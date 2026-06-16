@@ -1,0 +1,86 @@
+---
+title: Tools
+description: Plain AI SDK tools passed in two scopes — planner-time on the model, workflow-time on globalTools.
+---
+
+Tools in Little Workflow are plain AI SDK `tool()` definitions. There is no wrapper. The developer decides _where_ the tool is allowed to run; the planner decides _when_.
+
+## Two Scopes
+
+```ts
+import { tool } from 'ai';
+import { openai } from '@ai-sdk/openai';
+import { z } from 'zod';
+import { createLittleWorkflow, model } from 'little-workflow';
+
+createLittleWorkflow({
+  id: 'support.summarize-ticket',
+  inputSchema: /* ... */,
+  output: /* ... */,
+  planner: model(openai('gpt-5'), {
+    tools: {
+      bash: createBashTool(),
+    },
+  }),
+  globalTools: {
+    parsePdf: parsePdfTool,
+  },
+});
+```
+
+- **`model().tools`** — tools the model can call _while planning or repairing_. They run in the planner's environment and never appear as workflow steps.
+- **`globalTools`** — tools the planner can include in the compiled workflow. The runtime calls them when executing steps.
+
+Both maps accept the same AI SDK `tool()` shape; the difference is only when and where the tool runs.
+
+## Defining A Tool
+
+```ts
+import { tool } from 'ai';
+import { z } from 'zod';
+
+const parsePdfTool = tool({
+  description: 'Extract text and page spans from a PDF URL.',
+  inputSchema: z.object({
+    url: z.string().url(),
+  }),
+  execute: async ({ url }) => {
+    return { url, pages: [/* ... */] };
+  },
+});
+```
+
+That is the entire authoring contract. No `id`, no `risk`, no `sideEffect`, no `plannerVisible`, no `workflowCallable` flags. The planner reads the tool's description and input schema; it decides whether the tool is the right fit for a step. The runtime executes it when the compiled workflow says so.
+
+## Provider-Executed Tools
+
+Provider tools can be included in `model().tools` for planner-time model calls. In alpha, `globalTools` execution requires a local `execute` function; provider-only tools without `execute` fail closed at runtime instead of opening an implicit model-call tool path.
+
+```ts
+import { openai } from '@ai-sdk/openai';
+
+createLittleWorkflow({
+  planner: model(openai('gpt-5'), {
+    tools: {
+      webSearch: openai.tools.webSearch(),
+    },
+  }),
+});
+```
+
+The runtime path records which local executable tool was invoked, the response boundary, and usage metadata in the event log. Provider-side runtime tool calling is reserved for a later adapter that can capture provider tool-call events under the same capability lock.
+
+## What The Compiler Does With Tools
+
+At compile time:
+
+- each tool in `model().tools` and `globalTools` is captured as a capability reference in LWIR, with the tool's description and input schema hashed and locked.
+- the planner can reference any of these tools when drafting steps. It cannot invent new tools.
+
+At execution time:
+
+- the worker resolves the tool by reference and invokes its local `execute` function, passing AI SDK-style execution options.
+- executable tools with `needsApproval` set to `true` or a function fail closed in alpha; approval-gated execution arrives with the approval runtime.
+- if the live tool's description or schema does not match the locked snapshot, the step fails with `capability_drift`.
+
+That is the whole boundary. Authoring stays AI SDK-native; the IR keeps a hash of what was promised.

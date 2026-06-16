@@ -1,0 +1,53 @@
+---
+title: Isolation And Security
+description: Trust boundaries for sessions, tools, storage, and scripts.
+---
+
+Little Harness should make isolation the default behavior.
+
+The first principle is simple: one session's files should not be visible to another session unless the developer explicitly configured shared persistence.
+
+## Session Isolation
+
+Each session should receive its own workspace, artifacts, and trace. Parallel sessions should not mutate each other's working files.
+
+Shared state only appears through:
+
+- a Persistent Dir
+- a host tool
+- an export action
+- a future policy-controlled shared memory feature
+
+## Tool Trust
+
+Tool handlers run in the host app's trust boundary. The harness can trace and mediate tool calls, but it cannot make a malicious host tool safe.
+
+Write tools should be named and described clearly:
+
+```ts
+save_report
+create_ticket
+update_crm_note
+```
+
+Avoid vague write tools such as `finish`, `sync`, or `do_action`.
+
+## Runtime Trust
+
+The just-bash runtime helps protect against untrusted scripts. It should still be treated as one layer in a broader design:
+
+- network off by default
+- explicit harness directories only
+- host tools as explicit capabilities
+- trace records for tool and file activity
+- no arbitrary host path exposure by default
+
+## App Policy
+
+The app should still decide:
+
+- which tools are available
+- which users, teams, or request contexts may use them
+- which Persistent Dirs are exposed
+- whether export tools require approval
+- how persistence failures are surfaced to users

@@ -1,0 +1,71 @@
+---
+title: Ecosystem Comparison
+description: A hub for comparing Little Harness with agent SDKs, frameworks, sandboxes, visual builders, memory layers, and observability tools.
+---
+
+Last researched: June 1, 2026.
+
+This section compares the choices developers have when building agent applications today. It is a product-shape comparison, not a benchmark.
+
+The useful question is not "which agent framework is best?" The useful question is:
+
+> What does the developer still need to build after choosing this option?
+
+Little Harness is aimed at the awkward middle layer between model/tool SDKs and full agent platforms: an embeddable harness that keeps AI SDK streaming ergonomics while owning session files, artifacts, skill directories, Persistent Dirs, tracing, and runtime isolation.
+
+## Layer Map
+
+| Layer | Examples | What They Mostly Solve |
+|---|---|---|
+| Chat and tool SDK | AI SDK Agents, OpenAI Agents SDK | Model calls, tool loops, streaming, typed app integration. |
+| Agent orchestration | LangGraph, CrewAI, Microsoft Agent Framework, Mastra | Control flow, multi-agent coordination, durable state, workflows. |
+| Sandboxed compute | E2B, Daytona, Vercel Sandbox, Modal, Cloudflare Sandbox | Safe process execution, filesystems, snapshots, remote environments. |
+| Coding harness | OpenHands, OpenClaw ACP | Agents operating on code workspaces and external coding CLIs. |
+| Visual builders | Dify, Flowise, Langflow, n8n, Zapier Agents | Low-code app, workflow, RAG, and integration assembly. |
+| Memory layers | Mem0, Zep, Letta, LlamaIndex memory | Long-term user or agent memory retrieval and state. |
+| Observability | LangSmith, Langfuse, Braintrust, Helicone, AgentOps | Traces, evals, prompt management, dashboards, cost and latency. |
+
+Little Harness should not try to replace all of these. Its job is narrower: make the first product-embedded, file-capable agent session pleasant and safe enough that developers do not have to design the harness from scratch.
+
+## Focused Comparisons
+
+- [AI SDK vs Little Harness](/docs/v0.1.0-alpha/reference/ecosystem-comparison/ai-sdk-vs-little-harness)
+- [OpenAI Agents SDK vs Little Harness](/docs/v0.1.0-alpha/reference/ecosystem-comparison/openai-agents-sdk-vs-little-harness)
+- [LangGraph vs Little Harness](/docs/v0.1.0-alpha/reference/ecosystem-comparison/langgraph-vs-little-harness)
+- [Mastra vs Little Harness](/docs/v0.1.0-alpha/reference/ecosystem-comparison/mastra-vs-little-harness)
+- [Other Agent Frameworks vs Little Harness](/docs/v0.1.0-alpha/reference/ecosystem-comparison/agent-frameworks-vs-little-harness)
+- [Coding Harnesses vs Little Harness](/docs/v0.1.0-alpha/reference/ecosystem-comparison/coding-harnesses-vs-little-harness)
+- [Sandboxes vs Little Harness](/docs/v0.1.0-alpha/reference/ecosystem-comparison/sandboxes-vs-little-harness)
+- [Visual Builders vs Little Harness](/docs/v0.1.0-alpha/reference/ecosystem-comparison/visual-builders-vs-little-harness)
+- [Memory And Observability vs Little Harness](/docs/v0.1.0-alpha/reference/ecosystem-comparison/memory-observability-vs-little-harness)
+
+## Short Version
+
+| Choice | Best For | Main Gap Little Harness Targets |
+|---|---|---|
+| AI SDK Agents | TypeScript web apps that already use `useChat`, `streamText`, and typed tools. | No canonical session workspace, artifact boundary, Persistent Dir model, or sandbox policy. |
+| OpenAI Agents SDK | OpenAI-first agents with sessions, handoffs, guardrails, hosted tools, tracing, and sandbox agents. | Strong runtime, but less model-neutral and less focused on app-owned harness directories. |
+| LangGraph | Durable graph workflows, checkpoints, human review, and explicit orchestration. | Excellent state machine; developer still designs files, artifacts, sandbox, and app storage. |
+| Mastra | Full TypeScript AI app framework with agents, workflows, memory, RAG, evals, and observability. | Closest broad TS alternative; heavier than a small embeddable harness primitive. |
+| CrewAI | Python crews, flows, delegation, business automation, and research workflows. | Good multi-agent framework; less AI SDK-native and less filesystem-harness-first. |
+| Microsoft Agent Framework / AutoGen | Enterprise .NET/Python agents, sessions, middleware, MCP, telemetry, and graph workflows. | Powerful platform direction; not a lightweight TS runtime for session files and Persistent Dirs. |
+| OpenHands SDK | Software engineering agents that operate on code workspaces. | Strong coding-agent substrate; narrower than product agents for docs, data, and customer workflows. |
+| OpenClaw / ACP | Agent gateway and control plane that can route to coding harnesses such as Codex, Claude Code, Gemini, and OpenCode. | Validates the harness layer, but is a platform/control plane rather than a small app-embedded runtime. |
+| E2B, Daytona, Vercel Sandbox, Modal, Cloudflare Sandbox | Safe isolated execution with files, commands, snapshots, and remote environments. | They give the agent a computer; they do not define the agent loop, UI stream, artifact policy, or Persistent Dir contract. |
+| Dify, Flowise, Langflow, n8n, Zapier Agents | Low-code AI apps, RAG, workflow automation, and integration catalogs. | Great for assembly; not a code-level harness primitive inside the developer's product. |
+| Mem0, Zep, Letta, LlamaIndex memory | Long-term user or agent memory. | Memory is not the same as a working directory, artifact store, or isolated execution environment. |
+| LangSmith, Langfuse, Braintrust, Helicone, AgentOps | Traces, evals, prompt management, cost, latency, and production monitoring. | Observability can inspect the run, but does not provide the run's workspace or persistence model. |
+
+## What Little Harness Should Learn
+
+- from AI SDK: raw `UIMessage[]`, streamed route handlers, typed tools, and web UI ergonomics
+- from OpenAI Agents SDK: first-class tracing, sessions, handoffs, guardrail hooks, and sandbox-agent lessons
+- from LangGraph: durable state and replayability without forcing every agent into graph topology
+- from Mastra: TypeScript-native agent primitives, workspaces, and skill-file ergonomics
+- from sandbox providers: swappable isolated execution backends
+- from OpenHands and OpenClaw: the idea that a harness is a real runtime layer, not just a list of tools
+- from visual builders: discoverable recipes, logs, and low-friction workflow assembly
+- from memory tools: explicit ownership and boundaries for durable context
+- from observability tools: traces, evals, dashboards, and production feedback loops
+
+The Little Harness bet is that many developers do not need a full platform first. They need a small, pleasant, batteries-included harness primitive that makes the first production agent safe enough to build.

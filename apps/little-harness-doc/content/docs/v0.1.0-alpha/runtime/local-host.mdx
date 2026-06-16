@@ -1,0 +1,178 @@
+---
+title: Local Host
+description: Zero-service local development for Little Harness sessions.
+---
+
+Local Host is the first Little Harness host. It gives developers a fully
+working SDK in local development without Docker, Postgres, Redis, object
+storage, a managed account, or a separate daemon.
+
+```ts
+import { createHarness, localHost } from "little-harness";
+
+const harness = createHarness({
+  host: localHost({ dataDir: ".little-harness" }),
+  model,
+  system,
+  tools,
+});
+```
+
+Local Host is not the managed service and not a production multi-tenant
+runtime. It is the local development host: inspectable files, deterministic
+session isolation, and enough concurrency to test multiple sessions at once.
+
+## Directory Layout
+
+```txt
+.little-harness/
+  host.json
+  sessions/
+    <session-id>/
+      session/
+      artifacts/
+        trace/
+        tool-results/
+      skills/
+      persistent/
+      trace.ndjson
+      status.json
+      turns/
+        <turn-id>.json
+  persistent/
+    ...
+  locks/
+    sessions/
+    persistent/
+```
+
+`session/` maps to `/session` inside the harness. `artifacts/` maps to
+`/artifacts`. `.agents/skills/` contains read-only materialized skills;
+`persistent/` is the session checkout for configured Persistent Dirs. These
+names are kept close to the paths the agent sees so a developer can open the
+local folder and understand what happened.
+
+## Session Concurrency
+
+A Little Harness session never runs more than one turn at the same time.
+
+Local Host enforces that rule by queueing same-session calls by default.
+Different sessions can run concurrently.
+
+```txt
+session chat_a turn 1 -> running
+session chat_b turn 1 -> running
+session chat_a turn 2 -> queued behind chat_a turn 1
+```
+
+Apps that prefer strict UI behavior can reject same-session contention.
+
+```ts
+localHost({
+  sameSession: "reject",
+});
+```
+
+The invariant stays the same: no parallel mutation of one session workspace.
+
+## Restart Behavior
+
+Stable session keys persist across dev-server restarts.
+
+```ts
+streamHarness({
+  harness,
+  messages,
+  session: chatId,
+});
+```
+
+The next call with the same `session` resumes the same local folder. Calls that
+omit `session` still get a generated session folder for debugging, but the host
+can mark it as ephemeral in `status.json`.
+
+## Persistent Dirs
+
+Local Host supports the same Persistent Dir contract as any other host.
+
+```ts
+import { localDir } from "little-harness";
+
+const harness = createHarness({
+  host: localHost(),
+  model,
+  persistentDirs: [
+    localDir({
+      harnessDir: "/persistent/user",
+      sourceDir: ({ extraBody }) =>
+        `persistent/users/${extraBody.userId}/memory`,
+      commit: "after-turn",
+    }),
+  ],
+});
+```
+
+Plain relative `sourceDir` values resolve under `localHost({ dataDir })`.
+
+```txt
+sourceDir: "persistent/users/u_123/memory"
+-> .little-harness/persistent/users/u_123/memory
+```
+
+Project files require explicit intent.
+
+```ts
+localDir({
+  harnessDir: "/persistent/project-docs",
+  sourceDir: projectDir("./docs"),
+  commit: "read-only",
+});
+```
+
+`projectDir(...)` must resolve inside `projectRoot`, which defaults to the
+current working directory.
+
+## Inspection Surface
+
+Local Host inspection is file-based.
+
+The local runtime should not require a dashboard. Developers can
+inspect:
+
+- `session/` for working files
+- `artifacts/` for generated outputs
+- `trace.ndjson` for model, tool, file, and persistence events
+- `status.json` for the current session state
+- `turns/` for per-turn summaries
+
+The CLI reads the same folders:
+
+```bash
+little-harness sessions --data-dir .little-harness
+little-harness trace chat_123 --data-dir .little-harness --format pretty
+little-harness files chat_123 --data-dir .little-harness
+little-harness artifacts chat_123 --data-dir .little-harness
+little-harness diff chat_123 --path /session/notes.md --data-dir .little-harness
+little-harness doctor chat_123 --data-dir .little-harness
+```
+
+The CLI is read-only in alpha. It lists mounted files and artifacts, prints
+validated trace events, finds the latest traced diff for a harness path, and
+summarizes failures or malformed trace lines. It does not run models, tools, or
+commands.
+
+A managed inspector can read the same concepts later, but it is not part of
+Local Host.
+
+## Limits
+
+Local Host is designed for development:
+
+- no production multi-tenant isolation
+- no distributed workers
+- no managed autoscaling
+- no inspector UI requirement
+- no direct raw host paths in the agent context
+
+For stronger isolation or managed scaling, the same SDK shape should later swap
+to a self-hosted or managed host.

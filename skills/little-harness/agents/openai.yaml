@@ -1,0 +1,4 @@
+interface:
+  display_name: "Little Harness"
+  short_description: "Build on the Little Harness runtime"
+  default_prompt: "Use $little-harness to build or debug a Little Harness agent runtime."

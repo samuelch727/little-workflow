@@ -1,0 +1,150 @@
+---
+title: Input Types
+description: Defining reusable non-chat inputs for generateHarness and streamHarness.
+---
+
+Most app chat routes can pass raw AI SDK `UIMessage[]` directly. Input Types are
+for callers that are not naturally chat messages: Little Workflow planning
+requests, background jobs, ticket triage, document review, report generation, or
+product-specific commands.
+
+An Input Type gives an open string a reusable meaning.
+
+```ts
+import { Output } from "ai";
+import { createHarness, inputType, localHost } from "little-harness";
+import { z } from "zod";
+
+const ticketSchema = z.object({
+  id: z.string(),
+  subject: z.string(),
+  body: z.string(),
+  customerTier: z.enum(["free", "pro", "enterprise"]),
+});
+
+const triageSchema = z.object({
+  priority: z.enum(["low", "medium", "high", "urgent"]),
+  owner: z.string(),
+  nextAction: z.string(),
+});
+
+const harness = createHarness({
+  host: localHost(),
+  model,
+  system: "You help support teams route customer issues.",
+  tools: { searchDocs, queryCustomer },
+  inputTypes: {
+    "support.ticket_triage": inputType({
+      description:
+        "Triage one support ticket and decide priority, owner, and next action.",
+      inputSchema: ticketSchema,
+      output: Output.object({ schema: triageSchema }),
+      toMessages: ({ input }) => [
+        {
+          role: "user",
+          content:
+            `Triage this support ticket.\n\n` +
+            `Subject: ${input.subject}\n` +
+            `Tier: ${input.customerTier}\n\n` +
+            input.body,
+        },
+      ],
+    }),
+  },
+});
+```
+
+Then callers can use the type without repeating prompt glue.
+
+```ts
+const result = await generateHarness({
+  harness,
+  type: "support.ticket_triage",
+  input: ticket,
+  session: ticket.id,
+});
+
+result.output.priority;
+```
+
+## Two Input Modes
+
+Little Harness should support two input modes:
+
+```ts
+streamHarness({ harness, messages });
+generateHarness({ harness, type: "support.ticket_triage", input: ticket });
+```
+
+Use `messages` for AI SDK chat. Use `type` and `input` for caller-defined
+requests. A call should not need both shapes at once.
+
+## What Definitions Do
+
+An Input Type definition can:
+
+- describe what the type means
+- validate the caller's input
+- convert product input into model messages
+- provide default structured output
+- add input-specific instructions without bloating the global system prompt
+
+The definition belongs on `createHarness({ inputTypes })` because it is reusable
+agent surface area, not one-off request plumbing.
+
+## Output Defaults
+
+Input Types can define a default AI SDK `Output` shape.
+
+```ts
+inputType({
+  description: "Write a renewal risk brief.",
+  inputSchema: renewalInputSchema,
+  output: Output.object({ schema: renewalBriefSchema }),
+  toMessages,
+});
+```
+
+A call may still override the output when it needs a different shape.
+
+```ts
+await generateHarness({
+  harness,
+  type: "account.renewal_brief",
+  input,
+  output: Output.text(),
+});
+```
+
+## Undefined Types
+
+Undefined input types should not be hard failures by default. Little Harness can
+fall back to a generic representation and emit a host-facing warning:
+
+```ts
+await generateHarness({
+  harness,
+  type: "experiments.unregistered_task",
+  input: payload,
+});
+```
+
+The warning should appear in the trace and result metadata so developers can fix
+the missing definition. It should not be injected into the agent's normal model
+context by default.
+
+## Streaming Custom Inputs
+
+Custom inputs can stream too. This is useful when a product command still needs
+live progress or a chat-like response.
+
+```ts
+const result = streamHarness({
+  harness,
+  type: "document.review",
+  input: { documentId },
+  session: documentId,
+});
+
+return result.toUIMessageStreamResponse();
+```

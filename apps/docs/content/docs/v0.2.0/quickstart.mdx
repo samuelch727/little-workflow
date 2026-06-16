@@ -1,0 +1,101 @@
+---
+title: Quickstart
+description: The planned local developer flow for defining and running a workflow.
+---
+
+The initial implementation target is a local loop: define a workflow, compile it, validate it, run it in Local World, and inspect the events and artifacts.
+
+The package is not implemented yet. This page shows the target API that the docs-first pass is validating.
+
+## Define The Workflow
+
+```ts
+import { Output, tool } from "ai";
+import { openai } from "@ai-sdk/openai";
+import { z } from "zod";
+import {
+  createLittleWorkflow,
+  localWorld,
+  model,
+  runWorkflow,
+} from "little-workflow";
+
+const summarizeTicket = createLittleWorkflow({
+  id: "support.summarize-ticket",
+  description: "Summarize a support ticket and preserve evidence references.",
+  inputSchema: z.object({
+    ticketId: z.string(),
+    transcript: z.string(),
+  }),
+  output: Output.object({
+    schema: z.object({
+      summary: z.string(),
+      severity: z.enum(["low", "medium", "high"]),
+      evidenceRefs: z.array(
+        z.object({
+          artifactId: z.string(),
+          locator: z.object({}),
+          claim: z.string(),
+          sourceStepPath: z.string(),
+        }),
+      ),
+    }),
+  }),
+  models: [
+    model(openai("gpt-5.4"), {
+      description: "Planner and reviewer model for structured reasoning.",
+      role: "planner",
+      qualityTier: "reasoning",
+      costClass: "high",
+    }),
+  ],
+  globalTools: {
+    lookupCustomer: tool({
+      description: "Look up customer metadata by account ID.",
+      inputSchema: z.object({ accountId: z.string() }),
+      execute: async ({ accountId }) => ({ accountId, plan: "enterprise" }),
+    }),
+  },
+});
+```
+
+The AI SDK currently exports the structured-output helper as `experimental_output`. The docs use `Output.*` to describe the target shape, and the runtime adapter is responsible for resolving the installed export name and locking that mapping into the WorkflowVersion. See [AI SDK Native](/docs/v0.2.0/author-workflows/ai-sdk-native) for details.
+
+## Run It Locally
+
+```ts
+const result = await runWorkflow({
+  world: localWorld({ dataDir: ".little-workflow" }),
+  workflows: summarizeTicket,
+  input: {
+    ticketId: "TCK-123",
+    transcript: "Customer reports intermittent billing export failures...",
+  },
+  timeout: "10m",
+});
+```
+
+Local World is the zero-service development backend. It stores metadata, events, stream chunks, and artifact manifests under `.little-workflow/` so a developer can inspect and reset local runs without Postgres, Redis, or S3.
+
+## Inspect The Run
+
+```bash
+little runs inspect run_123
+little runs timeline run_123
+little runs stream run_123
+little replay run_123
+```
+
+Replay reconstructs state from persisted events. It does not call models, tools, shell, code, or external APIs again.
+
+## What The Compiler Produces
+
+The compiler turns AI SDK-native authoring values into locked runtime references:
+
+- model objects become governed model slots
+- tools become capability refs and schema hashes
+- output specs become JSON Schema
+- skills and plugins become content-addressed locks
+- policy becomes a snapshot attached to the WorkflowVersion
+
+That boundary is the core product: developers author with familiar TypeScript objects, while the durable runtime executes a validated, immutable workflow version.

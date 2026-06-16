@@ -1,0 +1,288 @@
+---
+title: localHost()
+description: Configure the zero-service local development host.
+---
+
+`localHost()` configures the Local Host used by `createHarness()`.
+
+It is the default implementation target for the first fully working Little
+Harness SDK: local sessions, local artifacts, local traces, same-session
+queueing, and local Persistent Dir sources.
+
+## Import
+
+```ts
+import { localHost, localDir, projectDir } from "little-harness";
+```
+
+## Basic Usage
+
+```ts
+const harness = createHarness({
+  host: localHost({ dataDir: ".little-harness" }),
+  model,
+  system,
+  tools,
+});
+```
+
+`dataDir` defaults to `.little-harness`.
+
+## Storage Layout
+
+Local Host stores sessions under `dataDir` with names that mirror harness paths:
+
+```txt
+.little-harness/
+  sessions/
+    <session-key>/
+      session/
+      artifacts/
+        trace/
+        tool-results/
+      skills/
+      persistent/
+      turns/
+      trace.ndjson
+      status.json
+  persistent/
+  locks/
+```
+
+`session/` maps to `/session`, `artifacts/` maps to `/artifacts`,
+`.agents/skills/` contains read-only materialized skills, and `persistent/` contains the session checkout
+for configured Persistent Dirs.
+
+`trace.ndjson` is append-only newline-delimited JSON. Each line is a validated
+`lh.trace.v1` event. Large trace payloads are stored under
+`/artifacts/trace/...` and referenced from events by `contentRef`.
+
+## API Signature
+
+```ts
+function localHost(options?: LocalHostOptions): HarnessHost;
+
+type LocalHostOptions = {
+  dataDir?: string;
+  projectRoot?: string;
+  maxConcurrentSessions?: number;
+  sameSession?: "queue" | "reject";
+};
+```
+
+## Parameters
+
+### `dataDir`
+
+`string`
+
+Local Host storage root. Defaults to `.little-harness`.
+
+```ts
+localHost({ dataDir: ".little-harness" })
+```
+
+The host stores session folders, artifacts, traces, local persistent sources,
+and locks under this directory.
+
+In development, `.little-harness` is intentionally inspectable. Do not put raw
+provider credentials or app secrets inside mounted files unless your app's trace
+redaction policy excludes those paths.
+
+### `projectRoot`
+
+`string`
+
+Root used to validate `projectDir(...)`. Defaults to the current working
+directory.
+
+```ts
+localHost({
+  dataDir: ".little-harness",
+  projectRoot: process.cwd(),
+})
+```
+
+`projectDir("../docs")` should fail unless it resolves inside `projectRoot`.
+
+### `maxConcurrentSessions`
+
+`number | undefined`
+
+Optional cap on simultaneously running sessions.
+
+```ts
+localHost({ maxConcurrentSessions: 4 })
+```
+
+Same-session work is still serialized even when this allows multiple sessions
+to run concurrently.
+
+### `sameSession`
+
+`"queue" | "reject"`
+
+Controls what happens when a second turn targets a session that is already
+running. Defaults to `"queue"`.
+
+```ts
+localHost({ sameSession: "queue" })
+localHost({ sameSession: "reject" })
+```
+
+The invariant is fixed: one session never runs two turns at the same time.
+
+## Trace Inspection
+
+Local Host traces are designed to be useful from both code and the command
+line.
+
+From code, use `onEvent` on the harness or a single run:
+
+```ts
+const harness = createHarness({
+  host: localHost({ dataDir: ".little-harness" }),
+  model,
+  system,
+  tools,
+  onEvent: async (event) => {
+    await devTraceStore.append(event);
+  },
+});
+```
+
+From the terminal, the read-only CLI inspects the same Local Host data:
+
+```bash
+little-harness sessions --data-dir .little-harness
+little-harness trace chat_123 --data-dir .little-harness --format pretty
+little-harness files chat_123 --data-dir .little-harness
+little-harness artifacts chat_123 --data-dir .little-harness
+little-harness diff chat_123 --path /persistent/user/notes.md --data-dir .little-harness
+little-harness doctor chat_123 --data-dir .little-harness
+```
+
+The CLI is an inspector, not a task runner. It does not execute models or tools;
+the app still owns the model, tools, auth, policy, and runtime configuration.
+
+## `localDir()`
+
+`localDir()` creates a local filesystem-backed Persistent Dir.
+
+```ts
+localDir({
+  harnessDir: "/persistent/user",
+  sourceDir: ({ extraBody }) =>
+    `persistent/users/${extraBody.userId}/memory`,
+  commit: "after-turn",
+});
+```
+
+### `harnessDir`
+
+`string`
+
+Directory inside the harness filesystem.
+
+```txt
+/persistent/user
+```
+
+This is the path the agent sees.
+
+### `sourceDir`
+
+`string | ((context) => string | ProjectDirRef)`
+
+Backing directory outside the harness.
+
+Plain relative strings resolve under `localHost({ dataDir })`.
+
+```ts
+sourceDir: "persistent/users/u_123/memory"
+```
+
+Project files use `projectDir(...)`.
+
+```ts
+sourceDir: projectDir("./docs")
+```
+
+### `commit`
+
+`"after-turn" | "manual" | "read-only"`
+
+Commit policy for this Persistent Dir.
+
+```ts
+commit: "read-only"
+commit: "after-turn"
+commit: "manual"
+```
+
+`read-only` loads files into the `harnessDir` but rejects writes to that
+directory immediately. `after-turn` buffers session writes and commits them
+after the turn finishes. `manual` buffers session writes and skips the automatic
+commit; call `result.commitManual()` or `finished.commitManual()` to commit that
+completed turn later.
+
+Little Harness does not infer write policy from names like `company`, `project`,
+or `user`. Developers choose per directory.
+
+## `projectDir()`
+
+`projectDir()` marks a local source as an intentional project-folder reference.
+
+```ts
+localDir({
+  harnessDir: "/persistent/project-docs",
+  sourceDir: projectDir("./docs"),
+  commit: "read-only",
+});
+```
+
+The resolved path must stay inside `projectRoot`.
+
+## Mixed Persistent Dirs
+
+One harness can expose several Persistent Dirs with different sharing and write
+policies.
+
+```ts
+const harness = createHarness({
+  host: localHost(),
+  model,
+  persistentDirs: [
+    localDir({
+      harnessDir: "/persistent/company",
+      sourceDir: ({ extraBody }) =>
+        `persistent/companies/${extraBody.companyId}/knowledge`,
+      commit: "read-only",
+    }),
+    localDir({
+      harnessDir: "/persistent/user",
+      sourceDir: ({ extraBody }) =>
+        `persistent/users/${extraBody.userId}/memory`,
+      commit: "after-turn",
+    }),
+  ],
+});
+```
+
+The agent sees both directories:
+
+```txt
+/persistent/company/
+/persistent/user/
+```
+
+The app decides whether a source is company-wide, project-wide, team-wide, or
+user-specific through `extraBody` and the adapter's backing source.
+
+## Returns
+
+`localHost()` returns a host object consumed by `createHarness()`.
+
+The exact object can stay opaque. The public contract is that it can create and
+resume local sessions, enforce same-session serialization, prepare the harness
+filesystem, record trace files, and commit local Persistent Dirs.

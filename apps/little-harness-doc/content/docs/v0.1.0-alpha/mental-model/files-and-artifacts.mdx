@@ -1,0 +1,79 @@
+---
+title: Files And Artifacts
+description: The virtual filesystem shape exposed to agents.
+---
+
+Little Harness should make file-based work feel natural to the agent while keeping the host filesystem protected.
+
+The default filesystem layout is:
+
+| Path | Purpose |
+|---|---|
+| `/session/` | Private workspace for the current session |
+| `/artifacts/` | Large tool outputs and generated files |
+| `.agents/skills/` | Read-only skill directories |
+| `/persistent/` | Opt-in developer-backed persistent dirs |
+
+## Session Files
+
+`/session/` is for scratch work, notes, scripts, temporary datasets, and generated files that belong to one session.
+
+The app, tools, and model can all write session files through the harness
+boundary.
+
+```txt
+/session/user-input/msg_123/contract.pdf
+/session/plan.md
+/session/tmp/customers.json
+/session/scripts/analyze.py
+```
+
+These files should persist across turns in the same session, but they should not become app data automatically.
+
+User-uploaded files should be staged into `/session/` before the model turn
+starts. Tool handlers can also write large results into `/session/` when the
+result is useful for follow-up reasoning but does not need to become a durable
+artifact.
+
+## Artifacts
+
+Artifacts are durable outputs inside the harness boundary. A tool can return a
+huge JSON payload, a script can create a SQLite database, or the agent can
+generate a report. The model receives a pointer and preview instead of the whole
+file. If a tool result is too large to return inline, Little Harness can
+automatically spool it into `/artifacts/tool-results/` and return that pointer
+to the next model step. Spooled pointers include a compact summary with
+line/character counts and JSON structure metadata when the stored content can be
+parsed as JSON.
+
+```ts
+{
+  preview: "42 incidents returned. Top fields: id, severity, summary...",
+  artifactPath: "/artifacts/tool/search_incidents/turn_004/result.json",
+  bytes: 910238
+}
+```
+
+The model can inspect the artifact with shell commands or scripts:
+
+```bash
+jq '.incidents[] | select(.severity == "high")' /artifacts/tool/search_incidents/turn_004/result.json
+```
+
+## Export Boundary
+
+Artifacts are not automatically product records. To save a report, update a CRM, or create a ticket, expose an explicit tool such as `save_report` or `create_ticket`. That tool is the app boundary.
+
+## Three Write Paths
+
+Little Harness should expose the same file writer shape in three places:
+
+| Writer | When it runs | Common use |
+|---|---|---|
+| `chat.stageMessage(..., files)` | Before a user-message turn starts | Move uploaded files into `/session/user-input/...` |
+| `session.files` | Outside model turns | Stage app context for the next turn |
+| `ctx.files` | During tool execution | Write large tool results without flooding context |
+
+All three paths should create trace events. If the target path is inside a
+Persistent Dir, the write still lands inside the isolated session first and is
+committed through the Persistent Dir store logic.

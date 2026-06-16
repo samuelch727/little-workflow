@@ -1,0 +1,71 @@
+---
+title: Storage Adapters
+description: Proposed adapter shapes for object stores, app databases, and local development.
+---
+
+Persistent Dirs should be developer-backed. First-party adapters can make common stores easy without forcing Little Harness to own every app's data model.
+
+## Object Store Adapter
+
+An object store adapter maps a `harnessDir` to a bucket and prefix.
+
+```ts
+s3Dir({
+  harnessDir: "/persistent/user",
+  bucket: "app-agent-memory",
+  prefix: ({ extraBody }) => `users/${extraBody.userId}/`,
+});
+```
+
+Equivalent adapters could exist for Cloudflare R2 and Google Cloud Storage.
+
+## App Database Adapter
+
+Some apps store files in rows rather than object storage.
+
+```ts
+customDir({
+  harnessDir: "/persistent/user",
+  load: ({ extraBody }) => db.files.loadFolder(extraBody.userId),
+  store: ({ extraBody, changes }) =>
+    db.files.applyChanges(extraBody.userId, changes),
+});
+```
+
+## Lazy Store Shape
+
+For large stores, future adapter shapes may avoid loading the whole directory up front.
+
+```ts
+customDir({
+  harnessDir: "/persistent/docs",
+  list: ({ extraBody, path }) => docs.list(extraBody.userId, path),
+  read: ({ extraBody, path }) => docs.read(extraBody.userId, path),
+  write: ({ extraBody, path, content }) =>
+    docs.write(extraBody.userId, path, content),
+  delete: ({ extraBody, path }) => docs.delete(extraBody.userId, path),
+});
+```
+
+The runtime still needs to preserve the commit model. A lazy store should not turn every shell write into an immediate backing-store mutation unless the developer explicitly chooses that behavior.
+
+## Local Development
+
+A local adapter is useful for demos and internal tools, but it should still be exposed through Little Harness rather than leaking arbitrary host paths to the model.
+
+```ts
+localDir({
+  harnessDir: "/persistent/dev",
+  sourceDir: "persistent/dev-memory",
+});
+```
+
+Project folders require explicit intent.
+
+```ts
+localDir({
+  harnessDir: "/persistent/project-docs",
+  sourceDir: projectDir("./docs"),
+  commit: "read-only",
+});
+```

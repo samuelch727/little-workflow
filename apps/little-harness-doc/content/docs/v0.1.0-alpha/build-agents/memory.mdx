@@ -1,0 +1,163 @@
+---
+title: Memory
+description: Let a Little Harness agent save durable lessons during normal turns.
+---
+
+Harness memory is the opt-in path for model-authored durable context. It is useful when an agent learns something reusable while working, such as which database table answers a repeated natural-language question or which customer-specific field name should be preferred.
+
+Memory is not a background dreaming loop. Dreaming can be added later as a consolidation job, but hot-path memory lets the model save a narrow lesson during the turn where it discovers it.
+
+## Add Memory
+
+Use `memory(...)` on `createHarness()` when the model should be allowed to save durable lessons.
+
+```ts
+import {
+  createHarness,
+  generateHarness,
+  localHost,
+  memory,
+} from "little-harness";
+
+const harness = createHarness({
+  host: localHost({ dataDir: ".little-harness" }),
+  model,
+  system:
+    "Answer natural-language database questions. Query the schema before guessing.",
+  tools: { queryDatabase, inspectSchema },
+  memory: memory({
+    sourceDir: "memory/db-query-agent",
+  }),
+});
+
+await generateHarness({
+  harness,
+  messages: [
+    {
+      role: "user",
+      content: "Which open invoices belong to Acme?",
+    },
+  ],
+  session: "db-agent",
+});
+```
+
+With the default options, Little Harness does three things:
+
+- mounts a Persistent Dir at `/persistent/memory`
+- injects a bounded `MEMORY.md` index into the system context on future turns
+- exposes a `remember` tool so the model can save a durable memory explicitly
+
+The backing `sourceDir` belongs to the host app. With Local Host, a relative `sourceDir` resolves under `localHost({ dataDir })`; use `projectDir(...)` only when you intentionally expose a project folder.
+
+## What The Model Sees
+
+If `MEMORY.md` exists, future turns receive a small memory section in the system context.
+
+```txt
+# Memory
+
+Long-term memory is mounted at /persistent/memory.
+
+Use remember to save durable facts, preferences, decisions, and user-approved context that should be available in future turns.
+
+Current MEMORY.md:
+# Memory Index
+- 2026-06-09: [db-query-agent](entries/2026-06-09/db-query-agent-a1b2c3d4e5f6.md) - Invoices live in billing_invoices; do not start with orders for invoice status questions.
+```
+
+The full memory entry is stored under `entries/YYYY-MM-DD/...`. `MEMORY.md` stays bounded and keeps the newest index bullets first so future prompts get a compact reminder instead of a growing transcript.
+
+## Save A Memory
+
+The default tool is named `remember`.
+
+```ts
+{
+  memory: "Invoices live in billing_invoices; do not start with orders for invoice status questions.",
+  topic: "db-query-agent",
+  tags: ["database", "invoices"],
+  reason: "The agent tried orders and order_items first, then found the correct table in schema search.",
+}
+```
+
+The tool writes a markdown entry and updates the memory index. It accepts:
+
+| Field | Type | Description |
+|---|---|---|
+| `memory` | `string` | Required durable lesson. Defaults to at most 4000 bytes. |
+| `reason` | `string` | Optional explanation for why the memory was saved. |
+| `topic` | `string` | Optional label used in the index and entry filename. |
+| `tags` | `string[]` | Optional short tags, up to 8 entries. |
+
+Use memory for compact lessons, preferences, decisions, and user-approved context. Put raw query outputs, large documents, and generated reports in artifacts or the source system instead.
+
+## Configure Scope
+
+Memory scope should follow your product boundary: user, team, account, tenant, harness, or environment.
+
+```ts
+const harness = createHarness<
+  typeof tools,
+  { userId: string; teamId: string }
+>({
+  host: localHost({ dataDir: ".little-harness" }),
+  model,
+  system,
+  tools,
+  memory: memory({
+    sourceDir: ({ extraBody }) =>
+      `memory/teams/${extraBody?.teamId ?? "unknown"}/db-query-agent`,
+    harnessDir: "/persistent/team-memory",
+  }),
+});
+```
+
+The model only sees the `harnessDir`, not the host filesystem path. Keep secrets and private data boundaries in the host app; Little Harness does not infer tenancy from path names.
+
+## Options
+
+```ts
+memory({
+  sourceDir: "memory/db-query-agent",
+  harnessDir: "/persistent/memory",
+  commit: "after-turn",
+  tool: {
+    name: "remember",
+    description:
+      "Save a durable database-query lesson for future Little Harness turns.",
+  },
+  indexPath: "MEMORY.md",
+  maxIndexBytes: 8000,
+  maxEntryBytes: 4000,
+  instructions:
+    "Save only durable schema-routing lessons the user would want reused.",
+});
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `sourceDir` | required | Local Host source folder, `projectDir(...)`, or a function of `extraBody`. |
+| `harnessDir` | `/persistent/memory` | Agent-visible mount path. It must stay under `/persistent/`. |
+| `commit` | `after-turn` | `after-turn`, `manual`, or `read-only`. |
+| `tool` | `{ name: "remember" }` | Customize the tool, or set `false` to mount memory without adding a tool. |
+| `indexPath` | `MEMORY.md` | Relative index file path inside the memory directory. |
+| `maxIndexBytes` | `8000` | Maximum UTF-8 bytes injected for the memory index. |
+| `maxEntryBytes` | `4000` | Maximum UTF-8 bytes accepted by the `remember` tool for one memory. |
+| `instructions` | generated | Extra model instructions, or `false` to suppress memory-specific instructions. |
+
+`commit: "read-only"` mounts existing memory and injects it into context without exposing `remember`. `tool: false` keeps the Persistent Dir behavior but does not add the built-in tool. `commit: "manual"` lets the completed result expose the normal manual Persistent Dir commit path.
+
+## Boundaries
+
+Memory is built on Persistent Dirs. It uses the same session isolation, load, diff, trace, and commit model as other persistent files.
+
+Keep these boundaries explicit:
+
+- opt-in only: no memory is saved unless the harness config includes `memory(...)`
+- app-owned storage: the host controls `sourceDir`, tenancy, access, and retention
+- compact entries: memory is for reusable lessons, not transcripts or large datasets
+- explicit write: the default model-authored write path is the `remember` tool
+- no automatic dreaming yet: consolidation jobs can read and rewrite the same files later
+
+For lower-level storage behavior, read [Persistent Dirs](/docs/v0.1.0-alpha/mental-model/persistent-dirs) and [Persistent Dir Reference](/docs/v0.1.0-alpha/reference/persistent-dir-reference).

@@ -1,0 +1,160 @@
+---
+title: Planner Lifecycle
+description: How the Planner harness session turns an OrchestrationRequest into an immutable WorkflowVersion.
+---
+
+The planner is a model-driven compiler, not a runtime executor. Its job is to turn a normalized `OrchestrationRequest` into validated LWIR that the runtime can execute durably. In alpha, the planner runs as an AI agent inside a **Harness** session — with bash, memory, scratch, and skills available — rather than as an opaque function call.
+
+## The Harness Session
+
+The planner's harness session starts when `runWorkflow` is called with a single `WorkflowDefinition`. The SDK:
+
+1. Normalizes the definition and input into an `OrchestrationRequest`.
+2. Constructs a `PlannerManifest` (harness id, model, system prompt hash, skills hash, `workflowDefinitionHash`, memory store ids).
+3. Calls `planner.harness.run({ kind: "plan", workflowSnapshot, input }, ctx)`.
+
+Inside the session, the planner agent has access to:
+
+- **`bash`** — execute shell commands in the session's scratch directory
+- **Memory mounts** — `/mnt/memory/workflow/` (rw) and `/mnt/memory/org/` (ro) by default; read prior run lessons before designing
+- **Scratch mounts** — `/mnt/scratch/own/` for working notes and draft documents
+- **Skills** — auto-injected into the system prompt (frontmatter) + readable on-demand via bash from `.agents/skills/<name>/SKILL.md`
+- **Role-specific tools** — injected by the SDK; the planner does not get `plan_workflow` / `run_workflow` (those are Orchestrator tools)
+
+The system prompt is assembled from: the dev-supplied `planner.system`, the SDK's role addendum, skill frontmatter, memory mount descriptions, and available tool descriptions — in that order.
+
+## The Four Stages
+
+```txt
+draft -> validate -> repair -> register
+```
+
+Each stage is deterministic at its boundary, even when the model itself is not. The validation/repair loop is bounded; if it does not converge, the planner fails the request rather than register a workflow nobody can trust.
+
+### Draft
+
+The planner agent produces a draft LWIR document. It may:
+
+- Read prior lessons from `/mnt/memory/workflow/lessons-learned.md` before drafting
+- Use bash to test `code.run` step bodies in scratch before including them
+- Iterate across multiple model turns before emitting a final LWIR
+
+The draft references model slot IDs and capability refs by ID, populates step schemas, and includes any reducer or fan-out structure the goal requires.
+
+Every model call and tool call is event-logged: `harness.model.called`, `harness.model.responded`, `harness.tool_call.started, harness.tool_call.succeeded, harness.tool_call.failed`. If the planner session crashes mid-draft, on resume the SDK fast-forwards through committed events and re-invokes the model only for the in-flight turn.
+
+### What the Planner Sees
+
+The planner reads only the safe surface of the request:
+
+- the goal and input/output schemas
+- execution model slot metadata (model id, quality tier, description)
+- tool descriptions and input schemas for tools the developer passed in `globalTools`
+- memory store contents (via bash) and skill bodies (via bash on demand)
+
+It never sees:
+
+- secrets, environment variables, or signed credentials
+- raw tool implementations or executable function bodies
+- arbitrary stored artifacts unless policy explicitly grants planner access
+
+Planner-visible is not planner-callable. The planner can reference a capability in a draft LWIR document, but the runtime is what decides whether the capability is invoked.
+
+### Validate
+
+Deterministic validators run against the draft:
+
+- canonical JSON shape and JSON Schema subset
+- expression language whitelist (no arbitrary JavaScript, no I/O, no dynamic imports)
+- capability references resolve to the workflow's tool allowlist
+- model slot references resolve and satisfy step requirements
+- schema compatibility between adjacent steps
+
+Validation outputs structured findings, not free text, so the next stage has something to act on.
+
+### Repair
+
+When validation fails, the planner agent gets the findings back and produces a revised draft. The repair loop is bounded by:
+
+- maximum repair attempts (configurable, defaults conservative)
+- planner cost cap per request
+- planner call cap per request
+
+If the loop exhausts its attempts without a clean draft, the request fails. Failure is preferable to registering a workflow whose LWIR did not validate. Human-review pauses on exhausted repair arrive in [v0.1.0-beta](/docs/v0.1.0-beta/mental-model/planner-lifecycle).
+
+### Register
+
+A clean draft is registered as an immutable `WorkflowVersion`. Registration captures:
+
+- canonical JSON hash of the LWIR document (`WorkflowVersion = sha256(canonicalJson(LWIR))`)
+- capability snapshot (which tools, with their description and input schema hashes)
+- compiled expression plan
+- validation result and cost/risk estimate
+
+After registration the `WorkflowVersion` is read-only. Runs reference it by hash. If the underlying model or tool surface drifts, the worker detects it at execution time and fails the step or pauses the run for review.
+
+## The PlannerManifest and Drift Detection
+
+At session start, the SDK stores a `PlannerManifest` in the `harness.session.started` event:
+
+```ts
+type PlannerManifest = {
+  harnessId: string;               // e.g., "workflowHarness@1.0.0"
+  plannerModelSlotId: string;
+  systemPromptHash: string;
+  skillsHash: string;
+  workflowDefinitionHash: string;  // pins this session to one WorkflowDefinition
+  globalToolsHash: string;
+  memoryStoreIds: string[];
+};
+```
+
+On resume, the SDK recomputes the manifest and compares hashes. Any change — model swap, system prompt edit, skill added or removed, tool schema changed, workflow definition changed — triggers a `CapabilityDriftError` before execution resumes (fail-closed).
+
+## When the Planner Re-Runs
+
+Almost never inside a run.
+
+- A `Run` executes one registered `WorkflowVersion`. The planner does not re-plan mid-run.
+- `Retry` reuses the same `WorkflowVersion` and re-executes the failed step.
+- `Replay` reuses the same `WorkflowVersion` and rebuilds state from the event log without calling models or tools.
+
+The outer-loop supervisor (Layer B) is the exception: after `supervise() → continue { promptNote }`, a NEW planner session starts with the prior cycles' context (`outerLoopContextHash`) folded into a new `PlannerManifest`. Each cycle's planner has its own manifest and its own runId.
+
+## The Four Roles — Same Harness, Different Tasks
+
+The planner is one of four roles that run in a harness session. All four use the same machinery; `task.kind` discriminates them:
+
+| Role | `task.kind` | What it designs or executes |
+|---|---|---|
+| **Planner** | `"plan"` | LWIR for one workflow run |
+| **Orchestrator** | `"orchestrate"` | Composition of multiple workflow runs (`plan_workflow` / `run_workflow` tools) |
+| **Worker** | `"execute_step"` | One LWIR step (`ai.generate` runs agent loop; `code.run` / `tool.call` / `decision` run direct) |
+| **Fixer** | `"fix_step"` | Repairs a failed `code.run` step source so it produces output matching the schema |
+
+Each role receives its own `ctx.tools` (SDK-injected, role-specific), its own memory and scratch mounts, and its own system prompt addendum. The harness implementation is the same (`workflowHarness` by default) — the task and context configure the behavior.
+
+A custom harness can handle all four task kinds, or delegate any of them back to `workflowHarness` by returning `{ kind: "delegate_to_default" }`. See [Harness Implementation](/docs/v0.1.0-alpha/implementation/harness) for the plugin model.
+
+## Skills in the Planner Session
+
+Skills are procedurally-disclosed knowledge listed in the planner's system prompt. Each skill's frontmatter (`name` + `description`) and read path are appended at session start; the planner reads the full body on-demand:
+
+```bash
+cat .agents/skills/writing-loop-lwir/SKILL.md
+```
+
+Skills are declared on `WorkflowDefinition.planner.skills` or mounted at the org level. Workflow-declared skills take priority over org-mounted skills. The planner's `skillsHash` (in its manifest) includes all active skill frontmatter — adding or removing a skill changes the hash and triggers drift detection on resume.
+
+See [Skills](/docs/v0.1.0-alpha/author-workflows/skills) for the directory format and mount semantics.
+
+## Memory in the Planner Session
+
+The planner's workflow memory store (`/mnt/memory/workflow/`) accumulates lessons across runs. A well-designed planner system prompt reads this store before drafting:
+
+```
+Before drafting, read /mnt/memory/workflow/lessons-learned.md if it exists.
+After drafting, if you discovered anything worth remembering, append it.
+```
+
+The planner's fixes and observations compound over time. Dreaming — a periodic offline workflow that distills many runs' lessons — is post-alpha but uses the same primitives. See [Memory and Scratch](/docs/v0.1.0-alpha/implementation/memory-scratch).

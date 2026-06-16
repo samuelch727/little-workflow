@@ -1,0 +1,11 @@
+{
+  "title": "Mental Model",
+  "pages": [
+    "index",
+    "sessions",
+    "files-and-artifacts",
+    "tools-vs-exports",
+    "persistent-dirs",
+    "tracing"
+  ]
+}

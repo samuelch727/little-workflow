@@ -1,0 +1,161 @@
+---
+title: Fixer
+description: Per-step opt-in code repair — when it triggers, what the fixer harness session sees, and how fixes propagate.
+---
+
+The Fixer is a `fix_step` harness session spawned when a `code.run` step fails and the step's LWIR declares `onFailure.fixer`. It runs the same [Harness](/docs/v0.1.0-alpha/implementation/harness) contract as every other role — agent loop, bash, scratch, memory — with a focused mandate: produce corrected source and a valid output.
+
+## LWIR Step Declaration
+
+```jsonc
+{
+  "id": "compute-score",
+  "uses": "code.run",
+  "with": {
+    "source": "async ({ input, tools }) => { /* ... */ }"
+  },
+  "output": {
+    "mode": "object",
+    "schema": { /* ... */ }
+  },
+  "onFailure": {
+    "fixer": {
+      "model": "gpt-4o-mini",
+      "maxAttempts": 3,
+      "system": "Fix the code so it returns output matching the schema. Test in scratch before declaring done."
+    }
+  }
+}
+```
+
+`onFailure.fixer` is opt-in per step. Steps without it follow the standard retry + escalation path.
+
+## When the Fixer Triggers
+
+```ts
+// In executeCodeRunStep():
+try {
+  result = await runCodeInSandbox(step.with.source, { input, tools });
+  validateOutputAgainstSchema(result, step.output.schema);
+} catch (err) {
+  if (step.onFailure?.fixer && priorFixAttempts < step.onFailure.fixer.maxAttempts) {
+    const fixResult = await workerHarness.run(
+      {
+        kind: "fix_step",
+        step,
+        stepInput,
+        originalAttemptError: toErrorEnvelope(err),
+        priorFixAttempts,
+      },
+      ctx,
+    );
+    // fixResult.output is the corrected step output.
+    // fixResult.fixedSource is recorded in events; NOT written to the LWIR.
+    return fixResult;
+  }
+  throw err;
+}
+```
+
+Trigger conditions:
+
+- `code.run` throws during execution, OR
+- execution succeeds but the output fails schema validation.
+
+## The Fixer's HarnessTask
+
+```ts
+type FixStepTask = {
+  readonly kind: "fix_step";
+  readonly step: LwirStep;            // the original step, including its source
+  readonly stepInput: unknown;         // the input that caused the failure
+  readonly originalAttemptError: ErrorEnvelope;
+  readonly priorFixAttempts: number;   // 0 on first fixer invocation
+};
+```
+
+## What the Fixer Session Sees
+
+The fixer harness session receives:
+
+- `ctx.bash` — scoped to scratch; the fixer writes and tests code here.
+- `ctx.scratchMounts` — `own` (rw) for iteration; `from-planner` (ro) if available.
+- `ctx.memoryMounts` — same memory as the worker it's repairing: workflow, org.
+- `ctx.tools` — the same tools the original `code.run` step could call.
+- System prompt built from `onFailure.fixer.system` as `ctx.system` + fixer role addendum.
+
+The fixer's role addendum tells it:
+
+```text
+You are fixing a code.run step that failed. The original source, the error, and the expected output schema are below.
+
+Write modified source to scratch, run it with `node`, inspect output, iterate. When the output matches the schema, return the fixed source and the correct output.
+```
+
+The original code body and error message are included in the initial conversation turn (via `task.step.with.source` and `task.originalAttemptError`).
+
+## Fixer Session Lifecycle
+
+```
+harness.session.started  { role: "fixer", task: { kind: "fix_step" }, manifest: FixerManifest, manifestHash }
+harness.model.called     { turn: 1, request: { ... original code + error + schema ... } }
+harness.model.responded  { turn: 1, response: { toolCalls: [bash("write fixed.js"), bash("node fixed.js")] } }
+harness.tool_call.started { callId: "c1", caller: "model", toolName: "bash", args: { cmd: "..." } }
+harness.tool_call.succeeded { callId: "c1", result: { stdout: "...", exitCode: 0 } }
+... (iterate as needed)
+harness.session.completed { output: <validated output>, usage: { ... }, fixedSource: "..." }
+```
+
+`harness.session.completed.fixedSource` is the corrected source code observable in the event log.
+
+## One-Shot per Run
+
+The fixer's corrected source applies to THIS run only. The original LWIR is not mutated — `WorkflowVersion` identity is preserved. Future runs of the same `WorkflowVersion` re-invoke the fixer if the original code still fails.
+
+Persistent fixes route through memory and the planner:
+
+1. The fixer's system prompt encourages writing a lesson to `/mnt/memory/workflow/lessons-learned.md` describing what was wrong and what the fix was.
+2. Future planner sessions read those lessons and avoid the bug at LWIR design time.
+3. A planner that produces new LWIR with the corrected logic produces a new `WorkflowVersion`; subsequent runs no longer need the fixer for that step.
+
+This separation keeps LWIR immutable, avoids runtime content-addressing conflicts, and routes learning through the appropriate channel.
+
+## Fixer Manifest
+
+The fixer session carries a `FixerManifest` in its `harness.session.started` event. On resume, the manifest is recomputed and compared; drift fails closed.
+
+```ts
+type FixerManifest = WorkerManifest & {
+  readonly fixerModelSlotId: string;
+  readonly fixerSystemHash: string;   // sha256 of onFailure.fixer.system
+  readonly fixerMaxAttempts: number;
+};
+```
+
+See [Identity Manifests](/docs/v0.1.0-alpha/implementation/identity-manifests) for the full `WorkerManifest` shape and drift detection semantics.
+
+## Memory-Write Convention
+
+The fixer's system prompt convention (not mechanically enforced):
+
+```text
+After successfully fixing the code:
+1. Write a brief lesson to /mnt/memory/workflow/lessons-learned.md:
+   - What the original bug was.
+   - What the fix was.
+   - Any patterns the planner should avoid when designing similar steps.
+2. Return the fixed source and the correct output.
+```
+
+The runtime does not verify that the fixer wrote to memory. It is a best-effort guidance that improves future runs.
+
+## Fixer Exhaustion
+
+If the fixer's agent loop fails to produce valid output within `maxAttempts`, it throws `FixerExhausted`. The runtime catches this, records the step as failed, and (if `maxOuterCycles > 1`) surfaces the failure to the Layer B supervisor on the next outer-loop cycle.
+
+## Related Pages
+
+- [Harness](/docs/v0.1.0-alpha/implementation/harness) — the full harness contract the fixer runs in
+- [Memory + Scratch](/docs/v0.1.0-alpha/implementation/memory-scratch) — how memory and scratch are available to the fixer
+- [Identity Manifests](/docs/v0.1.0-alpha/implementation/identity-manifests) — `FixerManifest` shape and drift detection
+- [Runtime Execution](/docs/v0.1.0-alpha/implementation/runtime-execution) — where `executeCodeRunStep` lives and how step failures bubble

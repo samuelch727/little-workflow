@@ -1,0 +1,216 @@
+---
+title: FileWriter
+description: Writing files into a Little Harness session from hooks, tools, and host code.
+---
+
+`FileWriter` is the common write surface for session files, artifacts, and
+Persistent Dir harness directories.
+
+The same shape should appear in three places:
+
+| Writer | Where it appears | Typical use |
+|---|---|---|
+| `files` | `chat.stageMessage` | Stage uploaded message files before a model turn. |
+| `session.files` | Host app code | Add files between turns. |
+| `ctx.files` | Tool handlers | Write large tool outputs without flooding model context. |
+
+## Basic Usage
+
+```ts
+await files.write("/session/user-input/msg_123/report.pdf", stream, {
+  mediaType: "application/pdf",
+  source: "user-message",
+});
+```
+
+Tool authors can type the injected context with the exported
+`HarnessToolExecutionContext` type:
+
+```ts
+import type { HarnessToolExecutionContext } from "little-harness";
+import { tool } from "ai";
+import { z } from "zod";
+
+type RequestContext = {
+  userId: string;
+};
+
+const queryAccounts = tool({
+  description: "Query account rows visible to the current user.",
+  inputSchema: z.object({ query: z.string() }),
+  execute: async (
+    input,
+    ctx: HarnessToolExecutionContext<RequestContext>,
+  ) => {
+    const rows = await accountDb.query({
+      query: input.query,
+      userId: ctx.extraBody?.userId,
+      limit: 500,
+    });
+
+    const file = await ctx.files.writeJSON(
+      "/artifacts/tool/query-accounts/result.json",
+      rows,
+    );
+
+    return {
+      preview: `${rows.length} rows exported for analysis.`,
+      path: file.path,
+      bytes: file.bytes,
+      artifact: file.artifact,
+    };
+  },
+});
+```
+
+## API Shape
+
+```ts
+type FileWriter = {
+  write(path: string, content: FileContent, options?: WriteFileOptions): Promise<FileRef>;
+  writeText(path: string, text: string, options?: WriteFileOptions): Promise<FileRef>;
+  writeJSON(path: string, value: unknown, options?: WriteFileOptions): Promise<FileRef>;
+  read(path: string, options?: ReadFileOptions): Promise<FileData>;
+  list(path: string, options?: ListFilesOptions): Promise<FileEntry[]>;
+  remove(path: string, options?: RemoveFileOptions): Promise<void>;
+};
+```
+
+## Methods
+
+### `write`
+
+Writes bytes or a stream.
+
+```ts
+const file = await files.write("/session/uploads/source.pdf", stream, {
+  mediaType: "application/pdf",
+});
+```
+
+### `writeText`
+
+Writes UTF-8 text.
+
+```ts
+const file = await files.writeText(
+  "/session/notes/summary.md",
+  "# Summary\n\nThe customer asked for renewal options.",
+);
+```
+
+### `writeJSON`
+
+Serializes and writes JSON.
+
+```ts
+const file = await ctx.files.writeJSON(
+  "/artifacts/tool/query-customers/result.json",
+  rows,
+);
+```
+
+### `read`
+
+Reads a file from the session boundary.
+
+```ts
+const file = await session.files.read("/session/notes/summary.md");
+```
+
+### `list`
+
+Lists files under a directory.
+
+```ts
+const uploads = await session.files.list("/session/user-input");
+```
+
+### `remove`
+
+Deletes a file or staged path.
+
+```ts
+await session.files.remove("/session/tmp/old-result.json");
+```
+
+## `WriteFileOptions`
+
+### `mediaType`
+
+`string`
+
+IANA media type.
+
+### `source`
+
+`"user-message" | "app-context" | "tool" | "agent" | string`
+
+Origin label for trace events.
+
+### `metadata`
+
+Host metadata object.
+
+Host-facing metadata for traces and debugging.
+
+### `artifact`
+
+`boolean | ArtifactOptions`
+
+Marks the file as an artifact. Apps can also write directly under
+`/artifacts/`.
+
+```ts
+await ctx.files.writeJSON("/artifacts/report/data.json", data, {
+  artifact: true,
+});
+```
+
+## `FileRef`
+
+```ts
+type FileRef = {
+  path: string;
+  bytes?: number;
+  mediaType?: string;
+  sha256?: string;
+  artifact?: ArtifactRef;
+};
+```
+
+Return `FileRef` values from tools instead of returning large raw data.
+
+```ts
+return {
+  path: file.path,
+  bytes: file.bytes,
+  summary: "842 customer rows were exported for analysis.",
+};
+```
+
+If a tool accidentally returns a very large value, Little Harness can
+automatically write it through `ctx.files` under `/artifacts/tool-results/` and
+return a compact file reference to the model. That reference includes
+line/character counts and, when the value is JSON, a bounded structure sketch.
+
+## Path Rules
+
+Little Harness should accept writes only inside managed roots:
+
+| Root | Purpose |
+|---|---|
+| `/session/` | Private workspace for the current session. |
+| `/artifacts/` | Host-inspectable outputs and large generated files. |
+| `/persistent/` | Developer-backed cross-session directories. |
+
+Raw host paths should not be exposed by default.
+
+## Failure Behavior
+
+If the filesystem write fails, the hook or tool should fail. The data is not
+available to the agent.
+
+If a Persistent Dir commit fails after the write succeeded, the file remains
+recoverable inside the session workspace and the failure is surfaced to the host
+app and trace.

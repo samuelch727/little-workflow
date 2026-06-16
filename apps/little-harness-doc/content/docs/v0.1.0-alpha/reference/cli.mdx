@@ -1,0 +1,235 @@
+---
+title: CLI
+description: Read-only inspection commands for Local Host sessions and traces.
+---
+
+The `little-harness` CLI inspects Local Host data under `.little-harness`.
+
+It is a developer debugging tool, not a harness task runner. It does not call
+models, execute tools, start runtimes, mutate session files, or commit
+Persistent Dirs. Your app still owns the model, tools, auth, policy, and runtime
+configuration.
+
+## Install Shape
+
+When installed from the package, the binary is exposed as `little-harness`:
+
+```bash
+pnpm little-harness --help
+```
+
+In a workspace, you can run it through pnpm:
+
+```bash
+pnpm --filter little-harness exec little-harness --help
+```
+
+## Shared Options
+
+### `--data-dir <dir>`
+
+Local Host data directory. Defaults to `.little-harness`.
+
+```bash
+little-harness sessions --data-dir .little-harness
+```
+
+The CLI reads the same layout created by `localHost({ dataDir })`.
+
+```txt
+.little-harness/
+  sessions/
+    <session-key>/
+      session/
+      artifacts/
+      skills/
+      persistent/
+      trace.ndjson
+      status.json
+```
+
+## `sessions`
+
+List Local Host sessions.
+
+```bash
+little-harness sessions --data-dir .little-harness
+```
+
+Output is JSON:
+
+```json
+[
+  {
+    "id": "chat_123",
+    "state": "idle",
+    "pathKey": "chat_123",
+    "createdAt": "2026-06-03T10:00:00.000Z",
+    "updatedAt": "2026-06-03T10:04:12.000Z",
+    "stagedMessageIds": ["msg_1"],
+    "tracePath": ".little-harness/sessions/chat_123/trace.ndjson",
+    "artifactCount": 3
+  }
+]
+```
+
+Use this when you know the Local Host folder but not the session id used by the
+app.
+
+## `trace <session-id>`
+
+Dump validated trace events for one session.
+
+```bash
+little-harness trace chat_123 --data-dir .little-harness
+```
+
+By default, output is newline-delimited JSON, matching `trace.ndjson`.
+
+```json
+{"schemaVersion":"lh.trace.v1","eventId":"evt_01","sequence":1,"type":"session.started","sessionId":"chat_123","timestamp":"2026-06-03T10:00:00.000Z","metadata":{}}
+```
+
+Use `--format pretty` for a compact timeline:
+
+```bash
+little-harness trace chat_123 --data-dir .little-harness --format pretty
+```
+
+Example output:
+
+```txt
+   1  2026-06-03T10:00:00.000Z  session.started
+   2  2026-06-03T10:00:01.122Z  filesystem.mounted
+   3  2026-06-03T10:00:01.304Z  model.requested
+   4  2026-06-03T10:00:03.941Z  tool.succeeded
+   5  2026-06-03T10:00:04.118Z  file.updated
+```
+
+`trace` validates events before printing. If the trace contains malformed lines,
+run `doctor` to see the invalid line numbers.
+
+## `files <session-id>`
+
+List managed harness files without printing file contents.
+
+```bash
+little-harness files chat_123 --data-dir .little-harness
+```
+
+Output includes paths, file kinds, and byte counts when known:
+
+```json
+[
+  {
+    "path": "/session/input/customer.md",
+    "kind": "file",
+    "bytes": 1842
+  },
+  {
+    "path": ".agents/skills/customer-research/SKILL.md",
+    "kind": "file",
+    "bytes": 2190
+  }
+]
+```
+
+Use this before opening raw files to understand what was mounted or written
+during the run.
+
+## `artifacts <session-id>`
+
+List artifact references.
+
+```bash
+little-harness artifacts chat_123 --data-dir .little-harness
+```
+
+Output:
+
+```json
+[
+  {
+    "id": "/artifacts/tool-results/search/abc123.json",
+    "path": "/artifacts/tool-results/search/abc123.json",
+    "bytes": 38291,
+    "sha256": "0f4b8b7f4f7a3771d089a1a95fcbf9c2dcb06d1cf86908d7b9f32f4d8bb0ec7a"
+  }
+]
+```
+
+Artifacts can include developer-created outputs, automatically spooled tool
+results, and trace content refs under `/artifacts/trace/...`.
+
+## `diff <session-id> --path <harness-path>`
+
+Print the latest traced diff metadata for one harness path.
+
+```bash
+little-harness diff chat_123 \
+  --path /persistent/user/notes.md \
+  --data-dir .little-harness
+```
+
+Output:
+
+```json
+{
+  "eventId": "evt_42",
+  "sequence": 42,
+  "path": "/persistent/user/notes.md",
+  "diff": {
+    "available": true,
+    "format": "unified",
+    "preview": "@@ -1 +1\\n-old note\\n+new note\\n",
+    "truncated": false
+  }
+}
+```
+
+For large diffs, `diff.contentRef` points to `/artifacts/trace/...`.
+
+## `doctor <session-id>`
+
+Summarize trace failures and debug signals.
+
+```bash
+little-harness doctor chat_123 --data-dir .little-harness
+```
+
+Output:
+
+```json
+{
+  "sessionId": "chat_123",
+  "eventCount": 84,
+  "invalidEventCount": 0,
+  "failureCount": 1,
+  "spooledOutputCount": 2,
+  "redactionCount": 3,
+  "failures": [
+    {
+      "eventId": "evt_73",
+      "type": "persistent_dir.commit.failed",
+      "sequence": 73
+    }
+  ],
+  "invalidEvents": []
+}
+```
+
+`doctor` returns a non-zero exit code when it finds invalid trace events or
+failure events. That makes it useful in local smoke tests.
+
+## What The CLI Does Not Show
+
+The CLI follows the same content policy as the trace:
+
+- no raw mounted file contents in `files`
+- no provider-hidden model reasoning
+- no credentials or redacted metadata
+- no raw binary payload bodies
+- no deleted file contents after deletion
+
+When a developer needs raw file content, they can open the Local Host session
+folder directly or read a specific artifact path from application code.

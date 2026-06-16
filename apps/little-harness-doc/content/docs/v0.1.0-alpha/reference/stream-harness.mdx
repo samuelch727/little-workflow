@@ -1,0 +1,461 @@
+---
+title: streamHarness()
+description: Stream an interactive Little Harness agent turn.
+---
+
+`streamHarness()` runs a harness and streams the response. Use it for chat
+routes, live progress, and UI experiences that should update while the agent is
+working.
+
+It should feel close to AI SDK `streamText()`, while also owning sessions,
+files, artifacts, Persistent Dirs, and trace metadata.
+
+## Import
+
+```ts
+import { streamHarness } from "little-harness";
+```
+
+## Basic Usage
+
+```ts
+import type { UIMessage } from "ai";
+import { streamHarness } from "little-harness";
+
+export async function POST(req: Request) {
+  const { messages, chatId, extraBody }: {
+    messages: UIMessage[];
+    chatId: string;
+    extraBody: { userId: string; teamId: string };
+  } = await req.json();
+
+  const result = streamHarness({
+    harness,
+    messages,
+    session: chatId,
+    extraBody,
+  });
+
+  return result.toUIMessageStreamResponse();
+}
+```
+
+## API Signature
+
+```ts
+function streamHarness<TOutput = string, TInput = unknown, TExtraBody = unknown>(
+  options: StreamHarnessOptions<TInput, TExtraBody>,
+): StreamHarnessResult<TOutput>;
+```
+
+## Parameters
+
+### `harness`
+
+`Harness`
+
+The reusable harness returned by `createHarness()`.
+
+```ts
+streamHarness({ harness, messages });
+```
+
+### `messages`
+
+`UIMessage[]`
+
+Raw AI SDK UI messages. Use this for normal chat routes.
+
+```ts
+const { messages } = await req.json();
+
+const result = streamHarness({
+  harness,
+  messages,
+});
+```
+
+When `messages` are provided, do not also provide `type` and `input`.
+
+### `type`
+
+`string`
+
+Open string that names a custom Input Type.
+
+```ts
+const result = streamHarness({
+  harness,
+  type: "document.review",
+  input: { documentId: "doc_123" },
+  session: "doc_123",
+});
+```
+
+If the type is registered in `createHarness({ inputTypes })`, Little Harness can
+validate the input, convert it into model messages, and apply default output
+settings. If it is not registered, the call can still run with a warning.
+
+### `input`
+
+`TInput`
+
+App-defined payload for `type + input` calls.
+
+```ts
+input: {
+  documentId: "doc_123",
+  reviewMode: "risk",
+}
+```
+
+Use `messages` for chat and `type + input` for non-chat callers.
+
+### `session`
+
+`string | HarnessSession`
+
+Session key or session handle. Omit it for one-shot work. Pass a stable id when
+the next request should continue the same workspace.
+
+```ts
+streamHarness({
+  harness,
+  messages,
+  session: chatId,
+});
+```
+
+### `extraBody`
+
+`TExtraBody`
+
+App-defined request context. Little Harness should pass it to tools,
+`chat.stageMessage`, Input Type hooks, Persistent Dir callbacks, event
+callbacks, and trace metadata.
+
+```ts
+extraBody: {
+  userId: "user_123",
+  teamId: "team_456",
+  role: "account_manager",
+}
+```
+
+Little Harness should not impose an auth or tenancy model on this object.
+
+### `model`
+
+`LanguageModel`
+
+Per-call model override. `createHarness()` still requires a default model in
+the TypeScript API; use this when request-time configuration temporarily
+overrides that default.
+
+```ts
+streamHarness({
+  harness,
+  messages,
+  model: requestModel,
+});
+```
+
+### `system`
+
+`string | SystemModelMessage | SystemModelMessage[]`
+
+Per-call system override. When provided, it replaces the harness-level system
+prompt for this turn. Input Type instructions, skills, memory, and runtime
+hints are still added around the selected system prompt.
+
+```ts
+streamHarness({
+  harness,
+  messages,
+  system: requestSystem,
+});
+```
+
+### `runtime`
+
+`HarnessRuntimeOptions`
+
+Per-call runtime policy override. It merges with the harness-level runtime
+policy.
+
+```ts
+streamHarness({
+  harness,
+  messages,
+  runtime: {
+    bash: false,
+    network: false,
+  },
+});
+```
+
+### `temperature`
+
+`number`
+
+Per-call AI SDK temperature setting. Little Harness includes it in durable model
+request identity, so replay does not reuse a response generated with a different
+temperature.
+
+### `output`
+
+`Output`
+
+Optional AI SDK output specification for structured final output.
+
+```ts
+const result = streamHarness({
+  harness,
+  type: "support.ticket_triage",
+  input: ticket,
+  output: Output.object({ schema: triageSchema }),
+});
+
+const triage = await result.output;
+```
+
+If the Input Type defines an output shape, a per-call `output` should override
+it.
+
+### `abortSignal`
+
+`AbortSignal`
+
+Cancels staging, model calls, tool calls, and streaming when possible.
+
+```ts
+streamHarness({
+  harness,
+  messages,
+  abortSignal: req.signal,
+});
+```
+
+### `restage`
+
+`boolean`
+
+Whether message staging should run again for messages that were already staged.
+Default should be `false`.
+
+```ts
+streamHarness({
+  harness,
+  messages,
+  session: chatId,
+  restage: true,
+});
+```
+
+Use this only when intentionally rebuilding the session filesystem from message
+history.
+
+### `onEvent`
+
+Function that receives a `HarnessEvent`.
+
+Optional per-call event callback.
+
+```ts
+streamHarness({
+  harness,
+  messages,
+  onEvent: (event) => requestTrace.append(event),
+});
+```
+
+### `onPersistenceError`
+
+Function that receives a `PersistenceError`.
+
+Optional per-call persistence failure callback.
+
+```ts
+streamHarness({
+  harness,
+  messages,
+  onPersistenceError: (error) => retryQueue.enqueue(error.failedCommits),
+});
+```
+
+### `toolResultSpooling`
+
+`false | { maxInlineBytes?: number; previewBytes?: number; outputDir?: string }`
+
+Per-call override for automatic oversized tool-result spooling. When omitted,
+the setting from `createHarness()` is used. If neither is configured, Little
+Harness spools tool results larger than 16 KB into `/artifacts/tool-results`.
+The compact result includes `summary` metadata with text counts and, for JSON
+content, a bounded structure sketch.
+
+### `trace`
+
+`false | HarnessTraceOptions`
+
+Per-call override for trace capture. When omitted, the setting from
+`createHarness()` is used.
+
+```ts
+streamHarness({
+  harness,
+  messages,
+  session: chatId,
+  trace: {
+    content: {
+      previewBytes: 256,
+    },
+  },
+});
+```
+
+Set `trace: false` on a single call when the app should stream a response
+without persisting a Local Host trace for that request.
+
+### Agent Loop Options
+
+`streamHarness()` forwards the common AI SDK loop controls:
+
+```ts
+streamHarness({
+  harness,
+  messages,
+  stopWhen,
+  prepareStep,
+  toolChoice,
+  activeTools,
+  temperature,
+  providerOptions,
+  headers,
+  maxRetries,
+});
+```
+
+When `stopWhen` is omitted, Little Harness uses `stepCountIs(20)` so streamed
+turns can continue after executed tool calls.
+
+## Returns
+
+### `text`
+
+`PromiseLike<string>`
+
+The complete generated text. It can be awaited alongside
+`toUIMessageStreamResponse()` because Little Harness tees the UI message stream.
+The UI message stream itself can still only be consumed once.
+
+```ts
+const text = await result.text;
+```
+
+### `output`
+
+Promise-like value for the parsed output.
+
+The parsed structured output when `output` is provided.
+
+```ts
+const output = await result.output;
+```
+
+### `toUIMessageStream()`
+
+Function that returns a readable stream of `UIMessageChunk` values.
+
+Converts the result to an AI SDK-compatible UI message stream.
+
+### `toUIMessageStreamResponse()`
+
+`() => Response`
+
+Creates a streamed `Response` for `useChat()`.
+
+```ts
+return result.toUIMessageStreamResponse();
+```
+
+### `finished`
+
+Promise that resolves to `StreamHarnessFinished`.
+
+Resolves after the model, tools, file writes, artifact creation, and persistence
+commit work has finished.
+
+```ts
+const finished = await result.finished;
+
+if (finished.persistence.status === "failed") {
+  await retryQueue.enqueue(finished.persistence.failedCommits);
+}
+```
+
+`StreamHarnessFinished`:
+
+| Field | Type | Description |
+|---|---|---|
+| `session` | `HarnessSession` | The session that ran the turn. |
+| `artifacts` | `ArtifactRef[]` | Artifacts created during the run. |
+| `trace` | `TraceRef` | Host-facing trace reference. |
+| `persistence` | `PersistenceStatus` | Persistent Dir commit status. |
+| `commitManual` | `() => Promise<PersistenceStatus>` | Commits `commit: "manual"` Persistent Dirs for this completed turn. |
+| `warnings` | `HarnessWarning[]` | Undefined input types, provider warnings, staging warnings, or policy warnings. |
+
+## Examples
+
+### Chat Route
+
+```ts
+export async function POST(req: Request) {
+  const body = await req.json();
+
+  const result = streamHarness({
+    harness,
+    messages: body.messages,
+    session: body.chatId,
+    extraBody: {
+      userId: body.userId,
+      teamId: body.teamId,
+    },
+  });
+
+  return result.toUIMessageStreamResponse();
+}
+```
+
+### Stream A Custom Input
+
+```ts
+const result = streamHarness({
+  harness,
+  type: "document.review",
+  input: {
+    documentId: "doc_123",
+    requestedChecks: ["renewal-risk", "privacy"],
+  },
+  session: "doc_123",
+});
+
+return result.toUIMessageStreamResponse();
+```
+
+### Observe Persistence After Streaming
+
+```ts
+const result = streamHarness({
+  harness,
+  messages,
+  session: chatId,
+});
+
+result.finished.then(async ({ persistence }) => {
+  if (persistence.status === "failed") {
+    await retryQueue.enqueue(persistence.failedCommits);
+  }
+});
+
+return result.toUIMessageStreamResponse();
+```

@@ -1,0 +1,36 @@
+---
+title: Changelog
+description: What v1.0.0 adds compared to v0.2.0.
+---
+
+`v1.0.0` is the enterprise-ready milestone. The runtime, durability, and ecosystem shipped earlier; v1.0.0 adds the organizational and compliance machinery that lets a real team put AI-generated workflows in front of auditors, regulators, and customers.
+
+## Compared To v0.2.0
+
+Existing workflows still run. v1.0.0 adds management surface around them — visual editing, multi-tenant controls, autoscaling, audit, and evidence-graph evaluation.
+
+## New Authoring
+
+- Visual workflow editing with bidirectional sync to LWIR. Edits in the visual editor produce the same canonical LWIR as TypeScript authoring.
+- Built-in planner templates for common workflow shapes (research, classification, generation, decision-support).
+- Workflow optimization suggestions surfaced during authoring and during run review.
+
+## New Operations
+
+- Multi-tenant organization controls: organization-scoped capabilities, model slots, skill packs, plugins, and policies.
+- Worker autoscaling driven by queue depth, governor pressure, and SLA targets.
+- Enterprise audit and compliance exports: signed event log exports, capability snapshots, and policy decision logs in formats consumable by external SIEM and audit pipelines.
+
+## New Evaluation
+
+- Evidence graph: a queryable view that traces a workflow's outputs back through every claim, source span, and tool result that informed them.
+- Evaluation suites: structured fixtures for measuring planner quality, validation accuracy, and reviewer agreement across versions.
+
+## New Runtime
+
+- Multiple durable execution backends behind the same runtime contract. Teams already running Temporal, Restate, or similar can plug them in without rewriting workflows.
+- Marketplace-quality plugin install, update, migration, and provenance flows with content-addressed locks at every step.
+
+## What Comes Next
+
+After v1.0.0 the spec is open. Likely directions: deeper IDE integration, hosted control plane, and richer evaluation/eval-graph tooling.

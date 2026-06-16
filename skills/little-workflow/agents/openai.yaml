@@ -1,0 +1,4 @@
+interface:
+  display_name: "Little Workflow"
+  short_description: "Build and debug Little Workflow apps"
+  default_prompt: "Use $little-workflow to author or debug a Little Workflow workflow."

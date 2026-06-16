@@ -1,0 +1,67 @@
+{
+  "name": "little-harness",
+  "version": "0.1.0-alpha.2",
+  "description": "Local-first agent runtime primitives for AI SDK sessions, tools, files, traces, persistence, and Little Workflow harness integration.",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/samuelch727/little-workflow.git",
+    "directory": "packages/little-harness"
+  },
+  "bugs": {
+    "url": "https://github.com/samuelch727/little-workflow/issues"
+  },
+  "homepage": "https://github.com/samuelch727/little-workflow/tree/main/packages/little-harness#readme",
+  "keywords": [
+    "ai-sdk",
+    "agents",
+    "harness",
+    "local-first",
+    "workflow"
+  ],
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "little-harness": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "docs"
+  ],
+  "engines": {
+    "node": ">=20.19"
+  },
+  "publishConfig": {
+    "access": "public",
+    "tag": "alpha"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./workflow-harness": {
+      "types": "./dist/workflow-harness/index.d.ts",
+      "import": "./dist/workflow-harness/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "prepack": "pnpm run build",
+    "typecheck": "tsc --noEmit",
+    "lint": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "ai": "^6.0.0",
+    "just-bash": "^3.0.1",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^25.8.0",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.6"
+  }
+}

@@ -1,0 +1,221 @@
+---
+title: Memory + Scratch
+description: Persistent Memory Stores and ephemeral Run Scratch — on-disk layout, mount paths, scoping rules, and bash path enforcement.
+---
+
+Two storage surfaces serve distinct concerns. Both are mounted directories in the harness's bash environment; the same `bash` tool reads and writes both.
+
+- **Memory Stores** — persistent across runs; filesystem-shaped; curated by agents over time.
+- **Run Scratch** — ephemeral, run-scoped; passes curated context from upper-layer agents down to lower-layer agents within one pipeline run.
+
+See [Harness](/docs/v0.1.0-alpha/implementation/harness) for how these mounts are wired into `HarnessContext`.
+
+## Memory Stores
+
+Memory stores are persistent, filesystem-shaped collections of text documents (markdown or plain text). Aligned with Anthropic's Managed Agents memory model: agents read and write stores with normal bash tools; self-improvement happens at the context layer.
+
+### Three scopes
+
+| Scope | On-disk path | Mount path inside harness | Default mode |
+| --- | --- | --- | --- |
+| Workflow | `<dataDir>/memory/workflows/<workflowId>/` | `/mnt/memory/workflow/` | `rw` for that workflow's planner; `ro` for workers |
+| Pipeline | `<dataDir>/memory/pipelines/<pipelineKey>/` | `/mnt/memory/pipeline/` | `rw` for the orchestrator; `ro` for planners + workers of sub-runs |
+| Org | `<dataDir>/memory/org/` | `/mnt/memory/org/` | `ro` for all roles by default |
+
+`<pipelineKey>` = `sha256(canonicalJson(sorted WorkflowDefinitionHash[]))` — runs with the same pipeline composition share one pipeline memory store.
+
+### File layout (no enforced schema)
+
+Markdown and plain text are recommended. Agents organize files at their discretion:
+
+```text
+<dataDir>/memory/workflows/candidate-review/
+  lessons-learned.md
+  job-templates/
+    medical-doctor.md
+    senior-engineer.md
+  known-failure-modes.md
+  prompt-iterations/
+    v1-initial.md
+    v3-current.md
+  style-guide.md
+```
+
+### Creation
+
+Workflow and pipeline stores are created lazily on first write. The SDK auto-creates the directory; subsequent runs of the same workflow id or pipeline key mount the existing directory.
+
+Org store lives at `<dataDir>/memory/org/`. Devs pre-populate it; no SDK-side automation.
+
+### Org write access
+
+Granting the org store write access requires an explicit declaration:
+
+```ts
+createLittleWorkflow({
+  memory: { workflow: "rw", org: "rw" },  // explicit; accidental grant is a poisoning risk
+});
+```
+
+### Attaching peer workflow stores
+
+A workflow can mount another workflow's memory read-only:
+
+```ts
+createLittleWorkflow({
+  id: "candidate-scoring",
+  memory: {
+    workflow: "rw",
+    org: "ro",
+    attach: [{ id: "candidate-review", mode: "ro" }],
+  },
+});
+// harness sees:
+//   /mnt/memory/workflow/                       (rw — this workflow)
+//   /mnt/memory/peer-workflows/candidate-review/ (ro — peer)
+```
+
+### Available-workflows mount (orchestrator only)
+
+The orchestrator's harness gets read-only access to every available workflow's memory:
+
+```text
+/mnt/memory/available-workflows/
+  candidate-review/     ro — <dataDir>/memory/workflows/candidate-review/
+  candidate-scoring/    ro — <dataDir>/memory/workflows/candidate-scoring/
+```
+
+The orchestrator inspects prior workflow lessons before deciding to spawn a sub-run. It can only WRITE its own pipeline memory.
+
+## Run Scratch
+
+Each pipeline run has a hierarchy of agents. Scratch lets upper-layer agents pass curated context to lower-layer agents for that run only.
+
+### On-disk layout
+
+```text
+<dataDir>/runs/pipeline_X/
+  scratch/                        orchestrator's own scratch
+  sub-runs/
+    run_Y/
+      scratch/                    planner's own scratch
+      steps/
+        step_Z/
+          scratch/                worker's own scratch
+
+Single-workflow run (no orchestrator):
+<dataDir>/runs/run_Y/
+  scratch/                        planner's own scratch
+  steps/
+    step_Z/
+      scratch/                    worker's own scratch
+```
+
+### Mount semantics per role
+
+| Role | Mount path | Mode | Backing dir |
+| --- | --- | --- | --- |
+| Orchestrator | `/mnt/scratch/own/` | rw | `pipeline_X/scratch/` |
+| Planner of run_Y | `/mnt/scratch/own/` | rw | `pipeline_X/sub-runs/run_Y/scratch/` |
+| Planner of run_Y | `/mnt/scratch/from-orchestrator/` | ro | `pipeline_X/scratch/` |
+| Worker of step_Z | `/mnt/scratch/own/` | rw | `pipeline_X/sub-runs/run_Y/steps/step_Z/scratch/` |
+| Worker of step_Z | `/mnt/scratch/from-planner/` | ro | `pipeline_X/sub-runs/run_Y/scratch/` |
+| Worker of step_Z | `/mnt/scratch/from-orchestrator/` | ro | `pipeline_X/scratch/` |
+| Worker of step_Z | `/mnt/scratch/peer-steps/` | ro | `pipeline_X/sub-runs/run_Y/steps/*/scratch/` (all sibling steps) |
+
+Each role's `own` is writable; everything upward or sibling-of-upward is read-only; nothing downward (orchestrator cannot see worker scratch — not yet written when orchestrator decides).
+
+### Lifecycle
+
+Scratch lives for the duration of the run plus an optional retention period. Default: kept for inspection. Cleanup is a separate post-alpha concern (retention policy worker).
+
+### Scratch vs memory
+
+| | Scratch | Memory |
+| --- | --- | --- |
+| Scope | Single pipeline run | Cross-run, persistent |
+| Purpose | In-run coordination | Self-improvement over time |
+| Auto-cleaned | Eventually (retention policy) | Never (dev's responsibility) |
+
+A planner writes plan documents to scratch (context for this run's workers). A planner writes lessons-learned to memory (context for future planners). Keeping them separate prevents memory pollution from trivial per-run thinking notes.
+
+## Bash Path Enforcement
+
+The harness's bash tool enforces a path allowlist computed at session start:
+
+```ts
+type BashScope = {
+  readonly cwd: string;
+  readonly readableRoots: readonly { path: string; mode: "rw" | "ro" }[];
+};
+```
+
+For every bash invocation:
+
+1. Resolve affected paths (write redirections, `cat`/`grep`/`ls`/`cp` arguments).
+2. Canonicalize each path (resolve `..`, symlinks).
+3. Check against `readableRoots`:
+   - Outside all roots → reject: `"path is outside the allowed roots"`.
+   - Inside an `ro` root but the operation writes → reject: `"path is read-only"`.
+4. Execute only if all checks pass.
+
+For `find /mnt -name "*.md"`, the bash tool walks the find output and validates each resulting path before returning it to the model. The model never sees a path it isn't allowed to access.
+
+## Memory Poisoning Mitigations
+
+| Mitigation | Detail |
+| --- | --- |
+| Org store `ro` by default | Mutating org memory requires explicit `memory: { org: "rw" }` on the workflow config. |
+| Scope by trust boundary | Workflow memory is `rw` by planners of THAT workflow only — a planner cannot write to a different workflow's store. |
+| Path enforcement | The bash tool canonicalizes paths and rejects `..` traversal and symlink escapes. |
+| No automated promotion | Dreaming outputs to a separate store; human review before promoting to org-level `rw`. |
+
+Not in alpha: memory mutation audit log; automated PII/unsafe-content scanning before writes; memory-redaction APIs.
+
+## System Prompt Injection
+
+The harness includes mount descriptions in the model's system prompt so the model knows what's available:
+
+```text
+Memory mounts (filesystem; read with bash):
+- /mnt/memory/workflow/ (rw) — persistent notes for this workflow across all runs.
+- /mnt/memory/org/ (ro) — organization-wide knowledge (policies, runbooks).
+- /mnt/memory/available-workflows/candidate-review/ (ro) — peer workflow's accumulated lessons.
+
+Scratch mounts (ephemeral, this run only):
+- /mnt/scratch/own/ (rw) — your working area; write plan docs, intermediate notes here.
+- /mnt/scratch/from-orchestrator/ (ro) — the orchestrator's notes for this run.
+```
+
+## Forward-Look: Dreaming as a Workflow
+
+Dreaming — periodic consolidation of many run sessions into curated memory — is implementable as a workflow using the same primitives:
+
+```ts
+const dreaming = createLittleWorkflow({
+  id: "memory.dreaming",
+  inputSchema: z.object({ targetWorkflowId: z.string(), runIds: z.array(z.string()) }),
+  outputSchema: z.object({ writtenFiles: z.array(z.string()) }),
+
+  planner: {
+    model: openai("claude-opus-4-7"),
+    system: "Review N runs + existing memory. Identify patterns. Write consolidated notes.",
+    skills: [skill("./skills/memory-consolidation/")],
+  },
+
+  memory: {
+    workflow: "rw",
+    org: "ro",
+    attach: [{ id: "candidate-review", mode: "ro" }],
+  },
+});
+```
+
+A dreaming workflow reads many prior run event logs, reads the target workflow's existing memory, synthesizes, and writes to its own workflow memory store. Human/admin reviews before promoting. Not in alpha — scheduled triggering and promotion gates are post-alpha.
+
+## Related Pages
+
+- [Harness](/docs/v0.1.0-alpha/implementation/harness) — how memory and scratch are wired into `HarnessContext`
+- [Fixer](/docs/v0.1.0-alpha/implementation/fixer) — how the fixer uses scratch for iteration
+- [Identity Manifests](/docs/v0.1.0-alpha/implementation/identity-manifests) — how `memoryStoreIds` appear in manifests
+- [Local World Storage](/docs/v0.1.0-alpha/implementation/local-world-storage) — the underlying filesystem store

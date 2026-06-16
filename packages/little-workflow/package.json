@@ -1,0 +1,66 @@
+{
+  "name": "little-workflow",
+  "version": "0.1.0-alpha.2",
+  "description": "Local-first TypeScript workflow orchestration with validated LWIR, durable Local World execution, replay, and an alpha CLI.",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/samuelch727/little-workflow.git",
+    "directory": "packages/little-workflow"
+  },
+  "bugs": {
+    "url": "https://github.com/samuelch727/little-workflow/issues"
+  },
+  "homepage": "https://github.com/samuelch727/little-workflow/tree/main/packages/little-workflow#readme",
+  "keywords": [
+    "ai-sdk",
+    "agents",
+    "workflow",
+    "durable-execution",
+    "lwir"
+  ],
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "little": "./dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "docs"
+  ],
+  "engines": {
+    "node": ">=20.19"
+  },
+  "publishConfig": {
+    "access": "public",
+    "tag": "alpha"
+  },
+  "scripts": {
+    "build": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && tsc -p tsconfig.build.json && node -e \"require('node:fs').copyFileSync('src/model-registry.json', 'dist/model-registry.json')\"",
+    "prepack": "pnpm --filter little-harness run build && pnpm run build",
+    "lint": "tsc -p tsconfig.json --noEmit",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^25.8.0",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.6"
+  },
+  "dependencies": {
+    "ai": "^6.0.0",
+    "ajv": "^8.20.0",
+    "better-sqlite3": "^12.10.0",
+    "just-bash": "^3.0.1",
+    "little-harness": "workspace:*",
+    "zod": "^4.4.3"
+  }
+}

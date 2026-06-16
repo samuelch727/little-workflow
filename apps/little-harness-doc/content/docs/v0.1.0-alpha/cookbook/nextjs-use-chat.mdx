@@ -1,0 +1,131 @@
+---
+title: Next.js useChat Route
+description: Wire streamHarness() into a Next.js App Router route consumed by AI SDK useChat().
+---
+
+This recipe uses a normal AI SDK chat client and a Next.js App Router route.
+Little Harness owns the session workspace, artifacts, trace, tool context, and
+AI SDK-compatible stream response.
+
+## Client
+
+```tsx
+"use client";
+
+import { useChat } from "@ai-sdk/react";
+import { DefaultChatTransport } from "ai";
+
+export function AssistantChat({
+  chatId,
+  userId,
+}: {
+  chatId: string;
+  userId: string;
+}) {
+  const { messages, sendMessage, status } = useChat({
+    transport: new DefaultChatTransport({
+      api: "/api/chat",
+      body: { chatId, userId },
+    }),
+  });
+
+  return (
+    <form
+      onSubmit={(event) => {
+        event.preventDefault();
+        const input = new FormData(event.currentTarget).get("message");
+        if (typeof input === "string" && input.trim()) {
+          sendMessage({ text: input });
+          event.currentTarget.reset();
+        }
+      }}
+    >
+      {messages.map((message) => (
+        <div key={message.id}>{message.role}</div>
+      ))}
+      <input name="message" disabled={status !== "ready"} />
+      <button type="submit">Send</button>
+    </form>
+  );
+}
+```
+
+## Route
+
+```ts
+import type { UIMessage } from "ai";
+import { createHarness, localHost, streamHarness } from "little-harness";
+import { queryAccounts } from "@/lib/agent-tools";
+import { modelForRequest, systemForRequest } from "@/lib/remote-agent-config";
+
+export const runtime = "nodejs";
+
+const harness = createHarness({
+  host: localHost({ dataDir: ".little-harness" }),
+  model: modelForRequest("default"),
+  system: "Use the available tools and write large outputs to artifacts.",
+  tools: { queryAccounts },
+  runtime: {
+    bash: true,
+    network: false,
+  },
+});
+
+export async function POST(req: Request) {
+  const body = await req.json() as {
+    messages: UIMessage[];
+    chatId: string;
+    userId: string;
+  };
+
+  const result = streamHarness({
+    harness,
+    messages: body.messages,
+    session: body.chatId,
+    extraBody: {
+      userId: body.userId,
+    },
+    model: modelForRequest(body.userId),
+    system: systemForRequest(body.userId),
+    temperature: 0.2,
+  });
+
+  return result.toUIMessageStreamResponse();
+}
+```
+
+Use `runtime = "nodejs"` for Local Host and the default just-bash runtime. Edge
+routes are a separate hosting target.
+
+The harness can stay reusable even when model policy or system instructions
+come from request-time configuration. Pass `model`, `system`, and call settings
+to `streamHarness()` instead of rebuilding the harness for every request.
+
+## Bash Policy
+
+The built-in `bash` tool is enabled by default. Make that choice explicit when
+the app has a policy decision to document:
+
+```ts
+const harness = createHarness({
+  host: localHost({ dataDir: ".little-harness" }),
+  model,
+  runtime: {
+    bash: false,
+    network: false,
+  },
+});
+```
+
+You can also disable bash for one call:
+
+```ts
+streamHarness({
+  harness,
+  messages,
+  runtime: { bash: false },
+});
+```
+
+Disabling bash removes the built-in command tool from the model. App tools still
+receive `ctx.files`, `ctx.artifacts`, `ctx.extraBody`, and `ctx.abortSignal`.

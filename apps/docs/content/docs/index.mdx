@@ -1,0 +1,54 @@
+---
+title: What Little Workflow Is
+description: The control plane and runtime for AI-generated, durable, inspectable workflows.
+---
+
+Little Workflow is a TypeScript library for AI-generated work that must be bounded, durable, inspectable, and replayable.
+
+The developer describes a goal, inputs, schemas, model slots, tools, skills, and safety rules. An AI agent running in a structured **Harness** designs the workflow graph (Planner), composes multiple workflows together via tool calls (Orchestrator), executes the resulting steps (Worker), and self-recovers from code failures (Fixer) — all observable via a unified event log, all durable via per-step memoization, all enriched by filesystem **Memory Stores** that accumulate across runs.
+
+```txt
+WorkflowDefinition or array of WorkflowDefinitions
+-> Harness session (Planner or Orchestrator)
+-> planner draft LWIR
+-> deterministic validation and repair
+-> immutable WorkflowVersion
+-> durable Run (workers execute each step via Harness)
+-> artifacts, events, streams, replay, retry, fork
+```
+
+## Key Primitives in v0.1.0-alpha
+
+**Harness** is the agent runtime each role lives in — model + bash environment + scoped storage + tools + persistent agent loop. Think Claude Code or OpenCode. The SDK ships a default `workflowHarness`; devs can substitute by implementing the single `run(task, ctx)` interface. Every model call and tool call inside a harness session is event-logged for deterministic crash recovery.
+
+**Orchestrator** is the role that composes multiple workflows together. When `runWorkflow` receives an array of workflow definitions, it starts an Orchestrator session. The Orchestrator's tools — `plan_workflow`, `run_workflow`, and `start_workflow` — let an AI agent decide when to plan a fresh sub-workflow, when to reuse an existing compiled version (plan-once-run-50-times), and how to chain outputs across workflows. No static pipeline IR; the pipeline emerges from the agent's tool calls.
+
+**Memory Stores** are persistent, filesystem-shaped collections of text documents mounted into each harness session at `/mnt/memory/workflow/`, `/mnt/memory/pipeline/`, and `/mnt/memory/org/`. Planners write lessons learned; future planners read them. Agents self-improve across runs without model fine-tuning.
+
+## Product Boundaries
+
+Little Workflow is:
+
+- an AI workflow compiler
+- a durable execution runtime with harness-level crash recovery
+- an artifact-first audit system
+- a capability firewall around model, tool, skill, code, shell, network, and side-effect access
+- a local development experience through Local World
+
+Little Workflow is not:
+
+- a chat UI
+- a generic multi-agent framework
+- an n8n clone
+- a Temporal replacement
+- a low-code automation builder first
+
+## Start Here
+
+The docs are split by planned version. `v0.1.0-alpha` is the current implementation target — it includes the Harness, Orchestrator, Memory Stores, Run Scratch, and Skills primitives introduced in this milestone. Later versions describe what each release adds. Use the version switcher in the sidebar to move between them, and see [Comparisons](/docs/comparisons) for where Little Workflow fits next to other tools.
+
+- [v0.1.0-alpha](/docs/v0.1.0-alpha) — Harness-based agent runtime, Orchestrator, Memory, Skills
+- [v0.1.0-beta](/docs/v0.1.0-beta) — polished SDK and governance
+- [v0.1.0](/docs/v0.1.0) — production durability
+- [v0.2.0](/docs/v0.2.0) — high-throughput fan-out and ecosystem
+- [v1.0.0](/docs/v1.0.0) — enterprise workflow authoring and inspection

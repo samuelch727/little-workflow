@@ -1,0 +1,110 @@
+---
+title: Security Model
+description: Threats and required controls for AI-generated durable workflows.
+---
+
+Little Workflow treats planner output as untrusted until validation and policy approval.
+
+## Threats
+
+- prompt injection from user input, web pages, docs, tickets, emails, and tool results
+- prompt injection from skill descriptions and references
+- memory poisoning through shared Memory Stores (an agent reads untrusted content then writes to shared memory, poisoning future agents)
+- tool poisoning through changed descriptions or schemas
+- plugin supply-chain compromise
+- poisoned UI inspector panels
+- excessive agency through broad scopes
+- confused deputy OAuth flows
+- SSRF through remote metadata or auth discovery
+- arbitrary command execution through shell/code
+- data exfiltration through logs, traces, errors, or artifacts
+- replayed approvals
+- retry amplification of dangerous side effects
+
+## Required Controls
+
+- planner and executor permission separation
+- capability firewall
+- schema validation at every boundary
+- immutable workflow versioning
+- sandboxing for code and shell (see alpha policy below)
+- no network by default in shell/code
+- short-lived scoped secrets
+- side-effect idempotency keys
+- approval gates for high-risk actions
+- artifact access control
+- trace redaction
+- policy decision audit log
+- package, module, skill, plugin, and tool snapshotting
+- sandbox/CSP isolation for third-party UI panels
+
+## Harness Bash Scoping
+
+The harness's bash tool enforces a path allowlist computed at session start. For each command the model (or code) issues:
+
+1. The SDK resolves every path the command touches (write redirections, read paths in `cat`/`grep`/`ls`/`cp` arguments).
+2. Each path is canonicalized — `..` segments and symlinks are resolved to an absolute path before comparison.
+3. The resolved path is checked against `readableRoots`:
+   - Path outside all declared roots → rejected with `"path is outside the allowed roots"`.
+   - Path inside a read-only root and the command is a write → rejected with `"path is read-only"`.
+4. The command executes only when all checks pass.
+
+The model never receives a path reference it isn't allowed to access. `..` traversal and symlink escapes are stopped at the canonicalization step. See [Memory and Scratch](/docs/v0.1.0-alpha/implementation/memory-scratch) for how the allowlist is constructed per role.
+
+## Memory Poisoning Mitigations
+
+Memory Stores are the cross-run persistent layer. Three controls bound the risk surface in alpha:
+
+1. **Org store is read-only by default.** Granting write access to the org memory store (`memory: { org: "rw" }`) is an explicit acknowledgment in the workflow config. Accidental promotion of untrusted content to org-level memory requires opt-in.
+
+2. **Scope by trust boundary.** The workflow memory store is writable only by planners of that specific workflow. A planner for `candidate-review` cannot write to `invoice-processing`'s memory store. Path enforcement (above) backs this up: the bash allowlist mount for `/mnt/memory/workflow/` is backed by that workflow's specific on-disk path.
+
+3. **No automated promotion.** Dreaming (post-alpha) outputs to a separate "dreamed" store; a human or admin reviews before promoting to org-level read-write. The runtime provides no automatic escalation path.
+
+Not in alpha: memory mutation audit log, automated PII or unsafe-content scanning before writes, memory-redaction APIs. See [Memory and Scratch](/docs/v0.1.0-alpha/implementation/memory-scratch) for the full scoping design.
+
+## Capability Drift Detection
+
+Alpha capability drift detection hashes a tool's `description`, `inputSchema`, and `outputSchema` at compile time and re-hashes them at every step lease. If those declared shapes change between compile and run, the run fails with `capability_drift`.
+
+In this milestone, drift detection applies at **three manifest scopes**:
+
+| Manifest | Scope | What is hashed |
+| --- | --- | --- |
+| `OrchestratorManifest` | Pipeline level | Harness id, model slot id, system prompt, skills, available workflow definition hashes, tool registry, memory store ids |
+| `PlannerManifest` | Workflow-compile level | Harness id, model slot id, system prompt, skills, workflow definition hash, tool registry, memory store ids |
+| `WorkerManifest` | Per-step level | Harness id, workflow + version ids, step config, model slot (ai.generate only), skills, allowed tools |
+
+On resume, each manifest is recomputed and compared to the hash stored in `harness.session.started`. Any mismatch fails closed. See [Identity and Manifests](/docs/v0.1.0-alpha/implementation/identity-manifests) for the full hash composition.
+
+**Skill body changes are not drift.** Only the skill's frontmatter (`name` + `description`) is hashed. Refining a skill body is treated as knowledge improvement, not a capability surface change. Adding or removing a skill changes the `skillsHash` → drift fires.
+
+What alpha does **not** detect is **implementation drift**: a change to a tool's `execute` function body (or the closures it captures) that preserves the declared interface. If you change what a tool *does* without changing what it *says*, a resumed run will execute the new behavior. The planner cannot see implementation bodies — and shouldn't — so this is intentional.
+
+If you need implementation pinning, layer it outside Little Workflow: use a Code Connect reference, lock dependencies via your package manager, or write an audit step that records a snapshot of the tool's behavior on representative inputs and fails the run if that snapshot drifts.
+
+## Tool Call Attribution
+
+The event log distinguishes how each tool call was initiated via the `caller` field on `harness.tool_call.started` events:
+
+| `caller` value | Meaning |
+| --- | --- |
+| `"model"` | The model emitted a tool-call request in an AI SDK agent loop turn. |
+| `"runtime"` | The model ran just-bash JavaScript and called a configured tool through `tools.<name>(args)`. |
+| `"code"` | A `code.run` step body called `tools.x(...)` via the tools proxy, or a `tool.call` step invoked its single named tool. |
+
+This makes it possible to filter `little events <runId> --type harness.tool_call.*` by `caller` to separate model-driven decisions, runtime-scripted tool calls, and deterministic code-driven invocations. `caller: "runtime"` is still model-controlled because the model chose the bash command, but the complex input construction happened inside the sandboxed runtime instead of as provider tool-call JSON. `caller: "code"` calls are auditable as the LWIR source body.
+
+Runtime Tool Bridge exposure follows the same capability firewall as the built-in bash tool. It is unavailable when bash or JavaScript are disabled, can be disabled with `runtime.toolBridge: false`, and is not advertised when `activeTools` or `prepareStep` hides `bash` for a provider call.
+
+## Code Sandboxing — Alpha Policy
+
+**In v0.1.0-alpha, `code.run` steps execute in the same Node.js process as the harness.** There is no subprocess, VM, or Worker thread isolation boundary. The developer is trusted — they wrote or reviewed the planner's system prompt and the LWIR that contains the code body.
+
+This is a deliberate alpha scoping decision: adding isolation infrastructure before the execution model is stable would be premature complexity.
+
+**Post-alpha:** VM2 or Worker thread isolation for `code.run` steps is planned. `shell.run` as a separate step type (direct shell command with a real subprocess boundary) is also post-alpha.
+
+**Approval workflows, structured memory query tools, and recursive pipelines are post-alpha** and not part of the current security surface.
+
+Out of alpha: PII scanning before memory writes, per-mutation memory audit log, and memory-redaction APIs.

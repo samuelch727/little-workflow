@@ -1,0 +1,12 @@
+{
+  "title": "v0.1.0-alpha",
+  "pages": [
+    "index",
+    "quickstart",
+    "mental-model",
+    "build-agents",
+    "cookbook",
+    "runtime",
+    "reference"
+  ]
+}

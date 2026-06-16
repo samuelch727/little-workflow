@@ -1,0 +1,162 @@
+---
+title: API Reference
+description: Alpha API reference for Little Harness.
+---
+
+Little Harness mirrors the AI SDK shape: define a reusable harness once, then
+choose a streaming or final-result execution API per request.
+
+```ts
+import {
+  createHarness,
+  generateHarness,
+  inputType,
+  localHost,
+  memory,
+  skill,
+  streamHarness,
+} from "little-harness";
+```
+
+## Core APIs
+
+| API | Use it for |
+|---|---|
+| [`createHarness()`](/docs/v0.1.0-alpha/reference/create-harness) | Define the reusable runtime surface: model, system prompt, tools, skills, input types, file staging, persistence, and runtime policy. |
+| [`memory(...)`](/docs/v0.1.0-alpha/build-agents/memory) | Add opt-in model-authored long-term memory backed by a Persistent Dir, bounded index, and optional `remember` tool. |
+| [`localHost()`](/docs/v0.1.0-alpha/reference/local-host) | Configure the zero-service local development host, local sessions, local traces, and local Persistent Dir sources. |
+| [`streamHarness()`](/docs/v0.1.0-alpha/reference/stream-harness) | Stream an interactive agent turn, usually from a chat route using raw AI SDK `UIMessage[]`. |
+| [`generateHarness()`](/docs/v0.1.0-alpha/reference/generate-harness) | Run the same harness to completion and return a final result, usually for workers, jobs, tests, or server actions. |
+| [`HarnessSession`](/docs/v0.1.0-alpha/reference/harness-session) | Continue a private workspace, inspect session status, and stage files outside a model turn. |
+| [`FileWriter`](/docs/v0.1.0-alpha/reference/file-writer) | Write files into `/session/`, `/artifacts/`, or Persistent Dir harness directories from message staging, host code, or tools. |
+| [`little-harness` CLI](/docs/v0.1.0-alpha/reference/cli) | Inspect Local Host sessions, traces, files, artifacts, diffs, and debug summaries without running a harness task. |
+
+## Common Flow
+
+```ts
+import { openai } from "@ai-sdk/openai";
+import type { UIMessage } from "ai";
+import { createHarness, localHost, skill, streamHarness } from "little-harness";
+
+const harness = createHarness({
+  host: localHost({ dataDir: ".little-harness" }),
+  model: openai("gpt-5"),
+  system: "Answer account questions using the tools available to you.",
+  tools: { searchDocs, queryCustomers },
+  skills: [
+    skill("./skills/account-research"),
+    skill("https://github.com/anthropics/skills", {
+      skills: ["frontend-design"],
+    }),
+  ],
+});
+
+export async function POST(req: Request) {
+  const { messages, chatId, extraBody }: {
+    messages: UIMessage[];
+    chatId: string;
+    extraBody: { userId: string; teamId: string };
+  } = await req.json();
+
+  const result = streamHarness({
+    harness,
+    messages,
+    session: chatId,
+    extraBody,
+  });
+
+  return result.toUIMessageStreamResponse();
+}
+```
+
+For a final-result caller, use the same harness with `generateHarness()`.
+
+```ts
+import { Output } from "ai";
+import { generateHarness } from "little-harness";
+
+const result = await generateHarness({
+  harness,
+  type: "account.renewal_brief",
+  input: { accountId: "acct_123" },
+  output: Output.object({ schema: renewalBriefSchema }),
+  session: "acct_123-renewal",
+});
+
+console.log(result.output.risks);
+console.log(result.trace.id);
+console.log(result.trace.path);
+```
+
+## Trace Policy
+
+Tracing is enabled by default for Local Host. Developers can tune capture limits
+on `createHarness()` and override them per run:
+
+```ts
+const harness = createHarness({
+  host: localHost({ dataDir: ".little-harness" }),
+  model,
+  system,
+  tools,
+  trace: {
+    content: {
+      previewBytes: 512,
+      maxInlineBytes: 16 * 1024,
+    },
+    fileDiffs: {
+      enabled: true,
+      maxInlineBytes: 8 * 1024,
+      maxBytesToDiff: 256 * 1024,
+    },
+    redaction: {
+      metadataKeys: ["authorization", "cookie", "token", "password", "secret"],
+      paths: ["/persistent/company/secrets"],
+    },
+  },
+});
+
+await generateHarness({
+  harness,
+  type: "account.renewal_brief",
+  input: { accountId: "acct_123" },
+  trace: {
+    content: {
+      maxInlineBytes: 4096,
+    },
+  },
+});
+```
+
+Set `trace: false` at the harness or run level to disable trace persistence for
+that scope.
+
+## Mental Model
+
+The execution APIs share the same runtime machinery:
+
+```txt
+createHarness(config)
+streamHarness(...) or generateHarness(...)
+-> create or resume session
+-> load Persistent Dirs
+-> stage message/input files
+-> run model and tools
+-> write session files and artifacts
+-> commit Persistent Dirs
+-> return stream/result + trace metadata
+```
+
+The important part is that streaming and non-streaming calls do not create two
+different products. They are two ways to run the same harness.
+
+## Related Guides
+
+- [Generating And Streaming](/docs/v0.1.0-alpha/build-agents/generating-and-streaming) shows complete route, worker, and callback examples.
+- [Memory](/docs/v0.1.0-alpha/build-agents/memory) shows opt-in model-authored memory for durable lessons discovered during a turn.
+- [Message Files](/docs/v0.1.0-alpha/build-agents/message-files) explains uploaded chat files.
+- [Input Types](/docs/v0.1.0-alpha/build-agents/input-types) explains non-chat `type + input` calls.
+- [Local Host](/docs/v0.1.0-alpha/reference/local-host) documents local sessions, local storage, `localDir()`, and `projectDir()`.
+- [CLI Reference](/docs/v0.1.0-alpha/reference/cli) documents read-only local inspection commands.
+- [Events](/docs/v0.1.0-alpha/reference/events) documents the `HarnessEvent` envelope, durable replay payload shape, and event vocabulary.
+- [Persistent Dir Reference](/docs/v0.1.0-alpha/reference/persistent-dir-reference) documents cross-session storage callbacks.

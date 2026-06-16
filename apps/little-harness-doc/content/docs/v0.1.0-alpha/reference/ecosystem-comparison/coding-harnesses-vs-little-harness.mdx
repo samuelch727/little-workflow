@@ -1,0 +1,43 @@
+---
+title: Coding Harnesses Vs Little Harness
+description: Comparing OpenHands and OpenClaw with Little Harness's broader product-agent runtime.
+---
+
+Coding harnesses are the closest conceptual relatives to Little Harness. They prove that an agent needs more than tools: it needs a workspace, state, runtime policy, and traces.
+
+The difference is scope. Coding harnesses usually optimize for repository work. Little Harness should optimize for product-embedded agents across docs, customer data, analytics, and internal workflows.
+
+## OpenHands SDK
+
+OpenHands Software Agent SDK is a Python and REST surface for software engineering agents. It has agents, tools, workspaces, local and remote execution, conversation persistence, and OpenTelemetry observability.
+
+Use OpenHands when the agent edits repositories, runs tests, automates GitHub work, or behaves like a coding assistant.
+
+Use Little Harness when the same workspace ideas should apply to broader product agents.
+
+## OpenClaw And ACP
+
+OpenClaw is closer to a full agent gateway and control plane. Its ACP path can spawn and bind external coding harnesses such as Codex, Claude Code, Gemini, OpenCode, and others, while OpenClaw owns routing, background task state, delivery, bindings, and policy.
+
+Use OpenClaw when the goal is an always-on agent platform with channels, runtime routing, background tasks, and external harness orchestration.
+
+Use Little Harness when the developer wants to embed a harness in an existing app rather than operate a whole agent platform.
+
+## Core Difference
+
+| Question | Coding Harnesses | Little Harness |
+|---|---|---|
+| Primary workload | Code editing, tests, repository automation. | Product-agent sessions over files, tools, app data, and artifacts. |
+| Runtime surface | Workspace plus coding tools. | Workspace plus skills, artifacts, Persistent Dirs, app exports. |
+| Platform weight | OpenHands is coding-agent SDK; OpenClaw is platform-like. | Library-shaped runtime primitive. |
+| Best fit | Developer agents. | Developer-built user-facing agents. |
+
+## Sources
+
+- [OpenHands Software Agent SDK](https://docs.openhands.dev/sdk/index)
+- [OpenHands workspace architecture](https://docs.openhands.dev/sdk/arch/workspace)
+- [OpenHands conversation persistence](https://docs.openhands.dev/sdk/guides/convo-persistence)
+- [OpenHands observability](https://docs.openhands.dev/sdk/guides/observability)
+- [OpenClaw agent workspace](https://docs.openclaw.ai/concepts/agent-workspace)
+- [OpenClaw agent harness plugins](https://docs.openclaw.ai/plugins/sdk-agent-harness)
+- [OpenClaw ACP agents](https://docs.openclaw.ai/tools/acp-agents)

@@ -1,0 +1,47 @@
+---
+title: Runtime Overview
+description: The local runtime shape for Little Harness.
+---
+
+The runtime is the managed part of Little Harness. It turns a developer's high-level configuration into an isolated agent environment.
+
+```txt
+createHarness(config)
+streamHarness(...) or generateHarness(...)
+-> session manager
+-> filesystem directories
+-> tool bridge
+-> agent loop
+-> trace recorder
+-> persistence commits
+```
+
+The alpha runtime is intended to start local and self-hosted. A hosted control plane can come later without changing the developer's basic mental model.
+
+## Runtime Responsibilities
+
+The runtime should own:
+
+- Local Host setup in development
+- session creation and continuation
+- same-session turn serialization
+- workspace isolation
+- skill directories
+- artifact storage
+- tool output handling
+- shell/script execution
+- Persistent Dir load and commit
+- trace events
+- retryable persistence failures
+
+The developer should own:
+
+- tool definitions
+- export side effects
+- backing storage logic for Persistent Dirs
+- app request context and policy
+- user-facing UI decisions
+
+## First Runtime Target
+
+The first fully working SDK target is [Local Host](/docs/v0.1.0-alpha/runtime/local-host), backed by [just-bash](/docs/v0.1.0-alpha/runtime/just-bash). Local Host owns local sessions, traces, artifacts, and Persistent Dir sources under `.little-harness`; just-bash provides the virtual command and filesystem substrate inside each session.

@@ -1,0 +1,16 @@
+{
+  "name": "demo-hiring-candidates",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "demo": "node run.mjs",
+    "demo:stub": "node run.mjs stub",
+    "test": "node --test ./*.test.mjs"
+  },
+  "dependencies": {
+    "@ai-sdk/deepseek": "^2.0.35",
+    "ai": "^6.0.0",
+    "little-workflow": "workspace:*"
+  }
+}

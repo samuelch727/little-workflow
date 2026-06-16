@@ -1,0 +1,42 @@
+---
+title: Security Model
+description: Threats and required controls for AI-generated durable workflows.
+---
+
+Little Workflow treats planner output as untrusted until validation and policy approval.
+
+## Threats
+
+- prompt injection from user input, web pages, docs, tickets, emails, and tool results
+- prompt injection from skill descriptions and references
+- tool poisoning through changed descriptions or schemas
+- plugin supply-chain compromise
+- poisoned UI inspector panels
+- excessive agency through broad scopes
+- confused deputy OAuth flows
+- SSRF through remote metadata or auth discovery
+- arbitrary command execution through shell/code
+- data exfiltration through logs, traces, errors, or artifacts
+- replayed approvals
+- retry amplification of dangerous side effects
+
+## Required Controls
+
+- planner and executor permission separation
+- capability firewall
+- schema validation at every boundary
+- immutable workflow versioning
+- sandboxing for code and shell
+- no network by default in shell/code
+- short-lived scoped secrets
+- side-effect idempotency keys
+- approval gates for high-risk actions
+- artifact access control
+- trace redaction
+- policy decision audit log
+- package, module, skill, plugin, and tool snapshotting
+- sandbox/CSP isolation for third-party UI panels
+
+## Code And Shell
+
+`code.ts` is planned as constrained sandbox execution, not arbitrary local code execution. The initial target is a Deno subprocess sandbox with permissions denied by default. `ai.shell`, `code.python`, and broad agent loops are deferred.

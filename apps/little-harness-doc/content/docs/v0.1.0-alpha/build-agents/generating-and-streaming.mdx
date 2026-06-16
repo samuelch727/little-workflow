@@ -1,0 +1,434 @@
+---
+title: Generating And Streaming
+description: Using streamHarness and generateHarness in real app routes, jobs, and agent flows.
+---
+
+Little Harness has two execution APIs:
+
+- `streamHarness()` streams a response for interactive experiences.
+- `generateHarness()` waits for the turn to finish and returns a completed result.
+
+Both APIs run the same harness. They share sessions, tools, skills, files,
+artifacts, Persistent Dirs, traces, warnings, and output parsing.
+
+## Define A Harness
+
+Create the harness once in server-side code.
+
+```ts
+import { createHarness, localHost, skill } from "little-harness";
+
+export const accountHarness = createHarness({
+  host: localHost({ dataDir: ".little-harness" }),
+  model,
+  system:
+    "You help account teams prepare evidence-backed renewal briefs. " +
+    "Use uploaded files and approved tools before making claims.",
+  tools: {
+    searchDocs,
+    queryCustomers,
+    saveReport,
+  },
+  skills: [
+    skill("./skills/customer-renewal-analysis"),
+    skill("./skills/domain-glossary"),
+  ],
+});
+```
+
+The harness is reusable. It does not start a model call until you pass it to
+`streamHarness()` or `generateHarness()`.
+
+## Stream A Chat Response
+
+Use `streamHarness()` for chat routes and live UI updates.
+
+```ts
+import type { UIMessage } from "ai";
+import { streamHarness } from "little-harness";
+import { accountHarness } from "@/lib/account-harness";
+
+// Allow streaming responses up to 30 seconds.
+export const maxDuration = 30;
+
+export async function POST(req: Request) {
+  const body: {
+    messages: UIMessage[];
+    chatId: string;
+    extraBody: {
+      userId: string;
+      teamId: string;
+      role: "account_manager" | "support";
+    };
+  } = await req.json();
+
+  const result = streamHarness({
+    harness: accountHarness,
+    messages: body.messages,
+    session: body.chatId,
+    extraBody: body.extraBody,
+    abortSignal: req.signal,
+  });
+
+  return result.toUIMessageStreamResponse();
+}
+```
+
+The client can stay on the normal AI SDK UI path.
+
+```tsx
+"use client";
+
+import { useChat } from "@ai-sdk/react";
+import { DefaultChatTransport } from "ai";
+import { useState } from "react";
+
+export function AccountChat({ chatId }: { chatId: string }) {
+  const { messages, sendMessage, status } = useChat({
+    transport: new DefaultChatTransport({
+      api: "/api/account-chat",
+      body: {
+        chatId,
+        extraBody: {
+          userId: "user_123",
+          teamId: "team_456",
+          role: "account_manager",
+        },
+      },
+    }),
+  });
+  const [input, setInput] = useState("");
+
+  return (
+    <div>
+      {messages.map((message) => (
+        <div key={message.id}>
+          <strong>{message.role === "user" ? "User" : "Assistant"}:</strong>{" "}
+          {message.parts.map((part, index) =>
+            part.type === "text" ? <span key={index}>{part.text}</span> : null,
+          )}
+        </div>
+      ))}
+
+      <form
+        onSubmit={(event) => {
+          event.preventDefault();
+
+          if (input.trim()) {
+            sendMessage({ text: input });
+            setInput("");
+          }
+        }}
+      >
+        <input
+          value={input}
+          onChange={(event) => setInput(event.target.value)}
+          disabled={status !== "ready"}
+          placeholder="Ask about an account..."
+        />
+        <button type="submit" disabled={status !== "ready"}>
+          Send
+        </button>
+      </form>
+    </div>
+  );
+}
+```
+
+## Continue A Session
+
+Pass a stable `session` key when the next request belongs to the same private
+workspace.
+
+```ts
+const result = streamHarness({
+  harness: accountHarness,
+  messages,
+  session: chatId,
+});
+```
+
+The session can keep:
+
+- staged user files
+- generated notes and scripts under `/session/`
+- artifacts under `/artifacts/`
+- Persistent Dir checkouts
+- trace continuity
+
+Omit `session` for one-shot work.
+
+## Generate A Final Result
+
+Use `generateHarness()` when the caller wants a completed value instead of a
+live stream.
+
+```ts
+import { Output } from "ai";
+import { generateHarness } from "little-harness";
+
+const result = await generateHarness({
+  harness: accountHarness,
+  type: "account.renewal_brief",
+  input: {
+    accountId: "acct_123",
+    quarter: "2026-Q3",
+  },
+  output: Output.object({ schema: renewalBriefSchema }),
+  session: "acct_123-renewal",
+});
+
+await reports.create({
+  accountId: "acct_123",
+  content: result.output,
+  traceId: result.trace.id,
+});
+```
+
+`generateHarness()` should run the same runtime lifecycle as `streamHarness()`.
+Only the return shape changes.
+
+## Use Input Types For Non-Chat Calls
+
+Input Types give reusable meaning to `type + input` calls.
+
+```ts
+import { Output } from "ai";
+import { createHarness, inputType, localHost } from "little-harness";
+
+const accountHarness = createHarness({
+  host: localHost(),
+  model,
+  system: "Prepare concise, evidence-backed account briefs.",
+  tools: { searchDocs, queryCustomers },
+  inputTypes: {
+    "account.renewal_brief": inputType({
+      description:
+        "Prepare a renewal brief for one account using internal docs and customer history.",
+      inputSchema: renewalBriefInputSchema,
+      output: Output.object({ schema: renewalBriefSchema }),
+      toMessages: ({ input }) => [
+        {
+          role: "user",
+          content:
+            `Prepare a renewal brief for account ${input.accountId}.\n` +
+            `Quarter: ${input.quarter}`,
+        },
+      ],
+    }),
+  },
+});
+```
+
+Then call it from a job, queue consumer, server action, or Little Workflow node.
+
+```ts
+const result = await generateHarness({
+  harness: accountHarness,
+  type: "account.renewal_brief",
+  input: { accountId: "acct_123", quarter: "2026-Q3" },
+});
+```
+
+## Stream A Custom Input
+
+Custom inputs can stream too.
+
+```ts
+const result = streamHarness({
+  harness: accountHarness,
+  type: "document.review",
+  input: {
+    documentId: "doc_123",
+    checks: ["privacy", "renewal-risk"],
+  },
+  session: "doc_123",
+});
+
+return result.toUIMessageStreamResponse();
+```
+
+Use this when a product command is not naturally a chat message but still needs
+live progress in the UI.
+
+## Write Large Tool Results To Files
+
+Tools should return compact values to the model. Large results should be written
+to the harness filesystem.
+
+```ts
+const queryCustomers = tool({
+  description: "Query customer account data.",
+  inputSchema: z.object({
+    accountId: z.string().optional(),
+    query: z.string().optional(),
+  }),
+  execute: async (input, ctx) => {
+    const rows = await customerDb.query(input);
+
+    const file = await ctx.files.writeJSON(
+      "/artifacts/tool/query-customers/result.json",
+      rows,
+      { source: "tool" },
+    );
+
+    return {
+      summary: "Customer query exported for analysis.",
+      path: file.path,
+      bytes: file.bytes,
+      columns: ["accountId", "plan", "renewalDate", "arr"],
+    };
+  },
+});
+```
+
+The agent can inspect the file with shell commands, scripts, or follow-up tools.
+The model does not need every row in context.
+
+When a tool returns an oversized result instead of writing the file itself,
+Little Harness spools that value to `/artifacts/tool-results/<toolName>/` and
+returns a compact file reference. Configure this with `toolResultSpooling` on
+`createHarness()`, `generateHarness()`, or `streamHarness()`. The reference
+includes `summary` metadata so the model can see line/character counts and a
+bounded JSON structure sketch before deciding how to inspect the artifact.
+
+## Stage Uploaded Message Files
+
+When users attach files in chat, stage them into the session before the model
+turn starts.
+
+```ts
+const accountHarness = createHarness({
+  host: localHost(),
+  model,
+  system: "Use uploaded files when the user asks about them.",
+  chat: {
+    stageMessage: async ({ message, inputFiles, files }) => {
+      const stagedFiles = await Promise.all(
+        inputFiles.map(async (file) => {
+          const path = `/session/user-input/${message.id}/${file.safeName}`;
+
+          await files.write(path, file.content, {
+            mediaType: file.mediaType,
+            source: "user-message",
+          });
+
+          return { path, mediaType: file.mediaType };
+        }),
+      );
+
+      return {
+        stagedFiles,
+        notice:
+          stagedFiles.length > 0
+            ? `Uploaded files are available:\n${stagedFiles
+                .map((file) => `- ${file.path}`)
+                .join("\n")}`
+            : undefined,
+      };
+    },
+  },
+});
+```
+
+The notice should be short and path-oriented. The file content belongs in the
+session filesystem, not directly in prompt context.
+
+## Stage Files Outside A Message
+
+Apps can add files to a session without waiting for the next user message.
+
+```ts
+const session = await accountHarness.sessions.getOrCreate({
+  id: chatId,
+  extraBody: { userId: "user_123", teamId: "team_456" },
+});
+
+await session.files.write("/session/app-context/customer-history.csv", stream, {
+  mediaType: "text/csv",
+  source: "app-context",
+});
+
+const result = streamHarness({
+  harness: accountHarness,
+  messages,
+  session,
+});
+```
+
+This is useful for background uploads, app imports, and product state that
+arrives between chat turns.
+
+## Observe The End Of A Stream
+
+`streamHarness()` can return the UI stream immediately and still expose a
+`finished` promise for host-side follow-up.
+
+```ts
+const result = streamHarness({
+  harness: accountHarness,
+  messages,
+  session: chatId,
+});
+
+result.finished.then(async ({ persistence, trace }) => {
+  if (persistence.status === "failed") {
+    await retryQueue.enqueue(persistence.failedCommits);
+  }
+
+  await analytics.track("harness.turn.finished", {
+    traceId: trace.id,
+    persistenceStatus: persistence.status,
+  });
+});
+
+return result.toUIMessageStreamResponse();
+```
+
+This is where apps can enqueue retries, update dashboards, or persist host-side
+status after the response has been sent to the browser.
+
+## Lifecycle Callbacks
+
+Use callbacks for observability and host-side control-plane behavior.
+
+```ts
+const harness = createHarness({
+  host: localHost(),
+  model,
+  system,
+  tools,
+  onEvent: async (event) => {
+    await traces.append(event);
+  },
+  onPersistenceError: async (error) => {
+    await retryQueue.enqueue(error.failedCommits);
+  },
+});
+```
+
+Callbacks should not be treated as model-visible messages by default. They are
+for the host app and trace.
+
+## Error Behavior
+
+Little Harness should distinguish runtime errors from control-plane errors.
+
+| Error | Model sees it? | Host sees it? | Typical handling |
+|---|---|---|---|
+| Tool execution error | Usually yes, as a tool failure if the turn can continue | Yes | Let the agent recover or return a useful error |
+| File write failure | No, unless the tool/hook reports it | Yes | Fail the hook/tool because the file is unavailable |
+| Persistent Dir commit failure | No | Yes | Retry or show a host warning |
+| Undefined Input Type | No | Yes, as a warning | Add an Input Type definition |
+
+Persistence failures should not be injected into the normal agent context. The
+turn already finished, and the host app is better positioned to retry or warn
+the user.
+
+## What To Read Next
+
+- [`streamHarness()` reference](/docs/v0.1.0-alpha/reference/stream-harness)
+- [`generateHarness()` reference](/docs/v0.1.0-alpha/reference/generate-harness)
+- [Message Files](/docs/v0.1.0-alpha/build-agents/message-files)
+- [Input Types](/docs/v0.1.0-alpha/build-agents/input-types)
+- [FileWriter](/docs/v0.1.0-alpha/reference/file-writer)

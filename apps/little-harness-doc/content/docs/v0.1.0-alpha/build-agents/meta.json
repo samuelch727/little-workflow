@@ -1,0 +1,12 @@
+{
+  "title": "Build Agents",
+  "pages": [
+    "basic-agent",
+    "generating-and-streaming",
+    "tools",
+    "memory",
+    "message-files",
+    "input-types",
+    "skills"
+  ]
+}

@@ -1,0 +1,38 @@
+---
+title: Changelog
+description: What v0.1.0 adds compared to v0.1.0-beta.
+---
+
+`v0.1.0` is the first production-grade release. The authoring surface from beta does not change; what changes is the runtime — durable storage, queue, artifacts, leases, and governors finally run on real infrastructure rather than a single Node process.
+
+## Compared To v0.1.0-beta
+
+Everything in beta still works against Local World. v0.1.0 adds a parallel production runtime that implements the same contracts on Postgres, Redis, and S3.
+
+## New Runtime — Production Stores
+
+- Kysely/Postgres metadata, event, outbox, and state store.
+- BullMQ/Redis queue backend.
+- S3-compatible artifact storage through AWS SDK v3.
+- zstd compression for artifact payloads above a configurable size threshold.
+
+## New Runtime — Crash Consistency
+
+- Outbox dispatch and reconciliation: every external dispatch is committed alongside the event log entry, then dispatched separately and replayed on crash.
+- Attempt states with explicit lifecycle transitions.
+- Lease fencing: every step attempt carries a monotonic `leaseToken` acquired through compare-and-set, and every artifact commit, `sideEffectKey` write, budget debit, and external-result attachment must include the current token. Stale tokens are rejected at the storage layer.
+
+## New Runtime — Governance At Scale
+
+- Queue-independent governors for tenant, model slot, tool, provider, and network-destination limits. Governors are evaluated outside the queue so they survive worker pool churn.
+- Worker pools for AI, tool, code, reducer, and artifact maintenance work.
+- Production retry and reconciliation flows.
+- Budget debit and release from actual usage, not just estimates.
+- Skill and plugin package lock verification at worker lease time.
+- Testcontainers-driven contract tests covering Postgres, Redis, and S3 adapters against the same fixtures Local World uses.
+
+## Still Not In This Version
+
+- Sharded fan-out and tree reducers — arrive in [v0.2.0](/docs/v0.2.0).
+- Custom step type plugins, third-party UI inspector panels, registries, modules — arrive in [v0.2.0](/docs/v0.2.0).
+- Visual editing, multi-tenant controls, autoscaling — arrive in [v1.0.0](/docs/v1.0.0).

@@ -1,0 +1,56 @@
+---
+title: Budgets And Risk
+description: Cost reservation, policy validation, approvals, and bounded review loops.
+---
+
+Cost estimates are not enough. The scheduler must enforce budget before and after execution.
+
+```txt
+estimate step worst-case cost
+-> reserve budget before scheduling
+-> execute step
+-> debit actual usage after result metadata is known
+-> release unused reservation
+```
+
+## Budget Fields
+
+```json
+{
+  "estimatedCostUsd": 82.15,
+  "reservedCostUsd": 100.0,
+  "actualCostUsd": 74.22,
+  "remainingBudgetUsd": 175.78
+}
+```
+
+If remaining budget cannot cover the worst-case next step, the run pauses for approval or fails according to policy.
+
+## Policy Validation Examples
+
+```txt
+Deny ai.shell if network is allowed and secret access exists.
+Deny HR scoring workflow without human review gate.
+Deny external email sending without approval.
+Deny model calls on PII unless data policy allows it.
+Deny foreach concurrency above tenant policy.
+Deny unpinned remote skills or plugins in production.
+```
+
+## Bounded Review
+
+The orchestrator may review outputs and decide a result is insufficient, but only in a bounded loop.
+
+Allowed actions:
+
+- retry failed steps
+- add verifier steps
+- fork workflow
+- request human review
+
+Disallowed without new approval:
+
+- increasing budget
+- granting tools, network, or secrets
+- skipping required approval
+- mutating completed event history

@@ -1,0 +1,420 @@
+---
+title: LWIR
+description: The Little Workflow Intermediate Representation.
+---
+
+LWIR is the canonical JSON runtime format. TypeScript SDK definitions, visual editor output, YAML examples, and planner output all compile into LWIR.
+
+LWIR must be:
+
+- JSON Schema valid
+- canonicalizable
+- hashable
+- immutable once registered
+- safe to diff
+- safe to replay from logs
+
+## Top-Level Shape
+
+```json
+{
+  "apiVersion": "littleworkflow.dev/v0.1",
+  "kind": "Workflow",
+  "metadata": {
+    "name": "candidate-review",
+    "version": "0.1.0",
+    "description": "Produce evidence-backed candidate decision support."
+  },
+  "input": {
+    "schema": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  },
+  "output": {
+    "schema": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  },
+  "permissions": {
+    "tools": ["artifact.read", "artifact.write", "model.call"],
+    "models": ["gpt-4o-mini", "gpt-4o-mini-tiger"],
+    "secrets": [],
+    "network": []
+  },
+  "steps": []
+}
+```
+
+`permissions.models` lists the slot ids (auto-derived from model names) that steps in this LWIR are permitted to reference. The planner emits these ids; the runtime verifies them against the `WorkflowVersion` lock at step lease.
+
+## Step Types
+
+Alpha step types:
+
+- `ai.generate`
+- `tool.call`
+- constrained local `code.run`
+- bounded `parallel`
+- `decision` (routes execution to a target step or terminates the current scope)
+
+Later versions add broader fan-out, reducers, `shell.run`, `code.python`, custom step type plugins, and agent-loop style steps.
+
+## Output Modes
+
+Every executable step declares an output mode. Downstream steps consume the validated output value, not raw model text.
+
+```json
+{
+  "output": {
+    "mode": "object",
+    "schema": {
+      "type": "object",
+      "required": ["summary", "severity"],
+      "properties": {
+        "summary": { "type": "string" },
+        "severity": { "type": "string", "enum": ["low", "medium", "high"] }
+      }
+    }
+  }
+}
+```
+
+Alpha modes are:
+
+- `text`
+- `object`
+- `array`
+- `choice`
+- `json`
+
+`ai.generate` supports all alpha output modes (`text`, `object`, `array`, `choice`, `json`).
+
+## Decision Step
+
+A `decision` step evaluates an ordered list of expressions and routes execution to the first matching target, or to the `default` target if none match.
+
+```jsonc
+{
+  "id": "route",
+  "uses": "decision",
+  "needs": ["review"],
+  "with": {
+    "cases": [
+      { "when": "{{ steps.review.lastOutput.passed }}", "to": "fan-in" }
+    ],
+    "default": "worker"
+  }
+}
+```
+
+Shape rules:
+
+- `with.cases` is an ordered array. The first `when` expression that evaluates truthy wins.
+- `with.default` is required. It is the fallback target when no `when` expression matches.
+- Every `to` value (in `cases` and `default`) must reference either a step in the same scope or the sentinel `"end"`. Using `"end"` terminates the current scope — a parallel branch or the top-level workflow.
+- A `decision` step cannot route outside its enclosing scope. In a parallel branch, every `to` must name a step in that branch or `"end"`.
+- The `StepCompleted` payload for a decision step is `{ "chosen": "<targetId>" }`. Decision steps never contribute output to fan-in; only their routing is recorded.
+- A `decision` step does not accept an `output` field and does not use `sensitive` or `maxVisits` meaningfully (it is never revisited by a back-edge that points to it — the cycle must have a decision step *on* the cycle, but the back-edge target is the step that re-executes).
+
+## `code.run` Step
+
+`code.run` executes a JavaScript source body. The runtime injects `{input, tools}` — where `tools` is a proxy giving direct access to all globally-registered tools without routing through the model.
+
+```jsonc
+{
+  "id": "filter-top-candidates",
+  "uses": "code.run",
+  "needs": ["fetch"],
+  "with": {
+    "source": "async ({ input, tools }) => {\n  const candidates = await tools.fetchCandidates({ jobId: input.jobId });\n  return candidates.filter(c => c.score > 0.8);\n}"
+  },
+  "input": { "jobId": "{{ input.jobId }}" },
+  "output": {
+    "mode": "array",
+    "schema": { "type": "array", "items": { "type": "object" } }
+  }
+}
+```
+
+The code body signature is `async ({ input, tools }) => output`. Tool calls from code are event-logged with `caller: "code"` (distinguishable from model-driven tool calls). The model never sees the raw tool results.
+
+### `onFailure.fixer`
+
+A `code.run` step may declare a fixer for self-recovery. When the step's source throws or returns output that fails schema validation, the runtime spawns a fixer harness session:
+
+```jsonc
+{
+  "id": "compute-score",
+  "uses": "code.run",
+  "with": {
+    "source": "async ({ input, tools }) => { /* ... */ }"
+  },
+  "output": {
+    "mode": "object",
+    "schema": { "type": "object", "required": ["score"], "properties": { "score": { "type": "number" } } }
+  },
+  "onFailure": {
+    "fixer": {
+      "model": "gpt-4o-mini",
+      "maxAttempts": 3,
+      "system": "Fix the code so it returns output matching the schema. Test in scratch before declaring done."
+    }
+  }
+}
+```
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `fixer.model` | `string` | Slot id from the workflow's `models` list |
+| `fixer.maxAttempts` | `number` | Max fix iterations before escalating |
+| `fixer.system` | `string` | System prompt for the fixer harness session |
+
+The fixer's fix applies to the current run only (LWIR is immutable). Persistent fixes should be written by the fixer to `/mnt/memory/workflow/` for future planners to incorporate.
+
+## Step Metadata
+
+### `maxVisits`
+
+Every step accepts an optional `maxVisits` integer. Default is `1` (DAG behavior). Setting `maxVisits > 1` permits that step to execute more than once in a single run via a back-edge from a `decision` step.
+
+```jsonc
+{
+  "id": "worker",
+  "uses": "ai.generate",
+  "maxVisits": 5,
+  "with": { "prompt": "…" }
+}
+```
+
+- `maxVisits` must be an integer in `[1, 100]`. Values outside this range are rejected at validation time (`lwir.invalid_max_visits`).
+- Default `1` preserves existing DAG semantics. Step paths are unchanged when `maxVisits === 1`.
+- When `maxVisits > 1`, step paths gain a `.visit[N]` suffix (0-indexed): `review-cands[cand_123].worker.visit[0]`, `…visit[1]`, etc. Pure DAG steps are unaffected.
+- If a step is about to start its `maxVisits + 1`-th execution, the run fails with `RunFailedError { causeCode: "max_visits_exceeded", failedStepPath }`. The failed run is preserved in Local World for inspection.
+
+### `sensitive`
+
+Steps accept an optional `sensitive: true` field on their metadata. The field is parsed and validated by the LWIR validator but **not yet honored by the alpha runtime**. It is reserved so a future release can suppress inline output in the event log without a breaking LWIR upgrade.
+
+```jsonc
+{
+  "id": "fetch-secret",
+  "uses": "tool.call",
+  "sensitive": true,
+  "with": { "tool": "fetchCredential" }
+}
+```
+
+## Back-Edges and Cycle Rules
+
+A back-edge is a `decision` step's `to` that names a step which has already executed in the current branch. Back-edges enable in-workflow loops.
+
+Validator rules (Tarjan SCC over the union of `needs` edges and decision-step transition edges):
+
+1. A cycle is permitted only if it contains at least one `decision` step. A cycle with no `decision` step has no exit condition and is rejected (`lwir.invalid_cycle`).
+2. Every step on the cycle must have `maxVisits ≥ 2`. Any step on the cycle with `maxVisits === 1` (the default) is rejected (`lwir.invalid_cycle`).
+
+A cycle that satisfies both rules is valid. Loops are bounded by `maxVisits` at runtime.
+
+## Expressions — Multi-Visit Accessors
+
+When a step has `maxVisits > 1`, two additional accessors are available:
+
+- `{{ steps.X.lastOutput }}` — output of the most recent committed visit of step X.
+- `{{ steps.X.allVisits }}` — ordered array of all committed visit outputs for step X.
+
+`{{ steps.X.output }}` retains its existing meaning for single-visit steps. Referencing `{{ steps.X.output }}` on a step with `maxVisits > 1` is a validation error (`lwir.output_ambiguous_for_multi_visit`). The planner must use `lastOutput` or `allVisits` explicitly for multi-visit steps.
+
+References via `lastOutput` or `allVisits` are exempt from the `needs`-declaration requirement when the referenced step can reach the referencing step through the execution-flow graph (needs-edges plus decision-transition-edges). This covers the back-edge-in-a-cycle pattern, where an earlier step in a loop reads the output of a later step without declaring a `needs` entry for it.
+
+## Bounded Parallel Nodes — Updates
+
+### `fanIn.outputStep`
+
+The `fanIn` object on a `parallel` step's `with` accepts an optional `outputStep` field:
+
+```jsonc
+{
+  "fanIn": { "order": "input", "output": "array", "outputStep": "worker" }
+}
+```
+
+When `outputStep` is set, the named step's `lastOutput` is used as the branch's contribution to fan-in. The named step must exist in the branch body and must not be a `decision` step.
+
+When `outputStep` is omitted, the branch's final output is the `lastOutput` of the most recently committed non-`decision` step in the branch. This default preserves existing behavior for single-path DAG branches.
+
+### Branch Final Output Rule
+
+When a parallel branch terminates (via `to: "end"` from a decision step or by exhausting its DAG), its contribution to fan-in is determined as follows:
+
+1. If the parallel group declares `fanIn.outputStep: "<stepId>"`, that step's `lastOutput` is used.
+2. Otherwise, the most recently committed non-`decision` step in the branch contributes its `lastOutput`.
+
+`decision` steps are always excluded from fan-in output.
+
+## Worked Example — Candidate Review With Loop
+
+The following LWIR excerpt shows a parallel group where each branch runs a worker → review → decision loop. The branch exits when the review passes or when `maxVisits` is exhausted.
+
+```jsonc
+{
+  "id": "review-cands",
+  "uses": "parallel",
+  "with": {
+    "items": "{{ input.candidates }}",
+    "itemKey": "{{ item.id }}",
+    "maxBranches": 25,
+    "maxConcurrency": 5,
+    "failureMode": "all_settled",
+    "fanIn": { "order": "input", "output": "array" }
+  },
+  "steps": [
+    {
+      "id": "worker",
+      "uses": "ai.generate",
+      "maxVisits": 5,
+      "with": {
+        "model": "gpt-4o-mini",
+        "prompt": "Process {{ item }}. Prior feedback: {{ steps.review.lastOutput.feedback }}"
+      }
+    },
+    {
+      "id": "review",
+      "uses": "ai.generate",
+      "needs": ["worker"],
+      "maxVisits": 5,
+      "with": {
+        "model": "gpt-4o-mini",
+        "prompt": "Review worker output. History: {{ steps.worker.allVisits }}"
+      }
+    },
+    {
+      "id": "route",
+      "uses": "decision",
+      "needs": ["review"],
+      "with": {
+        "cases": [{ "when": "{{ steps.review.lastOutput.passed }}", "to": "end" }],
+        "default": "worker"
+      }
+    }
+  ]
+}
+```
+
+The `route` decision step routes back to `worker` (back-edge) when the review does not pass, or terminates the branch with `to: "end"` when it does. Both `worker` and `review` carry `maxVisits: 5`, satisfying the cycle rule. The branch's fan-in output is `review`'s `lastOutput` (the most recently committed non-decision step).
+
+Model slot ids (`"gpt-4o-mini"`) are auto-derived from the model name passed to `model()` at authoring time. The planner emits these ids; the runtime resolves them to the registered `ModelSlot`.
+
+## Result Envelopes
+
+Step outputs are committed as durable result envelopes:
+
+```json
+{
+  "output": {
+    "summary": "Customer reports intermittent billing export failures.",
+    "severity": "high"
+  },
+  "outputRef": "artifact://art_step_output",
+  "artifacts": ["artifact://art_prompt", "artifact://art_response"],
+  "metadata": {
+    "outputMode": "object",
+    "modelSlot": "gpt-4o-mini",
+    "schemaHash": "sha256:...",
+    "usage": {
+      "inputTokens": 3211,
+      "outputTokens": 918,
+      "costUsd": 0.018
+    }
+  }
+}
+```
+
+Small outputs may live inline in the event log. When the serialized output exceeds 256 KB the inline `output` field is omitted; only `outputRef` is written. Steps marked `sensitive: true` will also suppress inline output in a future release (reserved in alpha). Replay reads from `outputRef`; the inline value is never load-bearing.
+
+## Bounded Parallel Nodes
+
+Alpha supports bounded parallel branches over a known array:
+
+```json
+{
+  "id": "review-candidates",
+  "uses": "parallel",
+  "with": {
+    "items": "{{ input.candidates }}",
+    "itemKey": "{{ item.candidateId }}",
+    "maxBranches": 25,
+    "maxConcurrency": 5,
+    "failureMode": "all_settled",
+    "fanIn": {
+      "order": "input",
+      "output": "array"
+    }
+  },
+  "steps": [
+    {
+      "id": "score-candidate",
+      "uses": "ai.generate",
+      "with": {
+        "model": "gpt-4o-mini",
+        "prompt": "Score {{ item }} against {{ input.jobRequirement }}."
+      },
+      "output": {
+        "mode": "object",
+        "schema": {
+          "type": "object",
+          "required": ["candidateId", "score", "reason"],
+          "properties": {
+            "candidateId": { "type": "string" },
+            "score": { "type": "number" },
+            "reason": { "type": "string" }
+          }
+        }
+      }
+    }
+  ]
+}
+```
+
+Rules:
+
+- `maxBranches` and `maxConcurrency` are required.
+- `itemKey` must be deterministic and unique in the group.
+- branch step paths include the item key, such as `review-candidates[cand_123].score-candidate`.
+- fan-in order is deterministic; alpha supports `input` order and `itemKey` order.
+- `failureMode` is either `fail_fast` or `all_settled`.
+
+This is for small branch sets such as processing candidate records. Sharded fan-out, tree reducers, distributed workers, and high-volume batching arrive later.
+
+## Expressions
+
+LWIR uses a deterministic expression language:
+
+```txt
+{{ input.jobDescription }}
+{{ steps.extract.output.name }}
+{{ item.uri }}
+{{ sha256(item.uri) }}
+{{ coalesce(steps.profile.output.name, "unknown") }}
+```
+
+Allowed expressions are pure and bounded. Arbitrary JavaScript, filesystem access, network access, secret access, and dynamic imports are disallowed.
+
+## Schema Subset
+
+LWIR supports a deliberate JSON Schema subset: primitives, objects, arrays, enums, consts, bounded strings/numbers, and simple discriminated unions. Zod transforms, functions, `Date`, `bigint`, classes, maps, sets, and custom executable refinements must be rejected or normalized before LWIR registration.
+
+## Validators
+
+The LWIR validator enforces the following error codes (additions from prior milestones preserved):
+
+| Code | Description |
+| --- | --- |
+| `lwir.invalid_max_visits` | `maxVisits` outside `[1, 100]` |
+| `lwir.invalid_cycle` | Cycle with no `decision` step, or cycle step missing `maxVisits ≥ 2` |
+| `lwir.output_ambiguous_for_multi_visit` | `{{ steps.X.output }}` used on a step with `maxVisits > 1` |
+| `lwir.unknown_tool` | `step.with.tools` references a tool not in `globalTools` |
+| `lwir.unknown_model` | `step.with.model` references a slot id not in `permissions.models` |
+| `lwir.invalid_decision_target` | `to` references a step outside the current scope |
+| `lwir.invalid_code_run_source` | `code.run` source is not a valid async function expression |

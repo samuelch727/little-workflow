@@ -1,0 +1,85 @@
+---
+title: Persistent Dir Reference
+description: Proposed callback shapes for developer-backed persistent directories.
+---
+
+Persistent Dirs let the app choose the storage logic while Little Harness owns the harness directory, session isolation, diffing, and commit timing.
+
+## Diff-Based Shape
+
+The recommended default is diff-based.
+
+```ts
+const userMemory = {
+  harnessDir: "/persistent/user",
+
+  load: async ({ extraBody }) => {
+    return appStorage.loadFolder(`users/${extraBody.userId}/memory`);
+  },
+
+  store: async ({ extraBody, changes }) => {
+    return appStorage.applyChanges({
+      prefix: `users/${extraBody.userId}/memory`,
+      changes,
+    });
+  },
+};
+```
+
+## Load Result
+
+`load` can return a map of file paths to content.
+
+```ts
+{
+  "preferences.md": "# Preferences\nPrefer concise briefs.\n",
+  "accounts/acme.md": "Known risk: renewal date moved twice.\n"
+}
+```
+
+A future version may include metadata such as content type, version, etag, or modified time.
+
+## Store Input
+
+`store` receives changes computed at the commit point.
+
+```ts
+{
+  created: {
+    "accounts/contoso.md": "New notes..."
+  },
+  updated: {
+    "preferences.md": "Updated notes..."
+  },
+  deleted: ["old-note.md"]
+}
+```
+
+## Commit Modes
+
+```ts
+commit: "after-turn" // default
+commit: "manual"
+commit: "read-only"
+```
+
+`after-turn` should be the default because it is predictable across chat, API, and job-style usage.
+`manual` skips the automatic commit and can be committed later from
+`result.commitManual()` or `finished.commitManual()` for the completed turn.
+`read-only` exposes files for inspection but rejects writes immediately; it is
+not a copy-on-write mode.
+
+## Conflict Handling
+
+The alpha API does not lock the conflict API yet. A likely shape is for `load` to return a version cursor and `store` to receive it back.
+
+```ts
+load: async () => ({
+  files,
+  cursor: "etag-or-version",
+});
+
+store: async ({ changes, cursor }) => {
+  await storage.applyChanges({ changes, ifMatch: cursor });
+};
+```

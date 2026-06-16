@@ -1,0 +1,82 @@
+---
+title: just-bash Runtime
+description: Why the first local Little Harness runtime can build on just-bash.
+---
+
+just-bash is a TypeScript virtual bash environment with an in-memory filesystem. It is a strong first substrate for Little Harness because agents naturally benefit from file and shell workflows.
+
+The alpha runtime uses just-bash for:
+
+- virtual filesystems
+- mountable filesystems
+- copy-on-write overlays
+- standard shell commands
+- text and data tools such as `rg`, `jq`, `sqlite3`, and `xan`
+- optional Python and JavaScript execution
+- network disabled by default
+- Runtime Tool Bridge exposure for configured Little Harness tools inside `js-exec`
+
+## Runtime Shape
+
+```txt
+Little Harness session
+-> just-bash Bash instance
+   -> /session
+   -> /artifacts
+   -> .agents/skills
+   -> /persistent
+   -> configured tools via Runtime Tool Bridge
+```
+
+This gives the first runtime useful isolation and a familiar command surface without requiring Docker, microVMs, or cloud sandboxes in the happy path.
+
+## Runtime Tool Bridge
+
+When JavaScript is enabled, the default just-bash runtime exposes configured
+tools inside `js-exec` as `tools.<name>(args)`.
+
+```bash
+js-exec -c 'const result = await tools.queryCustomers({ plan: "enterprise" }); console.log(result.path ?? JSON.stringify(result))'
+```
+
+This is the default path for complex, batched, or programmatically assembled
+tool inputs. The model can still call the same tools directly through the
+provider; the bridge simply gives it a scriptable route when emitting many large
+tool-call JSON payloads would be brittle or token-heavy.
+
+Bridge calls use the same configured tool definitions, execution context,
+spooling policy, abort signal, traces, and durability replay as ordinary tool
+calls. Trace and durable events use `caller: "runtime"` and scope replay by the
+parent `bash` tool call id so repeated identical bridge calls in different bash
+commands do not collide.
+
+The bridge is available only when `bash` is model-visible and JavaScript is
+enabled. It is not advertised when `runtime.bash === false`,
+`runtime.javascript === false`, `runtime.toolBridge === false`, or per-call
+`activeTools` / `prepareStep` settings hide `bash`.
+
+```ts
+createHarness({
+  host: localHost(),
+  model,
+  tools,
+  runtime: { toolBridge: false },
+});
+```
+
+## Security Boundary
+
+The just-bash sandbox is meant to protect against untrusted scripts. It does not make host-provided hooks untrusted-safe.
+
+These still run in the host app's trust boundary:
+
+- tool handlers
+- storage callbacks
+- export callbacks
+- custom runtime hooks
+
+Little Harness should treat those as explicit capabilities and make their side effects visible in trace events.
+
+## Later Runtime Options
+
+Containers, microVMs, browser sandboxes, or hosted execution pools can implement the same higher-level runtime contract later. The developer-facing API should not force that decision into the first configuration object.

@@ -1,0 +1,477 @@
+---
+title: createHarness()
+description: Define a reusable Little Harness runtime surface.
+---
+
+`createHarness()` defines the reusable agent runtime surface. It does not start a
+model call by itself. It collects the host, system prompt, model, tools, memory,
+skills, file staging hooks, Input Types, Persistent Dirs, runtime policy, and
+callbacks that `streamHarness()` and `generateHarness()` will use later.
+
+## Import
+
+```ts
+import {
+  createHarness,
+  justBashRuntime,
+  localHost,
+  memory,
+} from "little-harness";
+```
+
+## Basic Usage
+
+```ts
+const harness = createHarness({
+  host: localHost({ dataDir: ".little-harness" }),
+  system: "Help account teams prepare evidence-backed renewal briefs.",
+  model,
+  tools: { searchDocs, queryCustomers, saveReport },
+  skills: [skill("./skills/customer-renewal-analysis")],
+});
+```
+
+## API Signature
+
+```ts
+function createHarness<TTools extends ToolSet = ToolSet, TExtraBody = unknown>(
+  options: CreateHarnessOptions<TTools, TExtraBody>,
+): Harness<TTools, TExtraBody>;
+```
+
+## Parameters
+
+### `host`
+
+`HarnessHost`
+
+The session, filesystem, trace, artifact, and persistence host used by this
+harness.
+
+```ts
+host: localHost({ dataDir: ".little-harness" })
+```
+
+The first SDK target should be Local Host. Managed and self-hosted hosts can
+later implement the same host contract.
+
+### `system`
+
+`string | SystemModelMessage | SystemModelMessage[]`
+
+Instructions for the agent. This is the global behavior that applies to every
+execution call unless an Input Type or step policy adds narrower instructions.
+
+```ts
+system: "Use uploaded files and approved tools before answering."
+```
+
+Use the system prompt for stable behavior. Put product-specific request details
+in `messages`, `type + input`, `extraBody`, `chat.stageMessage`, or Input Types.
+
+### `model`
+
+`LanguageModel`
+
+The language model used by default.
+
+```ts
+model: gateway("anthropic/claude-sonnet-4.5")
+```
+
+An execution call may override the model later if Little Harness chooses to
+support per-call model policy. The default should be enough for most apps.
+
+### `tools`
+
+`ToolSet`
+
+Host app capabilities exposed to the agent. Little Harness should accept normal
+AI SDK-style tools and add a harness execution context as the second argument.
+
+```ts
+const queryCustomers = tool({
+  description: "Query customer account data by account id or search string.",
+  inputSchema: z.object({
+    accountId: z.string().optional(),
+    query: z.string().optional(),
+  }),
+  execute: async (input, ctx) => {
+    const rows = await customerDb.query(input);
+
+    const file = await ctx.files.writeJSON(
+      "/artifacts/tool/query-customers/result.json",
+      rows,
+    );
+
+    return {
+      preview: "Customer query exported for analysis.",
+      path: file.path,
+      bytes: file.bytes,
+    };
+  },
+});
+```
+
+Tool return values should stay compact. Planned large data should be written
+with `ctx.files` and returned as paths plus summaries. If a tool returns an
+oversized value anyway, Little Harness can automatically spool it to a file.
+
+Tools also receive `ctx.artifacts`, which can list artifacts and read
+`/artifacts/...` files that another tool or runtime command already wrote.
+
+### `toolResultSpooling`
+
+`false | { maxInlineBytes?: number; previewBytes?: number; outputDir?: string }`
+
+Controls automatic file spooling for oversized tool return values. It applies
+to app tools and the built-in `bash` tool.
+
+```ts
+toolResultSpooling: {
+  maxInlineBytes: 32_000,
+  previewBytes: 512,
+  outputDir: "/artifacts/tool-results",
+}
+```
+
+When omitted, oversized tool results are spooled after 16 KB. The model receives
+a compact JSON object with the artifact `path`, byte count, media type,
+line/character counts, a bounded JSON structure sketch when available, preview,
+and a message telling it to read the file for the full result.
+
+Set `toolResultSpooling: false` to disable this behavior.
+
+### `trace`
+
+`false | HarnessTraceOptions`
+
+Controls Local Host trace capture for model steps, tool calls, mounted files,
+file changes, artifacts, runtime commands, and Persistent Dir commits.
+
+```ts
+trace: {
+  content: {
+    previewBytes: 512,
+    maxInlineBytes: 16 * 1024,
+    captureReasoning: true,
+    captureModelMessages: true,
+    captureToolInputs: true,
+    captureToolOutputs: true,
+  },
+  fileDiffs: {
+    enabled: true,
+    maxInlineBytes: 8 * 1024,
+    maxBytesToDiff: 256 * 1024,
+  },
+  redaction: {
+    metadataKeys: ["authorization", "cookie", "token", "password", "secret"],
+    paths: ["/persistent/company/secrets"],
+  },
+}
+```
+
+By default, Little Harness records metadata, small previews, and bounded text
+diffs. Large captured content is written under `/artifacts/trace/...` and
+referenced by `contentRef`. Raw mounted file contents, hidden provider
+reasoning, credentials, and binary payload bodies are not written to the trace.
+
+Set `trace: false` to disable trace persistence for this harness. A
+`streamHarness()` or `generateHarness()` call can override the harness-level
+policy for that run.
+
+### `chat`
+
+`HarnessChatOptions`
+
+Chat-specific hooks for raw AI SDK `UIMessage[]` input.
+
+```ts
+chat: {
+  stageMessage: async ({ message, inputFiles, files }) => {
+    const stagedFiles = await Promise.all(
+      inputFiles.map((file) =>
+        files.write(
+          `/session/user-input/${message.id}/${file.safeName}`,
+          file.content,
+          { mediaType: file.mediaType, source: "user-message" },
+        ),
+      ),
+    );
+
+    return {
+      stagedFiles,
+      notice: "Uploaded files were staged into /session/user-input/.",
+    };
+  },
+}
+```
+
+#### `chat.stageMessage`
+
+`(options: StageMessageOptions<TExtraBody>) => StageMessageResult | Promise<StageMessageResult>`
+
+Runs before a newly submitted user message reaches the model. It lets the app
+move uploaded files into the session filesystem and return a short notice that
+mentions paths instead of raw file contents.
+
+`StageMessageOptions`:
+
+| Field | Type | Description |
+|---|---|---|
+| `message` | `UIMessage` | The newly submitted user message. |
+| `inputFiles` | `InputFile[]` | Normalized file parts from the message. |
+| `files` | `FileWriter` | Writer for `/session/`, `/artifacts/`, and Persistent Dir harness directories. |
+| `session` | `HarnessSession` | The current session handle. |
+| `extraBody` | `TExtraBody | undefined` | App-defined request context. |
+| `abortSignal` | `AbortSignal | undefined` | Cancels staging if the request aborts. |
+
+`StageMessageResult`:
+
+| Field | Type | Description |
+|---|---|---|
+| `stagedFiles` | `StagedFile[]` | Files written into the harness filesystem. |
+| `notice` | `string | undefined` | Small model-visible note about the staged paths. |
+| `metadata` | object or undefined | Host-facing trace metadata. |
+
+### `skills`
+
+`SkillInput[]`
+
+Procedural knowledge exposed read-only for on-demand use.
+
+```ts
+skills: [
+  skill("./skills/customer-renewal-analysis"),
+  skill("./skills/domain-glossary"),
+  skill("https://github.com/anthropics/skills", {
+    skills: ["frontend-design"],
+  }),
+]
+```
+
+Skill metadata is injected into the system prompt. Full skill bodies are mounted
+read-only under `.agents/skills/<name>/` so the model can inspect details only when needed.
+
+### `inputTypes`
+
+Record of input type names to `HarnessInputType` definitions.
+
+Reusable definitions for non-chat request shapes.
+
+```ts
+inputTypes: {
+  "support.ticket_triage": inputType({
+    description:
+      "Triage one support ticket and decide priority, owner, and next action.",
+    inputSchema: ticketSchema,
+    output: Output.object({ schema: triageSchema }),
+    toMessages: ({ input }) => [
+      {
+        role: "user",
+        content: `Triage this ticket:\n\n${input.body}`,
+      },
+    ],
+  }),
+}
+```
+
+Undefined input types should run with a host-facing warning rather than fail by
+default.
+
+### `memory`
+
+`HarnessMemoryOptions`
+
+Opt-in model-authored long-term memory. `memory(...)` expands to a Persistent Dir,
+a bounded `MEMORY.md` index injected into future system context, and a `remember`
+tool unless the memory is read-only or `tool: false`.
+
+```ts
+const harness = createHarness({
+  host: localHost({ dataDir: ".little-harness" }),
+  model,
+  system: "Answer database questions using schema-aware tools.",
+  tools: { queryDatabase, inspectSchema },
+  memory: memory({
+    sourceDir: "memory/db-query-agent",
+  }),
+});
+```
+
+Defaults:
+
+| Field | Default |
+|---|---|
+| `harnessDir` | `/persistent/memory` |
+| `commit` | `after-turn` |
+| `tool.name` | `remember` |
+| `indexPath` | `MEMORY.md` |
+| `maxIndexBytes` | `8000` |
+| `maxEntryBytes` | `4000` |
+
+Use `commit: "read-only"` to inject existing memory without a write tool, or
+`tool: false` to mount writable memory without adding `remember`. Memory uses
+the same Persistent Dir load, diff, trace, and commit behavior as explicit
+`persistentDirs`.
+
+### `persistentDirs`
+
+`PersistentDir[]`
+
+Opt-in, developer-backed directories that can persist across sessions.
+
+```ts
+persistentDirs: [
+  {
+    harnessDir: "/persistent/user",
+    load: async ({ extraBody }) =>
+      storage.loadFolder(`users/${extraBody.userId}/memory`),
+    store: async ({ extraBody, changes }) =>
+      storage.applyChanges(`users/${extraBody.userId}/memory`, changes),
+    commit: "after-turn",
+  },
+]
+```
+
+Writes land inside the isolated session first. Little Harness calls the
+developer's `store` callback at the commit boundary.
+
+`harnessDir` is the path inside the harness filesystem. Backing storage is
+defined by `load` / `store`, `localDir({ sourceDir })`, or an object-store
+adapter's `prefix`.
+
+### `runtime`
+
+`HarnessRuntimeOptions`
+
+Runtime policy for the built-in Local Host runtime.
+
+```ts
+runtime: {
+  bash: true,
+  network: false,
+  python: true,
+  javascript: true,
+  toolBridge: true,
+}
+```
+
+`bash` controls whether Little Harness exposes the built-in command tool to the
+model. It defaults to `true`. Set `bash: false` when app tools are the only
+capabilities the model should call.
+
+`network` controls network access for the command runtime. It defaults to
+`false`.
+
+`python` and `javascript` control language helpers inside the command runtime.
+They default to `true`.
+
+`toolBridge` controls whether configured tools are exposed inside just-bash
+JavaScript as `tools.<name>(args)`. It defaults to `true` when `bash` and
+JavaScript are enabled. Set it to `false` when the model should only invoke
+tools directly through provider tool calls.
+
+Runtime Tool Bridge calls share normal tool context, spooling, trace events, and
+durability replay. They appear as tool events with `caller: "runtime"`.
+
+Execution calls can override runtime policy for one turn:
+
+```ts
+streamHarness({
+  harness,
+  messages,
+  runtime: { bash: false },
+});
+```
+
+### `onEvent`
+
+Function that receives a `HarnessEvent`.
+
+Receives host-facing trace events.
+
+```ts
+onEvent: async (event) => {
+  await traces.append(event);
+}
+```
+
+Callbacks should not be injected into the model context automatically. They are
+for host observability, dashboards, retries, and debugging.
+
+### `onPersistenceError`
+
+Function that receives a `PersistenceError`.
+
+Receives Persistent Dir commit failures.
+
+```ts
+onPersistenceError: async (error) => {
+  await retryQueue.enqueue(error.failedCommits);
+}
+```
+
+Commit failures are control-plane events. The session workspace should keep
+uncommitted changes recoverable.
+
+## Returns
+
+### `Harness`
+
+A reusable configuration object passed to `streamHarness()` and
+`generateHarness()`.
+
+```ts
+type Harness<TTools extends ToolSet = ToolSet, TExtraBody = unknown> = {
+  sessions: HarnessSessionManager<TExtraBody>;
+  config: ResolvedHarnessConfig<TTools, TExtraBody>;
+};
+```
+
+The exact object shape can stay opaque. The important public contract is that it
+can create, resume, and execute sessions through the documented APIs.
+
+## Examples
+
+### Chat Agent With File Staging
+
+```ts
+const harness = createHarness({
+  host: localHost(),
+  model,
+  system: "Answer using uploaded files and approved account tools.",
+  tools: { queryCustomers, saveReport },
+  chat: {
+    stageMessage: async ({ message, inputFiles, files }) => ({
+      stagedFiles: await Promise.all(
+        inputFiles.map((file) =>
+          files.write(
+            `/session/user-input/${message.id}/${file.safeName}`,
+            file.content,
+            { mediaType: file.mediaType },
+          ),
+        ),
+      ),
+    }),
+  },
+});
+```
+
+### Agent With User-Backed Persistence
+
+```ts
+const harness = createHarness({
+  host: localHost(),
+  model,
+  system: "Maintain lightweight project notes when they are useful.",
+  persistentDirs: [
+    {
+      harnessDir: "/persistent/user",
+      load: ({ extraBody }) => userFiles.load(extraBody.userId),
+      store: ({ extraBody, changes }) =>
+        userFiles.applyChanges(extraBody.userId, changes),
+    },
+  ],
+});
+```

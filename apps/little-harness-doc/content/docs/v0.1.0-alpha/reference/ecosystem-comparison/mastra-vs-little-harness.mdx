@@ -1,0 +1,44 @@
+---
+title: Mastra Vs Little Harness
+description: Comparing Mastra's full TypeScript AI framework with Little Harness's narrower runtime primitive.
+---
+
+Mastra is one of the closest broad TypeScript alternatives. It includes agents, workflows, memory, RAG, MCP, evals, logging, tracing, deployment, and cloud tooling.
+
+Little Harness should be smaller. It should solve the harness runtime problem without becoming the whole AI app framework.
+
+## Use Mastra When
+
+- the team wants an all-in-one TypeScript AI framework
+- workflows, agents, memory, RAG, evals, and observability should be designed together
+- adopting a broader framework and platform is acceptable
+- the app benefits from Mastra's deployment and studio-style tooling
+
+## Use Little Harness When
+
+- the app already has a framework, backend, auth, storage, and UI
+- the team wants to keep AI SDK streaming ergonomics
+- the missing piece is session workspace, artifacts, skills, persistence, and runtime isolation
+- the harness should be a library-shaped primitive, not the app framework
+
+## Core Difference
+
+| Question | Mastra | Little Harness |
+|---|---|---|
+| Main abstraction | Full AI app framework. | Managed harness runtime. |
+| Scope | Agents, workflows, memory, RAG, evals, observability, deployment. | Sessions, workspace, artifacts, skill directories, Persistent Dirs, tracing, isolation. |
+| Platform weight | Higher. | Lower by design. |
+| App ownership | App may be shaped around Mastra primitives. | Host app stays the product control plane. |
+| Best fit | Teams adopting a full TS agent framework. | Teams embedding agents into existing apps. |
+
+## What Little Harness Should Learn
+
+Mastra validates that TypeScript developers want more than raw model calls. Little Harness should learn from Mastra's TypeScript ergonomics, memory concepts, observability, and skill/workspace affordances while staying narrower.
+
+## Sources
+
+- [Mastra agents](https://mastra.ai/agents)
+- [Mastra Agent reference](https://mastra.ai/en/reference/agents/agent)
+- [Mastra storage overview](https://mastra.ai/docs/storage/overview)
+- [Mastra streaming reference](https://mastra.ai/en/reference/agents/streamVNext)
+- [Mastra observability](https://mastra.ai/ai-agent-observability)

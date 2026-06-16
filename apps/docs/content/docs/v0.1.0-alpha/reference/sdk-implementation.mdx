@@ -1,0 +1,580 @@
+---
+title: SDK Implementation Spec
+description: The build contract for the v0.1.0-alpha Little Workflow SDK.
+---
+
+This page is the alpha implementation contract. It translates the product spec into the packages, types, runtime services, and tests needed to build the SDK.
+
+For a deeper, diagrammed walkthrough of how each module is actually wired (planner pipeline, runtime loop, parallel branching, event log, replay), see [Implementation Details](/docs/v0.1.0-alpha/implementation).
+
+Alpha is intentionally local and narrow: compile one developer-authored workflow into validated LWIR, execute it in Local World, persist every result boundary, and prove replay after a process kill. The harness milestone extends this with a unified agent-runtime primitive (Harness), memory + scratch storage, skills, and the Orchestrator role for multi-workflow composition.
+
+## Alpha Goal
+
+Build the smallest SDK that proves this loop:
+
+```txt
+createLittleWorkflow()
+-> normalize OrchestrationRequest
+-> planner harness session generates LWIR
+-> validator repairs or rejects
+-> WorkflowVersion is locked
+-> Local World executes steps via worker harness
+-> event log and artifacts preserve results
+-> replay resumes without re-calling completed work (LWIR level + harness level)
+```
+
+Alpha must support:
+
+- Workflows that delegate bounded sets of AI worker steps in parallel (N candidate branches).
+- Multi-workflow orchestration (Orchestrator role composes multiple workflows via `plan_workflow` / `run_workflow` tools).
+- Memory stores and run scratch for agent context.
+- Skills for procedurally-disclosed planner and orchestrator knowledge.
+- Self-healing `code.run` steps via the Fixer harness role.
+
+Alpha must not try to solve production distribution, sharded fan-out, tree reducers, human approvals, or a full capability firewall.
+
+## Package Boundaries
+
+The alpha SDK keeps these internal modules separate, even if they ship from one `little-workflow` package:
+
+| Module | Responsibility |
+| --- | --- |
+| `authoring` | `createLittleWorkflow()`, `model()`, `skill()`, schema/output normalization, type inference helpers. Planner + worker config validation. |
+| `compiler` | OrchestrationRequest creation, LWIR generation via planner harness, validation, repair, and WorkflowVersion hashing. |
+| `lwir` | JSON Schema definitions, canonicalization, graph validation, expression validation, and alpha step type definitions. |
+| `harness/types.ts` | `Harness`, `HarnessTask`, `HarnessContext`, `HarnessResult`, `HarnessScope`, `HarnessRole` types. |
+| `packages/little-harness/src/workflow-harness/workflow-harness.ts` | Default `workflowHarness` implementation. Agent loop via AI SDK, system prompt assembly, tool dispatch, event recording, durability checks. |
+| `harness/event-recorder.ts` | `HarnessEventRecorder` — writes harness events to the event log; checks prior events on resume for memoization. |
+| `harness/agent-loop.ts` | `runAgentLoop()` helper — wraps AI SDK's agent with skill injection, turn-level events, memory/scratch mount setup, abort signal handling. |
+| `memory.ts` | Memory store mount computation and enforcement. On-disk layout under `<dataDir>/memory/`. Bash path allowlist computation. |
+| `scratch.ts` | Run scratch mount computation and layout. On-disk layout under `<dataDir>/runs/`. Mount semantics per role. |
+| `skills.ts` | Skill resolution (path → frontmatter + bodyPath), URL fetching + caching, conflict detection, system-prompt injection of skill list. |
+| `orchestrator.ts` | `plan_workflow`, `run_workflow`, `start_workflow` tool implementations. Orchestrator manifest computation. Pipeline memory key derivation. |
+| `model-registry.json` | Bundled model registry keyed by `provider/modelId`. Contains description, pricing (USD/1M tokens), contextWindow, capabilities. |
+| `local-world` | Filesystem event log, artifact manifests/blobs, materialized state, and local run locks under one data directory. |
+| `runtime` | Scheduler, step execution via worker harness, retry, result envelopes, replay, cancellation, and run finalization. |
+| `cli` | `little validate`, `run`, `events`, and `replay` for compiled JSON artifacts. |
+
+### Module dependency graph (simplified)
+
+```txt
+authoring ──> lwir
+           ──> harness/types
+           ──> skills
+           ──> memory (MemoryConfig validation)
+
+compiler  ──> authoring
+          ──> little-harness/workflow-harness  (planner session)
+          ──> lwir
+          ──> model-registry
+
+little-harness/workflow-harness ──> harness/types
+                     ──> harness/event-recorder
+                     ──> harness/agent-loop
+                     ──> memory
+                     ──> scratch
+                     ──> skills
+
+orchestrator ──> little-harness/workflow-harness  (plan_workflow, run_workflow delegates)
+             ──> harness/types
+             ──> compiler              (plan_workflow invokes planner)
+             ──> runtime               (run_workflow invokes run)
+
+runtime  ──> little-harness/workflow-harness  (worker + fixer sessions)
+         ──> harness/types
+         ──> local-world
+         ──> lwir
+
+cli      ──> runtime
+         ──> local-world
+         ──> lwir
+```
+
+## Public API Contract
+
+Alpha exposes one authoring front door, a tool registry, and one runner:
+
+```ts
+import {
+  createLittleWorkflow,
+  createToolRegistry,
+  localWorld,
+  runWorkflow,
+  model,
+  skill,
+} from "little-workflow";
+import { openai } from "@ai-sdk/openai";
+import { tool } from "ai";
+import { z } from "zod";
+
+const tools = createToolRegistry({
+  parsePdf: tool({
+    description: "Parse a PDF file and return structured text.",
+    inputSchema: z.object({ url: z.string() }),
+    outputSchema: z.object({ text: z.string() }),
+    execute: async ({ url }) => { /* … */ return { text: "…" }; },
+  }),
+});
+
+const workflow = createLittleWorkflow({
+  id: "candidate.review",
+  description: "Review candidates against a job requirement.",
+  inputSchema: CandidateReviewInput,
+  outputSchema: CandidateReviewOutput,
+  models: [model(openai("gpt-4o-mini"))],
+  globalTools: ["parsePdf"],
+  planner: {
+    model: openai("gpt-5"),
+    system: "You design candidate-review workflows.",
+  },
+});
+
+const result = await runWorkflow({
+  world: localWorld({ dataDir: ".little-workflow", maxConcurrentSteps: 8 }),
+  workflows: workflow,
+  input,
+  tools,
+  timeout: "30m",
+});
+```
+
+Implementation types should be generic enough to infer workflow input and output from schemas:
+
+```ts
+type WorkflowDefinition<TInput = unknown, TOutput = unknown> = {
+  id: string;
+  description?: string;
+  inputSchema?: InputSchemaLike<TInput>;
+  outputSchema?: OutputSchemaLike<TOutput>;
+  models?: readonly ModelSlot[];
+  globalTools?: readonly string[];
+  planner: PlannerConfig;
+  worker?: WorkerConfig;
+  memory?: MemoryConfig;
+};
+
+type RunResult<TOutput = unknown> = {
+  runId: string;
+  workflowVersionId: string;
+  status: "completed";
+  output: TOutput;
+  usage: {
+    inputTokens: number;
+    outputTokens: number;
+    costUsd: number;
+  };
+  events: readonly EventEnvelope[];
+  artifacts: readonly ArtifactRef[];
+};
+```
+
+## Output Modes
+
+The planner and every AI execution step must know whether the model response is plain text or schema-constrained data. Alpha treats output as a first-class contract:
+
+```ts
+type OutputMode<T> =
+  | { kind: "text" }
+  | { kind: "object"; schema: Schema<T>; name?: string; description?: string }
+  | { kind: "array"; element: Schema<T>; name?: string; description?: string }
+  | { kind: "choice"; values: readonly string[]; name?: string; description?: string }
+  | { kind: "json"; schema?: Schema<T>; name?: string; description?: string };
+```
+
+`normalizeSchema()` accepts JSON Schema descriptors, boolean schemas, and Zod v4 schemas. Zod schemas are converted with `z.toJSONSchema()` before hashing or registration; LWIR stores only the resulting JSON Schema descriptor. Other live validators must be converted by an adapter before reaching the normalizer.
+
+## Planner Compile Loop
+
+The planner runs in a harness session, not as a bare function call.
+
+```txt
+1. Validate developer input against the workflow input schema.
+2. Normalize WorkflowDefinition into OrchestrationRequest.
+3. Snapshot model slots, tool descriptions, tool schemas, and output modes.
+4. Compute WorkflowDefinitionHash from snapshot.
+5. Compute PlannerManifest; check for drift if resuming.
+6. Invoke planner.harness.run({ kind: "plan", workflowSnapshot, input }, ctx).
+   - ctx.tools: tool descriptors (planner sees but does NOT execute tools).
+   - ctx.skills: workflow-declared + org-mounted skills.
+   - ctx.memoryMounts: workflow memory store (rw) + org store (ro).
+   - ctx.scratchMounts: /mnt/scratch/own/ (rw).
+7. Harness runs agent loop; emits harness.model.called, harness.model.responded, and harness.tool_call.* events.
+8. Harness returns { kind: "plan", lwir }.
+9. Validate LWIR with Ajv and graph rules.
+10. If invalid, return compact validation findings to planner (repair loop; max maxWorkflowRevisions).
+11. Canonicalize LWIR and lock WorkflowVersion.
+12. Start a run against the locked WorkflowVersion.
+```
+
+The planner's own model is configured outside `WorkflowDefinition.models` (it is the planner's private slot). It is NOT added to the execution model slots the LWIR references.
+
+## Outer Loop (Layer B)
+
+When `maxOuterCycles > 1` and `planner.supervise` is defined, `runWorkflow` drives multiple compile-and-run cycles. Each cycle is a full compile + execute; cycles share an `outerLoopId`.
+
+Per-cycle flow:
+
+1. Cycle N starts. `OrchestrationRequest.outerLoop` carries `cycleNumber`, `maxCycles`, `isFinalCycle`, and `priorCycles`.
+2. Planner harness drafts LWIR.
+3. Workflow compiles and executes with Layer A semantics. Returns `RunCompleted` or `RunFailed`.
+4. Runtime calls `planner.supervise({ goal, cycles: […, cycleN] })`.
+5. `{ kind: "done", finalOutput }` — outer loop terminates.
+6. `{ kind: "continue", promptNote? }` and `N < maxOuterCycles` — start cycle N+1.
+7. `{ kind: "continue" }` on the final cycle — `RunFailedError { causeCode: "outer_loop_exhausted" }`.
+
+Durability: each cycle writes an `OuterLoopCycleCompleted` event. On crash between cycles, the runtime reuses `pendingCycleRunId` from `outer-loops/{outerLoopId}.json` so Layer A replay can resume the interrupted cycle from its last committed step.
+
+## Worker Execution
+
+Worker execution is unified through the harness. The previous `RuntimeAiAdapter` and `RuntimeCodeRunner` adapters are removed; all step types route through `worker.harness.run({ kind: "execute_step", ... }, ctx)`.
+
+```txt
+execute_step dispatch in workflowHarness:
+  - ai.generate  → runAgentLoop (model in agent loop; tool allowlist enforced)
+  - code.run     → executeCodeRunStep (direct execute; tools proxy injected; no agent loop)
+  - tool.call    → executeToolCallStep (single named tool, direct invocation)
+  - decision     → executeDecisionStep (expression evaluator; no model, no tools)
+  - parallel     → handled by runtime scheduler (NOT the harness)
+```
+
+All executions emit `harness.session.started`, `harness.execute_step.started, harness.execute_step.succeeded` (for direct-execute types), and `harness.session.completed`. Agent-loop types additionally emit `harness.model.called, harness.model.responded` and `harness.tool_call.started, harness.tool_call.succeeded, harness.tool_call.failed`.
+
+### `code.run` execution
+
+The `tools` proxy is constructed from the full `ToolRegistry`. Each tool invocation is event-logged with `caller: "code"`:
+
+```ts
+async function executeCodeRunStep(task, ctx): Promise<HarnessResult> {
+  const toolsProxy = createCodeRunToolsProxy(ctx.tools, ctx.recorder, task.stepContext);
+  const fn = new Function("input", "tools", `return (${task.step.with.source})({ input, tools });`);
+  const output = await fn(task.stepInput, toolsProxy);
+  validateOutput(output, task.step.output.schema);
+  return { kind: "execute_step", output, artifactRefs: [] };
+}
+```
+
+Tool calls from `code.run` appear in events with `harness.tool_call.started { caller: "code" }`. The model never processes the raw tool results.
+
+### Fixer harness session
+
+When a `code.run` step fails and declares `onFailure.fixer`, the worker harness spawns a fixer session:
+
+```ts
+await workerHarness.run({
+  kind: "fix_step",
+  step,
+  stepInput,
+  originalAttemptError: errorEnvelope,
+  priorFixAttempts: 0,
+}, ctx);
+```
+
+The fixer has bash + scratch + memory. Its system prompt is `onFailure.fixer.system`. On success it returns `{ kind: "fix_step", output, fixedSource, attempts }`. The `fixedSource` is event-logged but NOT written back to the LWIR (LWIR is immutable). Persistent fixes go through memory.
+
+## Memory + Scratch Storage
+
+### Memory store layout
+
+```txt
+<dataDir>/
+  memory/
+    workflows/
+      <workflowId>/           ← workflow-scoped store; rw by planner of this workflow
+    pipelines/
+      <pipelineKey>/           ← pipeline-scoped store; rw by orchestrator
+    org/                       ← org store; ro by all roles (override with memory.org: "rw")
+```
+
+`<pipelineKey>` = sha256 of sorted `WorkflowDefinitionHash` array for available workflows. Stable across runs of the same pipeline composition.
+
+Mounted inside harness bash at:
+
+- `/mnt/memory/workflow/` — workflow store
+- `/mnt/memory/pipeline/` — pipeline store (orchestrator sessions)
+- `/mnt/memory/org/` — org store
+- `/mnt/memory/available-workflows/<id>/` — peer workflow stores (orchestrator reads only)
+- `/mnt/memory/peer-workflows/<id>/` — attached peer stores (via `memory.attach`)
+
+Bash path allowlist enforcement: the SDK resolves `..` and symlinks before each bash command; rejects writes to `ro` mounts and access outside registered roots.
+
+### Run scratch layout
+
+```txt
+<dataDir>/runs/
+  pipeline_X/
+    scratch/                   ← orchestrator's own scratch (/mnt/scratch/own/)
+    events.db
+    sub-runs/
+      run_Y/
+        scratch/               ← planner's own scratch
+        steps/
+          step_Z/
+            scratch/           ← worker's own scratch
+```
+
+Each role mounts its `own` scratch rw; upper-layer scratches are mounted ro (`from-orchestrator`, `from-planner`, `peer-steps`).
+
+## Skill Loading
+
+1. During runtime materialization before each role session starts: resolve each `skill(pathOrUrl)` — read local `SKILL.md` frontmatter or materialize explicit Git URL sources, validate required fields (`name`, `description`), and cache remote skills by resolved commit SHA.
+2. At harness session start: union workflow-declared skills with org-mounted skills (`<dataDir>/memory/org/skills/*/`). Workflow-declared overrides org on name collision (warning logged).
+3. Inject skill list into system prompt: `"Available skills (read via cat .agents/skills/<name>/SKILL.md): …"` (frontmatter descriptions only).
+4. Stage skill directories read-only at `.agents/skills/<name>/` from the role/root working directory. Bodies are loaded on demand by the model via bash.
+
+## Harness Event Vocabulary
+
+All harness sessions write events under `scope.runId`. Standard LWIR step events (`StepAttemptStarted`, `StepCompleted`, etc.) continue unchanged. Harness adds:
+
+```txt
+harness.session.started      { runId, role, task: {kind}, manifest, manifestHash, parentRunId? }
+harness.session.completed    { runId, output?, usage: {inputTokens, outputTokens, costUsd?} }
+harness.session.failed       { runId, error }
+
+harness.model.called         { turn, promptHash, request: {model, messages, tools} }
+harness.model.responded      { turn, response: {text?, toolCalls?, usage} }
+
+harness.tool_call.started     { turn?, callId, caller: "model" | "runtime" | "code", toolName, args }
+harness.tool_call.succeeded   { callId, result, durationMs }
+harness.tool_call.failed      { callId, error, durationMs }
+
+harness.execute_step.started  { stepPath, stepKind: "code.run" | "tool.call" | "decision", inputHash }
+harness.execute_step.succeeded { stepPath, outputHash, durationMs }
+```
+
+Event sequencing by task kind:
+
+| Task kind | Sequence |
+| --- | --- |
+| `plan` / `orchestrate` / `fix_step` | `harness.session.started` → (`harness.model.called` → `harness.model.responded` → `harness.tool_call.*` per turn) × turns → `harness.session.completed` |
+| `execute_step` (ai.generate) | `harness.session.started` → agent-loop events × turns → `harness.session.completed` |
+| `execute_step` (code.run) | `harness.session.started` → `harness.execute_step.started` → `harness.tool_call.*` (caller: "code") → `harness.execute_step.succeeded` → `harness.session.completed` |
+| `execute_step` (tool.call) | `harness.session.started` → `harness.execute_step.started` → single `harness.tool_call.*` → `harness.execute_step.succeeded` → `harness.session.completed` |
+| `execute_step` (decision) | `harness.session.started` → `harness.execute_step.started` → `harness.execute_step.succeeded` → `harness.session.completed` |
+
+## Identity + Manifests
+
+### `WorkflowDefinitionHash`
+
+```ts
+WorkflowDefinitionHash = sha256(canonicalJson(WorkflowDefinitionSnapshot));
+```
+
+Stable at `createLittleWorkflow()` time. Includes: `id`, `description`, `inputSchemaHash`, `outputSchemaHash`, `modelSlots`, `plannerConfig` (model slot id + harness id + system hash + skills hash), `workerConfig`, `globalTools`, `memoryConfig`.
+
+### `WorkflowVersion` (unchanged)
+
+```ts
+WorkflowVersion = sha256(canonicalJson(LWIR));
+```
+
+Per-run because LWIR depends on input + planner non-determinism.
+
+### Manifests
+
+Three manifests; stored in `harness.session.started.payload.manifest`. Recomputed on resume; hash mismatch → `CapabilityDriftError`.
+
+- **`OrchestratorManifest`**: `harnessId`, `orchestratorModelSlotId`, `systemPromptHash`, `skillsHash`, `availableWorkflows[]`, `globalToolsHash`, `memoryStoreIds`, `maxConcurrentSubRuns`
+- **`PlannerManifest`**: `harnessId`, `plannerModelSlotId`, `systemPromptHash`, `skillsHash`, `workflowDefinitionHash`, `globalToolsHash`, `memoryStoreIds`, `outerLoopContextHash?`
+- **`WorkerManifest`**: `harnessId`, `workflowDefinitionHash`, `workflowVersionId`, `stepPath`, `stepConfigHash`, `modelSlotId?`, `systemPromptHash?`, `skillsHash`, `allowedToolsHash`, `memoryStoreIds`
+
+`FixerManifest` extends `WorkerManifest` with `fixerModelSlotId`, `fixerSystemHash`, `fixerMaxAttempts`.
+
+## Harness Durability
+
+Per-step memoization at the harness level mirrors the LWIR step-level memoization.
+
+On resume:
+
+1. Read harness events for `scope.runId`.
+2. For each `harness.model.called` + matching `harness.model.responded`: replay response into agent state; skip model invocation.
+3. For each `harness.tool_call.started` + matching `harness.tool_call.succeeded`: replay result; skip tool invocation.
+4. From the last uncommitted event boundary, resume execution.
+
+Sub-run composition: orchestrator's `harness.tool_call.started(run_workflow)` reserves `args.subRunId` and stays in-flight until the sub-run completes. The sub-run's own per-step memoization handles its recovery independently. Two levels of memoization, composed cleanly.
+
+## Orchestrator Tools
+
+The SDK injects three tools into the orchestrator's `ctx.tools`:
+
+- **`plan_workflow(workflowId, input) → { workflowVersionId, summary? }`**: Invokes the named workflow's planner for one representative input shape; returns a locked `WorkflowVersion`. Content-addressed dedupe: if the same (workflowId, LWIR) was already planned in this pipeline run, returns the cached id.
+- **`run_workflow(workflowVersionId, input) → { runId, outputRef, outputPath, outputSummary, status }`**: Executes a previously-planned version for a structure-compatible input. Creates a sub-run with its own event log + per-step memoization and returns compact model-facing output metadata instead of the full payload.
+- **`start_workflow(workflowId, input) → { workflowVersionId, runId, output, status }`**: Convenience — plan + run in one call. For batch work: plan once + run many via `run_workflow`.
+
+Parallel fan-out: the model can emit multiple `run_workflow` tool calls in one turn. The harness dispatches them concurrently (bounded by `maxConcurrentSubRuns`; default 10).
+
+## LWIR Alpha Step Types
+
+Alpha LWIR uses these executable step types:
+
+- `ai.generate`
+- `tool.call`
+- `code.run` — JS source; signature `async ({ input, tools }) => output`; supports `onFailure.fixer`
+- `decision` — routes execution or terminates scope
+- `parallel` — bounded branch group; coordination only (not a step executed by a harness)
+
+Every step accepts an optional `maxVisits` integer (default `1`). When `maxVisits > 1`, the step can be revisited via a back-edge from a `decision` step. See [LWIR Reference](/docs/v0.1.0-alpha/reference/lwir-reference) for cycle rules and expression accessors (`lastOutput`, `allVisits`).
+
+## Local World
+
+`localWorld()` is the only alpha world. It stores all local run state under `.little-workflow/` by default:
+
+```txt
+.little-workflow/
+  events/
+  artifacts/
+  locks/
+  outer-loops/       ← outer-loop session manifests (Layer B)
+  memory/            ← Memory Stores (workflow/, pipeline/, org/)
+  runs/              ← Run Scratch (per-run scratch hierarchy)
+  skills-cache/      ← URL-fetched skill cache
+```
+
+Local World responsibilities:
+
+- append event records in commit order (LWIR events + harness events)
+- write artifact manifests and payload files
+- expose materialized run and step views for the CLI
+- recover after a restart by replaying LWIR step events AND harness session events
+- reject capability drift when locked tool/model/schema hashes no longer match, or when harness session manifests differ
+- write and read `outer-loops/{outerLoopId}.json` manifests transactionally
+
+`localWorld` accepts `maxConcurrentSteps` to cap total in-flight step attempts across all parallel groups.
+
+## Execution Loop
+
+The runtime loop:
+
+```txt
+1. Register or find WorkflowVersion by hash.
+2. Create RunStarted.
+3. Schedule root steps whose dependencies are complete.
+4. Execute the next runnable step attempt via worker.harness.run({ kind: "execute_step", ... }, ctx).
+5. Resolve inputs from run input, prior StepResult envelopes, item context, and artifacts.
+6. Worker harness dispatches by step.uses (ai.generate, code.run, tool.call, decision).
+7. For code.run failures with onFailure.fixer: spawn fixer harness session.
+8. Validate output.
+9. Commit artifacts before StepCompleted.
+10. Schedule newly unblocked steps.
+11. Finalize RunCompleted or RunFailed.
+```
+
+## Error And Retry Semantics
+
+Alpha distinguishes internal automatic retry from user-invoked retry.
+
+- Internal retry: the runtime retries a transient failed step attempt according to the step retry policy.
+- Replay: reconstructs run state from committed events and never re-calls completed steps.
+- CLI retry: `little retry` is deferred to beta.
+- Fork: deferred to beta.
+
+`RunFailedError` carries:
+
+```ts
+class RunFailedError extends Error {
+  readonly runId: string;
+  readonly workflowVersionId: string;
+  readonly failedStepPath?: string;
+  readonly causeCode: RunFailedCauseCode;
+  readonly result?: FailedRunResult;
+  readonly outerLoopId?: string;
+  readonly lastCycleOutput?: unknown;
+}
+
+type RunFailedCauseCode =
+  | "input_schema_error"
+  | "planner_validation_exhausted"
+  | "capability_drift"
+  | "runtime_config_error"
+  | "step_schema_error"
+  | "step_failed"
+  | "max_visits_exceeded"
+  | "timeout"
+  | "cancelled"
+  | "outer_loop_exhausted";
+```
+
+## CLI Contract
+
+Alpha CLI commands:
+
+```bash
+little validate workflow.json
+little run workflow.json --input input.json
+little events <runId>
+little events <runId> --type harness.session.*
+little events <runId> --type harness.tool_call.* --caller code
+little replay <runId>
+```
+
+See [CLI Reference](/docs/v0.1.0-alpha/reference/cli) for the full event filtering surface.
+
+## Test Contract
+
+The alpha SDK is not complete until these Vitest suites pass:
+
+- schema normalization from JSON Schema descriptors, Zod v4 schemas, and AI SDK output-mode specs
+- canonical JSON hashing and hash stability
+- Ajv LWIR validation and compact validation error shape
+- planner harness session with mocked AI SDK calls (plan task, agent loop, event recording)
+- `WorkflowDefinitionHash` stability and change detection
+- `OrchestratorManifest`, `PlannerManifest`, `WorkerManifest` computation and drift detection on resume
+- memory store creation, path allowlist enforcement, rw/ro scoping
+- run scratch layout and mount semantics per role
+- skill frontmatter resolution, URL caching, conflict detection
+- `code.run` direct execution with tools proxy; `harness.tool_call.started { caller: "code" }` event
+- `code.run` with `onFailure.fixer`: fixer session spawned, `fixedSource` in events
+- orchestrator `plan_workflow` / `run_workflow` / `start_workflow` tool dispatch
+- orchestrator parallel fan-out (multiple `run_workflow` in one turn, bounded by `maxConcurrentSubRuns`)
+- harness session durability: crash between turns, resume fast-forwards committed model + tool calls
+- event append/replay ordering (LWIR events + harness events)
+- result envelope persistence and artifact refs
+- automatic retry without re-calling completed steps
+- bounded parallel branch fan-in order and failure modes
+- Local World kill-and-resume scenario (LWIR level + harness level)
+- CLI command smoke tests against a temporary `.little-workflow/` directory
+
+Layer A additions (carry-forward):
+
+- `decision` step validator rules (target in-scope, `to: "end"` sentinel, `cases`/`default` shape)
+- cycle-allowed-iff-decision-on-cycle + every cycle node has `maxVisits ≥ 2`
+- `lastOutput` and `allVisits` expression resolution
+- `{{ steps.X.output }}` on a multi-visit step is a validation error
+- runtime back-edge execution with visit-indexed step paths
+- `RunFailedError(causeCode: "max_visits_exceeded")` when a step overshoots its limit
+- kill-mid-loop replay: kill during `visit[2]`, resume completes `visit[2]`, then proceeds to `visit[3]` if needed
+- `fanIn.outputStep` override selects a specific branch step's `lastOutput`
+
+Layer B additions (carry-forward):
+
+- `supervise` on `PlannerConfig` invoked after each run cycle
+- `outerLoop` context appears in `OrchestrationRequest`; `isFinalCycle === true` on cycle N === maxCycles
+- `OuterLoopCycleCompleted` event written after each cycle's supervise call
+- `outer_loop_exhausted` failure when planner returns `continue` on the final cycle
+- `outer-loops/{id}.json` manifest written and updated transactionally
+- kill-between-cycles replay: kill after cycle N's `OuterLoopCycleCompleted`, resume into cycle N+1 compile
+
+Tests should use `pnpm` and temporary directories. Model calls should be mocked unless an integration test is explicitly marked and skipped by default.
+
+## Deferred From Alpha
+
+Deferred to beta or later:
+
+- `chainWorkflows()` execution and parent `workflow.invoke` nodes
+- production Postgres, Redis, BullMQ, S3/R2/MinIO worlds
+- full capability firewall
+- governed production `model()` wrappers
+- skill packs and plugins
+- human approval gates
+- budget reservation and enforcement
+- sharded fan-out and tree reducers
+- OpenTelemetry export
+- polished graph/timeline/artifact inspector
+- custom step type plugins
+- memory versioning, audit log, PII scanning
+- run-time skill injection (`RunWorkflowOptions.skills`)
+- OpenRouter sync for model pricing
+- recursive pipelines (orchestrators invoking orchestrators)
+- Dreaming workflow (post-alpha; uses same primitives; not implemented in alpha)
+
+Alpha should be boring and inspectable. If a feature cannot be represented in locked LWIR, persisted events, and deterministic replay, it should not ship in alpha.

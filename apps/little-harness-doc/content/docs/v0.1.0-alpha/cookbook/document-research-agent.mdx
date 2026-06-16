@@ -1,0 +1,59 @@
+---
+title: Document Research Agent
+description: A recipe for agents that search, inspect, compare, and summarize documents.
+---
+
+This is an example recipe, not a core Little Harness concept. Use it as a starting point for agents that work across user files, company docs, contracts, PDFs, notes, or knowledge bases.
+
+Document research is a good first Little Harness use case because it benefits from tools, files, artifacts, and optional user memory.
+
+## Shape
+
+```ts
+const harness = createHarness({
+  host: localHost(),
+  model,
+  system: "Help the user search, compare, and summarize their documents.",
+  tools: { searchDocs, readDoc, summarizePdf },
+  skills: [skill("./skills/domain-glossary")],
+});
+```
+
+## Tool Set
+
+Start with three tools:
+
+- `search_docs` finds candidate documents.
+- `read_doc` fetches a selected document or page range.
+- `summarize_pdf` creates a structured artifact for long PDFs.
+
+Large extracted text should become artifacts:
+
+```ts
+{
+  preview: "Contract PDF extracted. Sections: term, renewal, termination...",
+  artifactPath: "/artifacts/docs/acme-contract/extracted.md",
+  bytes: 239012
+}
+```
+
+## Optional User Memory
+
+Add a Persistent Dir when a user wants durable notes across sessions.
+
+```ts
+persistentDirs: [
+  {
+    harnessDir: "/persistent/user-notes",
+    load: ({ extraBody }) => notes.loadFolder(extraBody.userId),
+    store: ({ extraBody, changes }) =>
+      notes.applyChanges(extraBody.userId, changes),
+  },
+]
+```
+
+The agent can then write resolved terminology, preferences, and long-running research notes without mixing them into every prompt.
+
+## Export Boundary
+
+Generated summaries should stay as artifacts until the user asks to save or share them. Use explicit tools such as `save_summary`, `create_doc_comment`, or `send_draft`.

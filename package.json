@@ -1,0 +1,20 @@
+{
+  "name": "little-workflow-monorepo",
+  "private": true,
+  "license": "Apache-2.0",
+  "packageManager": "pnpm@10.27.0",
+  "scripts": {
+    "build": "turbo run build",
+    "dev": "turbo run dev",
+    "lint": "turbo run lint",
+    "test": "turbo run test",
+    "typecheck": "turbo run typecheck",
+    "verify": "turbo run build lint typecheck test",
+    "publish:alpha": "pnpm run publish:alpha:little-harness && pnpm run publish:alpha:little-workflow",
+    "publish:alpha:little-harness": "pnpm --filter little-harness publish --tag alpha --access public --publish-branch main",
+    "publish:alpha:little-workflow": "pnpm --filter little-workflow publish --tag alpha --access public --publish-branch main"
+  },
+  "devDependencies": {
+    "turbo": "latest"
+  }
+}

@@ -1,0 +1,4 @@
+out/
+.little-workflow-*/
+.env.local
+node_modules/

@@ -1,0 +1,273 @@
+---
+title: Events
+description: HarnessEvent envelope and trace event vocabulary for sessions, models, tools, artifacts, and commits.
+---
+
+The event names below are the alpha trace vocabulary. The names are observable
+from local traces and `onEvent` callbacks, while metadata details may continue
+to evolve during alpha.
+
+## HarnessEvent Envelope
+
+`HarnessEvent` is the versioned trace/callback event object emitted by
+`onEvent` and written to Local Host `trace.ndjson` files. Every persisted Local
+Host trace event uses the same envelope:
+
+```ts
+type HarnessEvent<TEventType extends string = HarnessEventType> = {
+  schemaVersion?: "lh.trace.v2";
+  eventId?: string;
+  sequence?: number;
+  occurrenceId?: string;
+  type: TEventType;
+  sessionId: string;
+  turnId?: string;
+  stepId?: string;
+  parentEventId?: string;
+  timestamp: string;
+  metadata?: Record<string, unknown>;
+};
+```
+
+Most consumers should key off `type`, `sessionId`, `turnId`, and
+`occurrenceId`, then read type-specific details from `metadata`.
+
+| Field | Meaning |
+| --- | --- |
+| `schemaVersion` | Trace schema version. Local traces currently use `lh.trace.v2`. |
+| `eventId` | Unique id for this emitted trace/callback event. |
+| `sequence` | Monotonic sequence number within one `trace.ndjson` file. |
+| `occurrenceId` | Correlation id for one model call, tool call, runtime command, or other logical occurrence. |
+| `type` | Dotted event name such as `harness.session.started`, `harness.model.called`, or `harness.tool_call.failed`. |
+| `sessionId` | Harness session id. |
+| `turnId` | Turn id for the current `generateHarness()` or `streamHarness()` call. |
+| `stepId` | Optional model step id for multi-step model/tool loops. |
+| `parentEventId` | Optional parent event id for nested event relationships. |
+| `timestamp` | ISO timestamp for when the event was emitted. |
+| `metadata` | Event-specific details after trace redaction. Defaults to `{}` in validated local traces. |
+
+Example trace event:
+
+```json
+{
+  "schemaVersion": "lh.trace.v2",
+  "eventId": "evt_abc123",
+  "sequence": 3,
+  "type": "harness.model.called",
+  "sessionId": "chat_123",
+  "turnId": "turn_abc123",
+  "occurrenceId": "evt_model_call",
+  "stepId": "step_1",
+  "timestamp": "2026-06-10T12:00:00.000Z",
+  "metadata": {
+    "model": { "provider": "openai", "modelId": "gpt-5" }
+  }
+}
+```
+
+`HarnessEvent` is not the same object as a durable replay event. Durable replay
+stores payloads:
+
+```ts
+type DurableHarnessEventInput<TEventType extends string = HarnessEventType> = {
+  type: TEventType;
+  runId: string;
+  occurrenceId?: string;
+  payload: Record<string, unknown>;
+};
+```
+
+Use `occurrenceId` to correlate a trace/callback `HarnessEvent` with a durable
+replay event for the same model or tool occurrence.
+
+Large strings and JSON values use a bounded content record:
+
+```ts
+type TraceContentRef = {
+  captured: boolean;
+  preview?: string;
+  truncated?: boolean;
+  contentRef?: string;
+  bytes?: number;
+  sha256?: string;
+  mediaType?: string;
+  redacted?: boolean;
+  redactionReason?: string;
+};
+```
+
+When content is too large to inline, `contentRef` points to
+`/artifacts/trace/...`. The trace still records byte counts and hashes so a
+developer can verify what changed.
+
+## Session Events
+
+```txt
+harness.session.started
+harness.session.completed
+harness.session.failed
+```
+
+Session events identify the runtime profile, root trace id, session status, and
+any app-defined `extraBody` fields allowed by the trace policy.
+
+## Model Events
+
+```txt
+harness.model.called
+harness.model.responded
+harness.model.failed
+```
+
+Model events track each AI SDK model-loop step.
+
+`harness.model.called` is emitted before a provider call. Metadata should include the
+step number, provider and model id when available, prompt hash, bounded message
+previews, tool names, tool schema hashes, and output mode.
+
+`harness.model.responded` is emitted after the step completes. Metadata should include
+finish reason, usage, warnings, provider metadata, bounded text output,
+provider-exposed reasoning when available, tool calls, sources, and generated
+file metadata.
+
+`harness.model.failed` includes the model, step number, duration, retry metadata when
+available, and a structured error envelope. Provider-hidden reasoning is not
+traced.
+
+## Tool Events
+
+```txt
+harness.tool_call.started
+harness.tool_call.succeeded
+harness.tool_call.failed
+```
+
+Large tool outputs should point to artifacts. Automatically spooled tool results
+also emit normal `harness.file.created`, `harness.file.written_by_tool`, and
+`harness.artifact.created` events for the `/artifacts/tool-results/...` file.
+
+Tool events include a `caller` value:
+
+| Caller | Meaning |
+| --- | --- |
+| `model` | The provider returned a tool call in an agent-loop step. |
+| `runtime` | just-bash JavaScript called a configured tool through `tools.<name>(args)`. |
+| `code` | Workflow code invoked a configured tool through a code-run proxy. |
+
+`harness.tool_call.started` records the tool name, tool call id, step id, and bounded input
+metadata when the trace policy allows tool input capture.
+
+`harness.tool_call.succeeded` records duration, bounded output metadata, artifact refs, and
+spooled output refs. If the model receives a compact file-reference response,
+the trace should include the full artifact path and hash.
+
+`harness.tool_call.failed` records duration and an error envelope. Tool implementation source
+code and closure internals are never traced.
+
+## Runtime Events
+
+```txt
+harness.runtime.command.started
+harness.runtime.command.succeeded
+harness.runtime.command.failed
+harness.runtime.error
+```
+
+Runtime events are for the execution substrate, such as the built-in bash tool.
+They should record commands, exit codes, duration, bounded stdout and stderr
+previews, and file changes discovered by the runtime.
+
+## File Events
+
+```txt
+harness.file.created
+harness.file.updated
+harness.file.deleted
+harness.file.staged_from_message
+harness.file.staged_from_host
+harness.file.written_by_tool
+harness.artifact.created
+harness.filesystem.mounted
+```
+
+The goal is not to log every byte of every file. The trace should explain what changed and where the data is stored.
+
+`harness.filesystem.mounted` records roots that were made available to the turn:
+
+```json
+{
+  "root": "skills",
+  "harnessDir": ".agents/skills",
+  "source": "skill",
+  "writable": false,
+  "fileCount": 3,
+  "files": [
+    {
+      "path": ".agents/skills/customer-research/SKILL.md",
+      "kind": "file",
+      "bytes": 1842
+    }
+  ]
+}
+```
+
+File change events should include `path`, `root`, `source`, before/after byte
+and hash metadata, and a diff record when the changed content is text:
+
+```ts
+type TraceFileDiff =
+  | {
+      available: true;
+      format: "unified";
+      preview?: string;
+      truncated: boolean;
+      contentRef?: string;
+      bytes?: number;
+      sha256?: string;
+    }
+  | {
+      available: false;
+      reason:
+        | "disabled"
+        | "non_text"
+        | "too_large"
+        | "redacted"
+        | "content_unavailable";
+    };
+```
+
+Deleted file events should record metadata and path, not deleted file contents.
+
+## Persistent Dir Events
+
+```txt
+harness.persistent_dir.loaded
+harness.persistent_dir.commit.started
+harness.persistent_dir.commit.succeeded
+harness.persistent_dir.commit.failed
+```
+
+Commit failures should be host-facing. They should not be automatically inserted into the agent's normal context.
+
+Persistent Dir metadata should include `harnessDir`, commit policy, file counts,
+change counts, storage adapter metadata allowed by policy, duration, and error
+details for failed commits.
+
+## Subagent Events
+
+Subagent trace events are deferred for the alpha release. If they are added in a
+later version, they should link back to the parent session and use the same
+content-free metadata rules as the rest of the trace vocabulary.
+
+## What Is Not Traced
+
+Little Harness traces should not capture:
+
+- API keys, auth headers, cookies, bearer tokens, or provider credentials
+- raw mounted file contents
+- raw binary payloads such as PDFs, images, archives, audio, or video
+- hidden model reasoning not exposed by the provider
+- deleted file contents after deletion
+- Persistent Dir backing-store credentials
+- tool implementation source code or closure internals
+- anything matched by the configured redaction policy

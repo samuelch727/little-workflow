@@ -1,0 +1,12 @@
+{
+  "title": "v0.1.0-beta",
+  "pages": [
+    "index",
+    "quickstart",
+    "mental-model",
+    "author-workflows",
+    "run-inspect",
+    "governance",
+    "reference"
+  ]
+}

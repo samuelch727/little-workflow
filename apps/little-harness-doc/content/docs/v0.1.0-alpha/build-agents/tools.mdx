@@ -1,0 +1,148 @@
+---
+title: Tools
+description: How to expose app capabilities to a Little Harness agent.
+---
+
+Tools are the host app capabilities available to the model. A tool can read data, transform data, call another system, or publish a final result.
+
+Little Harness keeps the tool API familiar. A normal AI SDK-style tool definition is enough for the alpha shape.
+
+```ts
+const queryCustomers = tool({
+  name: "query_customers",
+  description: "Query customer account data.",
+  inputSchema: z.object({
+    accountId: z.string().optional(),
+    query: z.string().optional(),
+  }),
+  execute: async (input) => customerDb.query(input),
+});
+```
+
+## Return Small Results Inline
+
+If a result is small and directly useful, return it inline.
+
+```ts
+return {
+  accountId: "acct_123",
+  name: "Acme",
+  renewalDate: "2026-09-01",
+  owner: "Mina",
+};
+```
+
+## Write Large Results To Files
+
+For planned large outputs, a tool should write the full payload into the harness
+filesystem and return a compact preview to the model.
+
+```ts
+const queryCustomers = tool({
+  description: "Query customer account data.",
+  inputSchema,
+  execute: async (input, ctx) => {
+    const rows = await customerDb.query(input);
+
+    const file = await ctx.files.writeJSON(
+      "/artifacts/tool/query-customers/result.json",
+      rows,
+    );
+
+    return {
+      preview: "842 rows returned. Columns: accountId, plan, renewalDate, arr.",
+      path: file.path,
+      bytes: file.bytes,
+    };
+  },
+});
+```
+
+The agent can inspect the file with `jq`, `sqlite3`, scripts, or follow-up
+tools. The model gets a path and summary instead of every row.
+
+Use `/session/` for data that only needs to live in the current session. Use
+`/artifacts/` for outputs that the host app may want to inspect, export, or show
+to the user.
+
+## Call Tools From Runtime JavaScript
+
+Tools can be called directly by the model through the provider, and they can
+also be called from just-bash JavaScript through the Runtime Tool Bridge:
+
+```bash
+js-exec -c '
+  const accounts = ["acct_1", "acct_2", "acct_3"];
+  const results = [];
+  for (const accountId of accounts) {
+    results.push(await tools.queryCustomers({ accountId }));
+  }
+  console.log(JSON.stringify(results));
+'
+```
+
+This is useful when the model needs to construct large inputs, call the same
+tool many times, or combine tool results with `jq`, files, or scripts before the
+next model turn. It avoids asking the model to emit one large provider tool-call
+JSON object per operation.
+
+The bridge uses the same tool definitions and context as ordinary calls:
+`ctx.files`, `ctx.artifacts`, `extraBody`, abort signals, trace capture, and
+automatic oversized result spooling all still apply. Bridged calls are traced
+and replayed as tool calls with `caller: "runtime"`.
+
+Disable the bridge with `runtime: { toolBridge: false }`, or disable the
+underlying route with `runtime: { javascript: false }` or `runtime: { bash:
+false }`.
+
+## Automatic Oversized Result Spooling
+
+Little Harness also protects the model context automatically. If a tool returns
+more than `toolResultSpooling.maxInlineBytes` bytes, the wrapper writes the full
+result to `/artifacts/tool-results/<toolName>/<toolCallId>.*` and returns a
+compact object with:
+
+- `type: "harness.tool_result_file"`
+- `path`
+- `bytes`
+- `mediaType`
+- `summary`
+- `preview`
+- `message`
+
+`summary` includes text counts (`characters`, `lines`). When the spooled value
+is JSON or JSON-like text, it also includes a bounded `structure` sketch for
+objects, arrays, and primitive fields. That lets the model decide whether to
+read the artifact, query it with `jq`, or process it with a script without
+loading every row into context.
+
+The next model step can use `bash` or another tool to read the returned `path`.
+This works for app tools and the built-in `bash` tool.
+
+```ts
+const harness = createHarness({
+  host: localHost(),
+  model,
+  tools: { queryCustomers },
+  toolResultSpooling: {
+    maxInlineBytes: 32_000,
+    previewBytes: 512,
+    outputDir: "/artifacts/tool-results",
+  },
+});
+```
+
+Pass `toolResultSpooling: false` to `createHarness()`, `generateHarness()`, or
+`streamHarness()` when an app wants to manage all large tool outputs manually.
+
+## Tool Design Rules
+
+Good tools have:
+
+- a narrow operation
+- a clear description
+- a schema that prevents ambiguous calls
+- predictable output
+- explicit side effects
+
+When a tool writes outside the harness, name that side effect clearly. `save_report` is better than `finish`.

@@ -1,0 +1,50 @@
+---
+title: Subagents
+description: How subagents could fit inside the session boundary.
+---
+
+Subagents are optional worker agents spawned by the main agent for bounded subtasks.
+
+In Little Harness, subagents should inherit the parent session's trust boundary. They are not a way to escape the workspace or gain new storage access.
+
+## Proposed Behavior
+
+A subagent should get:
+
+- a focused instruction
+- selected parent context
+- its own scratch area
+- access to approved tools
+- artifact output back to the parent
+
+It should not get:
+
+- another user's files
+- arbitrary host paths
+- new Persistent Dirs
+- broader tool permissions than the parent session allowed
+
+## Example
+
+```ts
+const harness = createHarness({
+  host: localHost(),
+  model,
+  system: "Research customer risk and delegate narrow checks when useful.",
+  tools: { searchDocs, searchIncidents, queryCustomers },
+  subagents: true,
+});
+```
+
+The exact API is future-shaped. The important runtime rule is that subagent work remains visible in the parent trace and commits through the parent session boundary.
+
+## When To Use
+
+Subagents are useful for:
+
+- parallel document review
+- independent customer checks
+- code or data review tasks
+- long-running research decomposition
+
+They are not needed for every agent. Most first agents should start without them.

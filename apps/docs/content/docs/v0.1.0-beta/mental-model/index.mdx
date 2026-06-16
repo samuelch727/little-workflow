@@ -1,0 +1,64 @@
+---
+title: Core Mental Model
+description: How Little Workflow moves from developer intent to durable execution.
+---
+
+Little Workflow separates authoring from execution.
+
+The developer writes a `WorkflowDefinition` or a direct `OrchestrationRequest`. The runtime normalizes that request, asks a planner to draft LWIR, validates and repairs the draft, estimates cost and risk, registers an immutable `WorkflowVersion`, then executes a `Run`.
+
+## The Pipeline
+
+```txt
+WorkflowDefinition
+-> OrchestrationRequest
+-> LWIR
+-> WorkflowVersion
+-> Run
+-> StepAttempt
+-> Artifact and Event Log
+```
+
+## WorkflowDefinition
+
+The ergonomic TypeScript authoring object. It includes input and output schemas, model slots, tools, skills, budgets, approval policy, retention policy, and planner hints.
+
+It is not a runtime service handle. Runtime infrastructure belongs in `runWorkflow()` or `createRuntime()`.
+
+## OrchestrationRequest
+
+The canonical planner input. It is declarative and signed/versioned. It contains the goal, safe capability metadata, model slots, data policy, approval rules, budgets, and requested output schema.
+
+The planner may inspect metadata. It may not see secrets, raw tool implementations, or arbitrary raw artifacts unless policy grants that access.
+
+## LWIR
+
+Little Workflow Intermediate Representation is the deterministic JSON runtime format. It contains model slot IDs, capability refs, step types, schemas, expressions, policy snapshots, and locked skill/plugin refs.
+
+LWIR must be canonicalizable, hashable, immutable once registered, and safe to replay from logs. The spec targets RFC 8785 JSON Canonicalization Scheme for hashable documents.
+
+## WorkflowVersion
+
+A registered, immutable LWIR document plus its locks and validation metadata:
+
+- canonical JSON hash
+- capability manifest hash
+- policy version hash
+- skill and plugin lock snapshots
+- compiled expression plan
+- validation result
+- cost and risk estimate
+
+Workers verify the locks before execution. If a model, tool, skill, plugin, or capability surface has drifted, the run must fail or pause instead of silently executing against a different surface.
+
+## Run And StepAttempt
+
+A `Run` executes one `WorkflowVersion` with one input packet and runtime policy snapshot. A `StepAttempt` is one attempt to execute a step, including fan-out item key when applicable.
+
+Little Workflow promises at-least-once execution with idempotent commits, not general exactly-once execution.
+
+## Artifacts And Events
+
+Events store facts and pointers. Artifacts store payloads.
+
+Prompts, responses, files, code, logs, evidence, generated outputs, and tool results should be preserved as artifacts when policy allows. Replay reconstructs state from events and artifact refs.

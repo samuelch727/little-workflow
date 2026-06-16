@@ -1,0 +1,19 @@
+{
+  "title": "Reference",
+  "pages": [
+    "api-reference",
+    "create-harness",
+    "local-host",
+    "cli",
+    "stream-harness",
+    "generate-harness",
+    "harness-session",
+    "file-writer",
+    "skill-helper",
+    "persistent-dir-reference",
+    "ecosystem-comparison",
+    "events",
+    "storage-adapters",
+    "glossary"
+  ]
+}

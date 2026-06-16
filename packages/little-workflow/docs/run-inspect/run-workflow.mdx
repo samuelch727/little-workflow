@@ -1,0 +1,252 @@
+---
+title: Run A Workflow
+description: How to execute a workflow definition against a world, with options, return shape, errors, and streaming.
+---
+
+`runWorkflow()` is the alpha entry point. It provisions a one-shot runtime, executes one run, returns the result, and tears the runtime down. Fine for scripts, tests, and the kill-and-resume demo. The long-lived `createRuntime()` for processes that serve many runs arrives in [v0.1.0-beta](/docs/v0.1.0-beta/run-inspect/run-workflow).
+
+`runWorkflow` is **polymorphic**: pass a single `WorkflowDefinition` and the workflow's own planner harness runs; pass an array and an orchestrator harness runs to compose them.
+
+## Single Workflow
+
+```ts
+import {
+  createLittleWorkflow,
+  localWorld,
+  runWorkflow,
+} from 'little-workflow';
+
+const result = await runWorkflow({
+  world: localWorld({ dataDir: '.little-workflow' }),
+  workflows: summarizeTicket,    // single WorkflowDefinition → planner harness runs
+  input: {
+    ticketId: 'TCK-123',
+    transcript: 'Customer reports intermittent billing export failures...',
+  },
+  tools,   // ToolRegistry created with createToolRegistry()
+  runId: 'run_tck_123',
+  timeout: '10m',
+});
+
+console.log(result.runId);
+console.log(result.output);
+```
+
+`runWorkflow` returns a promise that resolves when the run reaches `RunCompleted`, or rejects on `RunFailed`. Internally it starts a planner harness session to compile the workflow to LWIR, registers a locked `WorkflowVersion`, executes the steps via worker harness sessions, and persists every event and artifact into the world. Reusing the same `runId` on a terminal run replays durable state instead of calling the planner, tools, or models again.
+
+## Multiple Workflows (Orchestration)
+
+Pass an array to run an orchestrator. The orchestrator is a harness session with tools to plan and run sub-workflows, and is required when `workflows` is an array.
+
+```ts
+const result = await runWorkflow({
+  world: localWorld({ dataDir: '.little-workflow' }),
+  workflows: [candidateReview, candidateScoring],   // array → orchestrator runs
+  input: { jobDescription, candidates: [...] },
+  tools,
+  orchestrator: {                                   // required when workflows is an array
+    model: openai('gpt-5'),
+    system: 'Orchestrate candidate evaluation. Plan once per job description; spawn parallel runs per candidate.',
+    skills: [skill('./skills/batch-fan-out/')],
+  },
+  maxConcurrentSubRuns: 20,
+  runId: 'run_eng_123',
+});
+```
+
+The orchestrator has tools to compose sub-workflows:
+
+- `plan_workflow(workflowId, input)` — draft an LWIR for one workflow; returns a `workflowVersionId`.
+- `run_workflow(workflowVersionId, input)` — execute a previously-planned version with the given input.
+- `start_workflow(workflowId, input)` — convenience for plan + run in one call.
+
+For batched parallel work (same workflow shape, many items), the orchestrator calls `plan_workflow` once then `run_workflow` N times in parallel tool calls. Each sub-workflow run has its own `runId` reserved in `harness.tool_call.started.payload.args.subRunId` and returned as `harness.tool_call.succeeded.payload.result.runId`. See [Orchestrator](/docs/v0.1.0-alpha/author-workflows/orchestrator) for the full composition model.
+
+## Options
+
+```ts
+type RunWorkflowOptions<W extends RunTarget> = {
+  // Core
+  world: LocalWorld;
+  workflows: W;                  // WorkflowDefinition (single) | readonly WorkflowDefinition[] (pipeline)
+  input: unknown;
+  tools?: ToolRegistry;
+  bash?: BashCapabilities;       // run-level default for harness Bash tool capabilities
+
+  // Orchestrator — required iff workflows is an array; forbidden for single workflows
+  orchestrator?: OrchestratorConfig;
+  maxConcurrentSubRuns?: number; // cap on simultaneous sub-workflow runs; default 10; orchestrator only
+
+  // Run identity + lifecycle
+  runId?: string;
+  timeout?: string | number;
+  signal?: AbortSignal;
+
+  // Retry + outer loop
+  maxAttempts?: number;
+  maxOuterCycles?: number;
+  outerLoopId?: string;
+};
+
+type OrchestratorConfig = {
+  model: AiSdkModel | ModelSlot;
+  harness: Harness;
+  system?: string;
+  skills?: readonly Skill[];
+  tools?: ToolSet;               // extra tools beyond SDK-injected (plan_workflow, run_workflow, start_workflow, bash)
+  bash?: BashCapabilities;       // orchestrator-session override
+};
+```
+
+- **`world`** — the runtime backend. Use `localWorld()` for development; production worlds (Postgres + Redis + S3) arrive after alpha.
+- **`workflows`** — a single `WorkflowDefinition` from `createLittleWorkflow()`, or an array of them. Single triggers the planner harness; array triggers the orchestrator harness.
+- **`input`** — validated against the workflow's `inputSchema` before the run starts. A mismatch throws before any model is called.
+- **`tools`** — a `ToolRegistry` created with `createToolRegistry()`. Required when the workflow (or any sub-workflow) references a global tool by name.
+- **`bash`** — run-level default for the SDK-injected Bash tool sandbox. Workflow-level `workflow.bash` wins for planner/worker/fixer sessions; `orchestrator.bash` wins for the orchestrator session. Defaults are network off, Python on, JavaScript on, all inside explicit mounts.
+- **`orchestrator`** — orchestrator harness config. Enforced at the type level: required when `workflows` is an array, forbidden when it is a single definition.
+- **`maxConcurrentSubRuns`** — maximum sub-workflow runs the orchestrator may have in-flight simultaneously. Default `10`. Applies only to pipeline runs.
+- **`runId`** — optional durable run identity. If omitted, one is generated. Reusing a terminal `runId` validates persisted state and replays the result.
+- **`timeout`** — wall-clock cap. Accepts a duration string (`'10m'`, `'2h'`) or milliseconds. The run is cancelled and marked `RunFailed` if it elapses.
+- **`signal`** — an `AbortSignal` for external cancellation. Same outcome as `timeout` but on demand.
+- **`maxAttempts`** — default retry budget for step attempts unless a step declares its own retry policy.
+- **`maxOuterCycles`** — default `1` (single-cycle). Set to `> 1` to engage the outer loop, which calls `planner.supervise()` after each cycle. See [Durability](/docs/v0.1.0-alpha/run-inspect/durability) for the outer-loop resume model.
+- **`outerLoopId`** — resume an existing outer-loop session by ID. If omitted and `maxOuterCycles > 1`, a new `outerLoopId` is generated.
+
+### Bash sandbox
+
+`ctx.bash` is powered by `just-bash`, not the host shell. Each role sees explicit mounts only: Memory Stores, Run Scratch, and Skills. The default cwd is the role's writable `/mnt/scratch/own/` when available. Replay returns recorded Bash tool output; it does not re-execute commands or reconstruct live shell state.
+
+```ts
+await runWorkflow({
+  world,
+  workflows: summarizeTicket,
+  input,
+  tools,
+  bash: {
+    network: {
+      allow: ["https://api.example.com/"],
+      methods: ["GET", "HEAD"],
+      denyPrivateRanges: true,
+    },
+  },
+});
+```
+
+### Removed fields (vs prior alpha)
+
+The following `RunWorkflowOptions` fields have been removed:
+
+- ❌ **`planner`** — the workflow's own `WorkflowDefinition.planner` is the source of truth. Custom harness implementations are passed there.
+- ❌ **`models`** — models are declared at the workflow level inside `createLittleWorkflow`; there is no top-level model map override.
+- ❌ **`ai`** (`RuntimeAiAdapter`) — the worker harness owns AI step execution; there is no separate adapter.
+- ❌ **`codeRunner`** (`RuntimeCodeRunner`) — the worker harness owns `code.run` step execution; there is no separate runner.
+
+## Type-Level Enforcement
+
+TypeScript catches misconfiguration at compile time:
+
+```ts
+// ✓ Single: orchestrator omitted (or `never`)
+await runWorkflow({ workflows: myWorkflow, /* ... */ });
+
+// ✓ Array: orchestrator required
+await runWorkflow({ workflows: [wfA, wfB], orchestrator: { /* ... */ }, /* ... */ });
+
+// ✗ Compile error: orchestrator required when workflows is an array
+await runWorkflow({ workflows: [wfA, wfB], /* missing orchestrator */ });
+
+// ✗ Compile error: orchestrator forbidden for single workflow
+await runWorkflow({ workflows: myWorkflow, orchestrator: { /* ... */ } });
+```
+
+## Return Shape
+
+```ts
+type RunResult<T = unknown> = {
+  runId: string;
+  workflowVersionId: string;
+  status: 'completed';
+  output: T;
+  usage: {
+    inputTokens: number;
+    outputTokens: number;
+    costUsd: number;
+  };
+  events: readonly EventEnvelope[];
+  artifacts: readonly ArtifactRef[];
+};
+```
+
+`output` is typed by the workflow's output schema. `events` are the durable event envelopes for this run, and `artifacts` are artifact refs whose payloads live in the world's artifact store and can be inspected with `little events`.
+
+For pipeline runs, `usage` aggregates tokens across all harness sessions (orchestrator + all sub-workflow planners and workers). Per-session usage is in the individual `harness.session.completed` events.
+
+## Errors
+
+The promise rejects on `RunFailed`. The rejection carries the structured failure:
+
+```ts
+try {
+  await runWorkflow({ /* ... */ });
+} catch (err) {
+  if (err.name === 'RunFailedError') {
+    console.error(err.runId, err.failedStepPath, err.causeCode);
+    // outer-loop failures carry additional context:
+    console.error(err.outerLoopId, err.lastCycleOutput);
+    console.error(err.result?.events);
+  } else {
+    throw err;
+  }
+}
+```
+
+`RunFailedError` includes `runId`, `workflowVersionId`, `causeCode`, optional `failedStepPath`, and a `FailedRunResult` when the SDK recorded a terminal run. Cause codes:
+
+- **`input_schema_error`** — input did not match the workflow's input schema.
+- **`planner_validation_exhausted`** — the planner could not produce a valid LWIR document within its repair budget.
+- **`capability_drift`** — the computed manifest for an orchestrator, planner, or worker harness session does not match the manifest stored when the run was first started. Drift is fail-closed: no execution resumes until the environment matches the original manifest. The error includes a structured diff of what changed.
+- **`runtime_config_error`** — deterministic runtime configuration is invalid, such as `maxOuterCycles > 1` without `planner.supervise` defined, or `orchestrator` absent when `workflows` is an array.
+- **`step_schema_error`** — a step or terminal workflow output did not match its schema.
+- **`step_failed`** — a non-runtime-owned step failure exhausted retries.
+- **`max_visits_exceeded`** — a step attempted to start its `maxVisits + 1`-th visit. `failedStepPath` identifies the step. The failed run is preserved in Local World for inspection.
+- **`timeout`** — the run exceeded `timeout`.
+- **`cancelled`** — the run was aborted through `signal`.
+- **`outer_loop_exhausted`** — `supervise` returned `{ kind: "continue" }` on the final cycle. `outerLoopId` and `lastCycleOutput` are populated on `RunFailedError` for this code.
+
+`outerLoopId` and `lastCycleOutput` are set only when `causeCode === "outer_loop_exhausted"`. `failedStepPath` is set on `max_visits_exceeded`. All other fields are always present.
+
+Budget enforcement (`BudgetExhaustedError`) and policy-denial failures arrive in [v0.1.0-beta](/docs/v0.1.0-beta/run-inspect/run-workflow).
+
+Recoverable step failures (transient network, rate limits) are retried automatically inside the same run and never bubble up here unless the retry policy is exhausted.
+
+## Cancellation
+
+Cancellation always produces a `RunFailed` with `causeCode: 'cancelled'`. The runtime stops scheduling new steps, lets in-flight step attempts complete or be killed by their own timeout, and finalizes the run record.
+
+```ts
+const controller = new AbortController();
+setTimeout(() => controller.abort(), 5_000);
+
+await runWorkflow({
+  /* ... */
+  signal: controller.signal,
+});
+```
+
+Cancellation is propagated into any in-flight harness sessions (planner, orchestrator, or worker). See [Durability](/docs/v0.1.0-alpha/run-inspect/durability) for the crash and cancellation recovery model.
+
+## Streaming
+
+Streaming responses are not a public alpha surface. A dedicated streaming entry point arrives alongside `createRuntime` in [v0.1.0-beta](/docs/v0.1.0-beta/run-inspect/run-workflow).
+
+## Replay
+
+Passing a previous terminal `runId` to `runWorkflow` replays durable state. Completed replays validate the persisted input, final output, output schema, artifact payload hashes, and artifact ownership before returning. Terminal failed replays require a `RunStarted` record, validate persisted input when present, validate completed-step artifact payload hashes and ownership, then reject with the original `RunFailedError` metadata.
+
+To inspect an existing run's event log directly, use the CLI:
+
+```bash
+little events run_123
+```
+
+User-invoked retry-from-step (`little retry`) and `little fork` arrive in [v0.1.0-beta](/docs/v0.1.0-beta/reference/cli) along with the rest of the inspector commands. Alpha only supports automatic retry while a run is executing plus replay from the event log. See [Durability](/docs/v0.1.0-alpha/run-inspect/durability) for the replay-vs-retry semantics that alpha does support.

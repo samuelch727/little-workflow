@@ -1,0 +1,30 @@
+---
+title: v0.1.0
+description: Production durability on real infrastructure.
+---
+
+`v0.1.0` is about correctness under crashes, not maximum throughput. It takes the beta developer experience and proves it works on Postgres, Redis, and S3 with the durability primitives that matter when a run survives a process kill.
+
+## What This Version Includes
+
+Everything in [v0.1.0-beta](/docs/v0.1.0-beta), plus:
+
+- Kysely/Postgres metadata, event, outbox, and state store
+- BullMQ/Redis queue backend
+- S3-compatible artifact storage through AWS SDK v3
+- zstd compression for artifact payloads
+- outbox dispatch, reconciliation, attempt states, and lease fencing
+- queue-independent governors for tenant, model slot, tool, provider, and network-destination limits
+- worker pools for AI, tool, code, reducer, and artifact maintenance work
+- production retry/reconciliation, budget debit and release from actual usage
+- skill and plugin package lock verification
+- Testcontainers-driven contract tests
+
+## What This Version Does Not Include
+
+High-throughput sharded fan-out, tree reducers, custom step type plugins, third-party UI inspector panels, private SkillPack registries, workflow modules, marketplace flows, and visual editing arrive in later versions. See [Changelog](/docs/v0.1.0/reference/changelog).
+
+## Start Here
+
+- [Durability](/docs/v0.1.0/run-inspect/durability) — the full lease and outbox story
+- [Quickstart](/docs/v0.1.0/quickstart)

@@ -1,0 +1,45 @@
+---
+title: Other Agent Frameworks Vs Little Harness
+description: Comparing CrewAI, Microsoft Agent Framework, and AutoGen with Little Harness.
+---
+
+Some alternatives are broad agent frameworks rather than harness primitives. They are useful when orchestration and multi-agent structure are the main problem.
+
+## CrewAI
+
+CrewAI is Python-first and oriented around collaborative agents, crews, flows, delegation, planning, memory, knowledge, and observability.
+
+Use CrewAI when the problem is naturally a Python multi-agent business automation or research workflow.
+
+Use Little Harness when the problem is a product-embedded TypeScript/web agent that should feel like a normal streamed web feature with files and persistence handled behind the route handler.
+
+## Microsoft Agent Framework And AutoGen
+
+Microsoft Agent Framework combines ideas from AutoGen and Semantic Kernel. It provides agents, graph workflows, sessions, memory/context providers, middleware, MCP clients, telemetry, and .NET/Python surfaces. AutoGen remains relevant for multi-agent teams, AgentChat, and code executors.
+
+Use Microsoft Agent Framework or AutoGen when enterprise .NET/Python integration, Azure alignment, or multi-agent research patterns matter.
+
+Use Little Harness when the app wants a small TypeScript-facing harness contract that can sit inside any product backend without adopting a broader enterprise orchestration stack.
+
+## Core Difference
+
+| Question | Broad Agent Frameworks | Little Harness |
+|---|---|---|
+| Main abstraction | Agents, crews, teams, workflows, middleware. | Session workspace and harness runtime. |
+| Language center | Often Python or .NET/Python. | TypeScript-first docs and AI SDK-style web usage. |
+| Multi-agent coordination | First-class. | Optional and bounded by the session. |
+| Files/artifacts | Usually task or tool specific. | First-class runtime model. |
+| Best fit | Orchestrated agent systems. | Product-embedded agent sessions. |
+
+## Sources
+
+- [CrewAI agents](https://docs.crewai.com/en/concepts/agents)
+- [CrewAI processes](https://docs.crewai.com/en/concepts/processes)
+- [CrewAI flows](https://docs.crewai.com/en/concepts/flows)
+- [CrewAI memory](https://docs.crewai.com/en/concepts/memory)
+- [CrewAI observability](https://docs.crewai.com/en/observability)
+- [Microsoft Agent Framework overview](https://learn.microsoft.com/en-us/agent-framework/overview/)
+- [Microsoft Agent Framework workflows](https://learn.microsoft.com/en-us/agent-framework/user-guide/workflows/core-concepts/overview)
+- [Microsoft Agent Framework observability](https://learn.microsoft.com/en-us/agent-framework/user-guide/observability)
+- [AutoGen AgentChat agents](https://microsoft.github.io/autogen/stable/user-guide/agentchat-user-guide/tutorial/agents.html)
+- [AutoGen tracing](https://microsoft.github.io/autogen/stable/user-guide/agentchat-user-guide/tracing.html)

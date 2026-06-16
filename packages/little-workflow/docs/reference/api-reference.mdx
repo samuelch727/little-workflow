@@ -1,0 +1,532 @@
+---
+title: SDK API
+description: The minimal authoring + runtime surface that ships with v0.1.0-alpha.
+---
+
+Alpha exposes the front door, tool registry, a one-shot polymorphic runner, harness primitives, and skill/memory configuration. Pipelines (`chainWorkflows`, `transform`), skill packs, plugins, and the polished `createRuntime` arrive in [v0.1.0-beta](/docs/v0.1.0-beta/reference/api-reference).
+
+For the implementation contract behind these exports, see [SDK Implementation Spec](/docs/v0.1.0-alpha/reference/sdk-implementation).
+
+## Tool Registry
+
+Tools are registered using AI SDK's `tool()` helper and collected in a `ToolRegistry`. The `WorkflowDefinition` references them by name; the compiler reads descriptors to build the `WorkflowVersion` lock; the runtime reads handlers at step lease.
+
+```ts
+import { createToolRegistry } from "little-workflow";
+import { tool } from "ai";
+import { z } from "zod";
+
+const tools = createToolRegistry({
+  parsePdf: tool({
+    description: "Parse a PDF file and return structured text.",
+    inputSchema: z.object({ url: z.string() }),
+    outputSchema: z.object({ text: z.string() }),
+    execute: async ({ url }) => { /* … */ return { text: "…" }; },
+  }),
+  lookupCustomer: tool({
+    description: "Look up a customer account by id.",
+    inputSchema: z.object({ accountId: z.string() }),
+    execute: async ({ accountId }) => ({ accountId, plan: "enterprise" }),
+  }),
+});
+```
+
+```ts
+type ToolRegistry = {
+  readonly get: (id: string) => AiSdkTool | undefined;
+  readonly has: (id: string) => boolean;
+  readonly list: () => readonly string[];                       // sorted alphabetically
+  readonly snapshotForManifest: () => ToolRegistrySnapshot;    // used in manifests + WorkflowVersion lock
+  readonly attachMcpTools: (
+    mcpTools: Record<string, AiSdkTool>,
+    options?: { prefix?: string }
+  ) => void;
+  readonly toRecord: () => Record<string, AiSdkTool>;
+};
+
+export function createToolRegistry(
+  initial?: Record<string, AiSdkTool>,
+): ToolRegistry;
+```
+
+The registry is mutable (new tools may be registered at any time) but immutable per-entry — re-registering an existing name with a different descriptor throws.
+
+### MCP integration
+
+```ts
+import { experimental_createMCPClient as createMCPClient } from "ai";
+import { Experimental_StdioMCPTransport as StdioMCPTransport } from "ai/mcp-stdio";
+
+const atlasClient = await createMCPClient({
+  transport: new StdioMCPTransport({
+    command: "node",
+    args: ["./mcp-servers/atlas-mcp.mjs"],
+  }),
+});
+
+const atlasTools = await atlasClient.tools();
+tools.attachMcpTools(atlasTools, { prefix: "atlas" });
+// registry now includes: parsePdf, lookupCustomer, atlas.search, atlas.fetch, …
+
+await runWorkflow({ world, workflows, input, tools });
+await atlasClient.close();
+```
+
+## Authoring
+
+```ts
+createLittleWorkflow(definition);
+model(aiSdkModel, metadata?);
+skill(pathOrUrl);
+workflowHarness;
+```
+
+### `createLittleWorkflow`
+
+```ts
+import {
+  createLittleWorkflow,
+  model,
+  skill,
+} from "little-workflow";
+import { openai } from "@ai-sdk/openai";
+
+const candidateReview = createLittleWorkflow({
+  // Identity
+  id: "candidate.review",
+  description: "Review one candidate against a job description.",
+
+  // I/O schemas (Zod or JSON Schema)
+  inputSchema: z.object({
+    jobDescription: z.string(),
+    candidate: z.object({ id: z.string(), resume: z.string() }),
+  }),
+  outputSchema: z.object({
+    passed: z.boolean(),
+    reasoning: z.string(),
+  }),
+
+  // Execution model slots (planner chooses among these in LWIR)
+  models: [
+    model(openai("gpt-4o-mini")),
+    model(openai("gpt-4o-mini"), {
+      description: "Long-document summarizer.",
+    }),
+    // slot ids: "gpt-4o-mini" (first wins), "gpt-4o-mini-<animal>" (second)
+  ],
+
+  // Planner — required; harness defaults to the SDK workflowHarness
+  planner: {
+    model: openai("gpt-5"),        // raw AI SDK model or ModelSlot
+    system: "You design candidate-review workflows.",
+    skills: [
+      skill("./skills/writing-loop-lwir/"),
+      skill("./skills/output-schema-validation.md"),
+    ],
+    // tools: optional extra tools beyond SDK-injected (bash, memory read)
+    // supervise: optional outer-loop supervisor (see Outer Loop section)
+  },
+
+  // Worker — optional; defaults to the SDK workflowHarness.
+  // worker: { harness: customHarness, skills: [...] },
+
+  // Bash tool sandbox — optional; defaults shown in the field reference below
+  bash: {
+    network: {
+      allow: ["https://api.example.com/"],
+      methods: ["GET", "HEAD"],
+    },
+  },
+
+  // Tool registry references
+  globalTools: ["parsePdf", "lookupCustomer"],
+
+  // Memory mount config — optional; defaults shown
+  memory: {
+    workflow: "rw",   // planner rw to /mnt/memory/workflow/
+    org: "ro",        // ro to /mnt/memory/org/
+    // attach: [{ id: "peer-workflow-id", mode: "ro" }],
+  },
+});
+```
+
+### `WorkflowDefinition` field reference
+
+| Field | Required | Type | Notes |
+| --- | --- | --- | --- |
+| `id` | yes | `string` | Stable identifier; hashed into `WorkflowDefinitionHash` |
+| `description` | recommended | `string` | Shown to orchestrator in available-workflows list |
+| `inputSchema` | yes | Zod or JSON Schema | Validated at run start |
+| `outputSchema` | yes | Zod or JSON Schema | Validated on workflow output |
+| `models` | yes (≥ 1) | `ModelSlot[]` | Execution model options planner can reference in LWIR `step.with.model` |
+| `planner` | yes | `PlannerConfig` | See below |
+| `worker` | no | `WorkerConfig` | Defaults to the SDK `workflowHarness` |
+| `bash` | no | `BashCapabilities` | Role-scoped Bash tool sandbox; network is off by default |
+| `globalTools` | no | `string[]` | Tool registry ids the workflow's LWIR can reference |
+| `memory` | no | `MemoryConfig` | Defaults to `{ workflow: "rw", org: "ro" }` |
+
+### `PlannerConfig`
+
+```ts
+type PlannerConfig = {
+  readonly model: AiSdkModel | ModelSlot;     // raw AI SDK model OK; SDK auto-wraps
+  readonly harness?: Harness;                 // defaults to workflowHarness
+  readonly system?: string;                   // merged with SDK role addendum
+  readonly skills?: readonly Skill[];
+  readonly tools?: ToolSet;                   // extra tools beyond SDK-injected
+  readonly supervise?: (                      // outer-loop supervisor (optional)
+    state: SuperviseOuterLoopState
+  ) => Promise<SuperviseDecision>;
+};
+```
+
+If `planner.model` is a raw AI SDK model (not a `ModelSlot`), the SDK wraps it via `model()` with auto-derived slot id. The resulting slot is NOT added to `WorkflowDefinition.models`.
+
+### `WorkerConfig`
+
+```ts
+type WorkerConfig = {
+  readonly harness?: Harness;               // defaults to workflowHarness
+  readonly skills?: readonly Skill[];
+  readonly tools?: ToolSet;                 // merged with globalTools
+};
+```
+
+### `BashCapabilities`
+
+The Bash tool is SDK-injected into every harness session as `ctx.bash`. It is not a developer Tool Registry entry. Alpha runs it through the `just-bash` sandbox with explicit Memory Store, Run Scratch, and Skill mounts.
+
+```ts
+type BashCapabilities = {
+  readonly network?:
+    | false
+    | true
+    | {
+        readonly allow?: readonly string[];      // URL prefixes
+        readonly methods?: readonly string[];    // default for `true`: ["GET", "HEAD"]
+        readonly maxRedirects?: number;
+        readonly timeoutMs?: number;
+        readonly maxResponseSize?: number;
+        readonly denyPrivateRanges?: boolean;    // default true
+        readonly dangerouslyAllowFullInternetAccess?: boolean;
+      };
+  readonly python?: boolean;      // default true, inside the sandbox
+  readonly javascript?: boolean;  // default true, inside the sandbox
+};
+```
+
+Defaults: `network: false`, `python: true`, `javascript: true`. `network: true` allows `https://` with `GET`/`HEAD` and denies private ranges. For production-like runs, prefer the object form with explicit `allow` prefixes.
+
+The effective Bash capabilities are part of the `WorkflowDefinitionHash`, `OrchestrationRequest.capabilityManifest`, and harness session manifests. Changing them produces a new compiled workflow identity and fails closed on resume if an in-flight session would see a different sandbox.
+
+### `MemoryConfig`
+
+```ts
+type MemoryConfig = {
+  readonly workflow?: "rw" | "ro" | "none";   // default: "rw"
+  readonly org?: "rw" | "ro" | "none";        // default: "ro"
+  readonly attach?: ReadonlyArray<{ id: string; mode: "ro" }>;
+};
+```
+
+### `model()` factory
+
+Auto-derives slot ids from the model name. Collisions within a workflow get a deterministic animal-suffix disambiguator.
+
+```ts
+export function model(
+  aiSdkModel: AiSdkModel,
+  metadata?: ModelSelectionMetadata,
+): ModelSlot;
+
+export type ModelSelectionMetadata = {
+  readonly id?: string;           // explicit override; must be unique in the workflow
+  readonly description?: string;  // auto-filled from bundled registry if model is known
+};
+```
+
+Slot id derivation:
+- `model(openai("gpt-4o-mini"))` → slot id `"gpt-4o-mini"`
+- Second `model(openai("gpt-4o-mini"), { description: "..." })` in the same workflow → `"gpt-4o-mini-<animal>"` (deterministic from `modelId + description`)
+- Explicit: `model(openai("gpt-4o-mini"), { id: "fast" })` → `"fast"`
+
+The bundled model registry (`packages/little-workflow/src/model-registry.json`) provides default descriptions, pricing (USD/1M tokens), and contextWindow for known models. Unknown models get `description: ""` and `costUsd: null` in event payloads.
+
+### `skill()` factory
+
+```ts
+export function skill(pathOrUrl: string, options?: SkillOptions): Skill;
+```
+
+Accepts a local path (directory or single `.md` file) or an explicit Git URL. The runtime materializes the skill read-only under `.agents/skills/<name>/` from the role/root working directory before the role session starts.
+
+```ts
+skill("./skills/writing-loop-lwir/");           // directory form
+skill("./skills/output-schema-validation.md");  // single-file
+skill("https://github.com/anthropics/skills", {
+  skills: ["frontend-design"],
+});                                             // selected remote skill names
+```
+
+Remote skill URLs must be explicit Git sources, including GitHub, GitLab tree URLs, generic HTTPS Git URLs, SSH URLs, and scp-style Git URLs. Shorthands such as `org/repo`, `github:org/repo`, and `gitlab:org/repo` are rejected. If `skills` is omitted, every non-internal skill in the source is installed. The materialization cache is keyed by resolved commit SHA; include a commit SHA or ref in the Git URL/source options when you need a specific version.
+
+### `workflowHarness`
+
+The default `Harness` exported value. Wraps AI SDK's agent loop with Little Workflow concerns: system prompt assembly, tool exposure, per-turn event recording, durability checks, memory/scratch/skill mounts, and cancellation. Little Workflow uses it automatically when `planner.harness`, `worker.harness`, or `orchestrator.harness` is omitted; pass a custom harness only when you need to substitute the runtime.
+
+## Output Modes
+
+Workflow and step outputs can be plain text or schema-constrained data:
+
+```ts
+type OutputMode<T> =
+  | { kind: "text" }
+  | { kind: "object"; schema: Schema<T> }
+  | { kind: "array"; element: Schema<T> }
+  | { kind: "choice"; values: readonly string[] }
+  | { kind: "json"; schema?: Schema<T> };
+```
+
+## Runtime
+
+### `runWorkflow` — polymorphic entry point
+
+```ts
+import { runWorkflow, localWorld } from "little-workflow";
+
+// ── Single workflow ──
+const result = await runWorkflow({
+  world: localWorld({ dataDir: ".little-workflow" }),
+  workflows: candidateReview,                     // single WorkflowDefinition
+  input: { jobDescription, candidate },
+  tools,
+});
+
+// ── Multiple workflows (orchestration) ──
+const result2 = await runWorkflow({
+  world: localWorld({ dataDir: ".little-workflow" }),
+  workflows: [candidateReview, candidateScoring], // array → orchestrator required
+  input: { jobDescription, candidates: [...] },
+  tools,
+  orchestrator: {
+    model: openai("gpt-5"),
+    system: "Orchestrate candidate evaluation. For batch work, plan once + run many.",
+    skills: [skill("./skills/batch-fan-out/")],
+  },
+});
+```
+
+### `RunWorkflowOptions`
+
+```ts
+type RunWorkflowOptions<W extends RunTarget> = {
+  readonly world: LocalWorld;
+  readonly workflows: W;                          // WorkflowDefinition | readonly WorkflowDefinition[]
+  readonly input: unknown;
+  readonly tools?: ToolRegistry;
+  readonly orchestrator?: OrchestratorConfig;     // required (type-level) iff workflows is array
+
+  // Outer loop
+  readonly maxOuterCycles?: number;               // default 1 (no outer loop); requires planner.supervise when > 1
+  readonly outerLoopId?: string;                  // resume an existing outer-loop session
+
+  // Execution
+  readonly runId?: RunId;
+  readonly signal?: AbortSignal;
+  readonly timeout?: number | string;
+  readonly maxAttempts?: number;
+  readonly maxConcurrentSubRuns?: number;         // orchestrator only; default 10
+};
+```
+
+TypeScript enforces `orchestrator` is required when `workflows` is an array, and forbidden when it is a single definition.
+
+### Removed from `RunWorkflowOptions` vs prior alpha tip
+
+- ❌ `planner` — workflow's own `planner` config is the source of truth
+- ❌ `models` — declared at workflow level; no top-level model registry override
+- ❌ `ai` — `RuntimeAiAdapter` is gone; worker harness owns AI step execution
+- ❌ `codeRunner` — `RuntimeCodeRunner` is gone; worker harness owns `code.run` execution
+
+### `OrchestratorConfig`
+
+```ts
+type OrchestratorConfig = {
+  readonly model: AiSdkModel | ModelSlot;
+  readonly harness?: Harness;                // defaults to workflowHarness
+  readonly system?: string;
+  readonly skills?: readonly Skill[];
+  readonly tools?: ToolSet;
+};
+```
+
+### `localWorld` options
+
+```ts
+type LocalWorldOptions = {
+  dataDir?: string;
+  maxConcurrentSteps?: number;
+};
+
+localWorld({ dataDir: ".little-workflow", maxConcurrentSteps: 8 });
+```
+
+`maxConcurrentSteps` caps total in-flight step attempts across all parallel groups and serial steps in a run. Effective concurrency = `min(group.maxConcurrency, world.maxConcurrentSteps - in-flight)`. Default `undefined` (no cap).
+
+## Harness Contract
+
+Custom harnesses implement one method:
+
+```ts
+type Harness = {
+  run(task: HarnessTask, ctx: HarnessContext): Promise<HarnessResult>;
+};
+
+type HarnessTask =
+  | { readonly kind: "plan"; readonly workflowSnapshot: WorkflowDefinitionSnapshot; readonly input: unknown; readonly outerLoopContext?: OuterLoopContext }
+  | { readonly kind: "orchestrate"; readonly available: readonly WorkflowDefinitionSnapshot[]; readonly input: unknown }
+  | { readonly kind: "execute_step"; readonly step: LwirStep; readonly stepInput: unknown; readonly stepContext: { stepPath: string; visitIndex: number } }
+  | { readonly kind: "fix_step"; readonly step: LwirStep; readonly stepInput: unknown; readonly originalAttemptError: ErrorEnvelope; readonly priorFixAttempts: number };
+
+type HarnessContext = {
+  readonly scope: HarnessScope;
+  readonly model: ResolvedModel;
+  readonly system?: string;
+  readonly tools: ToolSet;
+  readonly memoryMounts: readonly MemoryMount[];
+  readonly scratchMounts: readonly ScratchMount[];
+  readonly skills: readonly SkillDescriptor[];
+  readonly mounts: readonly HarnessRuntimeMount[];
+  readonly bashCapabilities?: WorkflowBashCapabilities;
+  readonly durability: WorkflowHarnessDurabilitySink;
+  readonly trace?: WorkflowHarnessTraceSink;
+  readonly abortSignal: AbortSignal;
+  readonly bash?: BashTool;
+  readonly recorder?: HarnessEventRecorder;
+};
+
+type HarnessResult =
+  | { readonly kind: "plan"; readonly lwir: unknown }
+  | { readonly kind: "orchestrate"; readonly output: unknown }
+  | { readonly kind: "execute_step"; readonly output: unknown; readonly artifactRefs: readonly ArtifactRef[] }
+  | { readonly kind: "fix_step"; readonly output: unknown; readonly fixedSource: string; readonly attempts: number }
+  | { readonly kind: "delegate_to_default" };   // fall back to workflowHarness for this task kind
+```
+
+The SDK merges role-specific tools (bash, `plan_workflow`, `run_workflow`, `start_workflow` for orchestrator) into `ctx.tools` before calling the harness. Custom harnesses do not need workflow domain knowledge.
+
+## Manifest Types
+
+Each harness session writes a manifest to its `harness.session.started` event for drift detection on resume.
+
+```ts
+type OrchestratorManifest = {
+  readonly harnessId: string;
+  readonly orchestratorModelSlotId: string;
+  readonly systemPromptHash: string;
+  readonly skillsHash: string;
+  readonly availableWorkflows: ReadonlyArray<{ readonly id: string; readonly definitionHash: string }>;
+  readonly globalToolsHash: string;
+  readonly memoryStoreIds: ReadonlyArray<string>;
+  readonly maxConcurrentSubRuns: number;
+};
+
+type PlannerManifest = {
+  readonly harnessId: string;
+  readonly plannerModelSlotId: string;
+  readonly systemPromptHash: string;
+  readonly skillsHash: string;
+  readonly workflowDefinitionHash: string;
+  readonly globalToolsHash: string;
+  readonly memoryStoreIds: ReadonlyArray<string>;
+  readonly outerLoopContextHash?: string;
+};
+
+type WorkerManifest = {
+  readonly harnessId: string;
+  readonly workflowDefinitionHash: string;
+  readonly workflowVersionId: string;
+  readonly stepPath: string;
+  readonly stepConfigHash: string;
+  readonly modelSlotId?: string;
+  readonly systemPromptHash?: string;
+  readonly skillsHash: string;
+  readonly allowedToolsHash: string;
+  readonly memoryStoreIds: ReadonlyArray<string>;
+};
+
+type FixerManifest = WorkerManifest & {
+  readonly fixerModelSlotId: string;
+  readonly fixerSystemHash: string;
+  readonly fixerMaxAttempts: number;
+};
+```
+
+`WorkflowDefinitionHash = sha256(canonicalJson(WorkflowDefinitionSnapshot))` — stable at authoring time. Distinct from `WorkflowVersion = sha256(canonicalJson(LWIR))` which varies per planner draft.
+
+## Outer Loop (Layer B)
+
+When `maxOuterCycles > 1` and `planner.supervise` is defined, `runWorkflow` drives multiple compile-and-run cycles.
+
+```ts
+type SuperviseOuterLoopState = {
+  readonly goal: {
+    readonly workflowDefinitionHash: string;
+    readonly description: string;
+  };
+  readonly cycles: ReadonlyArray<{
+    readonly cycleNumber: number;
+    readonly workflowVersionId: string;
+    readonly runId: string;
+    readonly status: "completed" | "failed";
+    readonly output: unknown;
+    readonly summary?: string;
+  }>;
+};
+
+type SuperviseDecision =
+  | { readonly kind: "done"; readonly finalOutput: unknown }
+  | { readonly kind: "continue"; readonly promptNote?: string };
+```
+
+If `maxOuterCycles > 1` and `supervise` is absent on `planner`, `runWorkflow` throws `RunFailedError { causeCode: "runtime_config_error" }`. When `supervise` returns `{ kind: "continue" }` on the final cycle, the run fails with `RunFailedError { causeCode: "outer_loop_exhausted" }`.
+
+## Error Types
+
+### `RunFailedError`
+
+```ts
+class RunFailedError extends Error {
+  readonly runId: string;
+  readonly workflowVersionId: string;
+  readonly failedStepPath?: string;
+  readonly causeCode: RunFailedCauseCode;
+  readonly result?: FailedRunResult;
+  readonly outerLoopId?: string;
+  readonly lastCycleOutput?: unknown;
+}
+
+type RunFailedCauseCode =
+  | "input_schema_error"
+  | "planner_validation_exhausted"
+  | "capability_drift"
+  | "runtime_config_error"
+  | "step_schema_error"
+  | "step_failed"
+  | "max_visits_exceeded"
+  | "timeout"
+  | "cancelled"
+  | "outer_loop_exhausted";
+```
+
+`outerLoopId` and `lastCycleOutput` are populated only on `outer_loop_exhausted` failures. `failedStepPath` is populated on `max_visits_exceeded`.
+
+## Policy Types
+
+```ts
+type ToolSelectionPolicy = "planner_selected" | "all" | "explicit_only";
+```
+
+## Runtime Boundary
+
+Runtime APIs are Promise-based. Effect may power internals once the runtime lands, but it does not leak into the public alpha SDK.

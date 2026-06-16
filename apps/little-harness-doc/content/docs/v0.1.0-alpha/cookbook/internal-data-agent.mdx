@@ -1,0 +1,56 @@
+---
+title: Internal Data Agent
+description: A recipe for agents that query databases and analyze large results.
+---
+
+This is an example recipe, not a core Little Harness concept. Use it when an agent needs to query data, write large results to files, inspect them with scripts, and return a compact answer.
+
+## Shape
+
+```ts
+const harness = createHarness({
+  host: localHost(),
+  model,
+  system: "Analyze internal data. Prefer file-backed analysis for large results.",
+  tools: { queryWarehouse, getMetricDefinitions },
+  skills: [skill("./skills/data-analysis")],
+});
+```
+
+## Artifact-First Queries
+
+Warehouse tools should be allowed to write large results to artifacts.
+
+```ts
+{
+  preview: "18,204 events returned for the selected cohort.",
+  artifactPath: "/artifacts/warehouse/turn_005/events.parquet",
+  bytes: 8910231
+}
+```
+
+The agent can then run focused analysis:
+
+```bash
+python3 /session/scripts/cohort_summary.py /artifacts/warehouse/turn_005/events.parquet
+```
+
+## Keep Permissions In Tools
+
+The database tool remains the permission boundary. The agent should not receive direct network or credential access just because it has a shell.
+
+Good tool descriptions say:
+
+- what tables or metrics are available
+- whether the tool can mutate data
+- what row limits apply
+- where large outputs will appear
+
+Little Harness manages the session workspace and artifact path. It does not
+protect the database from an expensive query. Put timeouts, row limits,
+read-only credentials, tenant filters, RLS, allowlists, and validation in the
+database tool or the backing data service.
+
+## Persist Only Derived Notes
+
+For analytics agents, Persistent Dirs should usually store metric definitions, prior analysis notes, or team preferences. Raw query outputs belong in artifacts or source systems.

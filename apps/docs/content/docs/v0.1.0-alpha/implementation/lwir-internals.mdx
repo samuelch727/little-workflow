@@ -1,0 +1,208 @@
+---
+title: LWIR Internals
+description: The structural validator behind validateLwir() — what it accepts, what it rejects, and what the runtime depends on.
+---
+
+[LWIR](/docs/v0.1.0-alpha/reference/lwir-reference) is the canonical JSON document the runtime executes. `lwir.ts` is the only place LWIR is parsed and structurally validated. Every other module — the compiler, the runtime, replay — assumes a value that passed `validateLwir()`.
+
+This page maps the validator phases against the source.
+
+## Top-Level Shape
+
+```ts
+type LwirWorkflow = {
+  apiVersion: "littleworkflow.dev/v0.1";
+  kind: "Workflow";
+  metadata: { name: string; version?: string; description?: string };
+  input: { schema: NormalizedSchemaDescriptor };
+  output: { schema: NormalizedSchemaDescriptor };
+  permissions?: {
+    models?: readonly string[];
+    tools?: readonly string[];
+    secrets?: readonly string[];
+    network?: readonly string[];
+  };
+  steps: readonly LwirStep[];
+};
+```
+
+`apiVersion` and `kind` are constants. Anything else there fails `schema.invalid` immediately.
+
+## Step Shape
+
+```ts
+type LwirStep = {
+  id: string;
+  uses: "ai.generate" | "tool.call" | "code.run" | "parallel" | "decision";
+  needs?: readonly string[];
+  with?: Record<string, unknown>;
+  input?: unknown;
+  cache?: unknown;
+  output?: LwirStepOutput;
+  maxVisits?: number;          // integer in [1, 100]; default 1 (DAG)
+  sensitive?: boolean;         // reserved; validated but not yet enforced
+  steps?: readonly LwirStep[]; // only on parallel
+};
+```
+
+Step IDs are paths, so they have rules:
+
+- non-empty string
+- no `.`, `[`, or `]` (those are path delimiters: `review-candidates[cand_123].score-candidate`)
+- no `@attempt_` substring (reserved for retry path markers)
+- unique within their parent list
+
+A parallel step contains nested child steps, but those run *under each branch* — the validator forbids nested `parallel` steps.
+
+## Validator Phases
+
+`validateLwir()` runs four phases. Each phase appends findings; nothing throws until the caller calls `assertValidLwir()`.
+
+<Mermaid chart={`flowchart TB
+  classDef phase fill:#fef3c7,stroke:#d97706,color:#0f172a;
+  classDef gate fill:#fee2e2,stroke:#dc2626,color:#0f172a;
+
+  Input["unknown candidate"]:::phase
+  Canonical["1. canonicalJsonClone<br/>fails → lwir.non_hashable"]:::phase
+  TopLevel["2. validateTopLevelShape<br/>apiVersion, kind, metadata.name,<br/>input.schema, output.schema, permissions"]:::phase
+  Schemas["3. validateSchemaValue<br/>alpha JSON Schema subset"]:::phase
+  Steps["4. validateStepList<br/>ids, needs, references, graph cycle,<br/>per-step type, expressions"]:::phase
+  Result{"findings.length == 0"}:::gate
+
+  Input --> Canonical --> TopLevel --> Schemas --> Steps --> Result
+  Result -->|yes| Valid["{ valid: true }"]:::gate
+  Result -->|no| Invalid["{ valid: false, findings }"]:::gate
+`} />
+
+## Phase 1: Canonical Hashability
+
+The validator first tries to canonicalize the value. If `canonical.ts` throws — typical causes are functions, `bigint`, or cyclic references — the validator records `lwir.non_hashable` and bails. Replay safety depends on canonical hashability, so this is non-negotiable.
+
+## Phase 2: Top-Level Shape
+
+`validateTopLevelShape()` enforces the constants and required objects. Common findings:
+
+- `schema.invalid` at `$.apiVersion`, `$.kind`, `$.metadata.name`, `$.input`, `$.output`, `$.steps`.
+- `schema.invalid` at `$.permissions.<key>` when a permission entry is not a string array.
+
+## Phase 3: JSON Schema Subset
+
+`validateSchemaValue()` enforces a deliberately small JSON Schema subset:
+
+- `type` is one of `object`, `array`, `string`, `number`, `integer`, `boolean`, `null`.
+- Allowed keys: `additionalProperties`, `anyOf`, `const`, `enum`, `items`, `maxItems`, `maxLength`, `maximum`, `minItems`, `minLength`, `minimum`, `oneOf`, `properties`, `required`, `type`.
+- Schemas can be `true` (allow everything) or `false` (allow nothing).
+- Nested schemas are validated recursively.
+
+Unsupported keys (`patternProperties`, `if/then/else`, `$ref`, `$dynamicRef`, etc.) are rejected with `schema.unsupported_key`. The runtime never needs to evaluate them, and shrinking the surface keeps Ajv predictable across alpha hosts.
+
+## Phase 4: Steps
+
+`validateStepList()` is the densest phase. It walks every step list (including nested `parallel.steps`) and records:
+
+| Code | Triggered when |
+| --- | --- |
+| `step.invalid` | A step is not an object. |
+| `step.invalid_id` | Missing, empty, contains `.` / `[` / `]`, or contains `@attempt_`. |
+| `step.duplicate_id` | Two steps in the same list share an id. |
+| `step.invalid_needs` | `needs` is present but not a string array. |
+| `step.missing_dependency` | A `needs[]` entry or a `{{ steps.X.output }}` reference points to an id that doesn't exist. |
+| `step.undeclared_dependency` | An expression references a step id that is real, but the step did not list it in `needs`. |
+| `output.missing_schema` | A step references another step's `json`-mode output without that step declaring a schema. |
+| `lwir.invalid_cycle` | The dependency graph has a cycle that violates the decision-step rules (see below). |
+| `lwir.output_ambiguous_for_multi_visit` | `{{ steps.X.output }}` is used on a step with `maxVisits > 1`. Use `lastOutput` or `allVisits`. |
+| `lwir.decision_target_referenced_by_needs` | A non-decision-target, non-decision step declares a decision target in its `needs`. The decision controls routing to that target; declaring it in `needs` deadlocks the dependent step. Catches author/planner errors at compile time. |
+
+### Cycle validation
+
+Cycle detection uses Tarjan's strongly-connected-components (SCC) algorithm over the union of `needs` edges and `decision`-step transition edges (`decision.with.cases[].to` and `decision.with.default`). A cycle is allowed only if:
+
+1. Every elementary cycle in the SCC contains a decision step. Implemented by removing decision nodes from the SCC's induced subgraph and re-running Tarjan; any non-trivial residual SCC indicates a decision-free cycle and is rejected.
+2. Every step on the cycle has `maxVisits >= 2`.
+
+Cycles that fail either condition are rejected as `lwir.invalid_cycle`. Cycles that pass both are back-edges; the runtime re-executes the targeted step as a new visit. `maxVisits` must be an integer in `[1, 100]` (enforced with `maxVisits_out_of_range`).
+
+## Per-Step Type Rules
+
+After the structural pass, each step is dispatched on `uses`:
+
+<Mermaid chart={`flowchart LR
+  classDef leaf fill:#dcfce7,stroke:#16a34a,color:#0f172a;
+  classDef branch fill:#fef3c7,stroke:#d97706,color:#0f172a;
+
+  Step["LwirStep"]:::branch
+  Step --> AI["ai.generate<br/>required: with.model in allowedModels"]:::leaf
+  Step --> Tool["tool.call<br/>required: with.tool in allowedTools"]:::leaf
+  Step --> Code["code.run<br/>required: entrypoint, files[],<br/>per-file sha256 verified,<br/>sandbox policy explicit"]:::leaf
+  Step --> Par["parallel<br/>required: items, itemKey,<br/>maxBranches, maxConcurrency,<br/>failureMode, fanIn"]:::leaf
+  Step --> Dec["decision<br/>required: with.cases[] (ordered),<br/>with.default (required);<br/>no output schema (output is { chosen })"]:::leaf
+`} />
+
+A `decision` step's `with.cases[]` is an ordered list of `{ when, to }` pairs; the first truthy `when` expression wins. `with.default` is the fallback target. Every `to` must name a step in the same scope or the sentinel `"end"` (terminates the current scope). The validator checks that all targets exist in scope (`decision.target_not_in_scope`). A `decision` step does not have an `output` contract; the runtime records `{ chosen: "<targetId>" }` in the event log for auditability.
+
+The expression validator (`expressions.ts`) runs against `step.with`, `step.input`, and `step.cache`. Inside a `parallel.steps[]` body, `{{ item.* }}` references become legal; outside, they fail with `expression.invalid_root`.
+
+## Output Modes And Compatibility
+
+Every executable step must declare an `output` with a `mode` from `text | object | array | choice | json`. `object` and `array` require a schema; `choice` requires `values`; `json` may omit the schema unless another step consumes it as a typed reference.
+
+The validator runs an output-compatibility pass: if step B references `{{ steps.A.output.foo }}` and step A is `json` without a schema, step A gets an `output.missing_schema` finding. This is what guarantees that downstream readers see structured data, not raw assistant text.
+
+## Parallel Coordination Rules
+
+For `uses: "parallel"`, `validateParallelStep()` enforces:
+
+- `with.items` is a `{{ ... }}` expression yielding an array.
+- `with.itemKey` is an `{{ item.* }}` expression.
+- `with.maxBranches` is a positive integer `<= 100` (alpha cap).
+- `with.maxConcurrency` is a positive integer `<= maxBranches`.
+- `with.failureMode` is `fail_fast` or `all_settled`.
+- `with.fanIn.order` is `input` or `itemKey`. `with.fanIn.output` is `array`.
+- `output` is `array` and the items schema enforces the runtime envelope shape (`itemKey`, `status`, `output | outputRef`, `error`, `artifacts`).
+
+`parallel` steps cannot nest inside another `parallel`. Detection is via `context.allowItemExpressions` — once set to `true` (inside a parallel body), encountering `uses: "parallel"` raises `parallel.nested_unsupported`.
+
+## `onFailure.fixer` Validator (code.run steps)
+
+For `uses: "code.run"` steps that declare `onFailure.fixer`, the validator checks the fixer config shape:
+
+- `fixer.model` must be a string that references a slot id present in the workflow's `models` list. If the slot id is absent, a `step.invalid_fixer_model` finding is recorded. This prevents the fixer from attempting to invoke a model that won't be available at runtime.
+- `fixer.maxAttempts` must be a positive integer in `[1, 10]` (alpha cap). Out of range → `step.fixer_max_attempts_out_of_range`.
+- `fixer.system` is optional; if present, must be a non-empty string.
+
+Step type naming is now unified in alpha: `ai.generate`, `tool.call`, `code.run`, `parallel`, `decision`.
+
+## WorkflowVersion and WorkflowDefinitionHash
+
+`WorkflowVersion = sha256(canonicalJson(LWIR))`. This is unchanged.
+
+This milestone introduces a second identity primitive alongside it:
+
+- **`WorkflowDefinitionHash`** — hash of the workflow's identity-bearing authoring-time fields (planner config, models, globalTools list, worker config, memory config, schemas). Stable across runs as long as the definition does not change; computed once when `createLittleWorkflow({...})` is called.
+- **`WorkflowVersion`** — per-run hash of LWIR, unchanged.
+
+A single `WorkflowDefinition` can produce many `WorkflowVersion`s (different inputs → different LWIR). The `WorkflowDefinitionHash` is what the orchestrator's manifest tracks for each available workflow; `WorkflowVersion` is what worker sessions reference when executing steps.
+
+See [Identity and Manifests](/docs/v0.1.0-alpha/implementation/identity-manifests) for how the two hashes compose with the three manifest types.
+
+## Registration
+
+`registerWorkflowVersion()` is the only path that produces a `WorkflowVersion`. It calls `assertValidLwir()`, canonicalizes the document, deep-freezes the result, and stamps an `id` derived from `sha256(canonicalLwir)`:
+
+```ts
+return {
+  id: `wfver_${hash.slice(7, 7 + 16)}`,     // e.g. "wfver_4f0a..."
+  hash: "sha256:<64 hex>",
+  canonicalizer: "little-workflow-canonical-json@alpha",
+  canonicalJson,                             // string, exact bytes
+  lwir,                                      // frozen
+};
+```
+
+`compiler.ts` calls this with the planner's draft and wraps the result with the compiled-lock seed described on the [Compile Pipeline](/docs/v0.1.0-alpha/implementation/compile-pipeline#stage-7-register-and-lock) page.
+
+## What This Validator Is Not
+
+- It does not call models, tools, or run code. It is pure.
+- It does not enforce business rules — for example, an `ai.generate` step with a hopelessly broad schema validates fine here; the planner repair loop is what nudges that.
+- It does not cross-check against the orchestration request. That is `validateRequestBinding()` in `compiler.ts`. The split exists so that hand-written LWIR (e.g. CLI `little validate`) is meaningful even without a request.

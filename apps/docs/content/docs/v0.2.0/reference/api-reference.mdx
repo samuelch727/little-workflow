@@ -1,0 +1,58 @@
+---
+title: SDK API
+description: Planned public API surface for the TypeScript package.
+---
+
+This reference records the target SDK names from the product spec. It is not an implementation guarantee until the library package is built.
+
+## Authoring
+
+```ts
+createLittleWorkflow(definition);
+chainWorkflows(workflows, { schemaPolicy, transformModel? });
+workflowModule(id, options);
+transform(options);
+model(aiSdkModel, metadata); // metadata.tools accepts AI SDK tools for planner-time use
+skill(pathOrUrl);
+```
+
+`chainWorkflows` accepts a pipeline-level `transformModel`, required when `schemaPolicy` is `ai_suggest_transform_requires_approval`. It is a separate model slot from any child workflow's planner.
+
+Tools are plain AI SDK `tool()` definitions. They live in `model().tools` (planner-time) or `globalTools` on the workflow definition (workflow-time). There is no separate `capabilityTool()` wrapper.
+
+## Runtime
+
+```ts
+runWorkflow({
+  world,
+  workflows,
+  input,
+  timeout,
+});
+
+createRuntime({
+  world,
+  plugins,
+  skills,
+  metadata,
+  queue,
+  artifacts,
+});
+
+localWorld({ dataDir: ".little-workflow" });
+```
+
+## Policy Types
+
+```ts
+type ToolSelectionPolicy = "planner_selected" | "all" | "explicit_only";
+
+type PipelineSchemaPolicy =
+  | "fail_on_schema_mismatch"
+  | "allow_explicit_transform"
+  | "ai_suggest_transform_requires_approval";
+```
+
+## Runtime Boundary
+
+Runtime APIs should be Promise-based by default. Effect may power internals and advanced plugin layers, but it should not leak into normal SDK usage.

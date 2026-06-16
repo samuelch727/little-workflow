@@ -1,0 +1,360 @@
+---
+title: generateHarness()
+description: Run a Little Harness agent turn and return a completed result.
+---
+
+`generateHarness()` runs the same harness as `streamHarness()`, but waits for the
+turn to complete and returns the final result directly.
+
+Use it for workers, cron jobs, tests, server actions, queue consumers, and Little
+Workflow nodes.
+
+## Import
+
+```ts
+import { generateHarness } from "little-harness";
+```
+
+## Basic Usage
+
+```ts
+import { Output } from "ai";
+import { generateHarness } from "little-harness";
+
+const result = await generateHarness({
+  harness,
+  type: "support.ticket_triage",
+  input: ticket,
+  output: Output.object({ schema: triageSchema }),
+  session: ticket.id,
+});
+
+console.log(result.output.priority);
+```
+
+## API Signature
+
+```ts
+async function generateHarness<
+  TOutput = string,
+  TInput = unknown,
+  TExtraBody = unknown,
+>(
+  options: GenerateHarnessOptions<TInput, TExtraBody>,
+): Promise<GenerateHarnessResult<TOutput>>;
+```
+
+## Parameters
+
+`generateHarness()` accepts the same core input options as `streamHarness()`.
+
+### `harness`
+
+`Harness`
+
+Reusable harness returned by `createHarness()`.
+
+### `messages`
+
+`UIMessage[]`
+
+Raw chat messages. Use this when a non-streaming caller still wants to run a
+chat transcript to completion.
+
+```ts
+const result = await generateHarness({
+  harness,
+  messages,
+  session: chatId,
+});
+```
+
+### `type`
+
+`string`
+
+Open string that names a custom Input Type.
+
+```ts
+type: "account.renewal_brief"
+```
+
+### `input`
+
+`TInput`
+
+App-defined payload for the custom Input Type.
+
+```ts
+input: {
+  accountId: "acct_123",
+  includeOpenTickets: true,
+}
+```
+
+### `session`
+
+`string | HarnessSession`
+
+Stable continuation key or explicit session handle.
+
+```ts
+session: `account:${accountId}:renewal`
+```
+
+### `extraBody`
+
+`TExtraBody`
+
+App-defined request context passed to tools, file hooks, Persistent Dirs, and
+events.
+
+### `model`
+
+`LanguageModel`
+
+Per-call model override. `createHarness()` still requires a default model in
+the TypeScript API; use this when a worker, route, or remote configuration
+temporarily overrides that default.
+
+```ts
+await generateHarness({
+  harness,
+  type: "support.ticket_triage",
+  input: ticket,
+  model: requestModel,
+});
+```
+
+### `system`
+
+`string | SystemModelMessage | SystemModelMessage[]`
+
+Per-call system override. When provided, it replaces the harness-level system
+prompt for this turn. Input Type instructions, skills, memory, and runtime
+hints are still added around the selected system prompt.
+
+### `runtime`
+
+`HarnessRuntimeOptions`
+
+Per-call runtime policy override. It merges with the harness-level runtime
+policy.
+
+```ts
+await generateHarness({
+  harness,
+  type: "support.ticket_triage",
+  input: ticket,
+  runtime: { bash: false },
+});
+```
+
+### `temperature`
+
+`number`
+
+Per-call AI SDK temperature setting. Little Harness includes it in durable model
+request identity, so replay does not reuse a response generated with a different
+temperature.
+
+### `output`
+
+`Output`
+
+AI SDK output specification for parsing the completed result.
+
+```ts
+output: Output.object({ schema: renewalBriefSchema })
+```
+
+### `abortSignal`
+
+`AbortSignal`
+
+Cancels the run when possible.
+
+### `onEvent`
+
+Function that receives a `HarnessEvent`.
+
+Per-call trace callback.
+
+### `onPersistenceError`
+
+Function that receives a `PersistenceError`.
+
+Per-call Persistent Dir failure callback.
+
+### `toolResultSpooling`
+
+`false | { maxInlineBytes?: number; previewBytes?: number; outputDir?: string }`
+
+Per-call override for automatic oversized tool-result spooling. When omitted,
+the setting from `createHarness()` is used. If neither is configured, Little
+Harness spools tool results larger than 16 KB into `/artifacts/tool-results`.
+The compact result includes `summary` metadata with text counts and, for JSON
+content, a bounded structure sketch.
+
+### `trace`
+
+`false | HarnessTraceOptions`
+
+Per-call override for trace capture. When omitted, the setting from
+`createHarness()` is used.
+
+```ts
+await generateHarness({
+  harness,
+  type: "support.ticket_triage",
+  input: ticket,
+  trace: {
+    content: {
+      maxInlineBytes: 4096,
+    },
+    fileDiffs: {
+      enabled: true,
+    },
+  },
+});
+```
+
+Set `trace: false` on a single call for requests that should not persist a
+Local Host trace.
+
+### Agent Loop Options
+
+`generateHarness()` forwards the common AI SDK loop controls:
+
+```ts
+await generateHarness({
+  harness,
+  messages,
+  stopWhen,
+  prepareStep,
+  toolChoice,
+  activeTools,
+  temperature,
+  providerOptions,
+  headers,
+  maxRetries,
+});
+```
+
+When `stopWhen` is omitted, Little Harness uses `stepCountIs(20)` so a model can
+continue after executed tool calls instead of stopping after the first step.
+
+## Returns
+
+### `text`
+
+`string`
+
+The completed text response.
+
+### `output`
+
+`TOutput`
+
+The parsed structured output when `output` is provided.
+
+### `session`
+
+`HarnessSession`
+
+The session that ran the turn.
+
+### `artifacts`
+
+`ArtifactRef[]`
+
+Artifacts created during the run.
+
+### `trace`
+
+`TraceRef`
+
+Host-facing trace reference.
+
+### `persistence`
+
+`PersistenceStatus`
+
+Persistent Dir commit status.
+
+### `commitManual`
+
+`() => Promise<PersistenceStatus>`
+
+Commits Persistent Dirs configured with `commit: "manual"` for the completed
+turn. The method is idempotent for a result object; repeated calls return the
+same commit promise.
+
+### `warnings`
+
+`HarnessWarning[]`
+
+Warnings that should be visible to the host app.
+
+```ts
+if (result.warnings.some((warning) => warning.code === "undefined_input_type")) {
+  logger.warn("Missing Input Type definition", result.warnings);
+}
+```
+
+## Examples
+
+### Generate A Structured Brief
+
+```ts
+const result = await generateHarness({
+  harness,
+  type: "account.renewal_brief",
+  input: {
+    accountId: "acct_123",
+    quarter: "2026-Q3",
+  },
+  output: Output.object({ schema: renewalBriefSchema }),
+  session: "acct_123-renewal",
+});
+
+await reports.create({
+  accountId: "acct_123",
+  body: result.output,
+  traceId: result.trace.id,
+});
+```
+
+### Run A Chat Transcript To Completion
+
+```ts
+const result = await generateHarness({
+  harness,
+  messages,
+  session: chatId,
+  output: Output.text(),
+});
+
+return Response.json({
+  text: result.text,
+  artifacts: result.artifacts,
+});
+```
+
+### Handle Persistence Failure
+
+```ts
+const result = await generateHarness({
+  harness,
+  type: "project.update_notes",
+  input,
+  session: projectId,
+});
+
+if (result.persistence.status === "failed") {
+  await retryQueue.enqueue(result.persistence.failedCommits);
+}
+```
+
+The model should not automatically receive persistence failures in its normal
+context. The host app can retry, notify the user, or inspect the trace.

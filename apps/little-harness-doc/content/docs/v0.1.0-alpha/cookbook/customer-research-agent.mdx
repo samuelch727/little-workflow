@@ -1,0 +1,63 @@
+---
+title: Customer Research Agent
+description: A recipe for account, support, and renewal research agents.
+---
+
+This is an example recipe, not a core Little Harness concept. Use it when an agent needs internal tools, large intermediate datasets, and a clean export boundary.
+
+## Shape
+
+```ts
+const harness = createHarness({
+  host: localHost(),
+  model,
+  system: "Prepare evidence-backed customer research for account teams.",
+  tools: {
+    queryCustomers,
+    searchDocs,
+    searchIncidents,
+    getUsageMetrics,
+    saveReport,
+  },
+  skills: [skill("./skills/customer-renewal-analysis")],
+});
+```
+
+## Working Pattern
+
+The agent should:
+
+1. Query account metadata.
+2. Fetch recent incidents and usage metrics.
+3. Write large datasets to artifacts.
+4. Analyze those artifacts with scripts or shell tools.
+5. Produce a report artifact.
+6. Call an export tool only when the report should become app data.
+
+## Persistent Context
+
+Use a Persistent Dir for account-team preferences, not for every raw customer record.
+
+```ts
+persistentDirs: [
+  {
+    harnessDir: "/persistent/account-team",
+    load: ({ extraBody }) => accountMemory.loadFolder(extraBody.teamId),
+    store: ({ extraBody, changes }) =>
+      accountMemory.applyChanges(extraBody.teamId, changes),
+  },
+]
+```
+
+Keep raw source-of-truth data behind tools so permissions and freshness remain under app control.
+
+## Export Tools
+
+Useful exports include:
+
+- `save_report`
+- `create_crm_note`
+- `draft_email`
+- `create_followup_task`
+
+Make the side effect obvious in the tool name and description.

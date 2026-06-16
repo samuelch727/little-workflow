@@ -1,0 +1,5 @@
+[
+  { "id": "c1", "name": "Alex Chen", "summary": "5 years backend at startups, Go and Postgres; led an open-source migration project." },
+  { "id": "c2", "name": "Sam Patel", "summary": "3 years data engineer, Snowflake plus dbt plus Airflow; no Go experience." },
+  { "id": "c3", "name": "Jordan Kim", "summary": "8 years SRE, deep Kubernetes operations; strong ops focus." }
+]

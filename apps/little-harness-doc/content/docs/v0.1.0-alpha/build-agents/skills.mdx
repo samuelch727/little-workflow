@@ -1,0 +1,68 @@
+---
+title: Skills
+description: How skills teach an agent procedures without bloating every prompt.
+---
+
+Skills are procedural knowledge. They tell the model how to handle a situation, when to use tools, and what quality bar to apply.
+
+They are different from tools. Tools do things. Skills teach the agent how to work.
+
+## Skill Shape
+
+A skill can be a directory with a `SKILL.md` file:
+
+```txt
+skills/customer-briefs/
+  SKILL.md
+  examples/
+    renewal-brief.md
+```
+
+`SKILL.md` should contain frontmatter and instructions:
+
+```md
+---
+name: customer-briefs
+description: Use when preparing renewal, expansion, or risk briefs for account teams.
+---
+
+Before writing the brief, inspect recent support incidents, product usage,
+contract dates, and open account notes. Prefer evidence-backed bullets.
+```
+
+## Using Skills
+
+```ts
+const harness = createHarness({
+  host: localHost(),
+  model,
+  system: "Help account teams prepare high-signal customer work.",
+  tools: { searchDocs, queryCustomers, searchIncidents },
+  skills: [
+    skill("./skills/customer-briefs"),
+    skill("https://github.com/anthropics/skills", {
+      skills: ["frontend-design"],
+    }),
+  ],
+});
+```
+
+The runtime puts skill names and descriptions in the prompt, then stages full skill bodies under `.agents/skills/<name>/` from the harness working directory for on-demand reading:
+
+```bash
+cat .agents/skills/frontend-design/SKILL.md
+```
+
+The helper that registers a skill is documented in [skill()](/docs/v0.1.0-alpha/reference/skill-helper).
+
+## What Belongs In A Skill
+
+Use skills for:
+
+- domain vocabulary
+- decision procedures
+- report formats
+- tool usage rules
+- review checklists
+
+Do not use skills for secrets, user-specific memory, or large raw datasets. Put persistent app data behind tools or Persistent Dirs.

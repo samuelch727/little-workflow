@@ -1,0 +1,13 @@
+{
+  "name": "demo-orchestrator-fanout",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "demo": "node ./run.mjs"
+  },
+  "dependencies": {
+    "ai": "^6.0.0",
+    "little-workflow": "workspace:*"
+  }
+}

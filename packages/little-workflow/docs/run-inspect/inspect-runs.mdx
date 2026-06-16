@@ -1,0 +1,251 @@
+---
+title: Inspect Runs
+description: The event log is the only inspection surface in v0.1.0-alpha.
+---
+
+Alpha is artifact-first and event-driven. The runtime stores facts in the event log and payloads on the filesystem. Inspection in alpha means dumping the event log; the polished inspector (list, timeline, stream, per-step inspect, artifact CLI) arrives in [v0.1.0-beta](/docs/v0.1.0-beta/run-inspect/inspect-runs).
+
+## Event Vocabulary
+
+Alpha emits two families of events:
+
+- **LWIR events** — track workflow compilation, step scheduling, and step lifecycle. Present in all runs.
+- **Harness session events** — track every model call and tool call inside a planner, orchestrator, or worker harness session. New in this milestone.
+
+Both families write to the same Local World event store, keyed by `runId` and per-run sequence. For pipeline runs (array of workflows), the orchestrator has its own `runId`; each sub-workflow run has a separate `runId` reserved in `harness.tool_call.started.payload.args.subRunId` and returned as `harness.tool_call.succeeded.payload.result.runId`.
+
+### LWIR Events
+
+```txt
+OrchestrationRequested
+PlannerStarted
+PlannerDraftedWorkflow
+WorkflowValidationFailed
+WorkflowValidationSucceeded
+WorkflowVersionRegistered
+RunStarted
+StepScheduled
+StepAttemptStarted
+StepCompleted
+StepFailed
+ParallelGroupStarted
+ParallelBranchScheduled
+ParallelBranchCompleted
+ParallelBranchFailed
+ParallelGroupCompleted
+ParallelGroupFailed
+OuterLoopCycleCompleted
+RunCompleted
+RunFailed
+```
+
+`OuterLoopCycleCompleted` is appended to the current cycle's event log when `supervise()` returns. It is present only in outer-loop runs (`maxOuterCycles > 1`). Payload: `{ outerLoopId, cycleNumber, supervise: { kind, finalOutput?, promptNote? } }`. This event is the cycle commit point that makes inter-cycle replay decidable.
+
+`OrchestrationRequested` records request, input, workflow-definition, output, and capability-manifest hashes.
+Planner lifecycle events (`PlannerStarted`, `PlannerDraftedWorkflow`, `WorkflowValidationFailed/Succeeded`) are persisted before `WorkflowVersionRegistered`.
+
+### Harness Session Events
+
+These events wrap every model call and tool call inside a harness session. They are present in runs where the planner, orchestrator, or worker uses the harness (all runs in this milestone).
+
+#### Session lifecycle
+
+```ts
+// Emitted at the start of every harness session (planner, orchestrator, worker, fixer).
+// The manifest records the session's full capability surface for drift detection on resume.
+type SessionStartedEvent = {
+  type: "harness.session.started";
+  payload: {
+    runId: string;
+    role: "planner" | "orchestrator" | "worker.ai-generate" | "worker.code-run" | "worker.tool-call" | "fixer";
+    task: { kind: "plan" | "orchestrate" | "execute_step" | "fix_step" };
+    manifest: OrchestratorManifest | PlannerManifest | WorkerManifest;
+    manifestHash: string;        // sha256 of canonicalized manifest; compared on resume
+    parentRunId?: string;        // present for sub-workflow runs inside a pipeline
+  };
+};
+
+type SessionCompletedEvent = {
+  type: "harness.session.completed";
+  payload: {
+    runId: string;
+    output?: unknown;
+    usage: { inputTokens: number; outputTokens: number; costUsd?: number };
+  };
+};
+
+type SessionFailedEvent = {
+  type: "harness.session.failed";
+  payload: {
+    runId: string;
+    error: { message: string; causeCode: string; stack?: string };
+  };
+};
+```
+
+#### Agent-loop events
+
+Emitted for harness sessions that run an agent loop: `plan`, `orchestrate`, `execute_step` (ai.generate), `fix_step`.
+
+```ts
+type ModelCalledEvent = {
+  type: "harness.model.called";
+  payload: {
+    turn: number;                // 1-indexed
+    promptHash: string;          // sha256 of canonicalized {system, messages, tools}; used for replay memoization
+    request: {
+      model: string;             // slot id, e.g., "gpt-4o-mini"
+      messages: unknown[];       // large content stored as artifact refs
+      tools: { toolName: string; schemaHash: string }[];
+    };
+  };
+};
+
+type ModelRespondedEvent = {
+  type: "harness.model.responded";
+  payload: {
+    turn: number;
+    response: {
+      text?: string;
+      toolCalls?: { toolName: string; callId: string; args: unknown }[];
+      usage: { inputTokens: number; outputTokens: number };
+    };
+  };
+};
+```
+
+#### Tool-call events
+
+Emitted for all roles. The `caller` field distinguishes model-driven calls from code-driven calls.
+
+```ts
+type ToolCallStartedEvent = {
+  type: "harness.tool_call.started";
+  payload: {
+    turn?: number;               // present when caller="model"; absent otherwise
+    callId: string;
+    caller: "model" | "runtime" | "code";
+                                 // "model" = provider returned a tool call from the agent loop
+                                 // "runtime" = just-bash JavaScript called tools.x(args)
+                                 // "code" = a code.run step body invoked a registered tool directly
+    toolName: string;
+    args: unknown;
+  };
+};
+
+type ToolCallSucceededEvent = {
+  type: "harness.tool_call.succeeded";
+  payload: {
+    callId: string;
+    result: unknown;             // for start_workflow/run_workflow: includes runId
+    durationMs: number;
+  };
+};
+
+type ToolCallFailedEvent = {
+  type: "harness.tool_call.failed";
+  payload: {
+    callId: string;
+    error: { message: string; causeCode: string };
+    durationMs: number;
+  };
+};
+```
+
+For `start_workflow` and `run_workflow` tool calls, `harness.tool_call.started.payload.args.subRunId` is reserved before the sub-run starts, and `harness.tool_call.succeeded.payload.result.runId` is the runId of the spawned sub-workflow. Use this to navigate from an orchestrator's event log to a sub-run's event log.
+
+#### Direct-execute step events
+
+Emitted for `code.run`, `tool.call`, and `decision` steps (no model in the loop).
+
+```ts
+type ExecuteStepStartedEvent = {
+  type: "harness.execute_step.started";
+  payload: {
+    stepPath: string;
+    stepKind: "code.run" | "tool.call" | "decision";
+    inputHash: string;
+  };
+};
+
+type ExecuteStepSucceededEvent = {
+  type: "harness.execute_step.succeeded";
+  payload: {
+    stepPath: string;
+    outputHash: string;
+    durationMs: number;
+  };
+};
+```
+
+For `code.run` steps, any tools the code body invokes also emit `harness.tool_call.started, harness.tool_call.succeeded, harness.tool_call.failed` with `caller: "code"` between `harness.execute_step.started` and `harness.execute_step.succeeded`.
+
+### Event Sequencing by Task Kind
+
+| Task kind | Event sequence |
+|---|---|
+| `plan` | `harness.session.started` → (`harness.model.called` → `harness.model.responded` → `harness.tool_call.*` × tools per turn) × turns → `harness.session.completed` |
+| `orchestrate` | `harness.session.started` → (`harness.model.called` → `harness.model.responded` → `harness.tool_call.*` × tools per turn) × turns → `harness.session.completed` |
+| `execute_step` (ai.generate) | `harness.session.started` → agent-loop events × turns → `harness.session.completed` |
+| `execute_step` (code.run) | `harness.session.started` → `harness.execute_step.started` → (`harness.tool_call.*` × tools invoked by code) → `harness.execute_step.succeeded` → `harness.session.completed` |
+| `execute_step` (tool.call) | `harness.session.started` → `harness.execute_step.started` → `harness.tool_call.*` (single) → `harness.execute_step.succeeded` → `harness.session.completed` |
+| `execute_step` (decision) | `harness.session.started` → `harness.execute_step.started` → `harness.execute_step.succeeded` → `harness.session.completed` |
+| `fix_step` | `harness.session.started` → agent-loop events × turns → `harness.session.completed` |
+
+### Example: Event log shape
+
+```json
+{ "type": "harness.session.started", "payload": { "runId": "run_abc", "role": "orchestrator", "task": { "kind": "orchestrate" }, "manifest": { "harnessId": "workflowHarness@1.0.0", "orchestratorModelSlotId": "gpt-5", "maxConcurrentSubRuns": 10 }, "manifestHash": "sha256:orch789" } }
+{ "type": "harness.model.called", "payload": { "turn": 1, "promptHash": "sha256:p1", "request": { "model": "gpt-5", "messages": [], "tools": [{ "toolName": "plan_workflow", "schemaHash": "sha256:s1" }] } } }
+{ "type": "harness.model.responded", "payload": { "turn": 1, "response": { "toolCalls": [{ "toolName": "start_workflow", "callId": "c1", "args": { "workflowId": "candidate.review", "input": { "candidateId": "c_1" } } }], "usage": { "inputTokens": 800, "outputTokens": 120 } } } }
+{ "type": "harness.tool_call.started", "payload": { "turn": 1, "callId": "c1", "caller": "model", "toolName": "start_workflow", "args": { "workflowId": "candidate.review", "input": { "candidateId": "c_1" }, "subRunId": "run_def" } } }
+{ "type": "harness.tool_call.succeeded", "payload": { "callId": "c1", "result": { "workflowVersionId": "sha256:lwir1", "runId": "run_def" }, "durationMs": 4200 } }
+{ "type": "harness.session.completed", "payload": { "runId": "run_abc", "usage": { "inputTokens": 2800, "outputTokens": 450 } } }
+```
+
+For large payloads (messages, args, results), the event stores an artifact ref instead of inlining the content:
+
+```json
+{
+  "type": "StepCompleted",
+  "stepPath": "review-candidates.extract-profile",
+  "outputRef": "artifact://art_step_output",
+  "artifactRefs": ["artifact://art_resume_text"],
+  "usage": { "inputTokens": 3211, "outputTokens": 918, "costUsd": 0.018 }
+}
+```
+
+## CLI Inspection
+
+```bash
+# All events for a run, in commit order:
+little events run_123
+
+# Filter by event type:
+little events run_123 | jq 'select(.type == "harness.model.called")'
+
+# Show only tool calls made by code (not the model):
+little events run_123 | jq 'select(.type == "harness.tool_call.started" and .payload.caller == "code")'
+
+# Show all harness session summaries (usage + status):
+little events run_123 | jq 'select(.type | startswith("harness.session."))'
+
+# Navigate to a sub-run from an orchestrator event log:
+little events run_123 | jq 'select(.type == "harness.tool_call.succeeded" and .payload.result.runId != null) | .payload.result.runId'
+# → "run_def"
+little events run_def   # inspect the sub-run's own event log
+```
+
+That is the alpha inspection surface. JSON output, one event per line, in commit order.
+
+## Automatic Retry And Replay
+
+Automatic retry re-executes a failed step attempt inside the same run using the same WorkflowVersion and input. Alpha retry is best used for idempotent steps; production-grade dedup arrives in [v0.1.0](/docs/v0.1.0/run-inspect/durability).
+
+Replay reconstructs state from event history. It does not call models, tools, shell, code, or external APIs. Harness session events (Layer C) are replayed in addition to LWIR step events (Layer A) — committed model turns and tool calls are fast-forwarded without re-invoking the model or tool. This is what proves the kill-and-resume invariant.
+
+The user-invoked `little retry` command is not part of alpha. It arrives in [v0.1.0-beta](/docs/v0.1.0-beta/reference/cli).
+
+Fork (branching a run from a checkpoint with changed input, prompts, or policy) arrives in [v0.1.0-beta](/docs/v0.1.0-beta/run-inspect/durability).
+
+See [Durability](/docs/v0.1.0-alpha/run-inspect/durability) for the full resume model, crash scenarios, and `CapabilityDriftError` behavior.

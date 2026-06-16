@@ -1,0 +1,389 @@
+---
+title: Event Log
+description: The durability layer. SQLite/WAL-backed event envelopes with two-level vocabulary covering both LWIR steps and harness sessions.
+---
+
+The alpha event log is an append-only table in `<dataDir>/events/events.db`, backed by SQLite WAL mode. Every fact the runtime records lands here in per-run commit order before the append resolves. Replay reads the committed envelopes through the World API and rebuilds state.
+
+The implementation lives in `world.ts` (`appendEvent`, `listEvents`, `readCommittedEventLog`). Materialization lives in `run-state.ts`.
+
+## Storage Layout
+
+```txt
+.little-workflow/
+  events/
+    events.db       ← committed event rows
+    events.db-wal   ← SQLite write-ahead log
+    events.db-shm   ← SQLite shared-memory sidecar
+```
+
+Each stored row contains one canonical-JSON `EventEnvelope` payload plus indexed run metadata:
+
+```json
+{"eventId":"evt_4f0a...","runId":"run_a","sequence":1,"type":"harness.session.started","recordedAt":"2026-05-21T10:00:00.000Z","payload":{"runId":"run_a","role":"planner","task":{"kind":"plan"},"manifest":{...},"manifestHash":"sha256:..."}}
+{"eventId":"evt_2c81...","runId":"run_a","sequence":2,"type":"harness.model.called","recordedAt":"2026-05-21T10:00:01.000Z","payload":{"turn":1,"promptHash":"sha256:...","request":{"model":"gpt-5","messages":[...],"tools":[...]}}}
+```
+
+The storage file is not a public inspection surface. Use `little events <runId>` or `world.listEvents(runId)`; the CLI prints one JSON envelope per line for `jq`-friendly inspection.
+
+## Envelope Shape
+
+```ts
+type EventEnvelope = {
+  eventId: string;          // evt_<16 hex>; deterministic: sha256({runId, sequence, type, payload})
+  runId: string;            // run_<...>
+  sequence: number;         // 1-based, strictly monotonic per run
+  type: EventType;
+  recordedAt: string;       // ISO-8601
+  payload: Record<string, unknown>;
+};
+```
+
+Three invariants make the log replay-safe:
+
+1. **`sequence`** is 1-based and dense. `validateEventLogShape()` asserts `event.sequence === index + 1`; a hole is corruption.
+2. **`eventId`** is deterministic. Same event log → same IDs.
+3. **`payload`** is canonical JSON — `appendEvent()` calls `canonicalClone()` before writing; re-reading and re-hashing always reproduces the same value.
+
+## Full Event Vocabulary
+
+The vocabulary has two tiers: **Harness events** (new — emitted by every harness session) and **LWIR step events** (unchanged from prior alpha).
+
+<Mermaid chart={`flowchart TB
+  classDef harness fill:#fef3c7,stroke:#d97706,color:#0f172a;
+  classDef plan fill:#dbeafe,stroke:#2563eb,color:#0f172a;
+  classDef run fill:#dcfce7,stroke:#16a34a,color:#0f172a;
+  classDef step fill:#ede9fe,stroke:#7c3aed,color:#0f172a;
+  classDef terminal fill:#fee2e2,stroke:#dc2626,color:#0f172a;
+
+  HSession["harness.session.*<br/>started / completed / failed"]:::harness
+  HModel["harness.model.*<br/>called / responded"]:::harness
+  HTool["harness.tool_call.*<br/>started / succeeded / failed"]:::harness
+  HExec["harness.execute_step.*<br/>started / succeeded"]:::harness
+  Reg["WorkflowVersionRegistered"]:::run
+  Start["RunStarted"]:::run
+  Step["Per LWIR step<br/>StepScheduled<br/>StepAttemptStarted<br/>ArtifactCreated<br/>StepOutputValidated<br/>StepCompleted | StepFailed"]:::step
+  Par["Parallel<br/>ParallelGroupStarted<br/>ParallelBranchScheduled<br/>ParallelBranchCompleted | Failed<br/>ParallelGroupCompleted | Failed"]:::step
+  OuterLoop["OuterLoopCycleCompleted<br/>(outer-loop runs only)"]:::terminal
+  End["RunCompleted | RunFailed"]:::terminal
+
+  HSession --> HModel
+  HModel --> HTool
+  HSession --> HExec
+  HSession --> Reg --> Start --> Step --> End
+  Step --> Par --> Step
+  Step --> OuterLoop --> End
+`} />
+
+### Harness Session Events
+
+Emitted by every harness session (planner, orchestrator, worker, fixer). The same event types apply to all roles.
+
+#### `harness.session.started`
+
+```ts
+type SessionStartedPayload = {
+  runId: RunId;
+  role: HarnessRole;          // "planner" | "orchestrator" | "worker.ai-generate" | "worker.code-run" | "worker.tool-call" | "fixer"
+  task: { kind: HarnessTask["kind"] };  // task kind; full task stored separately (large)
+  manifest: PlannerManifest | OrchestratorManifest | WorkerManifest | FixerManifest;
+  manifestHash: string;        // sha256 of canonicalized manifest
+  parentRunId?: RunId;         // present for sub-runs inside an orchestrator pipeline
+};
+```
+
+Sample (planner role):
+
+```jsonc
+{
+  "type": "harness.session.started",
+  "payload": {
+    "runId": "run_abc123",
+    "role": "planner",
+    "task": { "kind": "plan" },
+    "manifest": {
+      "harnessId": "workflowHarness@1.0.0",
+      "plannerModelSlotId": "gpt-5",
+      "systemPromptHash": "sha256:a1b2c3...",
+      "skillsHash": "sha256:...",
+      "workflowDefinitionHash": "sha256:def123",
+      "globalToolsHash": "sha256:...",
+      "memoryStoreIds": ["workflow:candidate-review", "org"]
+    },
+    "manifestHash": "sha256:plan789"
+  }
+}
+```
+
+#### `harness.session.completed`
+
+```ts
+type SessionCompletedPayload = {
+  runId: RunId;
+  output?: unknown;            // present for plan/orchestrate/execute_step/fix_step happy path
+  usage: { inputTokens: number; outputTokens: number; costUsd?: number | null };
+  // For fix_step only:
+  fixedSource?: string;        // the repaired code body
+};
+```
+
+#### `harness.session.failed`
+
+```ts
+type SessionFailedPayload = {
+  runId: RunId;
+  error: ErrorEnvelope;
+};
+```
+
+### Agent-Loop Events
+
+Emitted by `plan`, `orchestrate`, `ai.generate` worker, and `fix_step` sessions. Not emitted by `code.run` / `tool.call` / `decision` workers (no model in the loop).
+
+#### `harness.model.called`
+
+```ts
+type ModelCalledPayload = {
+  turn: number;                // 1-indexed turn number in the agent loop
+  promptHash: string;          // sha256 of canonicalized {system, messages, tools}
+  request: {
+    model: string;             // slot id (e.g., "gpt-5")
+    messages: Message[];       // truncated/artifact-refed if huge
+    tools: ToolReference[];    // shallow refs (toolName + schemaHash)
+  };
+};
+```
+
+#### `harness.model.responded`
+
+```ts
+type ModelRespondedPayload = {
+  turn: number;
+  response: {
+    text?: string;
+    toolCalls?: ToolCallRequest[];   // model's tool invocations this turn
+    usage: { inputTokens: number; outputTokens: number };
+  };
+};
+```
+
+### Tool-Call Events
+
+Emitted by ALL roles when a tool is invoked. The `caller` field distinguishes **who** triggered the call.
+
+#### `harness.tool_call.started`
+
+```ts
+type ToolCallStartedPayload = {
+  turn?: number;               // present when caller="model"; absent otherwise
+  callId: string;              // unique id; matches the corresponding Succeeded/Failed event
+  caller: "model" | "runtime" | "code";
+  toolName: string;
+  args: unknown;               // canonical-JSON; large args become artifact refs
+};
+```
+
+`caller: "model"` — the harness's agent loop (planner, orchestrator, AI worker, fixer) invoked the tool.
+
+`caller: "runtime"` — just-bash JavaScript invoked the tool through the Runtime Tool Bridge.
+
+`caller: "code"` — a `code.run` step body called `tools.x(args)` via the proxy, or a `tool.call` step's direct invocation.
+
+Sample (model-triggered, orchestrator calling `plan_workflow`):
+
+```jsonc
+{
+  "type": "harness.tool_call.started",
+  "payload": {
+    "turn": 1,
+    "callId": "call_abc001",
+    "caller": "model",
+    "toolName": "plan_workflow",
+    "args": { "workflowId": "candidate.review", "input": { "jobDescription": "..." } }
+  }
+}
+```
+
+Sample (code-triggered, `code.run` body calling `fetchCandidates`):
+
+```jsonc
+{
+  "type": "harness.tool_call.started",
+  "payload": {
+    "callId": "call_code001",
+    "caller": "code",
+    "toolName": "fetchCandidates",
+    "args": { "jobId": "ENG-123" }
+  }
+}
+```
+
+#### `harness.tool_call.succeeded`
+
+```ts
+type ToolCallSucceededPayload = {
+  callId: string;
+  result: unknown;             // canonical-JSON; large results become artifact refs
+  durationMs: number;
+};
+```
+
+#### `harness.tool_call.failed`
+
+```ts
+type ToolCallFailedPayload = {
+  callId: string;
+  error: ErrorEnvelope;
+  durationMs: number;
+};
+```
+
+### Direct-Execute Step Events
+
+Emitted by `code.run`, `tool.call`, and `decision` workers (no agent loop — no model events).
+
+#### `harness.execute_step.started`
+
+```ts
+type ExecuteStepStartedPayload = {
+  stepPath: string;
+  stepKind: "code.run" | "tool.call" | "decision";
+  inputHash: string;           // sha256 of canonicalized step input
+};
+```
+
+#### `harness.execute_step.succeeded`
+
+```ts
+type ExecuteStepSucceededPayload = {
+  stepPath: string;
+  outputHash: string;
+  durationMs: number;
+};
+```
+
+### Event Sequencing by Task Kind
+
+| Task kind | Event sequence |
+|---|---|
+| `plan` | `harness.session.started` → (`harness.model.called` → `harness.model.responded` → `harness.tool_call.*` × tools per turn) × N turns → `harness.session.completed` |
+| `orchestrate` | `harness.session.started` → (`harness.model.called` → `harness.model.responded` → `harness.tool_call.*` × tools per turn) × N turns → `harness.session.completed` |
+| `execute_step` (ai.generate) | `harness.session.started` → agent-loop events × N turns → `harness.session.completed` |
+| `execute_step` (code.run) | `harness.session.started` → `harness.execute_step.started` → (`harness.tool_call.*` with `caller:"code"` × tools invoked by code) → `harness.execute_step.succeeded` → `harness.session.completed` |
+| `execute_step` (tool.call) | `harness.session.started` → `harness.execute_step.started` → `harness.tool_call.*` with `caller:"code"` (single) → `harness.execute_step.succeeded` → `harness.session.completed` |
+| `execute_step` (decision) | `harness.session.started` → `harness.execute_step.started` → `harness.execute_step.succeeded` → `harness.session.completed` |
+| `fix_step` | `harness.session.started` → agent-loop events × N turns → `harness.session.completed` (with `fixedSource`) |
+
+### LWIR Step Events (unchanged)
+
+These events are emitted by the runtime scheduler for each LWIR step, wrapping the harness session events:
+
+| Event | When |
+|---|---|
+| `StepScheduled` | Step becomes ready to run |
+| `StepAttemptStarted` | Attempt N begins (wraps harness session) |
+| `ArtifactCreated` | Step output artifact written to Local World |
+| `StepOutputValidated` | Output validated against step schema |
+| `StepCompleted` | Durable boundary; inline output + `outputRef` |
+| `StepFailed` | Attempt failed; with `error` + `retriable` |
+
+Plus parallel events: `ParallelGroupStarted`, `ParallelBranchScheduled`, `ParallelBranchCompleted/Failed`, `ParallelGroupCompleted/Failed`. See [Parallel](/docs/v0.1.0-alpha/implementation/parallel).
+
+### Run-Level Events (unchanged)
+
+| Event | When |
+|---|---|
+| `WorkflowVersionRegistered` | LWIR locked after planner session completes |
+| `RunStarted` | Execution begins |
+| `OuterLoopCycleCompleted` | Outer-loop cycle commit point (Layer B runs only) |
+| `RunCompleted` | Run finished successfully |
+| `RunFailed` | Run finished with error |
+
+```ts
+type OuterLoopCycleCompletedPayload = {
+  outerLoopId: string;
+  cycleNumber: number;
+  supervise: {
+    kind: "done" | "continue";
+    finalOutput?: unknown;
+    promptNote?: string;
+  };
+};
+```
+
+## Append Path
+
+```
+appendEvent(world, runId, { type, payload })
+  → serialize on resolve(eventPath)
+  → read committed log (truncate trailing partial line)
+  → compute sequence, build envelope, hash → eventId
+  → open(append) → writeFile(line) → handle.sync()
+  → syncDirectory(events/)
+  → return deep-frozen envelope
+```
+
+The single-writer chain is keyed by the absolute event-file path. fsync runs on both the file handle and the parent directory; a process kill between the two leaves a partially-written tail truncated by the next reader.
+
+## Materialization
+
+`materializeRunStateFromEvents(runId, events)` folds the event stream into a `MaterializedRunState`:
+
+```ts
+type MaterializedRunState = {
+  runId: string;
+  workflowVersionId?: string;
+  status: "pending" | "running" | "completed" | "failed";
+  startedAt?: string;
+  finishedAt?: string;
+  output?: unknown;
+  outputRef?: ArtifactRef;
+  usage: { inputTokens: number; outputTokens: number; costUsd: number };
+  steps: Record<string, MaterializedStepState>;
+  artifacts: readonly ArtifactRef[];
+  error?: unknown;
+  eventCount: number;
+};
+```
+
+The folder now handles both harness events AND LWIR step events:
+
+- `harness.session.started` → track session start; check manifest hash for drift.
+- `harness.model.responded` → accumulate token / cost usage into the run's usage totals.
+- `harness.session.completed` → accumulate usage; mark session done.
+- `StepCompleted` → mark step completed; store output + artifact ref.
+- `StepFailed` → mark step failed; attach error.
+- `RunCompleted` / `RunFailed` → set run terminal state.
+
+## Sub-Run Event Logs
+
+Sub-runs spawned by an orchestrator's `run_workflow` / `start_workflow` have **their own run ids** and independent event streams in the same Local World event store. The orchestrator's stream records `harness.tool_call.started(start_workflow, args: { ..., subRunId: "run_sub_abc" })` and `harness.tool_call.succeeded(result: { runId: "run_sub_abc", ... })`, but does NOT inline the sub-run's events.
+
+To audit a pipeline run:
+
+```bash
+# Orchestrator's session:
+little events run_pipeline_xyz
+
+# A specific sub-run's events:
+little events run_sub_abc
+```
+
+The `parentRunId` field on `harness.session.started` links a sub-run back to its orchestrator's pipeline run.
+
+## Inline Output vs Artifact Refs
+
+Step outputs smaller than 256,000 bytes (canonical JSON) are stored inline in `StepCompleted.payload.output`. Larger outputs are omitted from inline and accessed via `outputRef`. The same applies to large `harness.tool_call.started.args` and `harness.tool_call.succeeded.result` payloads — they become artifact refs when they exceed the threshold.
+
+## What This Log Buys You
+
+- **Idempotency.** `runWorkflow()` with the same `runId` returns the persisted result or replays the failure. Two-level memoization means the same result at both the LWIR step level and the harness model-call/tool-call level.
+- **Auditability.** Every model call, tool call (with `caller` attribution), artifact write, and validation result is recorded. `little events <run-id>` dumps committed envelopes in order.
+- **Crash safety.** SQLite WAL transactions bound recovery to committed event rows; `appendEvent` resolves only after the synchronous insert has committed.
+- **Replay determinism.** [Replay](/docs/v0.1.0-alpha/implementation/replay) is a pure fold over this log; same bytes → same `MaterializedRunState`.
+
+## What This Log Is Not
+
+- Not multi-writer. Two processes writing to the same `runId` is a bug; the run lock prevents it.
+- Not durable across hosts. Alpha is one filesystem on one machine; Postgres-backed event stores come in v0.1-beta.
+- Not a query API. The backing store is SQLite, but alpha exposes committed events through `listEvents()` and CLI JSON output rather than arbitrary SQL.

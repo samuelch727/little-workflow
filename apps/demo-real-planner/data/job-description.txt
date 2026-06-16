@@ -1,0 +1,3 @@
+Senior backend engineer.
+Required: Go experience, distributed systems comfort, hybrid SF.
+Nice to have: open-source contributions, mentorship history.

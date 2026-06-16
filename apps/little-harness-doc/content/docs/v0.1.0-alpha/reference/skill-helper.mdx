@@ -1,0 +1,251 @@
+---
+title: skill()
+description: Proposed helper for adding procedural skill directories to a harness.
+---
+
+`skill()` registers procedural knowledge with Little Harness. Use it when the agent needs instructions, examples, or domain playbooks that should not live in every system prompt.
+
+## Import
+
+```ts
+import { createHarness, localHost, skill } from "little-harness";
+```
+
+## API Signature
+
+```ts
+function skill(input: string, options?: RemoteSkillOptions): SkillInput;
+function skill(input: SkillInput): SkillInput;
+
+type SkillInput = string | RemoteSkillInput | LocalSkillInput;
+
+type RemoteSkillInput = {
+  source: string;
+} & RemoteSkillOptions;
+
+type LocalSkillInput = {
+  path?: string;
+  name?: string;
+  description?: string;
+  harnessDir?: string;
+  files?: Record<string, string | Uint8Array>;
+};
+
+type RemoteSkillOptions = {
+  skills?: readonly string[];
+  skillMaxRisk?: SkillRiskLevel;
+  skillRisk?: Record<string, SkillRiskLevel>;
+  auth?: SkillGitAuth;
+};
+
+type SkillRiskLevel = "NONE" | "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
+
+type SkillGitAuth = {
+  type: "bearer";
+  token: string | undefined;
+};
+```
+
+## Parameters
+
+<ApiParameters>
+  <ApiField name="input" type="string | RemoteSkillInput | LocalSkillInput">
+    <p>The skill source to register.</p>
+    <p>Local directory sources must contain `SKILL.md`. Single-file local sources are treated as the `SKILL.md` body. Remote sources must be explicit Git URLs; shorthands such as `org/repo`, `github:org/repo`, and `gitlab:org/repo` are rejected.</p>
+
+    <ApiTypeBlock name="RemoteSkillInput">
+      <ApiField name="source" type="string">
+        <p>Explicit remote Git URL. GitHub URLs, GitLab tree URLs, generic HTTPS Git URLs, SSH URLs, and scp-style Git URLs are supported.</p>
+      </ApiField>
+      <ApiField name="skills?" type="readonly string[]">
+        <p>Selected remote skill names for this source. If omitted, every non-internal skill in the repository is installed.</p>
+      </ApiField>
+      <ApiField name="skillMaxRisk?" type="SkillRiskLevel">
+        <p>Maximum accepted risk for all selected skills from this source.</p>
+      </ApiField>
+      <ApiField name="skillRisk?" type="Record<string, SkillRiskLevel>">
+        <p>Per-skill maximum risk overrides for selected remote skills from this source.</p>
+      </ApiField>
+      <ApiField name="auth?" type="SkillGitAuth">
+        <p>Explicit Git authentication for this source. Only bearer tokens are supported.</p>
+      </ApiField>
+    </ApiTypeBlock>
+
+    <ApiTypeBlock name="LocalSkillInput">
+      <ApiField name="path?" type="string">
+        <p>Path to a local skill directory or single markdown file.</p>
+      </ApiField>
+      <ApiField name="name?" type="string">
+        <p>Overrides the `name` parsed from `SKILL.md` frontmatter.</p>
+      </ApiField>
+      <ApiField name="description?" type="string">
+        <p>Overrides the `description` parsed from `SKILL.md` frontmatter.</p>
+      </ApiField>
+      <ApiField name="harnessDir?" type="string">
+        <p>Overrides the visible directory shown to the model. Defaults to <code>{'.agents/skills/<name>'}</code>.</p>
+      </ApiField>
+      <ApiField name="files?" type="Record<string, string | Uint8Array>">
+        <p>Inline skill files keyed by relative path. Inline skills must include `name` and `description`.</p>
+      </ApiField>
+    </ApiTypeBlock>
+  </ApiField>
+
+  <ApiField name="options" type="RemoteSkillOptions">
+    <p>Remote Git options used when `input` is a string URL.</p>
+
+    <ApiTypeBlock name="RemoteSkillOptions">
+      <ApiField name="skills?" type="readonly string[]">
+        <p>Selected remote skill names, matching repeated `--skill` usage in the Skills CLI. If omitted, every non-internal skill in the repository is installed.</p>
+      </ApiField>
+      <ApiField name="skillMaxRisk?" type="SkillRiskLevel">
+        <p>Maximum accepted risk for all selected skills from this source.</p>
+      </ApiField>
+      <ApiField name="skillRisk?" type="Record<string, SkillRiskLevel>">
+        <p>Per-skill maximum risk overrides for selected remote skills.</p>
+      </ApiField>
+      <ApiField name="auth?" type="SkillGitAuth">
+        <p>Explicit Git authentication. Only bearer tokens are supported.</p>
+      </ApiField>
+    </ApiTypeBlock>
+  </ApiField>
+</ApiParameters>
+
+## Returns
+
+`SkillInput`
+
+A lazy skill reference. Little Harness resolves the reference when a session starts, injects compact skill metadata into the prompt, and stages the full skill files read-only under `.agents/skills/<name>/`.
+
+## Example
+
+```ts
+import { createHarness, skill } from "little-harness";
+
+const harness = createHarness({
+  host: localHost(),
+  model,
+  system: "Help account teams prepare high-signal customer work.",
+  tools: { searchDocs, queryCustomers },
+  skills: [
+    skill("./skills/customer-briefs"),
+    skill("https://github.com/anthropics/skills", {
+      skills: ["frontend-design"],
+    }),
+  ],
+});
+```
+
+The helper should make a skill visible in two ways:
+
+- a compact name and description can be disclosed to the model up front
+- the full skill directory can be staged read-only under `.agents/skills/<name>/`
+
+## Directory Input
+
+The simplest input is a local directory containing `SKILL.md`.
+
+```txt
+skills/customer-briefs/
+  SKILL.md
+  examples/
+    renewal-brief.md
+```
+
+```ts
+skill("./skills/customer-briefs")
+```
+
+Little Harness should read `SKILL.md`, parse its frontmatter, and expose the rest of the directory as supporting files.
+
+```md
+---
+name: customer-briefs
+description: Use when preparing renewal, expansion, or risk briefs.
+---
+
+Before writing the brief, inspect support incidents, product usage,
+contract dates, and open account notes.
+```
+
+## Remote Git Input
+
+Remote skills must use explicit Git URLs:
+
+```ts
+skill("https://github.com/anthropics/skills", {
+  skills: ["frontend-design"],
+});
+
+skill("https://gitlab.com/acme/agent-skills/-/tree/main", {
+  skills: ["customer-research"],
+});
+
+skill("git@github.com:acme/private-skills.git", {
+  skills: ["deal-review"],
+  auth: { type: "bearer", token: process.env.GIT_TOKEN },
+});
+```
+
+The `skills` option selects skill names from the repository, matching `npx skills add URL --skill frontend-design`. If `skills` is omitted, Little Harness installs every non-internal skill in the source. GitHub URLs, GitLab tree URLs, generic HTTPS Git URLs, SSH URLs, and scp-style Git URLs are supported. Shorthands such as `org/repo`, `github:org/repo`, and `gitlab:org/repo` are rejected.
+
+Remote skills are materialized in the runtime before the session starts. The cache is keyed by resolved commit SHA. To use a specific version, include a commit SHA or ref in the Git URL/source options.
+
+Remote Git skill loading is best-effort at runtime. If a repository cannot be fetched, a selected skill cannot be discovered, or a remote risk audit fails, Little Harness continues without that remote skill and returns a warning. Local skill path and metadata errors remain strict.
+
+Private Git sources can pass explicit auth with `auth: { type: "bearer", token: process.env.GIT_TOKEN }`. As a host-level fallback, set `LITTLE_SKILLS_GIT_TOKEN` and restrict where it is sent with `LITTLE_SKILLS_GIT_TOKEN_HOSTS`.
+
+Risk gates are optional. If your deployment configures one, set `skillOidcToken: process.env.VERCEL_OIDC_TOKEN` so the runtime can call the Skills API. `skillMaxRisk` can be set globally, on a harness or role config, or on a specific `skill(...)` source. For selected remote skills, `skillRisk` can assign per-skill policy inside that `skill(...)` call.
+
+## Object Input
+
+Use object input when the app wants to override metadata or control the harness directory.
+
+```ts
+skill({
+  path: "./skills/customer-briefs",
+  name: "customer-briefs",
+  description: "Use when preparing renewal, expansion, or risk briefs.",
+});
+```
+
+`path` points to the developer's skill directory. `name` and `description`
+override `SKILL.md` metadata when provided. Materialized skills are exposed at
+`.agents/skills/<name>/` from the harness working directory.
+
+## Inline Input
+
+Some apps may generate skills from a CMS, database, or package registry. For that case, a future-compatible inline shape could provide files directly.
+
+```ts
+skill({
+  name: "support-triage",
+  description: "Use when classifying support conversations.",
+  files: {
+    "SKILL.md": "# Support Triage\nClassify by urgency and customer impact.",
+    "examples/p1.md": "A P1 issue blocks production usage.",
+  },
+});
+```
+
+Inline skills should follow the same rules as directory skills: short metadata
+in context, full files exposed read-only.
+
+## Resolution Rules
+
+The alpha behavior:
+
+1. Resolve local skill paths in the host app; materialize remote Git skill sources in the runtime before the session starts.
+2. Require a `SKILL.md` entry file for materialized skill directories.
+3. Parse `name` and `description` from frontmatter unless the caller overrides them.
+4. Materialize local and remote skill files read-only under `.agents/skills/<name>/`.
+5. Include prompt-visible skill metadata in the initial prompt; agents load the full body on demand with `cat .agents/skills/<name>/SKILL.md`.
+
+This keeps the first prompt compact while letting the agent inspect detailed procedures only when they matter.
+
+## What Skills Are Not
+
+Skills are not tools. They do not execute code or grant capabilities by themselves.
+
+Skills are not memory. Do not put user-specific files, secrets, or raw customer data in a skill. Use Persistent Dirs or app tools for data that changes by user, team, or account.
+
+Skills are not exports. If the agent needs to save a report, update a ticket, or write to a product database, expose an explicit tool for that action.

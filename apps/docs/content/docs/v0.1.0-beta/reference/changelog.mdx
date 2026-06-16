@@ -1,0 +1,37 @@
+---
+title: Changelog
+description: What v0.1.0-beta adds compared to v0.1.0-alpha.
+---
+
+`v0.1.0-beta` keeps the runtime local but turns the alpha proof into a real developer SDK with the governance machinery a serious workflow needs.
+
+## Compared To v0.1.0-alpha
+
+Everything in alpha still works. Beta extends the authoring surface and the runtime policies; it does not replace the alpha primitives.
+
+## New Authoring Surface
+
+- Polished `createLittleWorkflow()`, `runWorkflow()`, and `createRuntime()` with the full options shape.
+- `chainWorkflows(workflows, { schemaPolicy })` — composes workflow definitions into an ordered pipeline. Each child compiles to its own WorkflowVersion; the pipeline compiles to a parent WorkflowVersion whose steps invoke those children.
+- `transform({ from, to, input, output, run })` — explicit developer-authored schema bridge between pipeline steps.
+- `model(aiSdkModel, metadata)` — governed wrapper around AI SDK model primitives. Adds role, capabilities, quality tier, cost class, allowed overrides, and limits.
+- Plain AI SDK `tool()` definitions accepted in `model().tools` (planner-time) or `globalTools` (workflow-time). The compiler hashes each tool's description and input schema into the WorkflowVersion lock; no per-tool risk/sideEffect/plannerVisible flags are required.
+- `skill(pathOrUrl)` and `skillPack(pathOrUrl)` for local skills and SkillPacks.
+
+## New Runtime
+
+- Raw local `SKILL.md` support and SkillPack manifest validation.
+- Manifest-first plugin packages contributing local model, tool, skill, policy, adapter, module, and UI surfaces.
+- Capability firewall: planner-visible is not the same as workflow-callable; every callable capability is recorded in LWIR with a manifest hash, schema hash, and description hash.
+- Content-addressed local blobs for artifacts.
+- Typed evidence references (`artifactId`, `locator`, `claim`, `sourceStepPath`).
+- Budget reservation: estimate worst-case cost, reserve before scheduling, debit actual usage, release the remainder.
+- Human approval gates for high-risk steps.
+- Basic OpenTelemetry spans for orchestration, planning, and step execution.
+- A minimal run inspector for local development.
+
+## Still Not In This Version
+
+- Production durability (Postgres, Redis, S3, lease fencing) — arrives in [v0.1.0](/docs/v0.1.0).
+- Sharded fan-out, tree reducers, custom step types — arrive in [v0.2.0](/docs/v0.2.0).
+- Visual editing, multi-tenant controls — arrive in [v1.0.0](/docs/v1.0.0).

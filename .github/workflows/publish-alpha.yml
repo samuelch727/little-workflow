@@ -1,0 +1,125 @@
+name: Publish npm alpha
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: npm-alpha-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify alpha release
+    runs-on: ubuntu-latest
+
+    env:
+      CI: true
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@0e279bb959325dab635dd2c09392533439d90093 # v6
+        with:
+          version: 10.27.0
+          run_install: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify packages
+        run: |
+          pnpm --filter little-harness build
+          pnpm --filter little-harness test
+          pnpm --filter little-workflow test
+          pnpm typecheck
+          pnpm lint
+          pnpm build
+
+  publish-alpha:
+    name: Publish alpha packages
+    runs-on: ubuntu-latest
+    needs: verify
+    environment: npm-alpha
+
+    permissions:
+      contents: read
+      id-token: write
+
+    env:
+      CI: true
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@0e279bb959325dab635dd2c09392533439d90093 # v6
+        with:
+          version: 10.27.0
+          run_install: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - name: Install dependencies without dependency scripts
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Publish missing alpha package versions
+        run: |
+          set -euo pipefail
+
+          if [ "${GITHUB_REF_NAME}" != "main" ]; then
+            echo "Refusing to publish alpha packages from ${GITHUB_REF_NAME}; expected main." >&2
+            exit 1
+          fi
+
+          pack_dir="${RUNNER_TEMP}/npm-alpha-packs"
+          mkdir -p "${pack_dir}"
+
+          publish_if_missing() {
+            local package_name="$1"
+            local package_dir="$2"
+            local package_version
+            local tarball
+
+            package_version="$(node -p "require('./${package_dir}/package.json').version")"
+            tarball="${pack_dir}/${package_name}-${package_version}.tgz"
+
+            if npm view "${package_name}@${package_version}" version >/dev/null 2>&1; then
+              echo "${package_name}@${package_version} already exists on npm; skipping publish."
+              return 0
+            fi
+
+            pnpm --filter "${package_name}" pack --pack-destination "${pack_dir}"
+
+            if [ ! -f "${tarball}" ]; then
+              echo "Expected package tarball not found: ${tarball}" >&2
+              exit 1
+            fi
+
+            echo "Publishing ${package_name}@${package_version} with alpha dist-tag."
+            npm publish "${tarball}" \
+              --registry https://registry.npmjs.org \
+              --tag alpha \
+              --access public
+          }
+
+          publish_if_missing little-harness packages/little-harness
+          publish_if_missing little-workflow packages/little-workflow

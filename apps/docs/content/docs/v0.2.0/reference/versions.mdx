@@ -1,0 +1,42 @@
+---
+title: Version Plan
+description: The planned version sequence from v0.1.0-alpha to v1.0.0.
+---
+
+## v0.1.0-alpha
+
+Goal: prove that a developer-supplied control plane can produce validated LWIR and execute it durably enough for local development.
+
+Required:
+
+- OrchestrationRequest schema and normalization from minimal `createLittleWorkflow()`
+- canonical LWIR JSON, hashes, Ajv validation, and JSON Schema subset
+- AI SDK structured-output planner with mocked tests
+- validation and repair loop
+- `ai.structured`, `tool`, and constrained local `code.ts`
+- simple capability allowlist
+- Local World with PGlite, filesystem artifacts, streams, events, and in-process queue
+- event log, retry failed step, and replay without re-calling completed steps
+- minimal CLI
+- kill-and-resume demo
+- Vitest coverage for compiler and Local World contracts
+
+## v0.1.0-beta
+
+Goal: make the local runtime usable as a developer SDK without adding distributed production complexity.
+
+Adds polished SDK APIs, pipelines, schema transforms, local skills and SkillPacks, plugins, governed model wrappers, capability firewall, content-addressed blobs, evidence refs, budgets, approvals, basic OpenTelemetry, and a minimal run inspector.
+
+## v0.1.0
+
+Goal: prove production durability on real infrastructure.
+
+Adds Kysely/Postgres, BullMQ/Redis, S3-compatible artifact storage, zstd compression, outbox dispatch, reconciler, lease fencing, distributed governors, worker pools, production retry/reconciliation, budget debit/release, package lock verification, and Testcontainers contract tests.
+
+## v0.2.0
+
+High-throughput fan-out, tree reducers, broader dashboard, adapter plugin packaging, custom step types, UI inspector panels, private registries, workflow modules, marketplace, and stronger sandbox backends.
+
+## v1.0.0
+
+Enterprise-ready workflow authoring, inspection, and governance. The target includes visual editing, workflow optimization suggestions, multi-tenant organization controls, worker autoscaling, enterprise audit exports, evidence graph support, evaluation suites, multiple durable execution backends, and marketplace-quality package flows.

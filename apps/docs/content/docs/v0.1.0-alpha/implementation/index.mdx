@@ -1,0 +1,70 @@
+---
+title: Implementation Details
+description: How the v0.1.0-alpha SDK actually works, end to end, anchored on the shipped source.
+---
+
+This section is a guided tour of the alpha SDK internals. The [SDK Implementation Spec](/docs/v0.1.0-alpha/reference/sdk-implementation) lists the contract; these pages walk through how that contract is implemented in the `little-workflow` package — every diagram traces a real path through the source.
+
+If you only need to use the SDK, start with the [Quickstart](/docs/v0.1.0-alpha/quickstart) and [Core Mental Model](/docs/v0.1.0-alpha/mental-model). Read on here if you want to extend, debug, or audit the runtime.
+
+## End-To-End View
+
+The alpha SDK is one package shaped around a single loop: turn a `WorkflowDefinition` into a locked `WorkflowVersion`, execute it against Local World, and persist every result boundary so a kill can be resumed.
+
+<Mermaid chart={`flowchart LR
+  classDef authoring fill:#dbeafe,stroke:#2563eb,color:#0f172a;
+  classDef compile fill:#fef3c7,stroke:#d97706,color:#0f172a;
+  classDef plan fill:#fee2e2,stroke:#dc2626,color:#0f172a;
+  classDef runtime fill:#dcfce7,stroke:#16a34a,color:#0f172a;
+  classDef world fill:#ede9fe,stroke:#7c3aed,color:#0f172a;
+
+  Dev["Developer code<br/>createLittleWorkflow"]:::authoring
+  Run["runWorkflow"]:::authoring
+  Compile["compileWorkflow"]:::compile
+  Req["OrchestrationRequest<br/>+ canonical hashes"]:::compile
+  Planner["Planner harness<br/>workflowHarness agent loop"]:::plan
+  Validate["validateLwir<br/>Ajv + structural + binding"]:::compile
+  Lock["WorkflowVersion lock<br/>compiler-lock.ts"]:::compile
+  Runtime["executeWorkflowVersion<br/>step scheduler + harness"]:::runtime
+  World["Local World<br/>events/ artifacts/ locks/"]:::world
+  Replay["replayRun<br/>materialize state"]:::runtime
+
+  Dev --> Run --> Compile --> Req --> Planner --> Validate
+  Validate -->|valid| Lock
+  Validate -->|findings| Planner
+  Lock --> Runtime --> World
+  World --> Replay
+`} />
+
+The shipped code in `packages/little-workflow/src/` corresponds 1:1 to these stages:
+
+| Stage | Source |
+| --- | --- |
+| Authoring + types | `authoring.ts`, `schema.ts` |
+| Tool registry | `tool-registry.ts` |
+| Compile pipeline | `compiler.ts`, `compiler-lock.ts`, `canonical.ts` |
+| LWIR validation | `lwir.ts`, `expressions.ts` |
+| Workflow harness AI SDK bridge | `packages/little-harness/src/workflow-harness/workflow-harness.ts` |
+| Runtime loop | `runtime.ts`, `run-state.ts` |
+| Outer-loop scheduler | `outer-loop.ts` |
+| Local World | `world.ts` |
+| Replay | `replay.ts`, `run-state.ts` |
+| CLI | `cli-core.ts`, `cli.ts` |
+
+## How To Read This Section
+
+The pages are ordered along the lifecycle of a workflow:
+
+1. [Architecture](/docs/v0.1.0-alpha/implementation/architecture) — package layout, module dependency graph.
+2. [Compile pipeline](/docs/v0.1.0-alpha/implementation/compile-pipeline) — how `compileWorkflow()` turns a definition into a locked `WorkflowVersion`.
+3. [LWIR internals](/docs/v0.1.0-alpha/implementation/lwir-internals) — the JSON document the runtime executes, plus its validator.
+4. [Planner output](/docs/v0.1.0-alpha/implementation/planner-output) — what the AI planner actually emits, end to end.
+5. [Expressions](/docs/v0.1.0-alpha/implementation/expressions) — the deterministic `{{ ... }}` mini-language.
+6. [Runtime execution](/docs/v0.1.0-alpha/implementation/runtime-execution) — step scheduling, harness dispatch, decision routing, outer-loop scheduler.
+7. [Parallel](/docs/v0.1.0-alpha/implementation/parallel) — bounded fan-out, fan-in, branch resume.
+8. [Event log](/docs/v0.1.0-alpha/implementation/event-log) — the SQLite/WAL durability layer.
+9. [Local World storage](/docs/v0.1.0-alpha/implementation/local-world-storage) — artifact manifests, blobs, run locks, outer-loop manifests.
+10. [Replay](/docs/v0.1.0-alpha/implementation/replay) — rebuilding state without re-calling external systems.
+11. [AI SDK adapter](/docs/v0.1.0-alpha/implementation/ai-sdk-adapter) — how planner and runtime bridge to the AI SDK.
+
+Each page is short on purpose; cross-link rather than chase. If you find a gap between the diagrams and the source, the source wins — file an issue.

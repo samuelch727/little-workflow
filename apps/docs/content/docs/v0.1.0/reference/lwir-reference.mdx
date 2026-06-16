@@ -1,0 +1,75 @@
+---
+title: LWIR
+description: The planned Little Workflow Intermediate Representation.
+---
+
+LWIR is the canonical JSON runtime format. TypeScript SDK definitions, visual editor output, YAML examples, and planner output all compile into LWIR.
+
+LWIR must be:
+
+- JSON Schema valid
+- canonicalizable
+- hashable
+- immutable once registered
+- safe to diff
+- safe to replay from logs
+
+## Top-Level Shape
+
+```json
+{
+  "apiVersion": "littleworkflow.dev/v0.1",
+  "kind": "Workflow",
+  "metadata": {
+    "name": "candidate-review",
+    "version": "0.1.0",
+    "description": "Produce evidence-backed candidate decision support."
+  },
+  "input": {
+    "schema": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  },
+  "output": {
+    "schema": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  },
+  "permissions": {
+    "tools": ["artifact.read", "artifact.write", "model.call"],
+    "secrets": [],
+    "network": []
+  },
+  "steps": []
+}
+```
+
+## Step Types
+
+The initial implementation target includes:
+
+- `ai.structured`
+- `tool`
+- constrained local `code.ts`
+
+Later versions add broader fan-out, reducers, `ai.shell`, `code.python`, custom step type plugins, and agent-loop style steps.
+
+## Expressions
+
+LWIR uses a deterministic expression language:
+
+```txt
+{{ input.jobDescription }}
+{{ steps.extract.output.name }}
+{{ item.uri }}
+{{ sha256(item.uri) }}
+{{ coalesce(steps.profile.output.name, "unknown") }}
+```
+
+Allowed expressions are pure and bounded. Arbitrary JavaScript, filesystem access, network access, secret access, and dynamic imports are disallowed.
+
+## Schema Subset
+
+LWIR supports a deliberate JSON Schema subset: primitives, objects, arrays, enums, consts, bounded strings/numbers, and simple discriminated unions. Zod transforms, functions, `Date`, `bigint`, classes, maps, sets, and custom executable refinements must be rejected or normalized before LWIR registration.

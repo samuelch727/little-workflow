@@ -1,0 +1,81 @@
+---
+title: LangGraph Vs Little Harness
+description: When to choose LangGraph's durable graph runtime versus Little Harness's managed agent session workspace.
+---
+
+LangGraph and Little Harness are solving adjacent but different problems.
+
+LangGraph is a durable orchestration runtime. Little Harness is a managed product-agent harness. LangGraph asks the developer to model control flow explicitly. Little Harness asks the developer to define the agent surface and lets the runtime own sessions, files, artifacts, Persistent Dirs, tracing, and isolation defaults.
+
+## Use LangGraph When
+
+- the agent is naturally a graph of nodes and edges
+- durable execution, checkpointing, replay, or time travel is central
+- human review or approval is part of the graph
+- the app needs explicit retries, branches, subgraphs, or deterministic nodes
+- the team wants LangSmith and LangGraph Platform-style observability and deployment
+
+LangGraph is a strong fit for long-running workflows where the state machine is the product.
+
+## Use Little Harness When
+
+- the app wants a streamed chat or job route using raw `UIMessage[]`
+- the agent needs a private `/session/` workspace for files and scripts
+- large tool outputs should become artifacts instead of prompt payloads
+- the developer wants app-backed `/persistent/` directories with load/store callbacks
+- the team does not want to model every turn as a graph before the first agent works
+
+Little Harness is a strong fit when the awkward part is the agent's working environment rather than graph orchestration.
+
+## Core Difference
+
+| Question | LangGraph | Little Harness |
+|---|---|---|
+| Main abstraction | Graph state and node execution. | Harness session and managed workspace. |
+| Primary state model | Checkpoints and stores. | Session files, artifacts, Persistent Dirs, trace metadata. |
+| Control flow | Explicit graph topology. | Agent loop with runtime-managed files and commits. |
+| Streaming | Multiple stream modes; app integration is developer-owned. | AI SDK-style `streamHarness(...)`, with `generateHarness(...)` for completed results. |
+| Files/artifacts | Developer-defined side effects. | First-class runtime paths such as `/session/`, `/artifacts/`, `/persistent/`. |
+| Sandbox | Developer-provided runtime choice. | Harness-owned default runtime with possible backends. |
+
+## How They Could Work Together
+
+Little Harness could run as a LangGraph node when a graph needs a file-capable agent step.
+
+```ts
+const researchNode = async (state) => {
+  const result = streamHarness({
+    harness,
+    messages: state.messages,
+    session: state.threadId,
+    extraBody: state.context,
+  });
+
+  const finished = await result.finished;
+
+  return {
+    artifacts: finished.artifacts,
+    trace: finished.trace,
+  };
+};
+```
+
+In that shape, LangGraph owns the broader workflow and Little Harness owns the agent's working environment.
+
+## Little Harness Should Learn From LangGraph
+
+- checkpoint and replay concepts
+- long-running workflow recovery
+- human-in-the-loop boundaries
+- durable state naming such as threads and stores
+- traceability across multi-step execution
+
+The lesson is not that Little Harness should become a graph framework. The lesson is that agent work should be inspectable, resumable, and recoverable.
+
+## Sources
+
+- [LangGraph overview](https://docs.langchain.com/oss/javascript/langgraph/overview)
+- [LangGraph streaming](https://docs.langchain.com/oss/javascript/langgraph/streaming)
+- [LangGraph persistence](https://docs.langchain.com/oss/javascript/langgraph/persistence)
+- [LangGraph durable execution](https://docs.langchain.com/oss/javascript/langgraph/durable-execution)
+- [LangSmith tracing with LangGraph](https://docs.langchain.com/langsmith/trace-with-langgraph)

@@ -1,0 +1,9 @@
+packages:
+  - "apps/*"
+  - "packages/*"
+
+# Allow the native build script for the embedded WAL event store.
+# Without this, pnpm's default "ignore build scripts" leaves better-sqlite3
+# without its compiled binding and `require("better-sqlite3")` fails at runtime.
+onlyBuiltDependencies:
+  - better-sqlite3

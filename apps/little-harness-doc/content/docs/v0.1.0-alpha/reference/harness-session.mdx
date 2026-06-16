@@ -1,0 +1,128 @@
+---
+title: HarnessSession
+description: Session handles, continuation, and out-of-band file staging.
+---
+
+A `HarnessSession` is the durable isolated boundary for one conversation or job.
+It owns the private workspace, artifacts, Persistent Dir checkouts, trace, and
+continuation handle.
+
+Most apps can pass a string session key directly to `streamHarness()` or
+`generateHarness()`. Use an explicit session handle when the host app needs to
+stage files or inspect state outside a model turn.
+
+## Basic Usage
+
+```ts
+const session = await harness.sessions.getOrCreate({
+  id: chatId,
+  extraBody,
+});
+
+await session.files.write("/session/app-context/customer-history.csv", stream, {
+  mediaType: "text/csv",
+  source: "app-context",
+});
+
+const result = streamHarness({
+  harness,
+  messages,
+  session,
+});
+```
+
+## API Shape
+
+```ts
+type HarnessSession = {
+  id: string;
+  files: FileWriter;
+  artifacts: ArtifactStore;
+  trace: TraceRef;
+  status(): Promise<HarnessSessionStatus>;
+};
+```
+
+The exact shape can stay small. Session handles should be stable enough to pass
+between host setup code and execution calls.
+
+## Session Manager
+
+```ts
+type HarnessSessionManager<TExtraBody = unknown> = {
+  getOrCreate(options: GetOrCreateSessionOptions<TExtraBody>): Promise<HarnessSession>;
+  get(id: string): Promise<HarnessSession | undefined>;
+};
+```
+
+### `getOrCreate`
+
+Creates a new isolated workspace or resumes an existing one.
+
+```ts
+const session = await harness.sessions.getOrCreate({
+  id: "chat_123",
+  extraBody: { userId: "user_123" },
+});
+```
+
+### `get`
+
+Looks up an existing session without creating one.
+
+```ts
+const session = await harness.sessions.get("chat_123");
+```
+
+## `GetOrCreateSessionOptions`
+
+### `id`
+
+`string`
+
+App-defined session key.
+
+### `extraBody`
+
+`TExtraBody`
+
+App-defined context used by storage, policy, events, and traces.
+
+### `metadata`
+
+Host metadata object.
+
+Optional host metadata for trace and debugging.
+
+## Out-Of-Band File Staging
+
+Use `session.files` when data arrives between chat messages.
+
+```ts
+await session.files.write("/session/uploads/report.pdf", reportStream, {
+  mediaType: "application/pdf",
+  source: "background-upload",
+});
+```
+
+The next agent turn can see the file in the same private workspace.
+
+## Persistent Dir Writes
+
+If the staged path is inside a Persistent Dir, Little Harness should still write
+into the session first.
+
+```ts
+await session.files.write("/persistent/user/uploads/report.pdf", reportStream);
+```
+
+Because host-staged writes can happen without a future model turn, the runtime
+may commit that one operation immediately. If the commit fails, the host
+operation should receive the failure and the file should remain recoverable from
+the session workspace.
+
+## Isolation Rule
+
+Two sessions must not see each other's files unless the developer configured a
+shared Persistent Dir or exposed an app tool that deliberately reads shared
+data.

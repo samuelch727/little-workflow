@@ -1,0 +1,48 @@
+---
+title: OpenAI Agents SDK Vs Little Harness
+description: When to choose OpenAI's agent runtime versus a model-neutral app harness.
+---
+
+OpenAI Agents SDK is a batteries-included agent runtime with tools, handoffs, sessions, guardrails, MCP, hosted tools, tracing, and sandbox agents.
+
+It is one of the strongest general-purpose alternatives because it solves more than just model calls.
+
+## Use OpenAI Agents SDK When
+
+- the app is comfortable being OpenAI-first
+- built-in sessions and tracing are a priority
+- handoffs, guardrails, hosted tools, or MCP support are central
+- the team wants a complete runner loop instead of designing one
+- sandbox agents fit the execution model
+
+## Use Little Harness When
+
+- the app wants model-neutral backend architecture
+- the primary API should be AI SDK-style `UIMessage[]` streaming
+- persistence should be app-backed harness directories, not only conversation/session stores
+- artifacts and large tool outputs need product-specific handling
+- the developer wants to own storage, auth, tenancy, and export side effects
+
+## Core Difference
+
+| Question | OpenAI Agents SDK | Little Harness |
+|---|---|---|
+| Main abstraction | Agent runner with tools, handoffs, sessions, guardrails. | Harness session with files, artifacts, Persistent Dirs. |
+| Provider posture | OpenAI-first. | Model-neutral by design. |
+| Sessions | Built-in and custom session backends. | App session key plus managed workspace. |
+| Files/sandbox | Sandbox agents provide a stronger file-capable story than most SDKs. | Filesystem and persistence are the core product abstraction. |
+| Tracing | Built-in tracing by default. | Host-facing traces including model, tool, shell, file, artifact, and commit events. |
+
+## How They Could Work Together
+
+Little Harness could expose an OpenAI Agents SDK runtime backend later, or tools inside Little Harness could call OpenAI hosted tools.
+
+The boundary should stay clear: OpenAI Agents SDK can own the runner; Little Harness should own the product-facing workspace and persistence contract.
+
+## Sources
+
+- [OpenAI Agents SDK running agents](https://openai.github.io/openai-agents-python/running_agents/)
+- [OpenAI Agents SDK sessions](https://openai.github.io/openai-agents-python/sessions/)
+- [OpenAI Agents SDK tools](https://openai.github.io/openai-agents-python/tools/)
+- [OpenAI Agents SDK sandbox agents](https://openai.github.io/openai-agents-python/sandbox_agents/)
+- [OpenAI Agents SDK tracing](https://openai.github.io/openai-agents-python/tracing/)

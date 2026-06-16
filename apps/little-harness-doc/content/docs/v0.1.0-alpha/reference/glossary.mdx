@@ -1,0 +1,58 @@
+---
+title: Glossary
+description: Short definitions for Little Harness concepts.
+---
+
+## A
+
+**Artifact** — A file or payload produced inside the harness, usually too large or too durable to keep inline in model context.
+
+## E
+
+**Export** — A deliberate app-level write that moves a harness artifact or result into product state.
+
+**Execution API** — The public call surface for a harness. `streamHarness()` streams an AI SDK-compatible UI response; `generateHarness()` returns a completed result. Both should share the same session, input, tool, artifact, persistence, and trace semantics.
+
+**Extra Body** — App-defined request context passed to execution calls, tools, Persistent Dir callbacks, events, and trace metadata.
+
+## H
+
+**Harness** — The managed runtime boundary around an agent: model loop, tools, skills, files, artifacts, tracing, and persistence behavior.
+
+**Harness Input Type** — A reusable definition for a non-chat `type + input` call. It can describe the input, validate it, translate it into model messages, and provide default output expectations.
+
+**Harness Dir** — A directory path inside the Little Harness filesystem, such as `/persistent/user`. It is separate from the source directory, object-store prefix, or app storage record that backs it.
+
+**Harness Memory** — An opt-in Persistent Dir convenience layer that lets the model save compact durable lessons through `remember` and receive a bounded memory index in future turns.
+
+## L
+
+**Local Host** — The zero-service development host for Little Harness. It stores session folders, artifacts, traces, local Persistent Dir sources, and locks under a local `dataDir`.
+
+## M
+
+**Message Staging** — The pre-turn hook that lets a developer turn uploaded chat-message files into session files and return a small path-only notice for the model.
+
+## P
+
+**Persistent Dir** — An opt-in developer-backed directory exposed inside a session at a `harnessDir` so selected files can persist across sessions.
+
+**Project Dir** — An explicit local filesystem source reference that must resolve inside the configured project root before Local Host exposes it.
+
+## S
+
+**Session** — The durable isolated boundary for one conversation or job. Owns workspace, artifacts, trace, and continuation handle.
+
+**Session Files** — Files inside one session's isolated filesystem. They can be written by the app, message staging, tools, or the agent, and persist across turns in that session.
+
+**Skill** — Procedural knowledge exposed read-only for the agent, usually as a `SKILL.md` file plus supporting material.
+
+## T
+
+**Tool** — A host-provided capability exposed to the agent.
+
+**Trace** — The host-facing record of model calls, tool calls, file changes, artifacts, commits, and failures.
+
+## W
+
+**Workspace** — Avoid for Little Harness docs when referring to the agent-visible filesystem. Prefer **Session Files** or `/session/`.

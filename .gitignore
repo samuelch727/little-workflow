@@ -1,0 +1,54 @@
+# dependencies
+node_modules
+
+# build outputs
+.turbo
+dist
+packages/*/dist
+apps/*/.next
+apps/*/out
+apps/*/build
+
+# generated framework/content files
+apps/*/.source
+apps/*/next-env.d.ts
+*.tsbuildinfo
+
+# environment and local files
+.worktrees
+.worktree
+.env
+.env.*
+!.env.example
+**/.secrets/
+.DS_Store
+.vercel
+
+# local agent runtime mounts and harness config (not authored repo content)
+.agents/
+.claude/
+refRepo/
+
+# internal agent/skill working artifacts (not part of the public repo):
+# design docs, plans, specs, handoffs, reviews, and the local dev-skill manifest
+docs/superpowers/
+docs/reviews/
+skills-lock.json
+
+# private design/decision docs (kept locally, not published):
+# domain model, product/runtime spec, and architecture decision records
+CONTEXT.md
+spec.md
+docs/adr/
+
+# generated spec renders (source of truth is spec.md)
+little-workflow-spec.pdf
+spec-body.html
+spec-print.html
+spec-review.md
+
+# little-workflow runtime output
+**/.little-workflow/
+**/.little-workflow-*/
+**/.little-harness/
+**/.little-harness-*/

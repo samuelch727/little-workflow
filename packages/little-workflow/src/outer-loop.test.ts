@@ -6,6 +6,7 @@ import {
   appendEvent,
   createLittleWorkflow,
   createToolRegistry,
+  createWorkflowHarness,
   getWorkflowDefinitionHash,
   listEvents,
   localWorld,
@@ -216,6 +217,32 @@ describe("Layer B — runWorkflow with maxOuterCycles", () => {
     expect(vi.mocked(planner.supervise!)).toHaveBeenCalledTimes(3);
   });
 
+  it("forwards progress callbacks into outer-loop cycle runs", async () => {
+    const planner = plannerWithSupervise([
+      { kind: "done", finalOutput: { result: "final-answer" } },
+    ]);
+    const progressEvents: Array<{ currentStep?: string; lastEvent?: unknown }> = [];
+
+    const result = await runWorkflow({
+      world,
+      workflows: simpleWorkflow,
+      input: { value: "test" },
+      planner,
+      tools: simpleToolRegistry,
+      maxOuterCycles: 2,
+      progress: (event) => {
+        progressEvents.push(event);
+      },
+    });
+
+    expect(result.status).toBe("completed");
+    expect(progressEvents.some((event) =>
+      event.currentStep === "process" &&
+      typeof event.lastEvent === "object" &&
+      event.lastEvent !== null
+    )).toBe(true);
+  });
+
   it("uses workflow.planner harness for draft while planner adapter supplies supervise", async () => {
     const harnessPlannerLwir = (): LwirWorkflow => ({
       ...simpleLwir(),
@@ -302,6 +329,85 @@ describe("Layer B — runWorkflow with maxOuterCycles", () => {
     // Spec §3.4 step 7: structured fields on RunFailedError for outer_loop_exhausted.
     expect(caught?.outerLoopId).toMatch(/^ol_/u);
     expect(caught?.lastCycleOutput).toEqual({ result: "processed:test" });
+    // The workflow makes no model calls, so $0 here is a measurement, not a placeholder:
+    // unpricedCalls === 0 is what separates it from an unknown total.
+    expect(caught?.result?.usage.costUsd).toBe(0);
+    expect(caught?.result?.usage.unpricedCalls).toBe(0);
+  });
+
+  it("reports the money an exhausted outer loop actually spent", async () => {
+    // The exhausted path used to report `emptyUsageTotals()` — costUsd: 0 — whenever the
+    // final cycle produced no in-memory RunResult, which is exactly what happens when
+    // that cycle fails or when the loop is resumed from a manifest after a crash. Under
+    // this package's contract 0 is an affirmative claim that nothing was spent, so a loop
+    // that burned paid cycles and then hit maxOuterCycles issued a false receipt. Usage
+    // is now materialized from the final cycle's durable event log, as the `done` path
+    // already did.
+    const aiLoop = {
+      generate: vi.fn(async () => ({
+        output: { result: "cycle output" },
+        usage: { inputTokens: 10_000, outputTokens: 2_000 },
+      })),
+    };
+    const pricedWorkflow = createLittleWorkflow({
+      id: "outer-loop-test.priced",
+      description: "An outer-loop workflow that spends real money.",
+      inputSchema: simpleInputSchema,
+      output: output.object({ schema: simpleOutputSchema }),
+      models: [model({ provider: "deepseek.chat", modelId: "deepseek-v4-flash" }, { id: "model.fast" })],
+      worker: { harness: createWorkflowHarness({ aiLoop }) },
+    } as unknown as Parameters<typeof createLittleWorkflow>[0]);
+    const pricedLwir: LwirWorkflow = {
+      apiVersion: "littleworkflow.dev/v0.1",
+      kind: "Workflow",
+      metadata: {
+        name: "outer-loop-test.priced",
+        version: "0.1.0-alpha",
+        description: "An outer-loop workflow that spends real money.",
+      },
+      input: { schema: simpleInputSchema },
+      output: { schema: simpleOutputSchema },
+      permissions: { tools: [], models: ["model.fast"], secrets: [], network: [] },
+      steps: [
+        {
+          id: "summarize",
+          uses: "ai.generate",
+          with: { model: "model.fast", prompt: "Summarize: {{ input.value }}" },
+          output: { mode: "object", schema: simpleOutputSchema },
+        },
+      ],
+    };
+
+    const planner: PlannerAdapter = {
+      draft: vi.fn(async () => pricedLwir),
+      supervise: vi.fn(async () => ({ kind: "continue" }) as SuperviseDecision),
+    };
+
+    let caught: RunFailedError | undefined;
+    try {
+      await runWorkflow({
+        world,
+        workflows: pricedWorkflow,
+        input: { value: "test" },
+        planner,
+        maxOuterCycles: 2,
+      });
+    } catch (err) {
+      caught = err as RunFailedError;
+    }
+
+    expect(caught?.causeCode).toBe("outer_loop_exhausted");
+    // deepseek/deepseek-v4-flash is listed at input $0.14 / output $0.28 per 1M tokens.
+    //   10,000 input  x $0.14 / 1M = $0.00140
+    //    2,000 output x $0.28 / 1M = $0.00056
+    //                        total = $0.00196
+    expect(caught?.result?.usage.costUsd).toBeCloseTo(0.00196, 12);
+    expect(caught?.result?.usage.pricedCalls).toBe(1);
+    expect(caught?.result?.usage.inputTokens).toBe(10_000);
+    // Known limitation, unchanged by this fix: the reported usage is the *final cycle's*
+    // only. Both cycles called the model, but an outer-loop result never sums across
+    // cycles — each cycle has its own runId and its own event log.
+    expect(aiLoop.generate).toHaveBeenCalledTimes(2);
   });
 
   it("each cycle's OrchestrationRequest carries outerLoop context with correct fields", async () => {
@@ -1028,6 +1134,81 @@ describe("outer-loop replay (Layer B §3.6)", () => {
     // Structured fields from Spec §3.4 step 7.
     expect(caught?.outerLoopId).toBe(outerLoopId);
     expect(caught?.lastCycleOutput).toEqual(lastCycleOutput);
+  });
+
+  it("recovers the exhausted run's real spend when there is no in-memory RunResult", async () => {
+    // The discriminating regression test for the false-$0 receipt. On this path
+    // `buildOuterLoopExhaustedError` is handed `lastRunResult: undefined` — as it also is
+    // whenever the final cycle *fails* — so the old `lastRunResult?.usage ??
+    // emptyUsageTotals()` fell through to `costUsd: 0`: an affirmative claim that a loop
+    // which had already burned paid cycles spent nothing. Usage is now read back from the
+    // final cycle's durable event log, so the paid call injected below must surface.
+    const outerLoopId = "ol_exhaustedusagerecovery000000000000";
+    const cycle1RunId = "run_exhaustedusagecycle1000000000000";
+    const cycle2RunId = "run_exhaustedusagecycle2000000000000";
+    const fakeWvId = "wv_exhaustedusagefake0000000000000000";
+
+    await writeOuterLoopManifest(world, outerLoopId, {
+      outerLoopId,
+      goal: {
+        workflowDefinitionHash: simpleWorkflowDefinitionHash(),
+        description: "outer-loop-test.simple",
+      },
+      maxCycles: 2,
+      cycles: [
+        {
+          cycleNumber: 1,
+          runId: cycle1RunId,
+          workflowVersionId: fakeWvId,
+          status: "completed",
+          output: { result: "cycle-1-output" },
+        },
+        {
+          cycleNumber: 2,
+          runId: cycle2RunId,
+          workflowVersionId: fakeWvId,
+          status: "completed",
+          output: { result: "cycle-2-output" },
+        },
+      ],
+    });
+
+    // The final cycle really did call a paid model before the crash.
+    await appendEvent(world, cycle2RunId, {
+      type: "harness.model.responded",
+      payload: {
+        turn: 1,
+        stepPath: "summarize",
+        model: { provider: "deepseek.chat", modelId: "deepseek-v4-flash" },
+        response: { text: "ok", usage: { inputTokens: 10_000, outputTokens: 2_000 } },
+      },
+    });
+    await appendEvent(world, cycle2RunId, {
+      type: "OuterLoopCycleCompleted",
+      payload: { outerLoopId, cycleNumber: 2, supervise: { kind: "continue" } },
+    });
+
+    let caught: RunFailedError | undefined;
+    try {
+      await runWorkflow({
+        world,
+        workflows: simpleWorkflow,
+        input: { value: "usage-recovery" },
+        planner: plannerWithSupervise([]),
+        tools: simpleToolRegistry,
+        maxOuterCycles: 2,
+        outerLoopId,
+      });
+    } catch (err) {
+      caught = err as RunFailedError;
+    }
+
+    expect(caught?.causeCode).toBe("outer_loop_exhausted");
+    // deepseek/deepseek-v4-flash is listed at input $0.14 / output $0.28 per 1M tokens:
+    // 10,000 x $0.14/1M + 2,000 x $0.28/1M = $0.00196. The old code reported $0.
+    expect(caught?.result?.usage.costUsd).toBeCloseTo(0.00196, 12);
+    expect(caught?.result?.usage.pricedCalls).toBe(1);
+    expect(caught?.result?.usage.inputTokens).toBe(10_000);
   });
 });
 

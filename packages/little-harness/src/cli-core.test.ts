@@ -403,6 +403,114 @@ describe("little-harness CLI", () => {
     });
   });
 
+  it("aggregates outcomes into success rates that always carry their sample size", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "little-harness-cli-outcomes-"));
+    const dataDir = join(dir, ".little-harness");
+    const host = localHost({ dataDir });
+    const first = (await host.sessions.getOrCreate({ id: "chat_123" })) as LocalHarnessSession;
+    const second = (await host.sessions.getOrCreate({ id: "chat_456" })) as LocalHarnessSession;
+
+    const outcome = (
+      sessionId: string,
+      sequence: number,
+      metadata: Record<string, unknown>,
+    ) =>
+      JSON.stringify({
+        schemaVersion: "lh.trace.v2",
+        eventId: `evt_${sessionId}_${sequence}`,
+        sequence,
+        type: "outcome.reported",
+        sessionId,
+        timestamp: "2026-08-07T00:00:00.000Z",
+        metadata: { source: "chat-sdk", ...metadata },
+      });
+
+    const promptA = "a".repeat(64);
+    const promptB = "b".repeat(64);
+    await writeFile(
+      first.paths.traceFile,
+      [
+        JSON.stringify(traceEvent("harness.model.called", 1)),
+        // A thumbs-down toggled to a thumbs-up by the same rater: both are retained, the
+        // later one is authoritative.
+        outcome("chat_123", 3_000_000_000_000_001, {
+          status: "failure",
+          promptHash: promptA,
+          reportKey: "k1",
+        }),
+        outcome("chat_123", 3_000_000_000_000_002, {
+          status: "success",
+          promptHash: promptA,
+          reportKey: "k1",
+        }),
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    await writeFile(
+      second.paths.traceFile,
+      [
+        outcome("chat_456", 3_000_000_000_000_003, {
+          status: "failure",
+          promptHash: promptA,
+          reportKey: "k2",
+        }),
+        outcome("chat_456", 3_000_000_000_000_004, {
+          status: "success",
+          promptHash: promptB,
+          stepPath: "root/draft",
+          reportKey: "k3",
+        }),
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const all = await invoke(["--data-dir", dataDir, "outcomes"], dir);
+    expect(all.exitCode).toBe(0);
+    expect(all.stderr).toBe("");
+    expect(JSON.parse(all.stdout)).toEqual({
+      sessionIds: ["chat_123", "chat_456"],
+      invalidEventCount: 0,
+      eventCount: 4,
+      countedCount: 3,
+      supersededCount: 1,
+      retractedCount: 0,
+      clearedCount: 0,
+      overall: { n: 3, success: 2, failure: 1, partial: 0, successRate: 2 / 3 },
+      byPromptHash: [
+        { key: promptA, n: 2, success: 1, failure: 1, partial: 0, successRate: 0.5 },
+        { key: promptB, n: 1, success: 1, failure: 0, partial: 0, successRate: 1 },
+      ],
+      byStepPath: [
+        { key: "root/draft", n: 1, success: 1, failure: 0, partial: 0, successRate: 1 },
+      ],
+      unattributed: { withoutPromptHash: 0, withoutStepPath: 2 },
+    });
+
+    const scoped = await invoke(["--data-dir", dataDir, "outcomes", "chat_123"], dir);
+    expect(JSON.parse(scoped.stdout)).toMatchObject({
+      sessionIds: ["chat_123"],
+      eventCount: 2,
+      countedCount: 1,
+      overall: { n: 1, success: 1, failure: 0, partial: 0, successRate: 1 },
+    });
+  });
+
+  it("reports an empty outcome sample as a null rate, never a fabricated zero", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "little-harness-cli-outcomes-empty-"));
+    const dataDir = join(dir, ".little-harness");
+    localHost({ dataDir });
+
+    const result = await invoke(["--data-dir", dataDir, "outcomes"], dir);
+
+    expect(result.exitCode).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      eventCount: 0,
+      overall: { n: 0, successRate: null },
+    });
+  });
+
   it("does not count generic content refs as spooled tool outputs in doctor", async () => {
     const dir = await mkdtemp(join(tmpdir(), "little-harness-cli-doctor-spooled-"));
     const host = localHost({ dataDir: join(dir, ".little-harness") });

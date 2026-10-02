@@ -12,10 +12,6 @@ type Version = {
 
 const versions: Version[] = [
   { label: 'Latest', version: 'v0.1.0-alpha', slug: 'v0.1.0-alpha' },
-  { label: 'Beta', version: 'v0.1.0-beta', slug: 'v0.1.0-beta' },
-  { label: 'Stable', version: 'v0.1.0', slug: 'v0.1.0' },
-  { label: 'Next', version: 'v0.2.0', slug: 'v0.2.0' },
-  { label: 'Future', version: 'v1.0.0', slug: 'v1.0.0' },
 ];
 
 function getActiveVersion(pathname: string): Version {

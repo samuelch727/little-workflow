@@ -1,0 +1,143 @@
+---
+title: Execution Tiers
+description: Classify shell scripts before they run, and escalate the commands just-bash cannot run to a real execution environment.
+---
+
+Every built-in execution environment runs **Tier-0**: just-bash, bash emulated in
+JavaScript over the session's virtual filesystem. Tier-0 covers file and text work
+(`ls`, `rg`, `jq`, `sqlite3`, optional Python and JavaScript), but it has no git,
+containers, compilers, package managers, or real network clients. Little Harness
+ships two opt-in pieces for those commands:
+
+- **Command classification** — `classifyCommand`, `detectEmulationGap`, and the
+  versioned `tier0CapabilityMatrix()` decide whether a script can run on Tier-0.
+- **Tiered execution** — `tieredExecutionEnvironment({ nextTier })` is an
+  execution-environment factory that runs Tier-0 and switches to a higher tier
+  you provide when a command needs it.
+
+Nothing here is on by default. `localHost()`'s default `"auto"` mode chooses
+*where* Tier-0 runs (in-process or the subprocess sandbox); tiers decide what
+happens to a command Tier-0 cannot run at all.
+
+## Classify Before Running
+
+`classifyCommand(script, options?)` reads the script's AST and returns a decision
+**without executing anything**:
+
+```ts
+import { classifyCommand } from "little-harness";
+
+classifyCommand("rm -rf build && cargo build");
+// {
+//   decision: "escalate",
+//   reasons: [
+//     { kind: "needs-real-exec", command: "cargo", reason: "build-toolchain" },
+//     { kind: "tier0-supported", commands: ["rm"] },
+//   ],
+// }
+```
+
+| Decision | Meaning |
+|---|---|
+| `"run"` | Every command the script names is emulated at the given `runtime` settings. |
+| `"escalate"` | The script is well-formed but needs a tier just-bash cannot provide. Not an error. |
+| `"deny"` | `policy.denyCommands` forbids it. Escalating would not help. |
+
+Deciding first is the point. Run on Tier-0, the script above deletes `build`
+and only then fails `cargo` with exit 127; re-running it on a real tier repeats
+the destructive prefix. Classification escalates before the first side effect.
+
+Reason kinds are `tier0-supported`, `empty-script`, `unknown-command`,
+`needs-real-exec` (with a reason such as `version-control`, `containers`,
+`build-toolchain`, `package-manager`, or `network-client`), `capability-disabled`,
+`policy-blocked`, `dynamic-command`, `opaque-script`, `parse-failed`, and
+`classifier-unavailable`. A command just-bash *could* run but whose toggle is off
+(`curl` without `runtime.network`, `python3` with `runtime.python: false`) is
+`capability-disabled` and escalates — a tier with the capability runs it.
+
+Options: `runtime` (the toggles the script would run under), `policy`
+(`{ denyCommands, rule? }`), and `matrix` (pin a capability-matrix version).
+
+Classification cannot see inside `./build.sh`, a command passed to a runner
+(`xargs cargo build`, `timeout 5 docker ps`), or which flags an emulated command
+implements. `detectEmulationGap(result)` is the back-stop: given a finished
+Tier-0 result, it returns `{ kind: "emulation-gap", signal, command, option? }`
+when stderr shows just-bash's own `command not found` or option-parser
+rejection. It matches stderr, not the exit code, and stderr is script-writable,
+so a consumer must bound it to one escalation per command.
+
+## Tiered Execution
+
+```ts
+import {
+  createHarness,
+  localHost,
+  subprocessSandbox,
+  tieredExecutionEnvironment,
+} from "little-harness";
+
+const harness = createHarness({
+  host: localHost({
+    executionEnvironment: tieredExecutionEnvironment({
+      tier0: subprocessSandbox(),   // defaults to in-process just-bash
+      nextTier: myContainerSandbox(), // any HarnessExecutionEnvironmentFactory you provide
+      policy: { denyCommands: ["docker"] },
+    }),
+  }),
+  model,
+});
+```
+
+`nextTier` is provisioned lazily on the first escalation — a turn that never
+escalates never pays for it. Build one with the shared machinery described in
+[Writing a custom execution environment](/docs/v0.1.0-alpha/runtime/execution-environments#writing-a-custom-execution-environment).
+
+How a turn moves:
+
+- **Two signals escalate.** A `classifyCommand` decision of `"escalate"` switches
+  before the command runs. An emulation gap found after a Tier-0 run escalates and
+  retries **that command once** — the retry is the containment against forged
+  stderr, and the reason classification runs first.
+- **The switch is invisible to the model.** System hints always come from Tier-0
+  (they feed `promptHash` replay), and one shell runtime traces every command, so
+  all tiers emit identical `harness.runtime.command.*` events.
+- **Escalation is sticky.** Once a turn is on the higher tier, every later command
+  runs there.
+- **Only env and cwd cross the switch.** Exported variables and the working
+  directory are replayed into the new tier; tier-owned variables such as `PATH`
+  and `HOME` are dropped.
+- **Unavailable means refused, not downgraded.** When escalation is required but no
+  `nextTier` is configured, or it fails to provision, the command does not run: it
+  returns exit code `126` (`TIER_REFUSED_EXIT_CODE`) with a `little-harness:`
+  stderr line naming the reason. Policy-denied commands are refused the same way on
+  every tier.
+
+## Events
+
+The tier events are out-of-band: they appear in the trace and `onEvent`, never in
+the prompt.
+
+| Event | When | Metadata |
+|---|---|---|
+| `harness.runtime.tier.escalated` | The turn switched to `nextTier`. | `from`, `to`, `trigger` (`"classification"` or `"emulation-gap"`), `command`, `decision`/`reasons` or `gap` |
+| `harness.runtime.tier.unavailable` | Escalation was needed but the higher tier could not be used. | the same, plus `detail` |
+| `harness.runtime.command.denied` | `policy.denyCommands` blocked a command. | `command`, `reasons` |
+| `harness.runtime.dispose.failed` | Any execution environment's teardown threw (not tier-specific). | `error` envelope |
+
+`little-harness doctor` counts `harness.runtime.dispose.failed` as a failure.
+
+## Teardown And Tracked Files
+
+A higher tier may write to the session's tracked mounts while it is disposed —
+syncing a sandbox workspace back to the host, for instance. The tiered runtime
+snapshots tracked mounts around its own disposal (only when the turn escalated)
+and emits the usual `harness.file.*` events for whatever changed. A custom
+environment that writes outside a `bash` command can do the same with
+`snapshotTrackedMounts(workspace)` and
+`emitTrackedMountFileChanges({ workspace, before, emit, files })`.
+
+## Next Steps
+
+- [Execution Environments](/docs/v0.1.0-alpha/runtime/execution-environments) — modes, the subprocess sandbox, and custom factories.
+- [Isolation And Security](/docs/v0.1.0-alpha/runtime/isolation-and-security) — the Tier-0 security contract.
+- [Events](/docs/v0.1.0-alpha/reference/events) — the full trace vocabulary.

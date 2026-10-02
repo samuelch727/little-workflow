@@ -9,14 +9,21 @@ With `localHost()`, session data is stored under `.little-harness/` by default:
 ```txt
 .little-harness/
   sessions/<session-path-key>/
-    session/
-    artifacts/
-    persistent/
-    skills/
+    session/            -> /session
+    artifacts/          -> /artifacts (includes trace/ content refs and tool-results/)
+    persistent/         -> /persistent checkout
+    .agents/            -> /.agents (staged read-only skills under .agents/skills/)
     turns/
+    workflows/          event stores of workflow runs started by this session's turns
+    dynamic-workflows/  event stores of one-shot plans (when dynamicWorkflows is on)
     trace.ndjson
     status.json
+  persistent/           local Persistent Dir sources
+  locks/
 ```
+
+`localHost()` sets `HarnessSession.dataDir` to the session folder, which is where workflow tools write
+their run stores. A custom host that leaves `dataDir` unset gets `<cwd>/<sessionId>/workflows`.
 
 Trace events use schema version `lh.trace.v2`. Disable persisted traces with `trace: false`; `onEvent` still receives callback events.
 
@@ -93,7 +100,11 @@ Generic harness events include:
 - `harness.runtime.command.started`
 - `harness.runtime.command.succeeded`
 - `harness.runtime.command.failed`
+- `harness.runtime.command.denied`
+- `harness.runtime.tier.escalated`
+- `harness.runtime.tier.unavailable`
 - `harness.runtime.error`
+- `harness.runtime.dispose.failed`
 - `harness.file.created`
 - `harness.file.updated`
 - `harness.file.deleted`
@@ -107,7 +118,27 @@ Generic harness events include:
 - `harness.persistent_dir.commit.succeeded`
 - `harness.persistent_dir.commit.failed`
 
+The `harness.runtime.tier.*` and `harness.runtime.command.denied` events appear
+only under `tieredExecutionEnvironment`. They record why a turn changed execution
+tier (or refused to run a command) and are never part of the model-visible prompt
+surface; commands themselves are traced identically whichever tier ran them.
+`harness.runtime.dispose.failed` records an execution environment whose teardown
+threw (error envelope under `metadata.error`); `little-harness doctor` counts it as
+a failure.
+
 Workflow harness runs add workflow-specific execute-step events.
+
+### `outcome.reported`
+
+`outcome.reported` is a **side-channel** trace event: a verdict written onto a run
+after the fact by `reportHarnessOutcome`, `createHarnessOutcomeReporter`, or a Chat
+SDK reaction. It is a valid trace event (and reaches `readLocalTrace`), but it is
+deliberately not a `HarnessEventType` — it never enters the durable session log,
+because an outcome is never an input to the run it describes. Its metadata carries
+`status` (`"success" | "failure" | "partial"`), `source`, and the optional
+`retracted`, `score`, `detail`, `reporter` (pseudonymous), `reportKey`, `stepPath`,
+and `promptHash`. Aggregate them with `aggregateLocalOutcomes({ dataDir })` or the
+`little-harness outcomes [session-id]` CLI.
 
 ## Trace Options
 
@@ -141,10 +172,12 @@ Default redaction metadata keys include `apiKey`, `authorization`, `cookie`, `se
 
 ## Durability Replay
 
-Pass a `durability` sink to `createHarness`, `generateHarness`, or `streamHarness` when model/tool calls should be replayable.
+Pass a session log (`sessionLog`, or its historical alias `durability`) to `createHarness`, `generateHarness`, or `streamHarness` when model/tool calls should be replayable. `sessionLog` wins when both are set.
 
 ```ts
-const durability = {
+import type { HarnessSessionLog } from "little-harness";
+
+const sessionLog: HarnessSessionLog = {
   append: async (event) => persistedEvent,
   priorEvents: async (query) => persistedEvents,
 };
@@ -154,9 +187,24 @@ const result = await generateHarness({
   type: "job",
   input,
   runId: "stable-run-id",
-  durability,
+  sessionLog,
 });
 ```
+
+`createInMemorySessionLog()` and `createFileSessionLog({ path })` are ready-made
+stores: they satisfy `HarnessSessionLog` directly and also back
+`startSessionLogServer({ store })`.
+
+The package ships ready-made sinks so the log can live outside the process:
+`startSessionLogServer()` serves the append-only log over HTTP (optional
+bearer auth; pass `createFileSessionLog({ path })` as its `store` for
+durability across server restarts) and `remoteSessionLog({ baseUrl })` is the
+matching `HarnessSessionLog` client. A fresh process re-invoked with the
+same `runId` resumes from the remote log alone. Appends are awaited before
+the turn proceeds, and the client times out stalled requests (`timeoutMs`,
+default 30 s) so a dead log service fails the turn instead of hanging it.
+Tool results that cross the remote log must be JSON-safe — they round-trip
+through serialization on resume.
 
 Replay matching depends on request hashes for model prompts and tool calls. Do not mutate prior events. Use a stable `runId` when retrying the same run.
 

@@ -3,6 +3,8 @@ title: localHost()
 description: Configure the zero-service local development host.
 ---
 
+import { Files, File, Folder } from 'fumadocs-ui/components/files';
+
 `localHost()` configures the Local Host used by `createHarness()`.
 
 It is the default implementation target for the first fully working Little
@@ -32,29 +34,36 @@ const harness = createHarness({
 
 Local Host stores sessions under `dataDir` with names that mirror harness paths:
 
-```txt
-.little-harness/
-  sessions/
-    <session-key>/
-      session/
-      artifacts/
-        trace/
-        tool-results/
-      skills/
-      persistent/
-      turns/
-      trace.ndjson
-      status.json
-  persistent/
-  locks/
-```
+<Files>
+  <Folder name=".little-harness" defaultOpen>
+    <Folder name="sessions" defaultOpen>
+      <Folder name="<session-key>" defaultOpen>
+        <Folder name="session" defaultOpen></Folder>
+        <Folder name="artifacts" defaultOpen>
+          <Folder name="trace" defaultOpen></Folder>
+          <Folder name="tool-results" defaultOpen></Folder>
+        </Folder>
+        <Folder name=".agents/skills" defaultOpen></Folder>
+        <Folder name="persistent" defaultOpen></Folder>
+        <Folder name="turns" defaultOpen></Folder>
+        <Folder name="workflows" defaultOpen></Folder>
+        <File name="trace.ndjson" />
+        <File name="status.json" />
+      </Folder>
+    </Folder>
+    <Folder name="persistent" defaultOpen></Folder>
+    <Folder name="locks" defaultOpen></Folder>
+  </Folder>
+</Files>
 
 `session/` maps to `/session`, `artifacts/` maps to `/artifacts`,
 `.agents/skills/` contains read-only materialized skills, and `persistent/` contains the session checkout
-for configured Persistent Dirs.
+for configured Persistent Dirs. `workflows/` holds the event stores of workflow runs started by this
+session's workflow tools (and `dynamic-workflows/` those of one-shot plans): `localHost()` sets the
+session's `dataDir` to this folder.
 
 `trace.ndjson` is append-only newline-delimited JSON. Each line is a validated
-`lh.trace.v1` event. Large trace payloads are stored under
+`lh.trace.v2` event. Large trace payloads are stored under
 `/artifacts/trace/...` and referenced from events by `contentRef`.
 
 ## API Signature
@@ -67,6 +76,12 @@ type LocalHostOptions = {
   projectRoot?: string;
   maxConcurrentSessions?: number;
   sameSession?: "queue" | "reject";
+  executionEnvironment?:
+    | "auto"
+    | "in-process"
+    | "subprocess"
+    | HarnessExecutionEnvironmentFactory;
+  orchestration?: HarnessOrchestrationServices;
 };
 ```
 
@@ -118,6 +133,10 @@ localHost({ maxConcurrentSessions: 4 })
 Same-session work is still serialized even when this allows multiple sessions
 to run concurrently.
 
+This queue is process-local. It prevents two turns in the same Node.js runtime
+from mutating a session at once, but it is not a distributed lock across
+multiple serverless instances or separate processes.
+
 ### `sameSession`
 
 `"queue" | "reject"`
@@ -131,6 +150,47 @@ localHost({ sameSession: "reject" })
 ```
 
 The invariant is fixed: one session never runs two turns at the same time.
+
+### `executionEnvironment`
+
+`"auto" | "in-process" | "subprocess" | HarnessExecutionEnvironmentFactory | undefined`
+
+Where runtime (bash) turns run. Defaults to `"auto"`.
+
+- `"auto"` — in-process just-bash only when the turn's `runtime.python` and
+  `runtime.javascript` are both `false` and network is off; `subprocessSandbox()`
+  otherwise. Because Python and JavaScript are on unless disabled, most turns get
+  the subprocess sandbox.
+- `"in-process"` — in-process just-bash for every turn (the pre-0.2 default). A
+  compatibility layer for trusted tool patterns, not an isolation boundary.
+- `"subprocess"` — `subprocessSandbox()` with its defaults for every turn.
+- a factory — for example `subprocessSandbox({ env, initTimeoutMs })`,
+  `tieredExecutionEnvironment({ nextTier })`, or your own.
+
+```ts
+localHost() // "auto"
+localHost({ executionEnvironment: "in-process" })
+localHost({ executionEnvironment: subprocessSandbox({ watchdogGraceMs: 2_000 }) })
+```
+
+See [Execution Environments](/docs/v0.1.0-alpha/runtime/execution-environments)
+for the shipped adapters and the custom-factory contract, and
+[Execution Tiers](/docs/v0.1.0-alpha/runtime/execution-tiers) for escalation.
+
+### `orchestration`
+
+`HarnessOrchestrationServices | undefined`
+
+Durable orchestration ledgers (tasks, continuations, wakeups, workflow queues,
+results). Defaults to file-backed ledgers under `dataDir`.
+
+```ts
+localHost({ orchestration: createInMemoryOrchestrationServices() })
+```
+
+Custom backends implement the five-method `DurableJsonStore` and pass it to
+`createDurableOrchestrationServices({ rootDir, store })` — both shipped
+backends share that same ledger core.
 
 ## Trace Inspection
 
@@ -160,10 +220,11 @@ little-harness files chat_123 --data-dir .little-harness
 little-harness artifacts chat_123 --data-dir .little-harness
 little-harness diff chat_123 --path /persistent/user/notes.md --data-dir .little-harness
 little-harness doctor chat_123 --data-dir .little-harness
+little-harness outcomes --data-dir .little-harness
 ```
 
-The CLI is an inspector, not a task runner. It does not execute models or tools;
-the app still owns the model, tools, auth, policy, and runtime configuration.
+These inspection commands do not execute models or tools; the app still owns the
+model, tools, auth, policy, and runtime configuration.
 
 ## `localDir()`
 
@@ -182,11 +243,7 @@ localDir({
 
 `string`
 
-Directory inside the harness filesystem.
-
-```txt
-/persistent/user
-```
+Directory inside the harness filesystem, for example `/persistent/user`.
 
 This is the path the agent sees.
 
@@ -269,12 +326,7 @@ const harness = createHarness({
 });
 ```
 
-The agent sees both directories:
-
-```txt
-/persistent/company/
-/persistent/user/
-```
+The agent sees both directories: `/persistent/company/` and `/persistent/user/`.
 
 The app decides whether a source is company-wide, project-wide, team-wide, or
 user-specific through `extraBody` and the adapter's backing source.

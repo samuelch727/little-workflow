@@ -1,6 +1,7 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   computeCompiledWorkflowVersionIdentity,
@@ -18,6 +19,8 @@ import { compileWorkflow } from "./compiler.js";
 import { runCli } from "./cli-core.js";
 
 const tempDirs: string[] = [];
+const srcDir = dirname(fileURLToPath(import.meta.url));
+const authoringUrl = pathToFileURL(join(srcDir, "authoring.ts")).href;
 
 async function tempDir(prefix: string): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), prefix));
@@ -94,7 +97,10 @@ function legacyUnlockedInputWorkflowVersion(
   };
 }
 
-async function invoke(args: readonly string[]): Promise<{
+async function invoke(
+  args: readonly string[],
+  options: { readonly cwd?: string } = {},
+): Promise<{
   readonly exitCode: number;
   readonly stdout: string;
   readonly stderr: string;
@@ -102,6 +108,7 @@ async function invoke(args: readonly string[]): Promise<{
   let stdout = "";
   let stderr = "";
   const exitCode = await runCli(args, {
+    ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
     stdout: (text) => {
       stdout += text;
     },
@@ -110,6 +117,41 @@ async function invoke(args: readonly string[]): Promise<{
     },
   });
   return { exitCode, stdout, stderr };
+}
+
+async function writeFolderWorkflow(dir: string, id: string): Promise<void> {
+  await mkdir(join(dir, "tools"), { recursive: true });
+  await writeFile(join(dir, "tools", "echo.ts"), `
+    export default { description: "Echo.", inputSchema: true, execute: async () => ({ ok: true }) };
+  `);
+  await writeFile(join(dir, "workflow.ts"), `
+    import { createLittleWorkflow, model } from ${JSON.stringify(authoringUrl)};
+    export default createLittleWorkflow({
+      id: ${JSON.stringify(id)},
+      models: [model({ provider: "test", modelId: "worker" })],
+      globalTools: ["echo"],
+      planner: {
+        model: model({ provider: "test", modelId: "planner" }),
+        harness: {
+          harnessId: "cli-folder-planner@1.0.0",
+          async run() {
+            return {
+              kind: "plan",
+              lwir: {
+                apiVersion: "littleworkflow.dev/v0.1",
+                kind: "Workflow",
+                metadata: { name: ${JSON.stringify(id)} },
+                input: { schema: true },
+                output: { schema: true },
+                permissions: { models: [], tools: ["echo"], secrets: [], network: [] },
+                steps: [{ id: "echo", uses: "tool.call", with: { tool: "echo", args: {} }, output: { mode: "json", schema: true } }]
+              }
+            };
+          }
+        }
+      },
+    });
+  `);
 }
 
 afterEach(async () => {
@@ -292,6 +334,60 @@ describe("little CLI", () => {
         eventCount: expect.any(Number),
       }),
     );
+  });
+
+  it("runs a folder workflow through little test", async () => {
+    const dir = await tempDir("little-workflow-cli-folder-");
+    await writeJson(join(dir, "input.json"), { value: "x" });
+    await writeFolderWorkflow(dir, "folder.echo");
+
+    const result = await invoke(["test", dir, "--input", join(dir, "input.json")], { cwd: dir });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr).toBe("");
+    expect(JSON.parse(result.stdout)).toEqual(expect.objectContaining({
+      workflowId: "folder.echo",
+      status: "completed",
+      output: { ok: true },
+    }));
+  });
+
+  it("runs a named workflow from little-workflow.json", async () => {
+    const root = await tempDir("little-workflow-cli-named-");
+    const workflowDir = join(root, "workflows", "candidate-review");
+    await mkdir(workflowDir, { recursive: true });
+    await writeJson(join(root, "input.json"), { value: "x" });
+    await writeJson(join(root, "little-workflow.json"), {
+      workflows: { "candidate-review": "./workflows/candidate-review" },
+    });
+    await writeFolderWorkflow(workflowDir, "candidate.review");
+
+    const result = await invoke(["test", "candidate-review", "--input", join(root, "input.json")], { cwd: root });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr).toBe("");
+    expect(JSON.parse(result.stdout)).toEqual(expect.objectContaining({
+      workflowId: "candidate.review",
+      status: "completed",
+    }));
+  });
+
+  it("routes init and add commands through the top-level little CLI", async () => {
+    const root = await tempDir("little-workflow-cli-scaffold-");
+
+    const init = await invoke(["init", "--here", "--workflow", "alpha", "--yes", "--no-install"], { cwd: root });
+    const addWorkflow = await invoke(["add", "workflow", "beta"], { cwd: root });
+    const addHarness = await invoke(["add", "harness", "--agent", "support", "--new-workflow", "gamma"], { cwd: root });
+
+    expect(init.exitCode).toBe(0);
+    expect(addWorkflow.exitCode).toBe(0);
+    expect(addHarness.exitCode).toBe(0);
+    const manifest = JSON.parse(await readFile(join(root, "little-workflow.json"), "utf8"));
+    expect(manifest.workflows).toMatchObject({
+      alpha: "./workflows/alpha",
+      beta: "./workflows/beta",
+      gamma: "./workflows/gamma",
+    });
   });
 
   it("rejects a locked WorkflowVersion when --input does not match the lock", async () => {

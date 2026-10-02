@@ -1,0 +1,148 @@
+---
+title: Letting an agent author its own workflow
+description: Enable one-shot, model-authored plans a Little Harness agent runs when no configured workflow fits.
+---
+
+Listing a workflow in `workflows` gives the agent a pre-authored tool to call. But
+some requests fit no workflow you shipped. `dynamicWorkflows` lets the agent
+**author a one-shot plan for the request in front of it**, run it once, and recall
+it on a later run — without a developer adding a new workflow first.
+
+A one-shot plan is not a new reusable workflow. It runs once, is never added to
+`list_workflows`, and is never promoted to your workflow library. It is a durable,
+inspectable, replay-proof plan the agent composed from **its own** capabilities.
+
+## Enable It
+
+Opt in with the `dynamicWorkflows()` helper from `little-workflow`. It is off by
+default; when absent, none of the tools below appear and nothing changes.
+
+```ts
+import { anthropic } from "@ai-sdk/anthropic";
+import { createHarness, localHost } from "little-harness";
+import { dynamicWorkflows } from "little-workflow";
+
+const agent = createHarness({
+  host: localHost({ dataDir: ".little-harness" }),
+  model: anthropic("claude-sonnet-4-6"),
+  system: "Help the user. If no configured workflow fits, author a one-shot plan.",
+  tools: { docsSearch, docsRead },
+  dynamicWorkflows: dynamicWorkflows(),
+});
+```
+
+> **Why `dynamicWorkflows()` and not `true`?** The helper injects the plan-lowering
+> factory. A bare `true` cannot pull it in: `little-workflow` depends on
+> `little-harness`, so importing it back from the harness would be a circular
+> dependency. `dynamicWorkflows()` reads almost like a boolean and carries no
+> global state.
+
+## What The Agent Can Do
+
+Enabling `dynamicWorkflows` adds two tools:
+
+- **`run_ad_hoc_plan`** — the agent authors a plan (a step-DAG over its own tools
+  and `ai.generate` steps) and runs it once. It provides a `purpose`, the `plan`
+  (steps plus which step's output is the result), the `input`, and an
+  `outputSchema`. The plan's result is returned to the agent inline.
+- **`search_authored_plans`** — the agent searches plans it authored on prior runs
+  (by purpose) and re-submits one, verbatim or adapted for the new input.
+
+A plan step is either a `tool.call` (a specific tool with args) or an
+`ai.generate` (a model step, optionally with bash). Steps wire together with the
+runtime's `{{ input.x }}` and `{{ steps.<id>.output }}` template expressions.
+
+```ts
+// A plan the agent might author for "validate these imported records":
+{
+  steps: [
+    { id: "fetch", uses: "tool.call", tool: "docsSearch", with: { q: "{{ input.query }}" } },
+    { id: "check", uses: "ai.generate", model: "default", needs: ["fetch"],
+      prompt: "Validate each record in: {{ steps.fetch.output }}", output: { mode: "json" } },
+  ],
+  output: { from: "check" },
+}
+```
+
+> **Note:** In v1 a plan uses `tool.call` and `ai.generate` steps. `code.run`,
+> `parallel`, and `decision` steps are rejected at submission with a clear
+> message. `output.from` must name the plan's terminal step (the step no other
+> step needs).
+
+## The Capability Invariant
+
+> A one-shot plan can never exceed what the agent could already do directly.
+
+The plan's ceiling is **the agent's own capability snapshot** — its tools, MCP
+tools, and (if it has them) agentic bash. The agent composes a plan from a
+*subset* of what it already has; it cannot name a tool the harness did not grant.
+Approval-required tools (`needsApproval`) are **not supported inside dynamic
+plans yet** — the alpha workflow runtime rejects them with a clear error rather
+than prompting. Enabling dynamic workflows is a repackaging of existing
+authority, never an escalation.
+
+A plan that references anything outside the snapshot fails validation **before it
+runs** with `capability_not_allowed`. Because the check runs on every submission,
+a recalled plan is re-validated against the *current* snapshot — if you removed a
+tool since the plan was authored, resubmission fails cleanly instead of running
+stale authority.
+
+> **The agent decides the plan's tools, by design.** Within its snapshot, the
+> agent chooses which capabilities a plan uses simply by authoring the steps — that
+> authoring *is* the access decision. Per-call `activeTools` narrowing (which tools
+> the model may call *directly* this turn) is a routing concern and does not
+> constrain what the agent may compose into a plan. To impose a hard ceiling the
+> *developer* controls, use `exclude` below or give the agent a harness with fewer
+> configured tools — do not rely on `activeTools`.
+
+To narrow the ceiling below the agent's full set, pass options to the helper:
+
+```ts
+dynamicWorkflows: dynamicWorkflows({
+  exclude: ["dangerousTool"],           // remove capabilities from what plans may use
+  limits: { maxSteps: 6, maxRuntimeMs: 60_000 },
+})
+```
+
+## How A Plan Runs
+
+1. **Frozen.** The agent's plan is lowered deterministically to the alpha LWIR and
+   frozen by canonical hash. That hash is the plan's identity.
+2. **Replay-proof.** The frozen plan runs with no re-planning — the model never
+   re-decides the step graph. Replaying the same plan against the same
+   capabilities reproduces the run. A guard refuses to run if a substituted plan
+   is ever produced.
+3. **Inline.** In v1 the plan runs to completion inside the `run_ad_hoc_plan` call
+   and returns its result. Runtime and step-count caps bound it (`maxRuntimeMs`
+   defaults to 120s; `maxSteps` to 8).
+
+An `ai.generate` step may use bash when the agent has it. In v1 that bash runs
+local commands with **network disabled** — a shared runtime-to-bash-capability
+normalizer that would enable network-in-plan is follow-up work.
+
+## Recall Across Runs
+
+On success, a plan is written to a durable store (`/persistent/dynamic-plans`)
+keyed by its purpose. A later run — even a fresh `createHarness` over the same
+host `dataDir` — can call `search_authored_plans` to find it and re-submit it.
+Records persist across harness instances the same way `memory` and
+`persistentDirs` do; recall round-trips through disk and always re-validates. A
+recalled plan is a remembered suggestion, never a privileged callable.
+
+> **Scoping:** the store lives under the host `dataDir`, so recall is shared by
+> every session on that `dataDir` — exactly like `memory`. That is what makes
+> cross-run recall work. In a multi-user deployment, **give each user their own
+> `dataDir`** — that is the supported isolation method today. The store's
+> harness path (`/persistent/dynamic-plans`) is fixed: `dynamicWorkflows()` does
+> not expose a per-user store override, and supplying your own `persistentDirs`
+> entry at that path is rejected as a duplicate. Sessions sharing one `dataDir`
+> can see each other's authored plans.
+
+## Next Steps
+
+- Read [Triggering a workflow from an agent](/docs/v0.1.0-alpha/build-agents/workflows) for the
+  static counterpart — pre-authored workflows handed to an agent as tools.
+- Read [Tools](/docs/v0.1.0-alpha/build-agents/tools) to compare `run_ad_hoc_plan`
+  with ordinary app tools.
+- See [`createHarness()`](/docs/v0.1.0-alpha/reference/create-harness) for the
+  `dynamicWorkflows` parameter reference.

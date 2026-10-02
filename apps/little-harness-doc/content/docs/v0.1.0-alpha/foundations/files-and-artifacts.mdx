@@ -1,0 +1,165 @@
+---
+title: Files And Artifacts
+description: The virtual filesystem the runtime exposes to agents — sessions, artifacts, skills, and persistent dirs.
+---
+
+import { Files, File, Folder } from 'fumadocs-ui/components/files';
+
+Little Harness makes file-based work feel natural to the agent while keeping the
+host filesystem protected. It exposes a stable virtual filesystem to the agent,
+independent of how the backing host stores those files.
+
+The default filesystem layout is:
+
+| Path | Purpose |
+|---|---|
+| `/session/` | Private workspace for the current session |
+| `/artifacts/` | Large tool outputs and generated files |
+| `.agents/skills/` | Read-only skill directories |
+| `/persistent/` | Opt-in developer-backed persistent dirs |
+
+<Files>
+  <Folder name="session" defaultOpen />
+  <Folder name="artifacts" defaultOpen />
+  <Folder name=".agents/skills" defaultOpen />
+  <Folder name="persistent" defaultOpen />
+</Files>
+
+Every mounted root emits a `harness.filesystem.mounted` trace event at the start
+of a turn. The event records file paths, file kinds, byte counts when known, and
+whether the root is writable. It does not record raw file contents.
+
+## `/session/`
+
+`/session/` is the private workspace for one session. It is writable by the agent
+and persists across turns in that session. Use it for scratch work, notes,
+scripts, temporary datasets, staged user uploads, app-staged context files, and
+draft reports.
+
+<Files>
+  <Folder name="session" defaultOpen>
+    <Folder name="user-input" defaultOpen>
+      <Folder name="msg_123" defaultOpen>
+        <File name="contract.pdf" />
+      </Folder>
+    </Folder>
+    <File name="plan.md" />
+    <Folder name="tmp" defaultOpen>
+      <File name="customers.json" />
+    </Folder>
+    <Folder name="scripts" defaultOpen>
+      <File name="analyze.py" />
+    </Folder>
+  </Folder>
+</Files>
+
+The app, tools, and model can all write session files through the harness
+boundary. Those files persist across turns in the same session, but they do not
+become app data automatically. User-uploaded files are staged into `/session/`
+before the model turn starts; tool handlers can also write large results into
+`/session/` when the result is useful for follow-up reasoning but does not need
+to become a durable artifact.
+
+Text file changes are traced as `harness.file.created`, `harness.file.updated`,
+and `harness.file.deleted` events with before/after byte counts and hashes, plus
+a bounded unified diff when the diff is small enough to inline. Large diffs use
+`/artifacts/trace/...` content refs; binary files record metadata only. See
+[Tracing](/docs/v0.1.0-alpha/foundations/tracing) for the full event shape.
+
+## `/artifacts/`
+
+`/artifacts/` is the artifact surface for large outputs and generated files. A
+tool can return a huge JSON payload, a script can create a SQLite database, or
+the agent can generate a report. The model receives a pointer and preview instead
+of the whole file, and can inspect the artifact with shell commands or scripts
+when it needs the detail.
+
+If a tool result is too large to return inline, Little Harness automatically
+spools it into `/artifacts/tool-results/<toolName>/<toolCallId>.<ext>` and returns
+that pointer to the next model step (the extension follows the result's media type
+— `.json` for JSON). Spooled pointers include a compact summary with
+line/character counts and JSON structure metadata when the stored content can be
+parsed as JSON.
+
+```ts
+{
+  preview: "42 incidents returned. Top fields: id, severity, summary...",
+  path: "/artifacts/tool-results/search_incidents/toolu_01ab....json",
+  bytes: 910238
+}
+```
+
+The model can inspect the artifact with shell commands or scripts:
+
+```bash
+jq '.incidents[] | select(.severity == "high")' \
+  /artifacts/tool-results/search_incidents/toolu_01ab....json
+```
+
+Trace artifacts live under `/artifacts/trace/...`. Both are normal artifacts: the
+host can list them, and the model can read them when it receives a harness path.
+
+## `.agents/skills/`
+
+`.agents/skills/` holds read-only skill content. The model discovers a skill from
+prompt-visible metadata, then reads the full body from this directory when needed.
+
+```bash
+cat .agents/skills/frontend-design/SKILL.md
+```
+
+The trace records which skill files were mounted by path and size. It does not
+duplicate `SKILL.md` bodies into the trace.
+
+## `/persistent/`
+
+`/persistent/` holds opt-in, cross-session directories backed by
+developer-provided storage logic. Each Persistent Dir has a `harnessDir`, such as
+`/persistent/user`, and a separate backing source, such as a Local Host
+`sourceDir` or custom `load` and `store` callbacks.
+
+The runtime exposes the `harnessDir` inside the session. Writable Persistent Dirs
+buffer writes until the commit boundary; read-only Persistent Dirs reject writes
+immediately. The app's backing store is not mutated on every shell write.
+Persistent Dir loads and commits are traced separately from ordinary file writes
+as `harness.persistent_dir.loaded`, `harness.persistent_dir.commit.started`,
+`.succeeded`, and `.failed`. See
+[Persistent Dirs](/docs/v0.1.0-alpha/foundations/persistent-dirs) for the load,
+commit, and error model.
+
+## Three Write Paths
+
+Little Harness exposes the same file writer shape in three places:
+
+| Writer | When it runs | Common use |
+|---|---|---|
+| `chat.stageMessage(..., files)` | Before a user-message turn starts | Move uploaded files into `/session/user-input/...` |
+| `session.files` | Outside model turns | Stage app context for the next turn |
+| `ctx.files` | During tool execution | Write large tool results without flooding context |
+
+Writes that happen inside a turn are trace-evented: `ctx.files` writes emit
+`harness.file.*` events, and `chat.stageMessage` emits
+`harness.file.staged_from_message`. `session.files` is a raw session-workspace
+writer — a host write outside a turn is not recorded in any turn trace. If the
+target path is inside a Persistent Dir, every write lands in the isolated
+session checkout first and reaches backing storage only at a commit boundary;
+host-only writes follow the
+[host-staging rules](/docs/v0.1.0-alpha/foundations/persistent-dirs#host-staged-writes)
+(an `after-turn` dir's host-only write is discarded by the next turn's reload).
+
+## Export Boundary
+
+Artifacts are not automatically product records. To save a report, update a CRM,
+or create a ticket, expose an explicit tool such as `save_report` or
+`create_ticket`. That tool is the app boundary. Without it, every generated file
+would risk becoming app data; with it, the agent can think, inspect, and
+transform freely inside the harness while the app decides what becomes durable
+product state.
+
+## No Arbitrary Host Paths
+
+The model does not receive raw host filesystem paths by default. To expose local
+files, do it through `projectDir(...)`, a tool, or a Persistent Dir adapter. Local
+Host may expose local debug paths to the host app and CLI, but those paths do not
+become model-visible content unless the developer explicitly stages or mounts
+them through the harness filesystem.

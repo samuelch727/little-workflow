@@ -1,0 +1,199 @@
+---
+title: Replay
+description: How replayRun() rebuilds a run from events — two-level memoization across LWIR steps and harness sessions, with cross-scope sub-run durability.
+---
+
+Replay is a pure fold over the [Event Log](/docs/v0.1.0-alpha/internals/event-log). It never touches a model, tool, code sandbox, or network. The implementation is small on purpose because all the durability work lives in the producers (`runtime.ts`, `harness/`, and `world.ts`).
+
+This milestone adds a **second level of memoization** on top of the existing LWIR per-step durability: harness sessions record every model call and tool call, so crashed sessions can be resumed without replaying completed model invocations.
+
+## Two Levels of Durability, Composed
+
+| Level | Unit of durability | Committed by | Fast-forwarded on resume |
+|---|---|---|---|
+| **LWIR step** (unchanged) | `StepCompleted` event | `runtime.ts` | Skip entire completed steps |
+| **Harness session** (new) | `harness.model.responded` event (per model call) + `harness.tool_call.succeeded, harness.tool_call.failed` event (per tool call) | `harness/event-recorder.ts` | Skip completed model calls + tool calls; re-run only the in-flight one |
+
+Both levels apply simultaneously. A resumed run:
+
+1. Skips steps that already committed `StepCompleted` (LWIR level).
+2. For in-progress steps: replays the harness session from events, fast-forwarding completed model/tool calls, and re-executing only the in-flight call.
+
+**Determinism guarantee.** Because both model calls AND tool calls are memoized, a resumed session reaches the same state byte-for-byte as the original — temperature only matters on the FIRST invocation of a given prompt; subsequent replays read the cached response.
+
+## API
+
+```ts
+import { localWorld, replayRun } from "little-workflow";
+
+const replay = await replayRun(
+  localWorld({ dataDir: ".little-workflow" }),
+  "run_killresume_abcdef",
+);
+
+replay.state;               // MaterializedRunState (includes harness usage totals)
+replay.steps;               // readonly ReplayPlanStep[]
+replay.completedStepPaths;  // step paths that don't need to run again
+replay.pendingStepPaths;    // step paths that should run on resume
+replay.artifacts;           // hydrated artifacts (manifest + payload)
+```
+
+`replayRun` reads the requested run's event stream only — it does NOT read sub-run streams. To inspect a sub-run, call `replayRun(world, subRunId)` separately.
+
+## What Replay Returns
+
+```ts
+type ReplayResult = {
+  runId: string;
+  state: MaterializedRunState;
+  steps: readonly ReplayPlanStep[];
+  completedStepPaths: readonly string[];
+  pendingStepPaths: readonly string[];
+  artifacts: readonly HydratedArtifact[];
+};
+
+type ReplayPlanStep = {
+  stepPath: string;
+  status: "completed" | "pending" | "running" | "failed";
+  shouldRun: boolean;                // status !== "completed"
+  output?: unknown;
+  outputRef?: ArtifactRef;
+  artifactRefs: readonly ArtifactRef[];
+};
+```
+
+`shouldRun: false` is the kill-and-resume invariant: any step whose `StepCompleted` event is committed must not run again.
+
+`ReplayPlanStep` is a scheduling view and deliberately carries no usage. Per-step tokens and dollars live on `result.state.steps[stepPath].usage` (a `UsageTotals`, with `costUsd: number | null`) and are rendered by `little report <run-id>`.
+
+## Pipeline
+
+<Mermaid chart={`flowchart TB
+  classDef stage fill:#fef3c7,stroke:#d97706,color:#0f172a;
+  classDef output fill:#dcfce7,stroke:#16a34a,color:#0f172a;
+  classDef gate fill:#fee2e2,stroke:#dc2626,color:#0f172a;
+
+  Events["events.db<br/>rows for runId"]:::stage
+  List["listEvents"]:::stage
+  Build["buildRunStateFromEvents<br/>= materializeRunStateFromEvents"]:::stage
+  Empty{"events.length == 0"}:::gate
+  Order["stepPathsInEventOrder<br/>+ append leftover step paths"]:::stage
+  Plan["replayPlanStep per step<br/>shouldRun = status !== completed"]:::stage
+  Hydrate["hydrateRunArtifactRefs<br/>read manifests + blobs<br/>assert runId match"]:::stage
+  Done["ReplayResult"]:::output
+
+  Events --> List --> Empty
+  Empty -->|yes| NotFound["throw RunNotFoundError"]:::gate
+  Empty -->|no| Build --> Order --> Plan --> Hydrate --> Done
+`} />
+
+The `materializeRunStateFromEvents()` function is the same one the runtime uses internally — replay does not have a parallel implementation. `MaterializedRunState` after replay matches the runtime's own view at the time it wrote each event.
+
+## Harness Session Replay Mechanics
+
+### LWIR step-level fast-forward (existing)
+
+Steps with a committed `StepCompleted` event are skipped entirely on resume. This is per-step memoization.
+
+### Harness session-level fast-forward (new)
+
+For a step that STARTED a harness session but did NOT commit `StepCompleted`:
+
+1. The runtime reads all `harness.model.*` and `harness.tool_call.*` events for that step's session.
+2. For each `harness.model.called` with a matching `harness.model.responded` (same `turn`): the model response is replayed into the agent's conversation state without re-calling the model.
+3. For each `harness.tool_call.started` with a matching `harness.tool_call.succeeded, harness.tool_call.failed` (same `callId`): the tool result is replayed without re-invoking the tool.
+4. When the replay catches up to the crash boundary — the last event has no matching terminal — the harness re-executes from that point:
+   - If last event was `harness.model.called` with no `harness.model.responded`: re-invoke the model.
+   - If last event was `harness.tool_call.started` with no terminal: re-invoke the tool.
+
+### Crash at the model-call boundary
+
+**Scenario:** `harness.model.called(turn 3)` is committed; process dies before `harness.model.responded(turn 3)`.
+
+Resume:
+1. Turns 1 and 2 replay from committed `harness.model.responded` events — no model calls.
+2. Turn 3 has no committed response → the model is re-invoked with the same prompt (same messages, same tools).
+3. The response may differ (model non-determinism), but ONLY this turn diverges; everything before it replays deterministically.
+4. New tool calls from the new turn 3 response execute fresh.
+
+### Crash at the tool-call boundary
+
+**Scenario:** `harness.tool_call.started(callId: "c42")` is committed; process dies before `harness.tool_call.succeeded`.
+
+Resume:
+1. All prior model calls and completed tool calls replay.
+2. Tool call `c42` has no terminal event → the tool is re-invoked with the same `args`.
+3. Execution continues from the tool result.
+
+## Cross-Scope Durability: Orchestrator + Sub-Runs
+
+When an orchestrator runs sub-workflows, two event streams are involved:
+
+- **Orchestrator stream** (`run_pipeline_X`): records `harness.tool_call.started(start_workflow, args: {workflowId, input, subRunId})`.
+- **Sub-run stream** (`run_sub_abc`): records the entire sub-run's events independently.
+
+On crash and resume:
+
+**Scenario: Orchestrator spawned 30 of 50 sub-runs; process dies.**
+
+1. Orchestrator's log shows 30 `harness.tool_call.succeeded(run_workflow)` events — these 30 sub-runs are done.
+2. Some sub-runs may have ALSO crashed — each sub-run's per-step memoization resumes them independently via their own event log.
+3. The remaining 20 sub-run tool calls in the orchestrator's log have `harness.tool_call.started` but no `Succeeded` → the harness re-dispatches those 20 with the same reserved `subRunId`s.
+4. Already-completed tool calls (1-30) fast-forward from the orchestrator's event cache.
+
+**Scenario: A sub-run completed but its result wasn't recorded in the orchestrator's log before crash.**
+
+1. Orchestrator's log shows `harness.tool_call.started(run_workflow)` but no `Succeeded`.
+2. Sub-run's log shows `RunCompleted` — the sub-run IS done.
+3. On resume: the SDK reads the sub-run's output from its log, emits `harness.tool_call.succeeded` to the orchestrator's log, returns the result.
+4. The sub-run is NOT re-executed.
+
+The two levels compose cleanly: sub-run per-step memoization handles crash-within-subrun; orchestrator harness-session memoization handles crash-between-subrun.
+
+## Harness Session Events in `MaterializedRunState`
+
+`materializeRunStateFromEvents` prices each recorded model call and folds it into the run-level totals — and, when the event carries a `stepPath`, into that step's totals:
+
+- `harness.model.responded.payload.response.usage` → `inputTokens`, `outputTokens`, `cachedInputTokens`, `reasoningTokens`.
+- `harness.model.responded.payload.model` → a pricing lookup via `getModelInfoFor(provider, modelId)`, multiplied against the tokens to give `costUsd`. This is the single place a dollar figure is produced; no event's own cost is ever read, because the event recorder rejects `costUsd` on any recorded usage payload.
+- A model with **no registry entry** yields `costUsd: null` for that call and increments `unpricedCalls`. It does **not** contribute `0`. A scope's aggregate `costUsd` is `null` only when *every* call in it was unpriced; when some were priced, the aggregate covers those and `unpricedCalls` records the shortfall. A true `0` is a real zero-dollar total, normally because there were no model calls.
+- `harness.session.completed.payload.usage` is **skipped**. It is a per-session rollup the harness computes by summing the same `harness.model.responded` events, so folding it in would double-count every call.
+
+Token + cost totals in `MaterializedRunState` include ALL harness sessions for the run (planner, all worker sessions). Sub-run totals are in each sub-run's own `MaterializedRunState`.
+
+## Visit Counter Reconstruction (Layer A)
+
+For steps with `maxVisits > 1`, replay reconstructs per-visit state by counting `StepCompleted` events sharing the same `(stepId, branchPath)` prefix. Each corresponds to one committed visit.
+
+On resume, the scheduler reads the most recent committed `decision` step's output (`pendingDecisionTarget`) to find the next step without re-running the decision. If the decision committed but its target's first attempt did not, the target is scheduled immediately.
+
+## Outer-Loop Replay (Layer B)
+
+`replayRun` operates on one run's event log. Outer-loop resume (picking up after cycle N, starting cycle N+1) is handled by `outer-loop.ts`, which reads the manifest at `.little-workflow/outer-loops/{outerLoopId}.json` and uses `pendingCycleRunId` to resume the correct cycle via Layer A replay.
+
+Each outer-loop cycle's planner harness session has its own `PlannerManifest` (with `outerLoopContextHash`). The outer-loop scheduler checks the manifest for each cycle on resume — drift in mid-cycle means starting a fresh cycle.
+
+## What Replay Does Not Do
+
+- **Does not call models.** No AI SDK adapter, harness, or model bindings needed.
+- **Does not call tools.** No tool registry or code runner.
+- **Does not contact the planner.** No planner harness.
+- **Does not write events.** Replay is read-only; `appendEvent` is never called from `replay.ts`.
+- **Does not cross sub-run boundaries.** Call `replayRun(world, subRunId)` for a sub-run.
+
+To make a run make forward progress: call `runWorkflow()` or `executeWorkflowVersion()` with the same `runId`. Those functions replay the existing log internally, skip every completed step (and fast-forward harness sessions), and resume at the first step with remaining work.
+
+## Idempotency
+
+Calling `replayRun()` twice returns deeply-equal results (every value is `Object.freeze`'d before return). The function has no side effects, no per-call randomness, and no time-based behavior beyond reading what is on disk.
+
+## Replay-Aware Run Restart
+
+Before re-entering the scheduler on a resumed run, the runtime:
+
+- Replays events to materialize state.
+- Calls `assertCompletedStepArtifactsValid()` — every `StepCompleted` artifact must exist, hash correctly, belong to this run, and match the persisted output.
+- Calls `assertCompletedParallelReplayMatchesInput()` — parallel groups' resolved branch sets are recomputed and compared against persisted `ParallelBranchScheduled` events.
+- **New:** calls `assertHarnessManifestConsistent()` — for any step with a committed `harness.session.started`, recomputes the manifest and compares `manifestHash`. Mismatch raises `CapabilityDriftError`.
+
+A mismatch at any check raises `RuntimeIntegrityError`. The kill-and-resume invariant rests on these checks: if the log is intact and consistent, replay can stand in for the original run; if it isn't, the runtime refuses to silently proceed.

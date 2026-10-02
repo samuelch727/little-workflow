@@ -1,0 +1,93 @@
+---
+title: Sessions
+description: How Little Harness creates, resumes, and isolates agent sessions.
+---
+
+A session is the durable boundary for one agent conversation or job. In the alpha API, `streamHarness()` and `generateHarness()` can create an ephemeral session or continue a stable app-provided session key.
+
+```ts
+const result = streamHarness({
+  harness,
+  messages,
+});
+```
+
+The app can ignore sessions for one-shot work, or pass a stable id to continue the same workspace. The same rule applies to non-streaming calls.
+
+```ts
+const result = streamHarness({
+  harness,
+  messages,
+  session: chatId,
+});
+```
+
+```ts
+const result = await generateHarness({
+  harness,
+  type: "account.brief",
+  input: { accountId },
+  session: jobId,
+});
+```
+
+## What A Session Owns
+
+A session owns:
+
+- the transcript and model context policy
+- a private `/session/` workspace
+- host-staged files for future turns
+- artifact references created during the session
+- Persistent Dir checkouts and uncommitted changes
+- trace events
+
+## Concurrency Rule
+
+One session never runs more than one turn at the same time.
+
+If two requests target the same session, the host serializes them. Local Host
+queues same-session calls by default and can reject them when configured to do
+so. Different sessions can run concurrently.
+
+## Out-Of-Band File Staging
+
+The app can add files to a session without pretending those files are a chat
+message.
+
+```ts
+const session = await harness.sessions.getOrCreate({
+  id: chatId,
+  extraBody,
+});
+
+await session.files.write("/session/app-context/customer-history.csv", stream, {
+  mediaType: "text/csv",
+  source: "app-context",
+});
+```
+
+The next `streamHarness({ session, messages })` call can reference the staged
+file in a short notice, or the developer can mention it through an Input Type or
+message. This is useful for background uploads, app-side imports, and files that
+arrive between chat turns.
+
+## Isolation Rule
+
+Two sessions do not see each other's files by accident. Shared state only appears through an explicit Persistent Dir or through an app tool that deliberately reads shared data.
+
+This keeps the developer from debugging strange cases where one user's agent changed another user's working files.
+
+## Extra Body Context
+
+`extraBody` is app-defined. Little Harness treats it as host metadata passed to tools, Persistent Dir callbacks, events, and traces, not as a built-in identity system.
+
+```ts
+extraBody: {
+  userId: "user_123",
+  teamId: "team_456",
+  role: "account_manager",
+}
+```
+
+The developer decides which fields matter for storage, tools, policy, and audit.

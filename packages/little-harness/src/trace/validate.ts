@@ -1,9 +1,10 @@
 import { z } from "zod";
-import { HARNESS_EVENT_TYPES } from "../events/names.js";
+import { HARNESS_EVENT_TYPES, HARNESS_SIDE_CHANNEL_EVENT_TYPES } from "../events/names.js";
 import type { HarnessEvent } from "../types.js";
 
 const TRACE_EVENT_TYPES = [
   ...HARNESS_EVENT_TYPES,
+  ...HARNESS_SIDE_CHANNEL_EVENT_TYPES,
   "harness.execute_step.started",
   "harness.execute_step.succeeded",
 ] as const;
@@ -211,16 +212,54 @@ const runtimeErrorMetadataSchema = z
     error: errorValueSchema,
   })
   .passthrough();
+// Classification reasons are recorded as the classifier produced them, so a reader can meter
+// escalation without re-deriving anything; only `kind` is required of each.
+const classificationReasonSchema = z
+  .object({
+    kind: z.string().min(1),
+  })
+  .passthrough();
+const runtimeCommandDeniedMetadataSchema = z
+  .object({
+    command: z.string().min(1),
+    reasons: z.array(classificationReasonSchema),
+  })
+  .passthrough();
+const runtimeTierMetadataSchema = z
+  .object({
+    from: z.string().min(1),
+    to: z.string().min(1),
+    trigger: z.enum(["classification", "emulation-gap"]),
+    command: z.string().min(1),
+    decision: z.enum(["run", "escalate", "deny"]).optional(),
+    reasons: z.array(classificationReasonSchema).optional(),
+    gap: z
+      .object({
+        kind: z.literal("emulation-gap"),
+        signal: z.string().min(1),
+        command: z.string().min(1),
+        option: z.string().min(1).optional(),
+      })
+      .passthrough()
+      .optional(),
+  })
+  .passthrough();
+const runtimeTierUnavailableMetadataSchema = runtimeTierMetadataSchema.extend({
+  detail: z.string().min(1),
+});
 const fileBinaryMetadataSchema = z
   .object({
     bytes: z.number().int().nonnegative(),
     sha256: z.string().min(1),
   })
   .passthrough();
+// File events may come from custom workspace mounts (root = mount label, path = /<root>/…),
+// not only the four managed roots — pathBelongsToRoot handles both conventions.
+const fileRootSchema = z.string().min(1);
 const fileMutationObjectSchema = z
   .object({
     path: z.string().startsWith("/"),
-    root: managedRootSchema,
+    root: fileRootSchema,
     bytes: z.number().int().nonnegative().optional(),
     mediaType: z.string().min(1).optional(),
     sha256: z.string().min(1).optional(),
@@ -244,7 +283,7 @@ const fileUpdatedMetadataSchema = fileMutationObjectSchema
 const fileDeletedMetadataSchema = z
   .object({
     path: z.string().startsWith("/"),
-    root: managedRootSchema,
+    root: fileRootSchema,
     source: z.string().min(1).optional(),
     before: fileBinaryMetadataSchema,
     diff: traceFileDiffSchema,
@@ -337,6 +376,22 @@ const persistentDirFailedMetadataSchema = persistentDirCommitCompletedMetadataSc
     error: traceErrorEnvelopeSchema,
   })
   .passthrough();
+// `outcome.reported` is a side-channel observation, so only the fields a reader must be able
+// to trust are required: the verdict and where it came from. Join keys are OPTIONAL because
+// an unresolvable one is omitted rather than written as a placeholder.
+const outcomeReportedMetadataSchema = z
+  .object({
+    status: z.enum(["success", "failure", "partial"]),
+    source: z.string().min(1),
+    retracted: z.boolean().optional(),
+    score: z.number().optional(),
+    detail: z.string().optional(),
+    reporter: z.string().min(1).optional(),
+    reportKey: z.string().min(1).optional(),
+    stepPath: z.string().min(1).optional(),
+    promptHash: z.string().min(1).optional(),
+  })
+  .passthrough();
 
 export function validateTraceEvent(event: unknown): HarnessEvent<HarnessTraceEventType> {
   const parsed = traceEventSchema.parse(event);
@@ -365,12 +420,22 @@ function metadataSchemaFor(type: HarnessTraceEventType): z.ZodTypeAny {
     case "harness.execute_step.started":
     case "harness.execute_step.succeeded":
       return stringRecordSchema;
+    case "outcome.reported":
+      return outcomeReportedMetadataSchema;
     case "harness.runtime.command.started":
       return runtimeStartedMetadataSchema;
     case "harness.runtime.command.succeeded":
     case "harness.runtime.command.failed":
       return runtimeFinishedMetadataSchema;
+    case "harness.runtime.command.denied":
+      return runtimeCommandDeniedMetadataSchema;
+    case "harness.runtime.tier.escalated":
+      return runtimeTierMetadataSchema;
+    case "harness.runtime.tier.unavailable":
+      return runtimeTierUnavailableMetadataSchema;
     case "harness.runtime.error":
+    // Turn teardown reports the same envelope shape as any other runtime error.
+    case "harness.runtime.dispose.failed":
       return runtimeErrorMetadataSchema;
     case "harness.file.created":
       return fileMutationMetadataSchema;
@@ -398,7 +463,21 @@ function metadataSchemaFor(type: HarnessTraceEventType): z.ZodTypeAny {
   }
 }
 
-function pathBelongsToRoot(pathname: string, root: ManagedRoot): boolean {
-  const harnessDir = managedRootHarnessDirs[root];
-  return pathname === harnessDir || pathname.startsWith(`${harnessDir}/`);
+function pathBelongsToRoot(pathname: string, root: string): boolean {
+  // Managed roots keep their harness-dir mapping (notably "agents" → "/.agents", the
+  // historical wire shape); custom mount labels map to `/<label>` directly.
+  const candidates = new Set<string>([`/${root}`]);
+  if (isManagedRoot(root)) {
+    candidates.add(managedRootHarnessDirs[root]);
+  }
+  for (const harnessDir of candidates) {
+    if (pathname === harnessDir || pathname.startsWith(`${harnessDir}/`)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function isManagedRoot(root: string): root is ManagedRoot {
+  return Object.hasOwn(managedRootHarnessDirs, root);
 }

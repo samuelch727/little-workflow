@@ -9,9 +9,12 @@ import {
   localDir,
   localHost,
   memory,
+  mountedResultPath,
+  modelFacingWorkflowRunStatus,
   projectDir,
   skill,
   streamHarness,
+  createWorkflowInspectionTools,
 } from "./index.js";
 import * as rootExports from "./index.js";
 
@@ -28,6 +31,9 @@ describe("public exports", () => {
     expect(inputType).toBeTypeOf("function");
     expect(memory).toBeTypeOf("function");
     expect(justBashRuntime).toBeTypeOf("function");
+    expect(mountedResultPath).toBeTypeOf("function");
+    expect(modelFacingWorkflowRunStatus).toBeTypeOf("function");
+    expect(createWorkflowInspectionTools).toBeTypeOf("function");
     expect(justBashRuntime({ network: true })).toEqual({ network: true });
   });
 
@@ -51,5 +57,62 @@ describe("public exports", () => {
 
     expect(packageJson.exports).toHaveProperty("./workflow-harness");
     expect(workflowHarness.createWorkflowRuntime).toBeTypeOf("function");
+  });
+
+  it("declares the connectors subpath export without adding connector APIs to the root", async () => {
+    const packageJson = JSON.parse(
+      await readFile(new URL("../package.json", import.meta.url), "utf8"),
+    ) as { exports?: Record<string, unknown> };
+    const connectors = await import("./connectors/index.js");
+
+    expect(packageJson.exports).toHaveProperty("./connectors");
+    expect(connectors.chatSdkConnector).toBeTypeOf("function");
+    expect(connectors.webRichConnector).toBeTypeOf("function");
+    expect(connectors.discoverConnectors).toBeTypeOf("function");
+    expect(connectors.loadChatSdkConnector).toBeTypeOf("function");
+    expect(connectors.loadWebRichConnector).toBeTypeOf("function");
+    expect(rootExports).not.toHaveProperty("chatSdkConnector");
+    expect(rootExports).not.toHaveProperty("loadChatSdkConnector");
+    expect(rootExports).not.toHaveProperty("webRichConnector");
+    expect(rootExports).not.toHaveProperty("loadWebRichConnector");
+  });
+
+  it("declares a connector runtime subpath without discovery helpers", async () => {
+    const packageJson = JSON.parse(
+      await readFile(new URL("../package.json", import.meta.url), "utf8"),
+    ) as { exports?: Record<string, unknown> };
+    const runtime = await import("./connectors/runtime.js");
+
+    expect(packageJson.exports).toHaveProperty("./connectors/runtime");
+    expect(runtime.chatSdkConnector).toBeTypeOf("function");
+    expect(runtime.webRichConnector).toBeTypeOf("function");
+    expect(runtime.loadChatSdkConnector).toBeTypeOf("function");
+    expect(runtime.loadWebRichConnector).toBeTypeOf("function");
+    expect(runtime).not.toHaveProperty("discoverConnectors");
+    expect(runtime).not.toHaveProperty("loadConnectorDescriptor");
+  });
+
+  it("declares workspace and connector discovery subpaths for lazy server imports", async () => {
+    const packageJson = JSON.parse(
+      await readFile(new URL("../package.json", import.meta.url), "utf8"),
+    ) as { exports?: Record<string, unknown> };
+    const workspace = await import("./workspace/index.js");
+    const discovery = await import("./connectors/discovery.js");
+
+    expect(packageJson.exports).toHaveProperty("./workspace");
+    expect(packageJson.exports).toHaveProperty("./connectors/discovery");
+    expect(workspace.loadHarness).toBeTypeOf("function");
+    expect(discovery.loadConnectorDescriptor).toBeTypeOf("function");
+  });
+
+  it("declares the execution subpath export for server bundles that need streaming helpers only", async () => {
+    const packageJson = JSON.parse(
+      await readFile(new URL("../package.json", import.meta.url), "utf8"),
+    ) as { exports?: Record<string, unknown> };
+    const execution = await import("./execution/index.js");
+
+    expect(packageJson.exports).toHaveProperty("./execution");
+    expect(execution.streamHarness).toBeTypeOf("function");
+    expect(execution.generateHarness).toBeTypeOf("function");
   });
 });

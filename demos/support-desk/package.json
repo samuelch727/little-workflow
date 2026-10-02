@@ -1,0 +1,28 @@
+{
+  "name": "support-desk",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "harness:chat": "little-harness test support",
+    "experiment:seed": "node experiment/run.mjs --seed",
+    "experiment:traffic": "node experiment/run.mjs --traffic",
+    "experiment:gate": "node experiment/run.mjs --gate",
+    "verify-truth": "node experiment/verify-truth.mjs",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@ai-sdk/deepseek": "^3.0.58",
+    "@little-workflow/littledb": "workspace:*",
+    "ai": "^7.0.126",
+    "jiti": "^2.7.0",
+    "little-harness": "workspace:*",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^25.8.0",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.6"
+  }
+}

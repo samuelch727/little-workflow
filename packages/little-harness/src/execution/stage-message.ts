@@ -98,7 +98,9 @@ export async function stageChatMessages<TExtraBody>(
       });
     }
 
-    await markMessageStaged(options.session, id);
+    // Optional call: sessions written against the pre-port contract may not implement the
+    // typed mutators yet; staging dedupe degrades gracefully instead of failing the turn.
+    await options.session.markMessageStaged?.(id);
     stagedMessageIds.push(id);
   }
 
@@ -147,13 +149,6 @@ function safeFileName(name: string): string {
 
 function stableMessageId(message: UIMessage): string {
   return `message_${JSON.stringify(message).length}`;
-}
-
-async function markMessageStaged(session: HarnessSession, id: string): Promise<void> {
-  const local = session as HarnessSession & {
-    markMessageStaged?: (messageId: string) => Promise<void>;
-  };
-  await local.markMessageStaged?.(id);
 }
 
 function fileMetadata(file: { bytes?: number; sha256?: string }): { bytes?: number; sha256?: string } {

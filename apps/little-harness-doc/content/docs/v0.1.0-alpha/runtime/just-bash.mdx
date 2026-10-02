@@ -28,7 +28,18 @@ Little Harness session
    -> configured tools via Runtime Tool Bridge
 ```
 
-This gives the first runtime useful isolation and a familiar command surface without requiring Docker, microVMs, or cloud sandboxes in the happy path.
+This gives the runtime a familiar command surface and per-session file isolation without requiring Docker, microVMs, or cloud sandboxes in the happy path.
+
+## Where It Runs
+
+The same just-bash runtime can run in two places, chosen by `localHost({ executionEnvironment })`:
+
+- **In a child process** (`subprocessSandbox()`) — the default for any turn that can run Python or
+  JavaScript or reach the network, under the default `"auto"` mode.
+- **In the host process** (`createJustBashRuntime`) — under `"auto"` only when `runtime.python` and
+  `runtime.javascript` are both `false` and network is off, or always with `"in-process"`.
+
+See [Execution Environments](/docs/v0.1.0-alpha/runtime/execution-environments).
 
 ## Runtime Tool Bridge
 
@@ -66,9 +77,15 @@ createHarness({
 
 ## Security Boundary
 
-The just-bash sandbox is meant to protect against untrusted scripts. It does not make host-provided hooks untrusted-safe.
+just-bash is Tier-0: a **compatibility layer for trusted tool patterns, not an isolation boundary**.
+Commands never touch the real filesystem, processes, or sockets, but the containment is a library's
+parser and virtual filesystem, not the OS. `js-exec` and Python execute guest code inside whichever
+process hosts just-bash, which is why the default `"auto"` mode moves code-running turns into the
+subprocess sandbox (empty environment, SIGKILL watchdog, and just-bash's defense-in-depth layer, on only
+there — see `defenseInDepthForAdapter`). Neither placement confines native code; see
+[Isolation And Security](/docs/v0.1.0-alpha/runtime/isolation-and-security).
 
-These still run in the host app's trust boundary:
+Whatever the execution environment, these still run in the host app's trust boundary:
 
 - tool handlers
 - storage callbacks
@@ -77,6 +94,11 @@ These still run in the host app's trust boundary:
 
 Little Harness should treat those as explicit capabilities and make their side effects visible in trace events.
 
-## Later Runtime Options
+## Beyond Tier-0
 
-Containers, microVMs, browser sandboxes, or hosted execution pools can implement the same higher-level runtime contract later. The developer-facing API should not force that decision into the first configuration object.
+just-bash has no git, containers, compilers, or package managers. A command that needs one can be
+escalated to a real execution environment you provide with `tieredExecutionEnvironment({ nextTier })`,
+which classifies each script before it runs; see [Execution Tiers](/docs/v0.1.0-alpha/runtime/execution-tiers).
+Containers, microVMs, or hosted execution pools plug in as that `nextTier` (or as the whole
+`executionEnvironment`) through the same `HarnessExecutionEnvironmentFactory` port — the
+developer-facing harness config does not change.

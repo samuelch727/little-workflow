@@ -1,0 +1,15 @@
+{
+  "name": "remote-resume",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "demo": "node ./run.mjs",
+    "test": "node --test ./*.test.mjs"
+  },
+  "dependencies": {
+    "ai": "^7.0.126",
+    "little-harness": "workspace:*",
+    "zod": "^4.4.3"
+  }
+}

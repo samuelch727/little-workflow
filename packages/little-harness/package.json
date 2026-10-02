@@ -1,6 +1,6 @@
 {
   "name": "little-harness",
-  "version": "0.1.0-alpha.2",
+  "version": "0.2.0-alpha.0",
   "description": "Local-first agent runtime primitives for AI SDK sessions, tools, files, traces, persistence, and Little Workflow harness integration.",
   "license": "Apache-2.0",
   "repository": {
@@ -30,7 +30,7 @@
     "docs"
   ],
   "engines": {
-    "node": ">=20.19"
+    "node": ">=22"
   },
   "publishConfig": {
     "access": "public",
@@ -39,12 +39,37 @@
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "default": "./dist/index.js"
+    },
+    "./connectors": {
+      "types": "./dist/connectors/index.d.ts",
+      "default": "./dist/connectors/index.js"
+    },
+    "./connectors/runtime": {
+      "types": "./dist/connectors/runtime.d.ts",
+      "default": "./dist/connectors/runtime.js"
+    },
+    "./connectors/discovery": {
+      "types": "./dist/connectors/discovery.d.ts",
+      "default": "./dist/connectors/discovery.js"
+    },
+    "./execution": {
+      "types": "./dist/execution/index.d.ts",
+      "default": "./dist/execution/index.js"
+    },
+    "./workspace": {
+      "types": "./dist/workspace/index.d.ts",
+      "default": "./dist/workspace/index.js"
     },
     "./workflow-harness": {
       "types": "./dist/workflow-harness/index.d.ts",
-      "import": "./dist/workflow-harness/index.js"
-    }
+      "default": "./dist/workflow-harness/index.js"
+    },
+    "./scaffold": {
+      "types": "./dist/scaffold.d.ts",
+      "default": "./dist/scaffold.js"
+    },
+    "./package.json": "./package.json"
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
@@ -55,11 +80,17 @@
     "test:watch": "vitest"
   },
   "dependencies": {
-    "ai": "^6.0.0",
+    "@ai-sdk/mcp": "^2.0.65",
+    "@inquirer/prompts": "^8.5.2",
+    "jiti": "^2.7.0",
     "just-bash": "^3.0.1",
     "zod": "^4.4.3"
   },
+  "peerDependencies": {
+    "ai": "^7.0.0"
+  },
   "devDependencies": {
+    "ai": "^7.0.126",
     "@types/node": "^25.8.0",
     "typescript": "^6.0.3",
     "vitest": "^4.1.6"

@@ -7,6 +7,7 @@ import {
   hashHarnessToolCall,
   sha256Digest,
 } from "./durability.js";
+import { durableModelRequest, toolRefsForDurableRequest } from "../execution/model-events.js";
 
 describe("durable harness hashing", () => {
   it("hashes semantically equal model requests with the legacy sha256 prefix", () => {
@@ -205,6 +206,90 @@ describe("durable harness hashing", () => {
     ], scopedRequest)).toEqual({ kind: "none" });
   });
 
+  it("replays a pre-abstract-filter recording built with the real durableModelRequest", () => {
+    // Build the recording the way a pre-abstract-filter recorder actually did: hash the FULL
+    // durableModelRequest (system + per-tool descriptionHash/inputSchemaHash, name-sorted) of a
+    // toolset that still included the abstract, execute-less tool.
+    const lookup = {
+      description: "Look up an order by id.",
+      inputSchema: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
+      execute: () => ({}),
+    };
+    const abstractPost = {
+      description: "Post a rich card. Implemented only on connectors.",
+      inputSchema: { type: "object", properties: { text: { type: "string" } }, required: ["text"] },
+      // No `execute`: this is the abstract tool the filter drops before the model call.
+    };
+    const recordedRequest = durableRequestFrom({ lookup, abstractPost });
+    // The current run filters the abstract tool out, so its request tools exclude it.
+    const currentRequest = durableRequestFrom({ lookup });
+    const hiddenAbstractToolRefs = toolRefsForDurableRequest({ abstractPost } as never);
+
+    const events = [
+      event(1, "harness.model.called", {
+        turn: 1,
+        callId: "call_1",
+        promptHash: hashHarnessPrompt(recordedRequest),
+        request: recordedRequest,
+      }),
+      event(2, "harness.model.responded", { turn: 1, callId: "call_1", response: { text: "replayed", usage: {} } }),
+    ];
+
+    // Sanity: the stripped current request genuinely differs from the recorded one.
+    expect(hashHarnessPrompt(currentRequest)).not.toBe(hashHarnessPrompt(recordedRequest));
+
+    // Without the hidden abstract tool refs, the pre-filter recording no longer matches.
+    expect(findModelReplay(events, currentRequest)).toEqual({ kind: "none" });
+
+    // Passing the hidden abstract tool refs reconstructs the exact pre-filter durableModelRequest,
+    // so the recording replays again.
+    expect(findModelReplay(events, currentRequest, hiddenAbstractToolRefs)).toEqual({
+      kind: "completed",
+      turn: 1,
+      callId: "call_1",
+      response: { text: "replayed", usage: {} },
+    });
+  });
+
+  it("does not replay a pre-abstract-filter recording for a different toolset", () => {
+    const lookup = {
+      description: "Look up an order by id.",
+      inputSchema: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
+      execute: () => ({}),
+    };
+    const abstractPost = {
+      description: "Post a rich card. Implemented only on connectors.",
+      inputSchema: { type: "object", properties: { text: { type: "string" } }, required: ["text"] },
+    };
+    const recordedRequest = durableRequestFrom({ lookup, abstractPost });
+    const currentRequest = durableRequestFrom({ lookup });
+    const events = [
+      event(1, "harness.model.called", {
+        turn: 1,
+        callId: "call_1",
+        promptHash: hashHarnessPrompt(recordedRequest),
+        request: recordedRequest,
+      }),
+      event(2, "harness.model.responded", { turn: 1, callId: "call_1", response: { text: "replayed", usage: {} } }),
+    ];
+
+    // A hidden ref for a DIFFERENTLY-NAMED tool reconstructs a different toolset — no match.
+    const wrongNameRefs = toolRefsForDurableRequest({
+      somethingElse: { description: "unrelated", inputSchema: { type: "object" } },
+    } as never);
+    expect(findModelReplay(events, currentRequest, wrongNameRefs)).toEqual({ kind: "none" });
+
+    // A hidden ref with the right NAME but a different description hashes differently (the full
+    // request shape, not just the name, is part of identity) — still no match.
+    const wrongShapeRefs = toolRefsForDurableRequest({
+      abstractPost: {
+        description: "A different description than the recorded one.",
+        inputSchema: { type: "object", properties: { text: { type: "string" } }, required: ["text"] },
+      },
+    } as never);
+    expect(findModelReplay(events, currentRequest, wrongShapeRefs)).toEqual({ kind: "none" });
+  });
+
   it("returns completed and failed tool replays using call sequence windows", () => {
     const call = { caller: "model" as const, toolName: "lookup", args: { id: "1" }, turn: 1, callIndex: 1 };
     const callId = hashHarnessToolCall(call);
@@ -254,4 +339,19 @@ function event(sequence: number, type: string, payload: Record<string, unknown>)
     recordedAt: "2026-06-07T00:00:00.000Z",
     payload,
   };
+}
+
+// Build a durable model request the way the harness records one. `durableModelRequest` reads only
+// model/system/messages/tools (plus optional settings/scope/step), so the unused files/traceOptions
+// members are trivial stubs.
+function durableRequestFrom(tools: Record<string, unknown>) {
+  return durableModelRequest({
+    stepNumber: 1,
+    model: { modelId: "test-model" },
+    system: "You are a test agent.",
+    messages: [{ role: "user", content: "hi" }] as never,
+    tools: tools as never,
+    files: {} as never,
+    traceOptions: {} as never,
+  });
 }

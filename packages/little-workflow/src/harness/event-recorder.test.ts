@@ -954,6 +954,39 @@ describe("Harness event recorder", () => {
     await expect(listEvents(world, runId)).resolves.toEqual([]);
   });
 
+  it("rejects a recorded cost on session usage so cost can only be derived downstream", async () => {
+    const world = await tempWorld();
+    const runId = "run_harness_recorder_session_cost";
+    const recorder = createHarnessEventRecorder({ world, runId });
+
+    // Session usage used to permit costUsd. It no longer does: keeping every dollar
+    // figure out of the durable log is what makes double-pricing unrepresentable.
+    await expect(
+      recorder.append({
+        type: "HarnessSessionCompleted",
+        payload: { runId, usage: { inputTokens: 3, outputTokens: 1, costUsd: 0 } },
+      }),
+    ).rejects.toThrow(/harness\.session\.completed\.payload\.usage\.costUsd must be absent/u);
+
+    await expect(listEvents(world, runId)).resolves.toEqual([]);
+  });
+
+  it("accepts token-only session usage including cache and reasoning counts", async () => {
+    const world = await tempWorld();
+    const runId = "run_harness_recorder_session_tokens";
+    const recorder = createHarnessEventRecorder({ world, runId });
+
+    await recorder.append({
+      type: "HarnessSessionCompleted",
+      payload: {
+        runId,
+        usage: { inputTokens: 3, outputTokens: 1, cachedInputTokens: 2, reasoningTokens: 1 },
+      },
+    });
+
+    await expect(listEvents(world, runId)).resolves.toHaveLength(1);
+  });
+
   it("hashHarnessPrompt returns sha256 digest and is stable", () => {
     const left = hashHarnessPrompt({
       messages: [{ role: "user", content: "hello" }],

@@ -88,6 +88,9 @@ export async function modelRespondedEventData(options: ModelRespondedMetadataOpt
     payload: {
       callId: options.callId,
       turn: options.stepNumber,
+      // Durability only persists the payload, so model identity has to live here too for
+      // downstream cost pricing to be able to key off it.
+      model: modelMetadata(options.model),
       response,
     },
     metadata,

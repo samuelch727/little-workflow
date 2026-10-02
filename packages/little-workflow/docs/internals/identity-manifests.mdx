@@ -1,0 +1,301 @@
+---
+title: Identity Manifests
+description: WorkflowDefinitionHash, the three harness manifests, drift detection on resume, and how identity links across a pipeline run.
+---
+
+Little Workflow uses content-addressed identity at every layer. This page covers the two workflow-level hashes and the three harness session manifests that compose them for drift detection and audit.
+
+## Two Workflow Hashes
+
+### `WorkflowDefinitionHash`
+
+A stable hash of the workflow's identity-bearing fields at authoring time. Computed once when `createLittleWorkflow({...})` is called; cached on the definition.
+
+```ts
+type WorkflowDefinitionSnapshot = {
+  readonly id: string;
+  readonly description: string;
+  readonly inputSchemaHash: string;
+  readonly outputSchemaHash: string;
+  readonly modelSlots: readonly {
+    readonly id: string;
+    readonly providerId: string;
+    readonly modelId: string;
+    readonly description: string;
+  }[];                                           // sorted by slot id
+  readonly plannerConfig: {
+    readonly modelSlotId: string;
+    readonly harnessId: string;
+    readonly systemHash: string;
+    readonly skillsHash: string;
+  };
+  readonly workerConfig: {
+    readonly harnessId: string;
+    readonly skillsHash: string;
+  };
+  readonly globalTools: readonly string[];       // sorted; tool ids referenced
+  readonly memoryConfig: {
+    readonly workflow: "rw" | "ro" | "none";
+    readonly org: "rw" | "ro" | "none";
+    readonly attached: readonly { id: string; mode: "ro" }[];  // sorted by id
+  };
+  readonly bashConfig: {
+    readonly network: false | {
+      readonly allowedUrlPrefixes?: readonly string[];
+      readonly allowedMethods?: readonly string[];
+      readonly denyPrivateRanges: boolean;
+      readonly maxRedirects?: number;
+      readonly timeoutMs?: number;
+      readonly maxResponseSize?: number;
+    };
+    readonly python: boolean;
+    readonly javascript: boolean;
+  };
+};
+
+WorkflowDefinitionHash = sha256(canonicalJson(WorkflowDefinitionSnapshot));
+```
+
+Used by: orchestrator manifest (available workflow list), planner manifest (pins to one definition), `little workflows list` CLI.
+
+### `WorkflowVersion`
+
+Unchanged: `sha256(canonicalJson(LWIR))`. Computed per planner draft. Two compiles that produce byte-identical LWIR collapse to the same `WorkflowVersion`.
+
+### Relationship
+
+```text
+WorkflowDefinition  (createLittleWorkflow)
+        ↓ hash once
+WorkflowDefinitionHash  (stable)
+        ↓ run with input
+LWIR  (per planner draft)
+        ↓ hash
+WorkflowVersion  (per run)
+        ↓ execute
+RunCompleted  (with output)
+```
+
+A `WorkflowDefinition` produces many `WorkflowVersion`s. The definition hash is stable across runs as long as the definition doesn't change; the version varies with input and planner non-determinism.
+
+## The Three Manifests
+
+Every harness session stores a manifest in its `harness.session.started` event. The manifest describes the capability surface the session was given. On resume, the SDK recomputes the manifest and compares hashes — mismatch fails closed.
+
+### `OrchestratorManifest`
+
+For `orchestrate` tasks.
+
+```ts
+type OrchestratorManifest = {
+  readonly harnessId: string;                    // e.g. "workflowHarness@1.0.0"
+  readonly orchestratorModelSlotId: string;
+  readonly systemPromptHash: string;
+  readonly skillsHash: string;
+  readonly availableWorkflows: ReadonlyArray<{
+    readonly id: string;
+    readonly definitionHash: string;
+  }>;                                            // sorted by id
+  readonly globalToolsHash: string;
+  readonly memoryStoreIds: ReadonlyArray<string>; // sorted
+  readonly bashCapabilitiesHash: string;
+  readonly maxConcurrentSubRuns: number;
+};
+
+OrchestratorManifestHash = sha256(canonicalJson(OrchestratorManifest));
+```
+
+### `PlannerManifest`
+
+For `plan` tasks, whether top-level or nested inside an orchestrator.
+
+```ts
+type PlannerManifest = {
+  readonly harnessId: string;
+  readonly plannerModelSlotId: string;
+  readonly systemPromptHash: string;
+  readonly skillsHash: string;
+  readonly workflowDefinitionHash: string;
+  readonly globalToolsHash: string;
+  readonly memoryStoreIds: ReadonlyArray<string>;
+  readonly bashCapabilitiesHash: string;
+  readonly outerLoopContextHash?: string;        // present iff this is a re-plan after supervise
+};
+
+PlannerManifestHash = sha256(canonicalJson(PlannerManifest));
+```
+
+### `WorkerManifest`
+
+For `execute_step` tasks, one per step execution.
+
+```ts
+type WorkerManifest = {
+  readonly harnessId: string;
+  readonly workflowDefinitionHash: string;
+  readonly workflowVersionId: string;
+  readonly stepPath: string;                     // e.g. "summarize" or "candidates[3].review"
+  readonly stepConfigHash: string;               // sha256 of the full LWIR step config
+  readonly modelSlotId?: string;                 // only for ai.generate steps
+  readonly systemPromptHash?: string;            // only for ai.generate
+  readonly skillsHash: string;
+  readonly allowedToolsHash: string;
+  readonly memoryStoreIds: ReadonlyArray<string>;
+  readonly bashCapabilitiesHash: string;
+};
+
+WorkerManifestHash = sha256(canonicalJson(WorkerManifest));
+```
+
+For direct-execute steps (`code.run`, `tool.call`, `decision`), `modelSlotId` and `systemPromptHash` are absent.
+
+### `FixerManifest`
+
+For `fix_step` tasks. Extends `WorkerManifest` with fixer-specific fields:
+
+```ts
+type FixerManifest = WorkerManifest & {
+  readonly fixerModelSlotId: string;
+  readonly fixerSystemHash: string;              // sha256 of onFailure.fixer.system
+  readonly fixerMaxAttempts: number;
+};
+```
+
+## `harness.session.started` Event Payload
+
+```jsonc
+{
+  "type": "harness.session.started",
+  "payload": {
+    "runId": "run_abc123",
+    "role": "orchestrator",
+    "task": { "kind": "orchestrate" },
+    "parentRunId": null,
+
+    "manifest": {
+      "harnessId": "workflowHarness@1.0.0",
+      "orchestratorModelSlotId": "gpt-5",
+      "systemPromptHash": "sha256:...",
+      "skillsHash": "sha256:...",
+      "availableWorkflows": [
+        { "id": "candidate.review", "definitionHash": "sha256:def123" },
+        { "id": "candidate.scoring", "definitionHash": "sha256:def456" }
+      ],
+      "globalToolsHash": "sha256:...",
+      "memoryStoreIds": ["pipeline:abc", "org"],
+      "bashCapabilitiesHash": "sha256:...",
+      "maxConcurrentSubRuns": 10
+    },
+    "manifestHash": "sha256:orch789"
+  }
+}
+```
+
+The manifest is inlined (not just hashed) so `little events <runId> --type harness.session.started` shows exactly what config the session ran against. Manifest size is ~500–2000 bytes per session — negligible.
+
+## Drift Detection on Resume
+
+```ts
+async function checkManifestDrift(world, runId, currentManifest) {
+  const events = await world.events.read(runId);
+  const startedEvent = events.find(e => e.type === "harness.session.started");
+  if (!startedEvent) return;  // fresh run
+
+  const storedHash = startedEvent.payload.manifestHash;
+  const currentHash = sha256(canonicalJson(currentManifest));
+
+  if (storedHash !== currentHash) {
+    throw new CapabilityDriftError({
+      runId,
+      storedManifest: startedEvent.payload.manifest,
+      currentManifest,
+      diff: computeManifestDiff(startedEvent.payload.manifest, currentManifest),
+    });
+  }
+}
+```
+
+`CapabilityDriftError` is thrown BEFORE any execution resumes. The dev sees what changed:
+
+```text
+CapabilityDriftError: Run 'run_abc123' was started with a different orchestrator config.
+
+Changes detected:
+- orchestratorModelSlotId: "gpt-5" → "gpt-4o-mini"
+- availableWorkflows[1].definitionHash: "sha256:def456" → "sha256:def789"
+  (candidate.scoring workflow definition changed)
+
+To resume cleanly, restore the prior state.
+To start fresh, run with a new runId.
+```
+
+### What counts as drift (orchestrator session)
+
+| Change | Drift? |
+| --- | --- |
+| `orchestrator.model` slot changed | Yes |
+| `orchestrator.system` prompt text changed | Yes |
+| `orchestrator.harness` changed | Yes |
+| Order or set of `workflows: [...]` changed | Yes |
+| Any sub-workflow's `WorkflowDefinitionHash` changed | Yes |
+| Tool registry gained/lost a tool or schema changed | Yes |
+| Bash sandbox/network capability changed | Yes |
+| Org memory store contents changed | No — only store IDs are in the manifest |
+| Skill body changed but frontmatter unchanged | No — only frontmatter is hashed |
+| Skill added or removed | Yes — changes `skillsHash` |
+
+### Dev options on drift
+
+- **Re-run fresh** — discard the runId; create a new run.
+- **Restore prior state** — revert the definition or tool registry changes and resume cleanly.
+- `acceptManifestDrift: true` is post-alpha.
+
+## Manifest Composition in a Pipeline Run
+
+A pipeline run nests multiple harness sessions:
+
+```text
+pipeline_run_X  (orchestrator session — OrchestratorManifest)
+  plan session for candidate.review  (PlannerManifest — workflowDefinitionHash: "sha256:def123")
+  run session for candidate.review × 50
+    each sub-run: worker sessions per LWIR step  (WorkerManifest — workflowVersionId: "sha256:lwir1")
+  plan session for candidate.scoring  (PlannerManifest — workflowDefinitionHash: "sha256:def456")
+  run session for candidate.scoring  (WorkerManifest per step)
+```
+
+Identity links from a worker step back to the orchestrator:
+
+```text
+WorkerManifest.workflowVersionId  →  LWIR hash
+                                      ↓ emitted by planner with
+PlannerManifest.workflowDefinitionHash
+                                      ↓ appears in
+OrchestratorManifest.availableWorkflows[X].definitionHash
+                                      ↓ hashed in
+harness.session.started of pipeline_run_X
+```
+
+All edges are durable in the event log. The CLI can render the dependency chain for any committed step.
+
+## Re-plan After Supervise
+
+When a planner re-plans after `supervise() → continue`:
+
+- The new session receives `outerLoopContextHash` (sha256 of prior cycles) in its `PlannerManifest`.
+- The new `PlannerManifestHash` differs from the prior planner manifest — each cycle has its own manifest.
+- New LWIR may yield a different `WorkflowVersion`; subsequent worker sessions reference the new version.
+
+## WorkflowDefinitionHash in Other Contexts
+
+| Use | Detail |
+| --- | --- |
+| CLI inspection | `little workflows list` shows `{id, hash, description}` |
+| Cross-machine compatibility | Same definition → same hash → interchangeable events across machines sharing `<dataDir>` |
+| Memory key | Workflow memory path is `<dataDir>/memory/workflows/<workflowId>/` — id-keyed not hash-keyed. Memory persists across definition changes; drift detection still works because the manifest pins the hash at run time. |
+
+## Related Pages
+
+- [Harness](/docs/v0.1.0-alpha/internals/harness) — where `harness.session.started` is emitted
+- [Memory + Scratch](/docs/v0.1.0-alpha/internals/memory-scratch) — how `memoryStoreIds` are constructed
+- [Fixer](/docs/v0.1.0-alpha/internals/fixer) — `FixerManifest` shape
+- [Event Log](/docs/v0.1.0-alpha/internals/event-log) — the underlying SQLite/WAL store that holds manifest events

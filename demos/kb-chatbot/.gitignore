@@ -1,0 +1,17 @@
+# The LIVE knowledge base. Seeded from `seed-knowledge/` (or, for the experiment, from
+# `experiment/kb/`) on first run and then written to by the agent, so it is a runtime
+# artifact, not repo content.
+knowledge/
+
+# Graded experiment runs. Evidence from a specific stack on a specific day, not content.
+experiment/.results/
+
+# Harness sessions and traces.
+.little-harness/
+
+# Workflow event stores. These do NOT land under `.little-harness/`: the harness hands a
+# workflow `persistence.dataDir = "<sessionId>/workflows"` (a RELATIVE path — see
+# packages/little-harness/src/execution/turn-tools.ts:88) and `localWorld` resolves it
+# against `process.cwd()`, so an inline workflow spills its sqlite store next to wherever
+# the process was started. Session ids here are `<adapter>:<threadId>`.
+/slack:*/

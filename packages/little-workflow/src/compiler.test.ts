@@ -837,6 +837,46 @@ describe("compiler and planner repair loop", () => {
     expect(planner.draft).not.toHaveBeenCalled();
   });
 
+  it("enforces a z.record input schema's propertyNames before calling the planner", async () => {
+    // The workflow-input half of LIT-53's not-a-lie proof. `compileWorkflow` validates the
+    // caller's input with the same Ajv build the rest of the package uses, so a key the
+    // record's key schema forbids must stop the compile before a planner is ever paid for.
+    const recordWorkflow = workflowDef({
+      ...workflow,
+      id: "support.score-configs",
+      inputSchema: z.record(z.enum(["fast", "cheap"]), z.number()),
+    });
+    const rejectingPlanner: PlannerAdapter = { draft: vi.fn(async () => validLwir()) };
+
+    await expect(
+      compileWorkflow(recordWorkflow, {
+        input: { fast: 1, cheap: 2, thorough: 3 },
+        tools: workflowRegistry,
+        planner: rejectingPlanner,
+        requestId: "orq_record_stray_key",
+      }),
+    ).rejects.toMatchObject({
+      name: "WorkflowInputValidationError",
+      // Ajv's wording, matched loosely: the rejection must be about the property NAME.
+      message: expect.stringMatching(/property name/u),
+    });
+    expect(rejectingPlanner.draft).not.toHaveBeenCalled();
+
+    // And the same schema lets a conforming map through — the compile continues to the
+    // planner, so the constraint is a key check and not a blanket rejection of maps.
+    const acceptingPlanner: PlannerAdapter = { draft: vi.fn(async () => validLwir()) };
+    await compileWorkflow(recordWorkflow, {
+      input: { fast: 1, cheap: 2 },
+      tools: workflowRegistry,
+      planner: acceptingPlanner,
+      requestId: "orq_record_valid_keys",
+    }).catch(() => undefined);
+    // Called at all is the assertion that matters: input validation is the gate before the
+    // planner, so reaching the planner means the conforming map passed it. (The draft this
+    // stub returns does not bind to this workflow, so the repair loop then retries it.)
+    expect(acceptingPlanner.draft).toHaveBeenCalled();
+  });
+
   it("returns a registered workflow version and lock metadata for valid planner output", async () => {
     const planner: PlannerAdapter = {
       draft: vi.fn(async () => validLwir()),
@@ -1624,7 +1664,12 @@ describe("compiler and planner repair loop", () => {
     });
   });
 
-  it("rejects unbound secrets and network permissions", async () => {
+  // `secrets` and `network` are declared but unimplemented, so `validateLwir`
+  // now rejects any non-empty entry before binding validation runs at all
+  // (schema findings short-circuit `validateRequestBinding`). The compiler's
+  // `binding.secret_disallowed` / `binding.network_disallowed` machinery is left
+  // in place, but the planner can no longer reach it through these two keys.
+  it("rejects declared-but-unimplemented secrets and network permissions", async () => {
     const draft = {
       ...validLwir(),
       permissions: {
@@ -1649,8 +1694,14 @@ describe("compiler and planner repair loop", () => {
       revisions: [
         expect.objectContaining({
           findings: expect.arrayContaining([
-            expect.objectContaining({ code: "binding.secret_disallowed" }),
-            expect.objectContaining({ code: "binding.network_disallowed" }),
+            expect.objectContaining({
+              code: "schema.unimplemented_field",
+              path: "$.permissions.secrets",
+            }),
+            expect.objectContaining({
+              code: "schema.unimplemented_field",
+              path: "$.permissions.network",
+            }),
           ]),
         }),
       ],

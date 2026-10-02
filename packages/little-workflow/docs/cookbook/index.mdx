@@ -1,0 +1,28 @@
+---
+title: Cookbook
+description: Task-oriented recipes lifted from the real, runnable Little Workflow demos.
+---
+
+The Cookbook collects short, task-oriented recipes — each one grounded in a real, runnable demo in the [`demos/`](https://github.com/samuelch727/little-workflow/tree/main/demos) folder rather than an invented snippet. Every recipe states what it does, shows the essential shape, and links to the full demo you can run.
+
+## Recipes
+
+- [**Plan once, run many**](/docs/v0.1.0-alpha/cookbook/plan-once-run-many) — an orchestrator plans a workflow once and fans it out across many inputs in parallel. From `demos/orchestrator-fanout`. Uses the deprecated orchestrator; for new composition, see [Compose With Little Harness](/docs/v0.1.0-alpha/authoring/compose-with-harness).
+- [**Resume after a crash**](/docs/v0.1.0-alpha/cookbook/resume-after-a-crash) — a run survives a mid-flight `SIGKILL` and resumes deterministically from the durable event log, without re-running committed steps. From `demos/kill-resume`.
+
+## More runnable demos
+
+Every demo is keyless unless noted. Run one with `pnpm --filter <name> demo` (some expose `demo:stub` for a keyless smoke run).
+
+| Demo | What it proves | Run |
+|---|---|---|
+| [`kill-resume`](https://github.com/samuelch727/little-workflow/tree/main/demos/kill-resume) | Kill-and-resume durability across a mid-run `SIGKILL`. | `pnpm --filter kill-resume demo` |
+| [`orchestrator-fanout`](https://github.com/samuelch727/little-workflow/tree/main/demos/orchestrator-fanout) | Plan-once, run-many sub-workflows in parallel (deprecated orchestrator surface). | `pnpm --filter orchestrator-fanout demo` |
+| [`real-planner`](https://github.com/samuelch727/little-workflow/tree/main/demos/real-planner) | The wedge — a real model designs a bounded parallel workflow from a goal (single-cycle and supervisor variants). | `pnpm --filter real-planner demo:single` (needs `DEEPSEEK_API_KEY`; `demo:stub` is keyless) |
+| [`sp500-investor-report`](https://github.com/samuelch727/little-workflow/tree/main/demos/sp500-investor-report) | ZIP-in, Markdown-out research workflow over external data. | `pnpm --filter sp500-investor-report demo:stub` |
+| [`hiring-candidates`](https://github.com/samuelch727/little-workflow/tree/main/demos/hiring-candidates) / [`delegated-candidates`](https://github.com/samuelch727/little-workflow/tree/main/demos/delegated-candidates) | Score a batch of candidates against a rubric (deprecated orchestrator surface). | `pnpm --filter hiring-candidates demo:stub` |
+| [`ticket-factory`](https://github.com/samuelch727/little-workflow/tree/main/demos/ticket-factory) | Turn unstructured input into a batch of structured work items (deprecated orchestrator surface). | `pnpm --filter ticket-factory demo:stub` |
+| [`remote-resume`](https://github.com/samuelch727/little-workflow/tree/main/demos/remote-resume) | Durability across process boundaries — sandboxed agent bash + a restartable session-log service. | `pnpm --filter remote-resume demo` |
+| [`kb-chatbot`](https://github.com/samuelch727/little-workflow/tree/main/demos/kb-chatbot) | A Little Harness agent that calls a workflow through `asHarnessWorkflow` and reads its `outputSummary`. | `pnpm --filter kb-chatbot demo` (needs `DEEPSEEK_API_KEY`) |
+
+New to the SDK? Start with the [Quickstart](/docs/v0.1.0-alpha/getting-started/quickstart) and [Define a Workflow](/docs/v0.1.0-alpha/authoring/define-a-workflow).

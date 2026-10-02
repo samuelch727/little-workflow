@@ -27,7 +27,12 @@ export type HarnessPriorEventQuery<TEventType extends string = HarnessEventType>
   readonly runId?: string;
 };
 
-export type HarnessDurabilitySink<TEventType extends string = HarnessEventType> = {
+/**
+ * The session log — the managed-agents "session" port: an append-only durable event log
+ * that is the source of truth for a run (append + priorEvents). A stateless harness
+ * reconstructs everything else from it.
+ */
+export type HarnessSessionLog<TEventType extends string = HarnessEventType> = {
   readonly append: (
     event: DurableHarnessEventInput<TEventType>,
   ) =>
@@ -40,6 +45,10 @@ export type HarnessDurabilitySink<TEventType extends string = HarnessEventType> 
     | Promise<readonly PersistedDurableHarnessEvent<TEventType>[]>
     | readonly PersistedDurableHarnessEvent<TEventType>[];
 };
+
+/** Historical name of the session-log contract (it reads via priorEvents too, not only "sinks"). */
+export type HarnessDurabilitySink<TEventType extends string = HarnessEventType> =
+  HarnessSessionLog<TEventType>;
 
 export type HarnessTraceSink<TEventType extends string = HarnessEventType> = {
   readonly append: (event: TraceHarnessEventInput<TEventType>) => Promise<void> | void;

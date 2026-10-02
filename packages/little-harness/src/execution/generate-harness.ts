@@ -1,6 +1,6 @@
 import {
   generateText,
-  stepCountIs,
+  isStepCount,
   type ModelMessage,
   type Output,
   type ToolSet,
@@ -8,18 +8,22 @@ import {
 } from "ai";
 import {
   findModelReplay,
+  findSingleCompletedModelReplay,
   findToolReplay,
   type DurableHarnessEvent,
   type ModelReplay,
   type ToolReplay,
 } from "../events/durability.js";
-import type { HarnessDurabilitySink, TraceHarnessEventInput } from "../events/occurrence.js";
+import type { HarnessSessionLog, TraceHarnessEventInput } from "../events/occurrence.js";
 import { emitHarnessOccurrence } from "../events/occurrence.js";
 import { HarnessInputError } from "../errors.js";
 import { createEventId, createTurnId } from "../ids.js";
+import type { ResolvedHarnessMcpGateway } from "../mcp.js";
 import { buildModelMessages, type BuildModelMessagesOptions } from "../runtime/messages.js";
+import { abstractToolHiddenWarning, partitionExecutableTools } from "./abstract-tools.js";
+import { assembleTurnTools, disposeTurnRuntime } from "./turn-tools.js";
+import { harnessToolExecutionEnd, harnessToolExecutionStart } from "./tool-execution-events.js";
 import { wrapToolsWithHarnessContext } from "../runtime/tools.js";
-import { resolveSkillsWithWarnings } from "../skills/skill.js";
 import { resolveTraceOptions } from "../trace/options.js";
 import { sanitizeTraceValue } from "../trace/redaction.js";
 import type { ResolvedHarnessTraceOptions } from "../trace/types.js";
@@ -43,10 +47,12 @@ import {
   modelCalledEventData,
   modelFailedEventData,
   modelRespondedEventData,
+  toolRefsForDurableRequest,
 } from "./model-events.js";
 import { modelRequestSettings } from "./model-request-settings.js";
 import { emitMountedFiles } from "./mount-events.js";
-import type { GenerateHarnessResult } from "./result.js";
+import type { GenerateHarnessResult, HarnessCompletedResult, HarnessParkedResult } from "./result.js";
+import { parkedResultFromSteps, parkedThisStep } from "./park-resume.js";
 import { stageChatMessages, type StageChatMessagesOptions } from "./stage-message.js";
 import { toolCallEventData } from "./tool-events.js";
 
@@ -62,7 +68,10 @@ export type GenerateHarnessOptions<TInput = unknown, TExtraBody = unknown, TOutp
     abortSignal?: AbortSignal;
     restage?: boolean;
     runId?: string;
-    durability?: HarnessDurabilitySink;
+    /** The session log (durable event log) this run appends to and replays from. */
+    sessionLog?: HarnessSessionLog;
+    /** Historical alias of `sessionLog`; `sessionLog` wins when both are set. */
+    durability?: HarnessSessionLog;
     onTraceError?: (error: unknown, event: TraceHarnessEventInput) => Promise<void> | void;
     onEvent?: (event: HarnessEvent) => void | Promise<void>;
     onPersistenceError?: (error: PersistenceError) => void | Promise<void>;
@@ -97,14 +106,25 @@ export async function generateHarness<
       : await getOrCreateSession(options.harness, options.session, options.extraBody);
   const turnId = createTurnId();
   const runId = options.runId ?? createEventId();
-  const durability = options.durability ?? config.durability;
+  const durability =
+    options.sessionLog ?? options.durability ?? config.sessionLog ?? config.durability;
   const onTraceError = options.onTraceError ?? config.onTraceError;
   const priorEvents = await durability?.priorEvents?.({ runId }) ?? [];
 
   return config.host.runExclusive(session, { turnId }, async () => {
     let prepared: PreparedTurn<TExtraBody> | undefined;
+    let resolvedMcp: ResolvedHarnessMcpGateway | undefined;
+    let turnRuntime: HarnessRuntime | undefined;
+    // The turn emitter is built inside the try (it needs `prepared`), but the `finally`
+    // that disposes the runtime has to report a disposal failure through it.
+    let emitTurnEventForDispose:
+      | ((event: PreparedTurnEvent) => Promise<void>)
+      | undefined;
+    let turnFailed = false;
     let callbackSequence = 0;
     let lastStartedModelStep: StartedModelStep | undefined;
+    // AI SDK 7 tool-execution events omit the step number; track the step the model is on.
+    let currentModelStepNumber: number | undefined;
     const modelSteps = new Map<number, StartedModelStep>();
     const toolOccurrences = new Map<string, string>();
     const toolReplayStates = new Map<string, ToolReplayState>();
@@ -133,6 +153,7 @@ export async function generateHarness<
           options,
           { runId, durability, onTraceError },
         );
+      emitTurnEventForDispose = emitTurnEvent;
       const agentFiles = createEventedFileWriter(prepared.files, emitTurnEvent, {
         defaultSource: "agent",
         traceOptions,
@@ -144,12 +165,64 @@ export async function generateHarness<
       });
       await prepared.loadPersistentDirs({ emit: emitTurnEvent });
 
-      const resolvedSkillsResult = await resolveSkillsWithWarnings(config.skills, {
-        skillMaxRisk: config.skillMaxRisk,
-        skillOidcToken: config.skillOidcToken,
+      // Abstract tools (declared without an execute) are structural placeholders that become live
+      // only on a connector that implements them; they must never be offered to the model on a
+      // plain run. Filter them here so the documented rule holds for generateHarness too, mirroring
+      // the connector loader's resolveConnectorTools behavior.
+      const { executable: modelTools, hidden: hiddenAbstractTools } =
+        partitionExecutableTools(config.tools as ToolSet);
+      for (const hiddenTool of Object.keys(hiddenAbstractTools)) {
+        warnings.push(abstractToolHiddenWarning(hiddenTool));
+      }
+      // Durable refs for the hidden abstract tools, in the same shape `durableModelRequest` records.
+      // Threaded into `findModelReplay` so it can reconstruct a pre-abstract-filter recording's hash.
+      const hiddenAbstractToolRefs = toolRefsForDurableRequest(hiddenAbstractTools);
+
+      if (config.mcp !== undefined && options.prepareStep === undefined) {
+        const replayedOutput = replayedSimpleModelOutput<TOutput>(
+          findSingleCompletedModelReplay(priorEvents as readonly DurableHarnessEvent[]),
+          options.output,
+        );
+        if (replayedOutput !== undefined) {
+          const persistence = await prepared.commitPersistentDirs({ emit: emitTurnEvent });
+          if (persistence.status === "failed") {
+            const error: PersistenceError = { session, failedCommits: persistence.failedCommits };
+            await config.onPersistenceError?.(error);
+            await options.onPersistenceError?.(error);
+          }
+
+          await emitTurnEvent({
+            type: "harness.session.completed",
+            turnId,
+            payload: { sessionId: session.id, turnId },
+          });
+          await setSessionState(session, "idle");
+
+          return {
+            status: "completed",
+            text: replayedOutput.text,
+            output: replayedOutput.output,
+            session,
+            artifacts: await session.artifacts.list(),
+            trace: prepared.trace,
+            persistence,
+            commitManual: createManualCommit(prepared, session, emitTurnEvent, options),
+            warnings,
+          };
+        }
+      }
+
+      const assembled = await assembleTurnTools({
+        config,
+        baseTools: modelTools,
+        session,
+        turnId,
+        orchestration: prepared.orchestration ?? config.host.durable,
+        abortSignal: options.abortSignal,
       });
-      const resolvedSkills = resolvedSkillsResult.skills;
-      warnings.push(...resolvedSkillsResult.warnings);
+      resolvedMcp = assembled.mcp;
+      const { resolvedSkills, turnTools } = assembled;
+      warnings.push(...assembled.warnings);
       await prepared.stageSkills(resolvedSkills);
 
       const staging = options.messages
@@ -202,7 +275,7 @@ export async function generateHarness<
         artifacts: createArtifactAccessor(prepared.files, session.artifacts),
       };
       const runtime = await prepared.createRuntime({
-        ...runtimeOptions(config, options),
+        ...runtimeOptions(config, options, turnTools),
         toolContext: runtimeToolContext,
         runtimeToolReplay: {
           find: (candidate) => findToolReplay(priorEvents as readonly DurableHarnessEvent[], candidate),
@@ -211,8 +284,9 @@ export async function generateHarness<
         emitToolEvents: false,
         traceOptions,
       });
+      turnRuntime = runtime;
       const tools = wrapToolsWithHarnessContext(
-        toolsForModel(config.tools as ToolSet, runtime, config.runtime),
+        toolsForModel(turnTools, runtime, config.runtime),
         toolContext,
       );
 
@@ -241,6 +315,7 @@ export async function generateHarness<
               traceOptions,
               settings: modelRequestSettings(options),
             }),
+              hiddenAbstractToolRefs,
           )
           : ({ kind: "none" } as const);
       const replayedOutput = replayedSimpleModelOutput<TOutput>(firstModelReplay, outputSpec);
@@ -260,6 +335,7 @@ export async function generateHarness<
         await setSessionState(session, "idle");
 
         return {
+          status: "completed",
           text: replayedOutput.text,
           output: replayedOutput.output,
           session,
@@ -278,7 +354,7 @@ export async function generateHarness<
         output: outputSpec,
         temperature: options.temperature,
         abortSignal: options.abortSignal,
-        stopWhen: options.stopWhen ?? stepCountIs(20),
+        stopWhen: stopWhenWithPark(options.stopWhen ?? isStepCount(config.workflowBudgets?.maxModelSteps ?? 20)),
         prepareStep,
         toolChoice: options.toolChoice,
         activeTools: options.activeTools,
@@ -287,6 +363,7 @@ export async function generateHarness<
         maxRetries: options.maxRetries,
         onStepStart: async (event) => {
           const stepNumber = eventStepNumber(event);
+          currentModelStepNumber = stepNumber;
           const model = eventModel(event, config.model);
           const eventSystemValue = eventSystem(event, system);
           const eventMessagesValue = eventMessages(event, built.messages);
@@ -305,6 +382,7 @@ export async function generateHarness<
               traceOptions,
               settings,
             }),
+            hiddenAbstractToolRefs,
           );
           const inflightReplay = stepReplay.kind === "inflight" ? stepReplay : undefined;
           const callId = inflightReplay?.callId ?? createEventId();
@@ -342,7 +420,7 @@ export async function generateHarness<
             metadata: eventData.metadata,
           });
         },
-        onStepFinish: async (event) => {
+        onStepEnd: async (event) => {
           const stepNumber = eventStepNumber(event);
           const started = modelSteps.get(stepNumber) ?? {
             stepNumber: stepNumber + 1,
@@ -369,7 +447,8 @@ export async function generateHarness<
             metadata: eventData.metadata,
           });
         },
-        onToolCallStart: async (event) => {
+        onToolExecutionStart: async (toolEvent) => {
+          const event = harnessToolExecutionStart(toolEvent, currentModelStepNumber);
           const replay = toolReplayForEvent(priorEvents as readonly DurableHarnessEvent[], event);
           const callId = replay.kind === "inflight" ? replay.callId : event.toolCall.toolCallId;
           const occurrenceId =
@@ -392,7 +471,8 @@ export async function generateHarness<
             metadata: eventData.metadata,
           });
         },
-        onToolCallFinish: async (event) => {
+        onToolExecutionEnd: async (toolEnd) => {
+          const event = harnessToolExecutionEnd(toolEnd, currentModelStepNumber);
           const state = toolReplayStates.get(event.toolCall.toolCallId);
           if (state?.replay.kind === "completed" || state?.replay.kind === "failed") {
             return;
@@ -415,6 +495,7 @@ export async function generateHarness<
         },
       });
       warnings.push(...providerWarnings(result.warnings));
+      const parked = parkedResultFromSteps(result.steps);
 
       const persistence = await prepared.commitPersistentDirs({ emit: emitTurnEvent });
       if (persistence.status === "failed") {
@@ -430,8 +511,19 @@ export async function generateHarness<
       });
       await setSessionState(session, "idle");
 
+      if (parked !== undefined) {
+        return {
+          ...parked,
+          session,
+          artifacts: await session.artifacts.list(),
+          trace: prepared.trace,
+          warnings,
+        } as unknown as GenerateHarnessResult<TOutput>;
+      }
+
       const output = outputSpec === undefined ? (result.text as TOutput) : (result.output as TOutput);
       return {
+        status: "completed",
         text: result.text,
         output,
         session,
@@ -442,48 +534,64 @@ export async function generateHarness<
         warnings,
       };
     } catch (error) {
-      await setSessionState(session, "failed");
+      turnFailed = true;
+      // Failure bookkeeping must never mask the root error: with a remote durability sink,
+      // the sink itself may be what failed, and these emits would fail the same way.
+      try {
+        await setSessionState(session, "failed");
+      } catch {
+        // Preserve the original turn failure.
+      }
       if (prepared) {
         const traceOptions = resolveTraceOptions(options.harness.config.trace, options.trace);
-        if (lastStartedModelStep) {
+        try {
+          if (lastStartedModelStep) {
+            await emitHarnessEvent(
+              prepared,
+              session,
+              {
+                type: "harness.model.failed",
+                occurrenceId: lastStartedModelStep.occurrenceId,
+                turnId,
+                stepId: stepIdFor(lastStartedModelStep.stepNumber - 1),
+                ...modelFailedEventData({
+                  callId: lastStartedModelStep.callId,
+                  stepNumber: lastStartedModelStep.stepNumber,
+                  model: lastStartedModelStep.model,
+                  durationMs: Date.now() - lastStartedModelStep.startedAt,
+                  error,
+                }),
+              },
+              traceOptions,
+              nextCallbackSequence,
+              options,
+              { runId, durability, onTraceError },
+            );
+          }
           await emitHarnessEvent(
             prepared,
             session,
             {
-              type: "harness.model.failed",
-              occurrenceId: lastStartedModelStep.occurrenceId,
+              type: "harness.session.failed",
               turnId,
-              stepId: stepIdFor(lastStartedModelStep.stepNumber - 1),
-              ...modelFailedEventData({
-                callId: lastStartedModelStep.callId,
-                stepNumber: lastStartedModelStep.stepNumber,
-                model: lastStartedModelStep.model,
-                durationMs: Date.now() - lastStartedModelStep.startedAt,
-                error,
-              }),
+              payload: { sessionId: session.id, turnId, error: error instanceof Error ? error.message : String(error) },
+              metadata: { error: error instanceof Error ? error.message : String(error) },
             },
             traceOptions,
             nextCallbackSequence,
             options,
             { runId, durability, onTraceError },
           );
+        } catch {
+          // Preserve the original turn failure.
         }
-        await emitHarnessEvent(
-          prepared,
-          session,
-          {
-            type: "harness.session.failed",
-            turnId,
-            payload: { sessionId: session.id, turnId, error: error instanceof Error ? error.message : String(error) },
-            metadata: { error: error instanceof Error ? error.message : String(error) },
-          },
-          traceOptions,
-          nextCallbackSequence,
-          options,
-          { runId, durability, onTraceError },
-        );
       }
       throw error;
+    } finally {
+      // Dispose the environment first: closing MCP can throw on the success path, and the
+      // sandbox child process must be reaped regardless.
+      await disposeTurnRuntime(turnRuntime, emitTurnEventForDispose);
+      await closeResolvedMcpGateway(resolvedMcp, { suppressErrors: turnFailed });
     }
 
     function toolOccurrenceId(event: { toolCall: { toolCallId: string } }): string {
@@ -496,6 +604,24 @@ export async function generateHarness<
       return occurrenceId;
     }
   });
+}
+
+async function closeResolvedMcpGateway(
+  resolvedMcp: ResolvedHarnessMcpGateway | undefined,
+  options: { suppressErrors: boolean },
+): Promise<void> {
+  if (resolvedMcp === undefined) {
+    return;
+  }
+  if (!options.suppressErrors) {
+    await resolvedMcp.close();
+    return;
+  }
+  try {
+    await resolvedMcp.close();
+  } catch {
+    // Preserve the original turn failure.
+  }
 }
 
 function toolReplayForEvent(
@@ -631,9 +757,10 @@ function messageInputOptions<TInput, TExtraBody, TOutput>(
 function runtimeOptions<TInput, TExtraBody, TOutput>(
   config: Harness<any, TExtraBody>["config"],
   options: GenerateHarnessOptions<TInput, TExtraBody, TOutput>,
+  tools: ToolSet,
 ): Parameters<PreparedTurn<TExtraBody>["createRuntime"]>[0] {
   const out: Parameters<PreparedTurn<TExtraBody>["createRuntime"]>[0] = {
-    tools: config.tools as ToolSet,
+    tools,
   };
   const runtime = resolveRuntimeOptions(config.runtime, options.runtime);
   if (runtime !== undefined) {
@@ -696,6 +823,11 @@ function toolsForModel(
     return { ...tools };
   }
   return { ...tools, bash: runtime.shellTool() };
+}
+
+function stopWhenWithPark(stopWhen: Parameters<typeof generateText>[0]["stopWhen"]): Parameters<typeof generateText>[0]["stopWhen"] {
+  const conditions = Array.isArray(stopWhen) ? stopWhen : [stopWhen ?? isStepCount(20)];
+  return [...conditions, parkedThisStep];
 }
 
 function runtimeSystem(
@@ -790,14 +922,14 @@ async function callGenerateText(options: {
   providerOptions?: Parameters<typeof generateText>[0]["providerOptions"];
   headers?: Parameters<typeof generateText>[0]["headers"];
   maxRetries?: Parameters<typeof generateText>[0]["maxRetries"];
-  onToolCallStart?: Parameters<typeof generateText>[0]["experimental_onToolCallStart"];
-  onToolCallFinish?: Parameters<typeof generateText>[0]["experimental_onToolCallFinish"];
-  onStepStart?: Parameters<typeof generateText>[0]["experimental_onStepStart"];
-  onStepFinish?: Parameters<typeof generateText>[0]["onStepFinish"];
+  onToolExecutionStart?: Parameters<typeof generateText>[0]["onToolExecutionStart"];
+  onToolExecutionEnd?: Parameters<typeof generateText>[0]["onToolExecutionEnd"];
+  onStepStart?: Parameters<typeof generateText>[0]["onStepStart"];
+  onStepEnd?: Parameters<typeof generateText>[0]["onStepEnd"];
 }) {
   const request: Record<string, unknown> = {
     model: options.model,
-    system: options.system,
+    instructions: options.system,
     messages: options.messages,
     tools: options.tools,
   };
@@ -832,16 +964,16 @@ async function callGenerateText(options: {
     request.maxRetries = options.maxRetries;
   }
   if (options.onStepStart !== undefined) {
-    request.experimental_onStepStart = options.onStepStart;
+    request.onStepStart = options.onStepStart;
   }
-  if (options.onStepFinish !== undefined) {
-    request.onStepFinish = options.onStepFinish;
+  if (options.onStepEnd !== undefined) {
+    request.onStepEnd = options.onStepEnd;
   }
-  if (options.onToolCallStart !== undefined) {
-    request.experimental_onToolCallStart = options.onToolCallStart;
+  if (options.onToolExecutionStart !== undefined) {
+    request.onToolExecutionStart = options.onToolExecutionStart;
   }
-  if (options.onToolCallFinish !== undefined) {
-    request.experimental_onToolCallFinish = options.onToolCallFinish;
+  if (options.onToolExecutionEnd !== undefined) {
+    request.onToolExecutionEnd = options.onToolExecutionEnd;
   }
   return generateText(request as Parameters<typeof generateText>[0]);
 }
@@ -858,7 +990,7 @@ async function emitHarnessEvent<TExtraBody>(
   },
   occurrence: {
     runId: string;
-    durability?: HarnessDurabilitySink | undefined;
+    durability?: HarnessSessionLog | undefined;
     onTraceError?: ((error: unknown, event: TraceHarnessEventInput) => Promise<void> | void) | undefined;
   },
 ): Promise<void> {
@@ -925,6 +1057,10 @@ function eventModel(event: unknown, fallback: Parameters<typeof generateText>[0]
   if (isObject(event) && isObject(event.model)) {
     return event.model as { provider?: string; modelId?: string };
   }
+  // AI SDK 7 step-start events flatten the model into top-level provider/modelId.
+  if (isObject(event) && typeof event.provider === "string" && typeof event.modelId === "string") {
+    return { provider: event.provider, modelId: event.modelId };
+  }
   return fallback;
 }
 
@@ -941,10 +1077,12 @@ function modelMetadata(model: EventModel): { provider?: string; modelId?: string
 }
 
 function eventSystem(event: unknown, fallback: string): string {
-  if (!isObject(event) || event.system === undefined) {
+  // AI SDK 7 renamed the step's system prompt to `instructions`; `system` is the v6 name.
+  const value = isObject(event) ? event.instructions ?? event.system : undefined;
+  if (value === undefined) {
     return fallback;
   }
-  return typeof event.system === "string" ? event.system : stableStringify(event.system);
+  return typeof value === "string" ? value : stableStringify(value);
 }
 
 function eventMessages(
@@ -984,8 +1122,8 @@ function createManualCommit<TExtraBody>(
     harness: Harness<any, TExtraBody>;
     onPersistenceError?: (error: PersistenceError) => void | Promise<void>;
   },
-): GenerateHarnessResult["commitManual"] {
-  let commit: ReturnType<GenerateHarnessResult["commitManual"]> | undefined;
+): HarnessCompletedResult["commitManual"] {
+  let commit: ReturnType<HarnessCompletedResult["commitManual"]> | undefined;
   return () => {
     commit ??= options.harness.config.host
       .runExclusive(session, { turnId: createTurnId() }, () =>
@@ -1027,9 +1165,7 @@ async function setSessionState(
   session: HarnessSession,
   state: "idle" | "running" | "failed",
 ): Promise<void> {
-  await (
-    session as HarnessSession & {
-      setStatus?: (patch: { state: "idle" | "running" | "failed" }) => Promise<void>;
-    }
-  ).setStatus?.({ state });
+  // Optional call: sessions written against the pre-port contract may not implement the
+  // typed mutators yet; state tracking degrades gracefully instead of failing every turn.
+  await session.setStatus?.({ state });
 }

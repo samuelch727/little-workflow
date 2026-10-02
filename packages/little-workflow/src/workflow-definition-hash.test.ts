@@ -453,6 +453,16 @@ describe("workflow definition hash", () => {
     );
   });
 
+  it("names the offending tool when a function-valued approval predicate is rejected", () => {
+    const definition = workflow({ globalTools: ["lookupCustomer"] });
+    const approvalRegistry = registryWithLookupCustomer({
+      needsApproval: (args) =>
+        typeof args === "object" && args !== null && "risk" in args,
+    });
+
+    expect(() => getWorkflowDefinitionHash(definition, approvalRegistry)).toThrow(/lookupCustomer/u);
+  });
+
   it("sorts global tools and attached memory stores", () => {
     const first = workflow({
       globalTools: ["summarize", "lookupCustomer"],

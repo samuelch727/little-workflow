@@ -56,4 +56,23 @@ describe("LocalSessionQueue", () => {
     );
     await first;
   });
+
+  it("honors per-call rejectIfBusy on a queueing-mode queue", async () => {
+    const queue = new LocalSessionQueue({ sameSession: "queue" });
+    const first = queue.run("s1", async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      return "first";
+    });
+
+    // The busy session rejects this call without disturbing the running turn…
+    await expect(
+      queue.run("s1", async () => "second", { rejectIfBusy: true }),
+    ).rejects.toBeInstanceOf(HarnessConcurrencyError);
+    await expect(first).resolves.toBe("first");
+
+    // …and once idle, rejectIfBusy calls run normally.
+    await expect(
+      queue.run("s1", async () => "third", { rejectIfBusy: true }),
+    ).resolves.toBe("third");
+  });
 });

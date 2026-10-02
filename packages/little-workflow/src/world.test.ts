@@ -435,7 +435,8 @@ describe("Local World event and artifact store", () => {
       type: "ModelCallCompleted",
       payload: {
         stepPath: "summarize",
-        usage: { inputTokens: 10, outputTokens: 5, costUsd: 0.002 },
+        model: { provider: "openai", modelId: "gpt-4o-mini" },
+        usage: { inputTokens: 10, outputTokens: 5 },
       },
     });
     await appendEvent(world, "run_materialize", {
@@ -468,9 +469,18 @@ describe("Local World event and artifact store", () => {
         outputRef: artifact.artifactRef,
         artifacts: [artifact.artifactRef],
         eventCount: 7,
-        usage: { inputTokens: 10, outputTokens: 5, costUsd: 0.002 },
       }),
     );
+    // Cost is priced from recorded tokens x registry rates, never read off the event.
+    // openai/gpt-4o-mini: 10 input x $0.15/1M + 5 output x $0.60/1M = $0.0000045
+    expect(state.usage.inputTokens).toBe(10);
+    expect(state.usage.outputTokens).toBe(5);
+    expect(state.usage.pricedCalls).toBe(1);
+    expect(state.usage.unpricedCalls).toBe(0);
+    expect(state.usage.costUsd).toBeCloseTo(0.0000045, 14);
+    // The same call is attributed to the step that emitted it.
+    expect(state.steps.summarize?.usage.inputTokens).toBe(10);
+    expect(state.steps.summarize?.usage.costUsd).toBeCloseTo(0.0000045, 14);
     expect(state.steps.summarize).toEqual(
       expect.objectContaining({
         stepPath: "summarize",

@@ -11,7 +11,9 @@ import { dirname, join, resolve } from "node:path";
 import Database from "better-sqlite3";
 import type { LocalWorld } from "./authoring.js";
 import { canonicalJson, sha256Digest } from "./canonical.js";
+import type { UsageTotals } from "./pricing.js";
 import { materializeRunStateFromEvents } from "./run-state.js";
+import { stripUndefined } from "./strip-undefined.js";
 import type { World } from "./world-port.js";
 
 type JsonRecord = Record<string, unknown>;
@@ -39,6 +41,7 @@ export type EventType =
   | "StepOutputValidated"
   | "StepCompleted"
   | "StepFailed"
+  | "StepRepairAttempted"
   | "ParallelGroupStarted"
   | "ParallelBranchScheduled"
   | "ParallelBranchCompleted"
@@ -118,6 +121,8 @@ export type MaterializedStepAttempt = {
 export type MaterializedStepState = {
   readonly stepPath: string;
   readonly status: "pending" | "running" | "completed" | "failed";
+  /** Tokens and priced dollars for the model calls attributed to this step. */
+  readonly usage: UsageTotals;
   readonly attempts: readonly MaterializedStepAttempt[];
   readonly output?: unknown;
   readonly outputRef?: ArtifactRef;
@@ -134,11 +139,8 @@ export type MaterializedRunState = {
   readonly finishedAt?: string;
   readonly output?: unknown;
   readonly outputRef?: ArtifactRef;
-  readonly usage: {
-    readonly inputTokens: number;
-    readonly outputTokens: number;
-    readonly costUsd: number;
-  };
+  /** Run-wide totals: the sum of every step's usage plus any unattributed model calls. */
+  readonly usage: UsageTotals;
   readonly steps: Record<string, MaterializedStepState>;
   readonly artifacts: readonly ArtifactRef[];
   readonly error?: unknown;
@@ -799,22 +801,6 @@ function artifactRefsValue(value: unknown): readonly ArtifactRef[] {
 
 function canonicalClone<T>(value: T): T {
   return JSON.parse(canonicalJson(value)) as T;
-}
-
-function stripUndefined<T>(value: T): T {
-  if (Array.isArray(value)) {
-    return value.map((item) => stripUndefined(item)) as T;
-  }
-  if (isRecord(value)) {
-    const result: JsonRecord = {};
-    for (const [key, item] of Object.entries(value)) {
-      if (item !== undefined) {
-        result[key] = stripUndefined(item);
-      }
-    }
-    return result as T;
-  }
-  return value;
 }
 
 function deepFreeze<T>(value: T): T {

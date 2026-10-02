@@ -3,6 +3,8 @@ title: skill()
 description: Proposed helper for adding procedural skill directories to a harness.
 ---
 
+import { Files, File, Folder } from 'fumadocs-ui/components/files';
+
 `skill()` registers procedural knowledge with Little Harness. Use it when the agent needs instructions, examples, or domain playbooks that should not live in every system prompt.
 
 ## Import
@@ -144,12 +146,16 @@ The helper should make a skill visible in two ways:
 
 The simplest input is a local directory containing `SKILL.md`.
 
-```txt
-skills/customer-briefs/
-  SKILL.md
-  examples/
-    renewal-brief.md
-```
+<Files>
+  <Folder name="skills" defaultOpen>
+    <Folder name="customer-briefs" defaultOpen>
+      <File name="SKILL.md" />
+      <Folder name="examples" defaultOpen>
+        <File name="renewal-brief.md" />
+      </Folder>
+    </Folder>
+  </Folder>
+</Files>
 
 ```ts
 skill("./skills/customer-briefs")

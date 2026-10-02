@@ -66,10 +66,17 @@ export function findModelReplay<TResponse = unknown>(
     readonly scope?: Record<string, unknown>;
     readonly step?: unknown;
   },
+  // Durable tool REFS (as produced by `toolRefsForDurableRequest` / `durableModelRequest`, i.e.
+  // `{ toolName, descriptionHash?, inputSchemaHash?, outputSchemaHash? }`) for the abstract
+  // (execute-less) tools filtered out of `request.tools` before this run reached the model.
+  // Recordings made BEFORE that filter hashed those tools into the prompt, so they are fed to
+  // `legacyModelReplayRequests` to reconstruct — full request shape and all — the exact
+  // `durableModelRequest` a pre-filter recorder produced from the un-filtered toolset.
+  hiddenAbstractToolRefs: readonly Record<string, unknown>[] = [],
 ): ModelReplay<TResponse> {
   const currentHash = hashHarnessPrompt(request);
   const legacyHashes = new Set<string>();
-  for (const legacyRequest of legacyModelReplayRequests(request)) {
+  for (const legacyRequest of legacyModelReplayRequests(request, hiddenAbstractToolRefs)) {
     legacyHashes.add(hashHarnessPrompt(legacyRequest));
   }
   const called = events
@@ -120,6 +127,47 @@ export function findModelReplay<TResponse = unknown>(
   }
 
   return { kind: "none" };
+}
+
+export function findSingleCompletedModelReplay<TResponse = unknown>(
+  events: readonly DurableHarnessEvent[],
+): ModelReplay<TResponse> {
+  const called = events
+    .filter((event) => event.type === "harness.model.called")
+    .sort((left, right) => left.sequence - right.sequence);
+  if (called.length !== 1) {
+    return { kind: "none" };
+  }
+
+  const current = called[0];
+  if (current === undefined) {
+    return { kind: "none" };
+  }
+  const turn = numberProperty(current.payload, "turn") ?? 1;
+  const callId = stringProperty(current.payload, "callId") ?? `legacy-turn:${turn}`;
+  const failed = events.find((event) =>
+    event.sequence > current.sequence &&
+    event.type === "harness.model.failed" &&
+    modelResponseMatchesCall(event.payload, callId, turn)
+  );
+  if (failed !== undefined) {
+    return { kind: "none" };
+  }
+  const responded = events.find((event) =>
+    event.sequence > current.sequence &&
+    event.type === "harness.model.responded" &&
+    modelResponseMatchesCall(event.payload, callId, turn)
+  );
+  if (responded === undefined) {
+    return { kind: "none" };
+  }
+
+  return {
+    kind: "completed",
+    turn,
+    callId,
+    response: replayResponseFromModelResponse(responded.payload) as TResponse,
+  };
 }
 
 export function findToolReplay(
@@ -266,24 +314,43 @@ function modelResponseMatchesCall(
   return numberProperty(payload, "turn") === turn;
 }
 
-function legacyModelReplayRequests(request: {
-  readonly model: string;
-  readonly messages: readonly unknown[];
-  readonly tools: readonly unknown[];
-}): readonly Record<string, unknown>[] {
-  const toolNames = request.tools
-    .map((tool) => stringProperty(tool, "toolName"))
-    .filter((name): name is string => name !== undefined);
-  const toRequest = (names: readonly string[]) => ({
-    model: request.model,
-    messages: request.messages,
-    tools: names.map((toolName) => ({ toolName })),
-  });
-  const requests: Record<string, unknown>[] = [toRequest(toolNames)];
-  if (toolNames.includes("bash")) {
-    requests.push(toRequest(toolNames.filter((name) => name !== "bash")));
+function legacyModelReplayRequests(
+  request: {
+    readonly model: string;
+    readonly messages: readonly unknown[];
+    readonly tools: readonly unknown[];
+    readonly [key: string]: unknown;
+  },
+  hiddenAbstractToolRefs: readonly Record<string, unknown>[] = [],
+): readonly Record<string, unknown>[] {
+  // Each candidate reuses EVERY other field of `request` (model, system, messages, settings, scope,
+  // step) and swaps only `tools`, because a pre-filter recorder stored
+  // `hashHarnessPrompt(durableModelRequest(...))` — the FULL request shape with system + per-tool
+  // descriptionHash/inputSchemaHash, name-sorted — so only a full-shape candidate can ever match.
+  //
+  // Base tool-ref list: the current model-facing refs. When abstract tools were filtered out of this
+  // run, a second variant MERGES their durable refs back in and re-sorts by name, reconstructing
+  // byte-for-byte the `tools` array `durableModelRequest(preFilterToolset)` produced. This is the
+  // mirror image of the `bash` removal below (bash was ADDED to requests at some point, so old
+  // recordings match with it removed).
+  const toolLists: (readonly unknown[])[] = [request.tools];
+  if (hiddenAbstractToolRefs.length > 0) {
+    toolLists.push(sortToolRefsByName([...request.tools, ...hiddenAbstractToolRefs]));
+  }
+  const requests: Record<string, unknown>[] = [];
+  for (const tools of toolLists) {
+    requests.push({ ...request, tools });
+    if (tools.some((tool) => stringProperty(tool, "toolName") === "bash")) {
+      requests.push({ ...request, tools: tools.filter((tool) => stringProperty(tool, "toolName") !== "bash") });
+    }
   }
   return requests;
+}
+
+function sortToolRefsByName(refs: readonly unknown[]): unknown[] {
+  return [...refs].sort((left, right) =>
+    (stringProperty(left, "toolName") ?? "").localeCompare(stringProperty(right, "toolName") ?? ""),
+  );
 }
 
 function hasReplayScope(request: { readonly scope?: unknown; readonly step?: unknown }): boolean {

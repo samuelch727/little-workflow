@@ -1,0 +1,24 @@
+{
+  "name": "real-planner",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "demo": "node run.mjs",
+    "demo:single": "node run.mjs single",
+    "demo:supervisor": "node run.mjs supervisor",
+    "demo:stub": "node run.mjs stub",
+    "demo:stub-supervisor": "node run.mjs stub-supervisor",
+    "test:planner-prompt": "node --test planner-prompt.test.mjs",
+    "test:provider-client": "node --test provider-client.test.mjs",
+    "test:run-cli": "node --test run-cli.test.mjs",
+    "test:supervisor-logic": "node --test supervisor-logic.test.mjs",
+    "test:variant-config": "node --test variant-config.test.mjs",
+    "test:worker-call": "node --test worker-call.test.mjs"
+  },
+  "dependencies": {
+    "@ai-sdk/deepseek": "^3.0.58",
+    "@ai-sdk/openai": "^4.0.83",
+    "ai": "^7.0.126",
+    "little-workflow": "workspace:*"
+  }
+}

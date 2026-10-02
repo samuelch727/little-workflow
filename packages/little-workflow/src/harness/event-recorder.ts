@@ -163,9 +163,10 @@ function validateHarnessEvent(event: HarnessEventInput, runId: RunId): void {
           );
         });
       }
-      assertUsage(response.usage, "harness.model.responded.payload.response.usage", {
-        allowCost: false,
-      });
+      if (payload.model !== undefined) {
+        assertHarnessModelIdentity(payload.model, "harness.model.responded.payload.model");
+      }
+      assertUsage(response.usage, "harness.model.responded.payload.response.usage");
       return;
     }
     case "harness.model.failed": {
@@ -403,19 +404,39 @@ function assertOwnPayloadField(payload: Record<string, unknown>, key: string, pa
   }
 }
 
-function assertUsage(
-  value: unknown,
-  path: string,
-  options: { readonly allowCost?: boolean } = {},
-): void {
+/**
+ * Recorded usage is token-only, on every event that carries it.
+ *
+ * Cost is derived downstream, in exactly one place, from these tokens and the model
+ * registry (`pricing.ts`). Rejecting `costUsd` here is what makes double-pricing
+ * unrepresentable: a dollar figure can never enter the durable log, so the run
+ * materializer has nothing to sum and must price. `harness.model.responded` already
+ * enforced this via an `allowCost: false` option; the rule now holds for every usage
+ * payload, and the opt-out is gone.
+ */
+function assertUsage(value: unknown, path: string): void {
   const usage = assertRecord(value, path);
   assertNonNegativeNumber(usage.inputTokens, `${path}.inputTokens`);
   assertNonNegativeNumber(usage.outputTokens, `${path}.outputTokens`);
-  if (options.allowCost === false && Object.hasOwn(usage, "costUsd")) {
+  if (usage.cachedInputTokens !== undefined) {
+    assertNonNegativeNumber(usage.cachedInputTokens, `${path}.cachedInputTokens`);
+  }
+  if (usage.reasoningTokens !== undefined) {
+    assertNonNegativeNumber(usage.reasoningTokens, `${path}.reasoningTokens`);
+  }
+  if (Object.hasOwn(usage, "costUsd")) {
     throw new TypeError(`${path}.costUsd must be absent.`);
   }
-  if (options.allowCost !== false && usage.costUsd !== undefined) {
-    assertNonNegativeNumber(usage.costUsd, `${path}.costUsd`);
+}
+
+/** Model identity recorded alongside a model response, used to price the call. */
+function assertHarnessModelIdentity(value: unknown, path: string): void {
+  const model = assertRecord(value, path);
+  if (model.provider !== undefined) {
+    assertString(model.provider, `${path}.provider`);
+  }
+  if (model.modelId !== undefined) {
+    assertString(model.modelId, `${path}.modelId`);
   }
 }
 

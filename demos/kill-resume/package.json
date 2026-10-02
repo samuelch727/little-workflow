@@ -1,0 +1,13 @@
+{
+  "name": "kill-resume",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "demo": "node ./run.mjs"
+  },
+  "dependencies": {
+    "ai": "^7.0.126",
+    "little-workflow": "workspace:*"
+  }
+}

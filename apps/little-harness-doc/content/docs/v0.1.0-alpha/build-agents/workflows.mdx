@@ -1,0 +1,154 @@
+---
+title: Triggering a workflow from an agent
+description: Expose a Little Workflow as a typed tool a Little Harness agent can call.
+---
+
+A Little Harness agent can trigger a Little Workflow as one of its tools. Adapt the workflow with
+`asHarnessWorkflow`, list it in `workflows`, and Little Harness turns it into one callable tool typed
+by the workflow's input schema. When the agent calls that tool, the workflow runs to completion inside
+the tool call and the agent receives a compact result: the run's status, its id, and a text summary of
+the output.
+
+<Callout title="Related but distinct">
+  This page is the **integration** side: handing an already-authored workflow to
+  an agent as a tool. Authoring a workflow — `defineWorkflow`, its step graph,
+  planner, and LWIR compilation — lives in Little Workflow, not here. See the
+  [Little Workflow docs](https://github.com/samuelch727/little-workflow/tree/main/packages/little-workflow#readme)
+  for how to author the `defineWorkflow` definition this page consumes.
+</Callout>
+
+## Install
+
+Workflows come from the `little-workflow` package, which depends on `little-harness` (not the other
+way around):
+
+```bash
+pnpm add little-workflow@alpha little-harness@alpha ai@^7 zod @ai-sdk/anthropic
+```
+
+## Author The Workflow
+
+The workflow needs no harness-specific shape. It is an ordinary `defineWorkflow` definition with an
+`id`, a `description`, an `input` schema, an `output` schema, a model, and tools — the same object you
+would run in a batch with `runWorkflow`.
+
+```ts
+// refund.ts — the workflow (authored exactly like a background workflow).
+import { anthropic } from "@ai-sdk/anthropic";
+import { tool } from "ai";
+import { z } from "zod";
+import { defineWorkflow } from "little-workflow";
+
+export const refundWorkflow = defineWorkflow({
+  id: "billing.refund",
+  description: "Process a customer refund: verify the order, check policy, issue the refund.",
+  input: z.object({ orderId: z.string(), amountCents: z.number(), reason: z.string() }),
+  output: z.object({ status: z.enum(["refunded", "denied"]), amountCents: z.number(), summary: z.string() }),
+  model: anthropic("claude-sonnet-4-6"),
+  tools: {
+    lookupOrder: tool({ description: "Fetch an order by id.", inputSchema: z.object({ orderId: z.string() }), execute: async ({ orderId }) => db.orders.get(orderId) }),
+    issueRefund: tool({ description: "Issue a refund.", inputSchema: z.object({ orderId: z.string(), amountCents: z.number() }), execute: async ({ orderId, amountCents }) => payments.refund(orderId, amountCents) }),
+  },
+});
+```
+
+> **Note:** A tool-using workflow is both *planned* (authors the step graph) and *executed* (the final step generates the declared structured output) by a model, so multi-step refund-style workflows need a **capable model for both roles** — a weak worker may not honor the output schema, even when the plan is correct. Use a capable `model`, and optionally give the planner its own (e.g. stronger) model for hard plans: `defineWorkflow({ ..., model: capable, planner: stronger })`.
+
+> **Schema subset:** Workflow `input`/`output` schemas compile to the alpha LWIR schema subset, which does **not** support every JSON-Schema keyword. `exclusiveMinimum`/`exclusiveMaximum` (produced by Zod's `.positive()`, `.negative()`, `.gt()`, `.lt()`) and `pattern`/`format` (produced by `.regex()`, `.email()`, `.url()`) are rejected; `.min()`/`.max()` (which produce `minimum`/`maximum`), `.describe()`, enums, and string- or enum-keyed `z.record()` are fine. Validate finer constraints inside a tool. A workflow whose schema uses an unsupported keyword fails to compile before the model is called.
+
+## Hand It To The Agent
+
+`workflows` takes `HarnessWorkflow` objects, not `defineWorkflow` results. Wrap the workflow with
+`asHarnessWorkflow` from `little-workflow`:
+
+```ts
+// route.ts — the chat agent.
+import { anthropic } from "@ai-sdk/anthropic";
+import { createHarness, localHost, streamHarness } from "little-harness";
+import { asHarnessWorkflow } from "little-workflow";
+import { refundWorkflow } from "./refund";
+
+const support = createHarness({
+  host: localHost(),
+  model: anthropic("claude-opus-4-7"),
+  system: "You are a support agent. When a customer asks for a refund, call the `billing_refund` tool with their order id, amount, and reason, then tell them the outcome.",
+  // Each workflow becomes ONE callable tool, named from its id (billing.refund -> billing_refund)
+  // and typed by the workflow's input schema.
+  workflows: [asHarnessWorkflow(refundWorkflow, { definitionIdentity: "billing.refund@1" })],
+  // At most two refund runs in flight per session; extra calls queue.
+  workflowBudgets: { maxConcurrentWorkflowRuns: 2 },
+});
+
+export async function POST(req: Request) {
+  const { messages } = await req.json();
+
+  const result = streamHarness({ harness: support, messages });
+
+  return result.toUIMessageStreamResponse();
+}
+```
+
+`definitionIdentity` is required. It names this version of the workflow's definition: use a stable
+string you change whenever the workflow's behavior changes (`"billing.refund@2"`), or
+`{ notApplicable: true }` to opt out. Workflows loaded from a folder with `loadWorkflow(...)` from
+`little-workflow` are already `HarnessWorkflow` objects with a folder-derived identity, so they can be
+listed directly.
+
+## How It Works
+
+Listing a workflow makes it **one** named tool the agent can call. The pieces are mechanical:
+
+- **Tool name comes from the workflow id.** Little Harness sanitizes each dotted segment and joins them
+  with `_`, so `billing.refund` becomes `billing_refund`. That is the name the model calls and the name
+  you reference in the system prompt.
+- **The tool's input schema is the workflow's input schema.** The AI SDK validates the agent's call
+  against it before the workflow runs, so the model cannot start a refund with a missing `orderId` or a
+  string where a number belongs.
+- **The result is compact, not the typed output.** A completed run returns
+  `{ status: "completed", runId, outputSummary?, outputPath? }`. `outputSummary` is the output rendered
+  as text (JSON for objects) and capped at 4096 characters, with a truncation marker naming the run when
+  it is cut. A failed or cancelled run returns `{ status, runId, causeCode, message, outputSummary? }`. The full typed
+  output stays in the workflow's run records under `runId`.
+- **The run happens inside the tool call.** Inline workflows must complete or fail before the tool call
+  returns; the agent then decides how to use the result in its reply.
+
+## Budgets
+
+The model can call several workflow tools in one step, and the AI SDK runs those calls in parallel. All
+workflow tools of a session share one admission gate set by `workflowBudgets`:
+
+| Budget | Default | Effect |
+|---|---|---|
+| `maxConcurrentWorkflowRuns` | `10` | Runs in flight at once. Extra calls wait in FIFO order. |
+| `maxQueuedWorkflowRuns` | `100` | Calls allowed to wait. Past this, a call returns `status: "failed"` with `causeCode: "max_queued_workflow_runs"` instead of failing the turn. |
+
+## Agent Folders
+
+In an [agent folder](/docs/v0.1.0-alpha/build-agents/agent-folders), put each workflow in
+`workflows/<name>.ts` as a default export. `loadHarness()` (and so `little-harness test`) imports every
+`workflows/*.ts` module and appends it to the agent's `workflows`:
+
+```ts
+// agents/support/workflows/refund.ts
+import { asHarnessWorkflow } from "little-workflow";
+import { refundWorkflow } from "../../../workflows/refund";
+
+export default asHarnessWorkflow(refundWorkflow, { definitionIdentity: "billing.refund@1" });
+```
+
+The default export must be a `HarnessWorkflow` (an `id`, an `executionMode`, a `definitionIdentity`, and
+`runForHarness`); a bare `defineWorkflow` result fails to load with a clear error.
+
+## Where Workflow Events Land
+
+The workflow runs through its own Little Workflow execution. Its run events — steps, model calls, tool
+calls inside the workflow — are written to an event store under the session's data directory
+(`.little-harness/sessions/<session>/workflows` with `localHost()`), not into the harness trace. The
+harness trace records the outer tool call (the agent calling `billing_refund` and getting a result).
+Inspect a triggered workflow's internals through Little Workflow's own run records for that `runId`.
+
+## Next Steps
+
+- Read [Tools](/docs/v0.1.0-alpha/build-agents/tools) to compare workflow tools with ordinary app tools.
+- Read [Letting an agent author its own workflow](/docs/v0.1.0-alpha/build-agents/dynamic-workflows) for one-shot plans when no configured workflow fits.
+- Read [Tracing](/docs/v0.1.0-alpha/foundations/tracing) to understand what the harness trace captures.

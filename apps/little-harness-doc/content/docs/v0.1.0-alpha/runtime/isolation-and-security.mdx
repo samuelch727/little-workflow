@@ -3,13 +3,13 @@ title: Isolation And Security
 description: Trust boundaries for sessions, tools, storage, and scripts.
 ---
 
-Little Harness should make isolation the default behavior.
+Little Harness makes isolation the default behavior.
 
-The first principle is simple: one session's files should not be visible to another session unless the developer explicitly configured shared persistence.
+The first principle is simple: one session's files are not visible to another session unless the developer explicitly configured shared persistence.
 
 ## Session Isolation
 
-Each session should receive its own workspace, artifacts, and trace. Parallel sessions should not mutate each other's working files.
+Each session receives its own workspace, artifacts, and trace. Parallel sessions do not mutate each other's working files.
 
 Shared state only appears through:
 
@@ -34,13 +34,39 @@ Avoid vague write tools such as `finish`, `sync`, or `do_action`.
 
 ## Runtime Trust
 
-The just-bash runtime helps protect against untrusted scripts. It should still be treated as one layer in a broader design:
+Tier-0 — just-bash, bash emulated in JavaScript over a virtual filesystem — is a
+**compatibility layer for trusted tool patterns, not an isolation boundary**. Its
+commands never touch the real filesystem, processes, or sockets, so ordinary tool
+scripting is contained by construction; but that containment is a library's parser
+and virtual filesystem, not the operating system. Treat it as protection against
+mistakes, not against an adversary.
+
+What follows from that:
+
+- **Model-authored code does not run in the host process by default.** `localHost()`
+  defaults `executionEnvironment` to `"auto"`: a turn stays in-process only when
+  `runtime.python` and `runtime.javascript` are both `false` and network is off.
+  Every other turn runs in `subprocessSandbox()`. `"in-process"` opts out of that
+  rule and should be reserved for trusted, read-only tool turns.
+- **The subprocess sandbox is the floor for anything beyond pure read tools.** Its
+  worker starts with an empty environment (your API keys and tokens never reach it),
+  a parent-side SIGKILL watchdog and init deadline, and just-bash's
+  defense-in-depth layer, which `defenseInDepthForAdapter` turns on only in the
+  worker — in-process it would patch process-wide globals of your app.
+- **Neither tier confines native code.** Use an OS-level sandbox (container, VM,
+  microVM) behind a custom execution environment for genuinely untrusted workloads.
+
+The rest of the design still applies around either tier:
 
 - network off by default
 - explicit harness directories only
 - host tools as explicit capabilities
 - trace records for tool and file activity
 - no arbitrary host path exposure by default
+
+See [Execution Environments](/docs/v0.1.0-alpha/runtime/execution-environments)
+for the modes and [Execution Tiers](/docs/v0.1.0-alpha/runtime/execution-tiers)
+for escalating commands Tier-0 cannot run.
 
 ## App Policy
 

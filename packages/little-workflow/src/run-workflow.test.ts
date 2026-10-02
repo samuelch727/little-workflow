@@ -27,6 +27,8 @@ import {
   writeArtifact,
 } from "./index.js";
 import { runWorkflowWithLegacyPlannerAdapter } from "./runtime.js";
+import { materializeRunStateFromEvents } from "./run-state.js";
+import { runReport } from "./run-report.js";
 import { compileWorkflow, type PlannerAdapter } from "./compiler.js";
 import {
   computeCompiledWorkflowVersionIdentity,
@@ -1782,7 +1784,17 @@ describe("runWorkflow integration", () => {
     expect(result.output).toEqual({ summary: "Cannot export invoices." });
     expect(result.runId).toBe("run_public_entrypoint");
     expect(result.workflowVersionId).toMatch(/^wfver_/u);
-    expect(result.usage).toEqual({ inputTokens: 0, outputTokens: 0, costUsd: 0 });
+    // No model calls, so $0 is a genuine zero (unpricedCalls === 0), not a silent
+    // under-report of work that could not be priced.
+    expect(result.usage).toEqual({
+      inputTokens: 0,
+      outputTokens: 0,
+      cachedInputTokens: 0,
+      reasoningTokens: 0,
+      costUsd: 0,
+      pricedCalls: 0,
+      unpricedCalls: 0,
+    });
     expect(result.events.map((event) => event.type)).toEqual([
       "OrchestrationRequested",
       "PlannerStarted",
@@ -2700,7 +2712,17 @@ describe("runWorkflow integration", () => {
     });
 
     expect(result.status).toBe("completed");
-    expect(result.usage).toEqual({ inputTokens: 2, outputTokens: 3, costUsd: 0 });
+    // The orchestrator harness records a model call but no model identity, so the call
+    // is counted in tokens and reported as unpriced — a null cost, never a fake $0.
+    expect(result.usage).toEqual({
+      inputTokens: 2,
+      outputTokens: 3,
+      cachedInputTokens: 0,
+      reasoningTokens: 0,
+      costUsd: null,
+      pricedCalls: 0,
+      unpricedCalls: 1,
+    });
     expect(orchestratorHarness.run).toHaveBeenCalledTimes(1);
     const orchestratorOutput = result.output as {
       workflowVersionId: string;
@@ -3017,7 +3039,7 @@ describe("runWorkflow integration", () => {
     expect(typeof optionsRecord?.toolCallId).toBe("string");
     expect(Array.isArray(optionsRecord?.messages)).toBe(true);
     expect(typeof optionsRecord?.abortSignal).toBe("object");
-    expect(typeof optionsRecord?.experimental_context).toBe("object");
+    expect(typeof optionsRecord?.context).toBe("object");
   });
 
   it("validates AI SDK-style tool input before executing", async () => {
@@ -4320,6 +4342,7 @@ describe("runWorkflow integration", () => {
       causeCode: "cancelled",
     });
 
+    await new Promise((resolve) => setTimeout(resolve, 50));
     const eventsAfterCancel = await listEvents(world, "run_public_terminal_cancelled");
     expect(eventsAfterCancel.filter((event) => event.type === "StepFailed")).toEqual([
       expect.objectContaining({
@@ -4329,6 +4352,11 @@ describe("runWorkflow integration", () => {
         }),
       }),
     ]);
+    const eventTypesAfterCancel = eventsAfterCancel.map((event) => event.type);
+    expect(eventTypesAfterCancel).not.toContain("harness.tool_call.succeeded");
+    expect(eventTypesAfterCancel).not.toContain("harness.execute_step.succeeded");
+    expect(eventTypesAfterCancel).not.toContain("harness.session.completed");
+    expect(eventTypesAfterCancel).not.toContain("harness.session.failed");
 
     const resumedTool = vi.fn<RuntimeToolHandler>(() => ({ summary: "should not resume" }));
     await expect(
@@ -6379,6 +6407,104 @@ describe("P1.5 — planner declares model in permissions; runtime receives model
     expect(result.status).toBe("completed");
     expect(result.output).toEqual({ summary: "stub summary" });
     expect(aiLoop.generate).toHaveBeenCalledOnce();
+  });
+
+  it("attributes real ai.generate usage to the step that ran it", async () => {
+    // End-to-end guard for the runtime -> harness bridge: the harness never sees a
+    // workflow step path, so the runtime stamps one onto every event it forwards. If
+    // that injection regressed, usage would still be counted at the run level but every
+    // step would report zero, and a receipt would lose its per-step breakdown.
+    const world = await tempWorld();
+    const workerSlot = model({ providerId: "stub", modelId: "stub-model" }, { id: "model.fast" });
+    const aiLoop = {
+      generate: vi.fn(async () => ({
+        output: { summary: "stub summary" },
+        usage: { inputTokens: 5_000, outputTokens: 3_000, cachedInputTokens: 4_000 },
+      })),
+    };
+    const aiWorkflow = createLittleWorkflow({
+      id: "p1-5.ai-generate",
+      description: "Single ai.generate step with model.fast slot.",
+      inputSchema: aiInputSchema,
+      output: output.object({ schema: aiOutputSchema }),
+      models: [workerSlot],
+      worker: { harness: createWorkflowHarness({ aiLoop }) },
+    } as unknown as Parameters<typeof createLittleWorkflow>[0]);
+
+    const result = await runWorkflow({
+      world,
+      workflows: aiWorkflow,
+      input: { text: "hello world" },
+      planner: plannerFor(aiGenerateLwir()),
+      runId: "run_step_usage_attribution",
+    });
+    expect(result.status).toBe("completed");
+
+    const state = materializeRunStateFromEvents("run_step_usage_attribution", result.events);
+    // The step path comes from the LWIR, not from anything the harness supplied.
+    expect(state.steps.summarize?.usage.inputTokens).toBe(5_000);
+    expect(state.steps.summarize?.usage.outputTokens).toBe(3_000);
+    expect(state.steps.summarize?.usage.cachedInputTokens).toBe(4_000);
+
+    // Nothing is left unattributed: the per-step rows reconcile with the run total.
+    const report = runReport(state);
+    expect(report.unattributed).toBeUndefined();
+    expect(report.total.inputTokens).toBe(5_000);
+
+    // The stub model is not in the registry, so cost is honestly unpriced rather than $0.
+    expect(state.usage.costUsd).toBeNull();
+    expect(state.usage.unpricedCalls).toBeGreaterThan(0);
+  });
+
+  it("prices an end-to-end run whose model reports a real AI SDK provider id", async () => {
+    // The companion to the test above, and the one that catches the whole-stack failure
+    // it cannot: every AI SDK provider stamps `.provider` as
+    // `${providerName}.${modelType}` — "deepseek.chat" here, "openai.responses" for
+    // `openai("gpt-4o-mini")` — while registry keys are bare ("deepseek/deepseek-v4-flash").
+    // Before provider-id normalization, every real-provider run reported costUsd: null,
+    // so a pricing suite that only used bare ids stayed green while nothing shipped
+    // priced. Note `provider`, not `providerId`: that is the property real AI SDK model
+    // objects expose, and the one the runtime falls back to.
+    const world = await tempWorld();
+    const workerSlot = model(
+      { provider: "deepseek.chat", modelId: "deepseek-v4-flash" },
+      { id: "model.fast" },
+    );
+    const aiLoop = {
+      generate: vi.fn(async () => ({
+        output: { summary: "stub summary" },
+        usage: { inputTokens: 10_000, outputTokens: 2_000 },
+      })),
+    };
+    const aiWorkflow = createLittleWorkflow({
+      id: "p1-5.ai-generate",
+      description: "Single ai.generate step with model.fast slot.",
+      inputSchema: aiInputSchema,
+      output: output.object({ schema: aiOutputSchema }),
+      models: [workerSlot],
+      worker: { harness: createWorkflowHarness({ aiLoop }) },
+    } as unknown as Parameters<typeof createLittleWorkflow>[0]);
+
+    const result = await runWorkflow({
+      world,
+      workflows: aiWorkflow,
+      input: { text: "hello world" },
+      planner: plannerFor(aiGenerateLwir()),
+      runId: "run_real_provider_id_pricing",
+    });
+    expect(result.status).toBe("completed");
+
+    // deepseek/deepseek-v4-flash is listed at input $0.14 / output $0.28 per 1M tokens.
+    //   10,000 input  x $0.14 / 1M = $0.00140
+    //    2,000 output x $0.28 / 1M = $0.00056
+    //                        total = $0.00196
+    expect(result.usage.costUsd).toBeCloseTo(0.00196, 12);
+    expect(result.usage.pricedCalls).toBeGreaterThan(0);
+    expect(result.usage.unpricedCalls).toBe(0);
+
+    const state = materializeRunStateFromEvents("run_real_provider_id_pricing", result.events);
+    expect(state.steps.summarize?.usage.costUsd).toBeCloseTo(0.00196, 12);
+    expect(runReport(state).hasUnpricedCalls).toBe(false);
   });
 
   it("blocks reuse_unchanged when a candidate model slot is no longer available", async () => {

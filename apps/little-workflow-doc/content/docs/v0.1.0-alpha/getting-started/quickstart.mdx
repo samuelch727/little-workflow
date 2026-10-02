@@ -1,0 +1,150 @@
+---
+title: Quickstart
+description: Define a workflow with the ergonomic front door, run it in one call, and inspect the result.
+---
+
+`defineWorkflow` is the eve-style front door: a single model, inline tools keyed by name, and plain `input`/`output` schemas. It normalizes into the engine's full shape — a `models` tuple plus a synthesized planner — so you describe the job, not the plumbing. This covers a single workflow. To compose several workflows, see [Compose With Little Harness](/docs/v0.1.0-alpha/authoring/compose-with-harness). For the lower-level `createLittleWorkflow` surface, see [Create A Workflow](/docs/v0.1.0-alpha/authoring/advanced-createlittleworkflow).
+
+## Install
+
+```sh
+pnpm add little-workflow@alpha ai@^7 zod @ai-sdk/anthropic
+```
+
+Releases are published under the `alpha` dist-tag. Little Workflow requires **Node.js 22 or later** and **AI SDK 7**: `ai` is a peer dependency (`^7.0.0`), so install it alongside the package. Add an AI SDK 7 provider package for your models; the example below uses `@ai-sdk/anthropic`.
+
+Local World uses `better-sqlite3` for its embedded event store. pnpm 10 skips dependency build scripts unless you allow them, so allow this native build in your app's `package.json` (or under `onlyBuiltDependencies` in `pnpm-workspace.yaml`) before running workflows:
+
+```json
+{
+  "pnpm": { "onlyBuiltDependencies": ["better-sqlite3"] }
+}
+```
+
+To scaffold a project instead, run `npx little-workflow@alpha init my-app`. The scaffold pins its dependency versions and writes this setting for you. See [CLI → Init And Add](/docs/v0.1.0-alpha/reference/cli#init-and-add).
+
+## Define And Run
+
+```ts
+import { anthropic } from "@ai-sdk/anthropic";
+import { tool } from "ai";
+import { z } from "zod";
+import { defineWorkflow, runWorkflow } from "little-workflow";
+
+const Applicant = z.object({ applicantId: z.string(), resume: z.string() });
+const Verdict = z.object({
+  applicantId: z.string(),
+  score: z.number().min(0).max(100),
+  decision: z.enum(["advance", "reject", "maybe"]),
+  reason: z.string(),
+});
+
+export const reviewApplicants = defineWorkflow({
+  id: "applicants.review",
+  description: "Review a batch of applicants against the role criteria; score each independently; return all verdicts.",
+  input: z.object({ role: z.string(), criteria: z.string(), applicants: z.array(Applicant) }),
+  output: z.array(Verdict),                  // z.array(...) => array output inferred
+  model: anthropic("claude-sonnet-4-6"),     // ONE model; no models[] tuple / planner block
+  tools: {                                   // inline, keyed by name; no registry
+    fetchScorecard: tool({
+      description: "Load the role scoring rubric.",
+      inputSchema: z.object({ role: z.string() }),
+      execute: async ({ role }) => loadRubric(role),
+    }),
+  },
+});
+
+// Run once over the whole batch. No world or tools plumbing.
+const result = await runWorkflow(reviewApplicants, {
+  role: "Staff Engineer",
+  criteria: "8+ yrs distributed systems; strong written communication.",
+  applicants: await loadApplicants(),        // up to 100 { applicantId, resume }
+});
+
+result.output;        // Verdict[] — typed from the schema
+result.usage.costUsd; // number | null — real USD, or null when nothing could be priced
+result.runId;         // re-runnable / replayable
+```
+
+`loadRubric` and `loadApplicants` are your own functions — the stubs here stand in for however your app fetches the scoring rubric and the applicant batch.
+
+## What The Run Cost
+
+`result.usage` is a real receipt, not a placeholder. Dollars are computed once, when the run's events are materialized, by multiplying the recorded token counts by the [bundled model registry](/docs/v0.1.0-alpha/authoring/ai-sdk-native#bundled-model-registry) rates:
+
+```ts
+result.usage.inputTokens;       // total prompt tokens
+result.usage.cachedInputTokens; // subset of inputTokens served from the provider's prompt cache
+result.usage.outputTokens;      // total completion tokens
+result.usage.reasoningTokens;   // subset of outputTokens spent on reasoning
+result.usage.costUsd;           // number | null
+result.usage.pricedCalls;       // model calls the registry could price
+result.usage.unpricedCalls;     // model calls it could not
+```
+
+`costUsd` is `number | null`, and the distinction is the point:
+
+- **`0`** is a genuine zero-dollar total — normally a run that made no model calls.
+- **`null`** means **unpriced**: the run made model calls, but *none* of them matched a registry entry, so no honest dollar figure exists. `null` is never a claim that the run was free.
+- A **number** covers the `pricedCalls` only. If `unpricedCalls > 0`, the figure is a floor, not a total — check that field before quoting the number.
+
+Cache hits are billed at the model's published cache-read rate where the registry has one, and at the full input rate otherwise, so a cost is a conservative over-estimate rather than an invented discount. See [Bundled Model Registry](/docs/v0.1.0-alpha/authoring/ai-sdk-native#bundled-model-registry) for which models carry a cache rate.
+
+For a per-step breakdown of the same numbers, run `little report <run-id>` (see [CLI](/docs/v0.1.0-alpha/reference/cli#report)). Pre-run *cost estimation* and budget enforcement are a different, still-unimplemented surface — see the [Roadmap](/docs/v0.1.0-alpha/roadmap).
+
+## What `defineWorkflow` Saves You
+
+`defineWorkflow` takes the ergonomic, eve-style description — one `model`, inline `tools` keyed by name, and plain `input`/`output` schemas — and normalizes it into the fully-specified shape the runtime already expects: a `models` tuple, a synthesized `planner`, an inferred output mode, and a `globalTools` list built from the inline tool registry. The engine is unchanged; you just stop writing the boilerplate.
+
+A plain `z.array(...)` `output` infers array output. A plain object schema infers object output, and a string schema infers text. There is no `models[]` tuple to assemble, no separate `planner` block to wire, and no standalone tool registry — `tools` are keyed by name inline and exposed to the plan automatically.
+
+The two-argument `runWorkflow(def, input)` form defaults the world to `localWorld()` and auto-wires the workflow's inline tool registry, so a typical run needs no `world` or `tools` plumbing. The result is typed end-to-end: `result.output` is `Verdict[]`, inferred straight from the output schema.
+
+## One Call Over A Batch
+
+The planner designs a **native parallel step** from the shape of the job: a list input (`applicants: z.array(...)`) feeding an array output (`z.array(Verdict)`). Reviewing a batch is therefore a single `runWorkflow` call. The fan-out lives in the durable, replayable plan instead of a `for` loop in your code. LWIR bounds the parallel step: `maxConcurrency` caps the branches in flight, and `maxBranches` caps the items, at most **100 per parallel step** in alpha. A run whose item list resolves to more than the step's `maxBranches` fails. For larger batches, split the input across runs. See [Parallel Execution](/docs/v0.1.0-alpha/internals/parallel) for how branches are scheduled, persisted, and resumed.
+
+## Escalating The Planner
+
+The planner that designs the plan defaults to the workflow's `model`. To give the planner a stronger model than the workers, pass a bare model under `planner`:
+
+```ts
+defineWorkflow({
+  id: "applicants.review",
+  model: anthropic("claude-sonnet-4-6"),       // workers
+  planner: anthropic("claude-opus-4-7"),       // planner only — lifted into a PlannerConfig
+  // ...input, output, tools
+});
+```
+
+A defined workflow is also runnable directly via its `run` method, which defaults the world and inline tools the same way:
+
+```ts
+const result = await reviewApplicants.run({
+  role: "Staff Engineer",
+  criteria: "8+ yrs distributed systems; strong written communication.",
+  applicants: await loadApplicants(),
+});
+```
+
+To coordinate **distinct** workflows rather than one batched workflow, hand each one to a Little Harness agent as a typed tool: `asHarnessWorkflow(def, { definitionIdentity })` passed to `createHarness({ workflows })`. See [Compose With Little Harness](/docs/v0.1.0-alpha/authoring/compose-with-harness). The older array-plus-`orchestrator` form of `runWorkflow` is deprecated.
+
+## Inspect The Run
+
+```bash
+little events run_123
+little replay run_123
+little report run_123 --table
+```
+
+`little events` dumps the run's event log (one JSON event per line). `little replay` reconstructs run state from persisted events without re-calling models, tools, or external APIs. `little report` prints per-step tokens and cost.
+
+## What The Runtime Produces
+
+The planner runs in a `workflowHarness` session. It produces LWIR — a validated, canonical JSON workflow graph. The runtime then executes each step through the worker harness:
+
+- `ai.generate` steps run in an AI agent loop with the step's tool allowlist.
+- `code.run` steps have no model in the loop: the body receives `{ input, tools }` and can call registered tools directly. **The default worker harness does not execute them.** It validates the step's sandbox policy and then throws, because `code.run` needs an isolated runtime. To run `code.run` steps, supply a `worker.harness` that implements `execute_step`; see [Security Model](/docs/v0.1.0-alpha/internals/security-model).
+- `tool.call` steps invoke a single named tool from the registry.
+
+The compiled artifact (LWIR + capability snapshots) is the `WorkflowVersion`. Durability guarantees: completed steps are never re-executed on resume.

@@ -24,33 +24,16 @@ session isolation, and enough concurrency to test multiple sessions at once.
 
 ## Directory Layout
 
-```txt
-.little-harness/
-  host.json
-  sessions/
-    <session-id>/
-      session/
-      artifacts/
-        trace/
-        tool-results/
-      skills/
-      persistent/
-      trace.ndjson
-      status.json
-      turns/
-        <turn-id>.json
-  persistent/
-    ...
-  locks/
-    sessions/
-    persistent/
-```
+Local Host stores each session under `dataDir` (default `.little-harness`) with
+on-disk names kept close to the paths the agent sees, so a developer can open the
+local folder and understand what happened: `session/` maps to `/session`,
+`artifacts/` maps to `/artifacts`, `.agents/skills/` holds read-only materialized
+skills, and `persistent/` is the session checkout for configured Persistent Dirs,
+alongside `trace.ndjson`, `status.json`, and per-turn summaries. Workflow tools
+write their run stores under the same session folder (`workflows/`).
 
-`session/` maps to `/session` inside the harness. `artifacts/` maps to
-`/artifacts`. `.agents/skills/` contains read-only materialized skills;
-`persistent/` is the session checkout for configured Persistent Dirs. These
-names are kept close to the paths the agent sees so a developer can open the
-local folder and understand what happened.
+For the full annotated on-disk tree and every option, see the
+[`localHost()` reference](/docs/v0.1.0-alpha/reference/local-host).
 
 ## Session Concurrency
 
@@ -90,6 +73,21 @@ streamHarness({
 The next call with the same `session` resumes the same local folder. Calls that
 omit `session` still get a generated session folder for debugging, but the host
 can mark it as ephemeral in `status.json`.
+
+## Execution Environment
+
+Local Host runs each turn's `bash` tool in the execution environment selected by
+`executionEnvironment`. The default, `"auto"`, uses the subprocess sandbox for any
+turn that can run Python or JavaScript or reach the network, and in-process
+just-bash only for turns with all three off:
+
+```ts
+localHost({ executionEnvironment: "auto" }); // the default
+localHost({ executionEnvironment: "in-process" }); // trusted read-only tools only
+localHost({ executionEnvironment: subprocessSandbox({ initTimeoutMs: 10_000 }) });
+```
+
+See [Execution Environments](/docs/v0.1.0-alpha/runtime/execution-environments).
 
 ## Persistent Dirs
 
@@ -136,7 +134,7 @@ current working directory.
 
 Local Host inspection is file-based.
 
-The local runtime should not require a dashboard. Developers can
+The local runtime does not require a dashboard. Developers can
 inspect:
 
 - `session/` for working files
@@ -154,12 +152,14 @@ little-harness files chat_123 --data-dir .little-harness
 little-harness artifacts chat_123 --data-dir .little-harness
 little-harness diff chat_123 --path /session/notes.md --data-dir .little-harness
 little-harness doctor chat_123 --data-dir .little-harness
+little-harness outcomes --data-dir .little-harness
 ```
 
-The CLI is read-only in alpha. It lists mounted files and artifacts, prints
-validated trace events, finds the latest traced diff for a harness path, and
-summarizes failures or malformed trace lines. It does not run models, tools, or
-commands.
+These inspection commands are read-only. They list mounted files and artifacts,
+print validated trace events, find the latest traced diff for a harness path,
+summarize failures or malformed trace lines, and aggregate recorded outcomes.
+They do not run models, tools, or commands (the separate `test` command does —
+see the [CLI reference](/docs/v0.1.0-alpha/reference/cli)).
 
 A managed inspector can read the same concepts later, but it is not part of
 Local Host.

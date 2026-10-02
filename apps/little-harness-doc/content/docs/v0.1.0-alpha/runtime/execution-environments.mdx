@@ -1,0 +1,264 @@
+---
+title: Execution Environments
+description: The decoupled sandbox, tool, session, and orchestration ports — execution modes, the subprocess sandbox, custom environments, and the remote session log.
+---
+
+Little Harness separates the agent loop ("the brain") from where commands run,
+where tools execute, and where the session's history lives — the architecture
+Anthropic describes in
+[Scaling Managed Agents](https://www.anthropic.com/engineering/managed-agents).
+Each concern is a port with a default local adapter:
+
+| Concern | Port | Default adapter | Alternate adapters |
+| --- | --- | --- | --- |
+| Sandbox | `HarnessExecutionEnvironmentFactory` consuming a `HarnessWorkspaceSpec` | `"auto"`: `subprocessSandbox()`, or in-process just-bash for turns that run no code and have no network | `"in-process"`, `"subprocess"`, `subprocessSandbox({ ... })`, `tieredExecutionEnvironment({ ... })`, custom factories |
+| Tools | `RuntimeToolBridge` (`invokeTool(name, argsJson) → JSON`) | in-process dispatch | the same proxy serving a child process |
+| Session log | `HarnessSessionLog` (append + priorEvents; historical alias `HarnessDurabilitySink`) | caller-provided | `remoteSessionLog()` over `startSessionLogServer()` |
+| Orchestration | `HarnessOrchestrationServices` via `PreparedTurn.orchestration` | file-backed ledgers | any store implementing the ledger interfaces |
+
+## How each port is wired
+
+The four ports are injected at different levels, matching where each concern
+lives:
+
+- **Sandbox** — a `localHost({ executionEnvironment })` option (a mode or a
+  factory): the host owns turn preparation, so it owns which factory builds the
+  runtime.
+- **Session log** — a `createHarness({ sessionLog })` or per-call
+  `generateHarness({ sessionLog, runId })` option (historical alias:
+  `durability`): the log follows the run, not the host.
+- **Orchestration** — a `localHost({ orchestration })` option overriding the
+  default file-backed ledgers; turn execution reaches them through
+  `PreparedTurn.orchestration`.
+- **Tools** — not separately injectable: the tool proxy is assembled per turn
+  from the harness's configured tools and served to whichever execution
+  environment is active. Custom-loop authors can build one with
+  `createRuntimeToolBridge`.
+
+## Choosing a mode
+
+`localHost({ executionEnvironment })` takes a mode or a factory:
+
+| Value | Runs the turn's `bash` tool in |
+|---|---|
+| `"auto"` (default) | In-process just-bash only when `runtime.python` and `runtime.javascript` are both `false` and network is off; `subprocessSandbox()` otherwise. |
+| `"in-process"` | In-process just-bash (`createJustBashRuntime`) for every turn — the pre-0.2 default. |
+| `"subprocess"` | `subprocessSandbox()` with its defaults for every turn. |
+| a factory | Whatever it builds: `subprocessSandbox({ ... })`, `tieredExecutionEnvironment({ ... })`, or your own. |
+
+just-bash enables Python and JavaScript unless they are turned off, so `"auto"`
+resolves to the subprocess sandbox for almost every configuration. The rule is
+applied per turn to the turn's effective `runtime` options:
+
+```ts
+import { createHarness, localHost } from "little-harness";
+
+// Code-capable turns: the subprocess sandbox.
+const coder = createHarness({ host: localHost(), model });
+
+// Read-only tool turns: in-process, no process spawn.
+const reader = createHarness({
+  host: localHost(), // executionEnvironment: "auto" is the default
+  model,
+  runtime: { python: false, javascript: false },
+});
+```
+
+Turning JavaScript off also removes the Runtime Tool Bridge, which only exists
+inside `js-exec`. In-process just-bash is a compatibility layer for trusted tool
+patterns, not an isolation boundary — see
+[Isolation And Security](/docs/v0.1.0-alpha/runtime/isolation-and-security).
+
+## Workspace specs instead of sessions
+
+Execution environments never see a session object. Hosts describe the
+filesystem as data — a mount table plus capability toggles — and hand it to
+whichever factory is configured:
+
+```ts
+import {
+  localSessionWorkspace,
+  type HarnessWorkspaceSpec,
+  type LocalHarnessSession,
+} from "little-harness";
+
+// The canonical layout localHost hands to every factory:
+// /session (rw, tracked), /artifacts (rw, tracked),
+// /persistent (rw, tracked, dynamic read-only prefixes), /.agents (ro)
+declare const session: LocalHarnessSession; // a localHost session
+const workspace: HarnessWorkspaceSpec = localSessionWorkspace(session);
+```
+
+Mount `backingPath`s are directories the **host** process can reach:
+file-change tracking snapshots them from the host, so an execution environment
+on another machine must share (or mirror) those paths for `harness.file.*`
+events to be observed.
+
+## Running the sandbox in a child process
+
+`subprocessSandbox()` runs just-bash in a lazily spawned worker process — what
+`"auto"` picks for code-capable turns, and what `"subprocess"` always picks. The
+parent keeps sessions, tool implementations, credentials, event emission, and
+file-change tracking; the child receives only the serialized workspace spec
+and runtime toggles over stdio, and proxies `js-exec` tool calls back to the
+parent's tool bridge. By default the worker is spawned with an **empty
+environment** (replaced, not merged), so API keys and tokens in the harness
+process never reach sandboxed code.
+
+```ts
+import { createHarness, localHost, subprocessSandbox } from "little-harness";
+
+const harness = createHarness({
+  host: localHost({
+    dataDir: ".little-harness",
+    executionEnvironment: subprocessSandbox(),
+  }),
+  model,
+});
+```
+
+Both adapters emit identical `harness.runtime.command.*`, `harness.tool_call.*`,
+and `harness.file.*` events because the event machinery lives once, in
+`createShellRuntime`, wrapped around any command executor. The worker also runs
+just-bash's defense-in-depth layer, which `defenseInDepthForAdapter` enables
+only there: in the host process it would patch process-wide globals of your app.
+
+Options (pass the factory form instead of the `"subprocess"` string to set them):
+
+| Option | Default | Purpose |
+|---|---|---|
+| `env` | `{}` | Worker environment. Replaces, never merges with, the parent environment. |
+| `watchdogGraceMs` | `5000` | Extra time past a command's timeout before a wedged worker is SIGKILLed. |
+| `initTimeoutMs` | `30000` | Deadline for the worker to start; a hung worker is SIGKILLed and the next command respawns it. |
+| `nodePath` | current Node executable | Node binary for the worker. |
+| `workerPath` | the shipped worker | Path to the compiled worker module. |
+
+The worker module ships in the package's `dist/`; bundlers do not pick it up
+automatically. Bundled consumers should externalize `little-harness` or pass
+`subprocessSandbox({ workerPath })` pointing at the worker module.
+
+## Escalating beyond Tier-0
+
+Both adapters run Tier-0 just-bash, which has no git, containers, compilers, or
+package managers. `tieredExecutionEnvironment({ nextTier })` classifies each
+script with `classifyCommand` and switches to a higher tier you provide when a
+command needs it, refusing the command (exit code `126`) when no higher tier is
+available. See [Execution Tiers](/docs/v0.1.0-alpha/runtime/execution-tiers).
+
+## Writing a custom execution environment
+
+A factory receives `CreateExecutionEnvironmentOptions` (workspace spec, files,
+optional tools + tool context, replay wiring, event sinks) and returns a
+`HarnessRuntime`. Build it on the shared machinery so your adapter emits the
+same traces as the built-in ones:
+
+```ts
+import {
+  createEnvironmentToolBridge,
+  createShellRuntime,
+  resolveTraceOptions,
+  type HarnessExecutionEnvironmentFactory,
+} from "little-harness";
+
+export function myRemoteSandbox(): HarnessExecutionEnvironmentFactory {
+  return async (options) => {
+    const traceOptions = options.traceOptions ?? resolveTraceOptions(undefined, undefined);
+    const toolBridge = createEnvironmentToolBridge(options, traceOptions, () => undefined);
+    return createShellRuntime({
+      workspace: options.workspace,
+      toolBridge,
+      runtime: options.runtime,
+      emit: options.emit,
+      emitToolEvents: options.emitToolEvents,
+      traceOptions,
+      files: options.files,
+      async execute(input) {
+        // Run input.command wherever your environment lives. Report failures as a
+        // result ({ exitCode, stderr }) — never throw — so every adapter shows the
+        // model the same tool-result shape.
+        return { stdout: "", stderr: "not implemented", exitCode: 1 };
+      },
+      dispose: async () => {
+        // Release the environment; the loops call this in a finally when the turn ends.
+      },
+    });
+  };
+}
+```
+
+The contract in brief: the factory is called once per turn that needs a
+runtime; `execute` owns cwd/env persistence across calls and must not throw;
+`dispose` is awaited on every turn exit path, and an error it throws never fails
+the turn but is reported as a `harness.runtime.dispose.failed` event (which
+`little-harness doctor` counts as a failure); providing `tools` requires
+`toolContext`. Read-only Persistent-Dir prefixes
+(`getReadOnlyPrefixes`) are resolved when the turn loads persistent dirs —
+out-of-process adapters may snapshot them at environment start.
+
+## The session log as a service
+
+The durable event log is the source of truth for a run: a stateless harness
+process reconstructs everything else from it. `startSessionLogServer()` puts
+that log behind two HTTP routes, and `remoteSessionLog()` is the
+`HarnessSessionLog` client:
+
+```ts
+import {
+  createFileSessionLog,
+  generateHarness,
+  remoteSessionLog,
+  startSessionLogServer,
+} from "little-harness";
+
+// Reference server: pass a durable store and an auth token before pointing
+// real workloads at it. The default store is in-memory and dies with the server.
+const server = await startSessionLogServer({
+  store: createFileSessionLog({ path: "/var/lib/harness/sessions.ndjson" }),
+  authToken: process.env.SESSION_LOG_TOKEN,
+  port: 8787,
+});
+
+const result = await generateHarness({
+  harness,
+  messages,
+  runId: "run_123",
+  sessionLog: remoteSessionLog({ baseUrl: server.url, authToken: process.env.SESSION_LOG_TOKEN }),
+});
+```
+
+Kill the process, start a fresh one anywhere with the same `runId`, and replay
+fast-forwards from the remote log: a completed single-step turn returns
+without any provider call, and recorded tool results are replayed instead of
+re-executing tool side effects. (Multi-step turns re-call the model per step
+by design — tool side effects, not provider calls, are what replay memoizes.)
+
+Appends are awaited before the turn proceeds, so a failed or timed-out append
+fails the turn rather than silently dropping durability. The client applies a
+per-request deadline (`timeoutMs`, default 30 s); tool results that cross the
+log must be JSON-safe, since they round-trip through serialization on resume.
+
+## Orchestration stores
+
+`HarnessOrchestrationServices` is the durable-ledger contract (tasks,
+continuations, wakeups, workflow queues, results) that lets stateless harness
+processes coordinate. `localHost` defaults to file-backed ledgers under its
+data dir and accepts a replacement:
+
+```ts
+import { createInMemoryOrchestrationServices, localHost } from "little-harness";
+
+const host = localHost({
+  dataDir: ".little-harness",
+  orchestration: createInMemoryOrchestrationServices(), // or your own services
+});
+```
+
+Both shipped backends run the exact same ledger logic over a five-method
+`DurableJsonStore` (readJson, writeJson, remove, listDir, withLock) — so a
+custom backend (database, object store) implements those five primitives and
+passes them to `createDurableOrchestrationServices({ rootDir, store })`
+instead of re-implementing twelve ledger interfaces. The in-memory services
+are per-process (data and locks live in the store instance); use the
+file-backed default or a shared store when multiple processes coordinate. If
+you only need a different sandbox or session log, you do not need to touch
+this port.

@@ -1,0 +1,138 @@
+---
+title: Durability
+description: What survives a process kill in v0.1.0-alpha, and what replay can and cannot do.
+---
+
+Alpha durability operates at two levels: per-LWIR-step memoization (unchanged from the prior milestone) and per-harness-session memoization (new). Together they give deterministic fast-forward from any crash point. Content-addressed blob storage is planned post-alpha (see the [Roadmap](/docs/v0.1.0-alpha/roadmap)); lease fencing, outbox dispatch, and reconciler arrive in [v0.1.0](/docs/v0.1.0-alpha/roadmap).
+
+## What Survives A Process Kill
+
+After a crash in alpha, the following state remains authoritative:
+
+- the event log up to the last committed SQLite/WAL event row
+- artifact files and their manifests under `.little-workflow/artifacts/`
+- harness session scratch under `.little-workflow/runs/<runId>/harness/`
+- memory store files under `.little-workflow/memory/`
+- local run locks under `.little-workflow/locks/` for active execution
+
+The following does not survive and is reissued on resume:
+
+- in-flight model calls that had not recorded a `harness.model.responded` event
+- in-flight tool calls that had not committed a `harness.tool_call.succeeded` or `harness.tool_call.failed` event
+- in-flight direct-execute steps that had not committed a `harness.execute_step.succeeded` event
+- the in-memory scheduler position between committed events
+
+A resumed run reads the event log, reconstructs in-memory state, and schedules only the steps the log does not already mark as completed.
+
+## Layer A — Per-Step and Per-Visit Memoization
+
+The LWIR-level durability unit is a `StepCompleted` event. A committed step is never re-executed on resume regardless of what happened after it.
+
+For steps with `maxVisits > 1` (used in decision loops), the durability unit is `(stepPath, visitIndex)`. Step paths include a visit suffix when `maxVisits > 1`:
+
+- Single-visit step (DAG): `review-candidates[cand_123].worker` — no suffix.
+- Multi-visit step: `review-candidates[cand_123].worker.visit[0]`, `…visit[1]`, etc. Visits are 0-indexed.
+
+A committed `StepCompleted` for `worker.visit[0]` is immutable and independent of `worker.visit[1]`. Replay reconstructs visit counts by scanning `StepCompleted` events with the same `(stepId, branchPath)` prefix.
+
+### Kill mid-loop
+
+If the process dies during visit N of a looping step, resume reconstructs the visit counter from committed events, then re-runs visit N from `StepAttemptStarted`. The decision step's routing is reconstructed from the event log via `pendingDecisionTarget` — the runtime finds the most recent `StepCompleted` event for the decision step and resumes the chosen branch.
+
+### Compile atomicity
+
+The planner is opaque. All planner lifecycle events (`harness.session.started` through `harness.session.completed` for the plan role) are written to the planner's event log. A kill mid-planner-session loses progress in the current model turn; on resume, the harness replays committed model turns (see Layer C below) and re-runs only from the last uncommitted point.
+
+## Layer B — Outer-Loop Durability
+
+When `maxOuterCycles > 1`, cycles share an `outerLoopId`. The outer-loop manifest at `.little-workflow/outer-loops/{outerLoopId}.json` is the cycle-level durability record.
+
+```jsonc
+{
+  "outerLoopId": "ol_…",
+  "goal": { "workflowDefinitionHash": "…", "description": "…" },
+  "maxCycles": 5,
+  "cycles": [
+    { "cycleNumber": 1, "runId": "run_…", "workflowVersionId": "wv_…", "status": "completed", "output": { } },
+    { "cycleNumber": 2, "runId": "run_…", "workflowVersionId": "wv_…", "status": "completed", "output": { }, "summary": "optional note" }
+  ],
+  // pendingCycleRunId is written before a cycle starts; cleared after supervise completes
+  "pendingCycleRunId": "run_…",
+  "result": { "kind": "done", "finalOutput": "…" }
+}
+```
+
+`OuterLoopCycleCompleted` is the cycle commit point. It is appended to the current cycle's event log when `supervise()` returns, before the manifest is updated.
+
+### Three kill scenarios
+
+| Killed at | Recovery |
+|---|---|
+| Mid-cycle (during a step) | Layer A + Layer C replay reconstructs the cycle; outer-loop logic engages only after `RunCompleted`/`RunFailed`. |
+| Between cycles (after `OuterLoopCycleCompleted` of cycle N, before cycle N+1 compile starts) | Resume reads the manifest; if the last decision was `continue` and `cycleNumber < maxCycles`, starts cycle N+1. If `done`, returns the recorded `finalOutput`. |
+| During `supervise()` | `supervise` is treated as atomic. On resume, `supervise` is re-invoked with the same `OuterLoopState`; make `supervise` idempotent. |
+
+`pendingCycleRunId` marks the in-flight cycle. Its presence on resume indicates a mid-cycle crash; the runtime reuses that `runId` so Layer A and C replay can resume from the last committed event.
+
+## Layer C — Per-Harness-Session Memoization
+
+Every harness session (planner, orchestrator, worker, fixer) writes a durable event log — one entry for every model call and every tool call. On resume, the agent loop fast-forwards by replaying committed events:
+
+1. Read events for the session's `runId`.
+2. For each `harness.model.called` that has a matching `harness.model.responded`, treat the response as committed — skip the model call and replay the cached response into the agent's conversation state.
+3. For each `harness.tool_call.started` that has a matching `harness.tool_call.succeeded`, replay the cached result.
+4. When the event log catches up to the crash boundary (the last event has no matching termination), resume from that point — re-invoke the model or tool that was in-flight.
+
+This mirrors the Layer A pattern, one level up. The harness session is durable as long as its events are durable.
+
+**Determinism guarantee.** Because both model calls AND tool calls are memoized, a resumed session reaches the same state as the original run. Temperature only matters on the first invocation of a given prompt; subsequent replays read the cached response.
+
+**Sub-run delegation.** When the orchestrator calls `start_workflow`, the harness records `harness.tool_call.started(start_workflow, { subRunId })`. The sub-workflow execution runs in its own run with its own event log. If the sub-run crashes, its own Layer A + Layer C replay handles recovery; the orchestrator's `harness.tool_call.started` remains in-flight (no `Succeeded` yet) until the sub-run completes. Two levels of memoization compose cleanly.
+
+### Crash scenarios by role
+
+| Crash point | Recovery |
+|---|---|
+| Orchestrator session, mid-model-turn | Layer C: replay committed turns; re-invoke the model at the uncommitted turn. |
+| Orchestrator session, during a `start_workflow` tool call | Layer C: orchestrator's `harness.tool_call.started` is in-flight. Sub-run's own event log handles sub-run recovery. On sub-run completion, orchestrator receives the result and records `harness.tool_call.succeeded`. |
+| Planner session, mid-model-turn | Layer C: replay committed turns; re-run only the uncommitted turn. |
+| Planner session, at compilation (LWIR emission) | Once planner emits LWIR, `harness.session.completed` is committed; Layer A takes over for step execution. |
+| Worker session (`ai.generate` step), mid-model-turn | Layer C: replay within the worker session; re-run the uncommitted turn. |
+| Worker session (`code.run` step) | Layer C: `harness.execute_step.started` committed but no `harness.execute_step.succeeded` → re-run the code step from scratch. Tool calls the code body made are replayed from `harness.tool_call.succeeded` events if committed. |
+
+### `CapabilityDriftError` on resume
+
+Every harness session computes a manifest (orchestrator, planner, or worker) and stores it in the `harness.session.started` event. On resume, the SDK recomputes the manifest and compares it to the stored hash. If they differ, a `CapabilityDriftError` is thrown before any execution resumes:
+
+```
+CapabilityDriftError: Run 'run_abc123' was started with a different orchestrator config.
+
+Changes detected:
+- orchestratorModelSlotId: "gpt-5" → "gpt-4o-mini"
+- availableWorkflows[1].definitionHash: "sha256:def456" → "sha256:def789"
+  (candidate.scoring workflow definition changed)
+
+To resume cleanly, restore the prior state.
+To start fresh, run with a new runId.
+```
+
+Drift is fail-closed. The dev's options are: restore the prior environment and resume, or start a fresh run with a new `runId`. See the [Manifests](/docs/v0.1.0-alpha/authoring/orchestrating-workflows) section for what counts as drift at each harness scope.
+
+## Replay Versus Retry
+
+|              | Calls models/tools | Same WorkflowVersion |
+| ------------ | ------------------ | -------------------- |
+| **Replay**   | no                 | yes                  |
+| **Retry**    | yes (failed step)  | yes                  |
+
+**Replay** is for reconstructing state after a process restart or for debugging. It reads the event log and rebuilds in-memory state without calling any external system.
+
+**Retry** is for transient failures. Alpha retries a failed step using the same WorkflowVersion and input. Without lease fencing or `sideEffectKey`s (those arrive in v0.1.0), retry is best used for idempotent steps; a non-idempotent tool that crashed after committing externally but before recording its result will be invoked twice.
+
+**Fork** — branching a new run from a checkpoint with changed input, model slot mapping, prompts, policy, or output schema — is planned post-alpha (see the [Roadmap](/docs/v0.1.0-alpha/roadmap)).
+
+## The Alpha Demo
+
+The kill-and-resume demo is the alpha milestone. Stop a run mid-flight, restart the process, and replay should rebuild state from `.little-workflow/` and continue without re-calling completed model or tool steps.
+
+That demo exercises both Layer A (LWIR step memoization) and Layer C (harness session memoization). Production-grade crash consistency — fencing late writers, deduplicating external commits, reconciling crashed dispatches — arrives in [v0.1.0](/docs/v0.1.0-alpha/roadmap).

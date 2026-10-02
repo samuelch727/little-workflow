@@ -2,11 +2,14 @@
   "title": "v0.1.0-alpha",
   "pages": [
     "index",
+    "getting-started",
     "quickstart",
-    "mental-model",
+    "foundations",
     "build-agents",
-    "cookbook",
     "runtime",
-    "reference"
+    "reference",
+    "cookbook",
+    "comparisons",
+    "roadmap"
   ]
 }

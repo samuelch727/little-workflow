@@ -5,15 +5,16 @@ description: Define a reusable Little Harness runtime surface.
 
 `createHarness()` defines the reusable agent runtime surface. It does not start a
 model call by itself. It collects the host, system prompt, model, tools, memory,
-skills, file staging hooks, Input Types, Persistent Dirs, runtime policy, and
-callbacks that `streamHarness()` and `generateHarness()` will use later.
+skills, workflows, file staging hooks, Input Types, Persistent Dirs, runtime
+policy, session log, and callbacks that `streamHarness()` and `generateHarness()`
+will use later. AI SDK loop controls such as `stopWhen` are per-call options of
+those functions, not `createHarness()` options.
 
 ## Import
 
 ```ts
 import {
   createHarness,
-  justBashRuntime,
   localHost,
   memory,
 } from "little-harness";
@@ -52,8 +53,8 @@ harness.
 host: localHost({ dataDir: ".little-harness" })
 ```
 
-The first SDK target should be Local Host. Managed and self-hosted hosts can
-later implement the same host contract.
+The first SDK target is Local Host. Managed and self-hosted hosts can later
+implement the same host contract.
 
 ### `system`
 
@@ -79,15 +80,15 @@ The language model used by default.
 model: gateway("anthropic/claude-sonnet-4.5")
 ```
 
-An execution call may override the model later if Little Harness chooses to
-support per-call model policy. The default should be enough for most apps.
+A `streamHarness()` or `generateHarness()` call can override the model for one
+run by passing its own `model`; otherwise this default is used.
 
 ### `tools`
 
 `ToolSet`
 
-Host app capabilities exposed to the agent. Little Harness should accept normal
-AI SDK-style tools and add a harness execution context as the second argument.
+Host app capabilities exposed to the agent. Little Harness accepts normal
+AI SDK-style tools and adds a harness execution context as the second argument.
 
 ```ts
 const queryCustomers = tool({
@@ -119,6 +120,49 @@ oversized value anyway, Little Harness can automatically spool it to a file.
 
 Tools also receive `ctx.artifacts`, which can list artifacts and read
 `/artifacts/...` files that another tool or runtime command already wrote.
+
+### `mcp`
+
+`HarnessMcpConfig`
+
+Declarative MCP servers exposed through ordinary AI SDK gateway tools. MCP is
+not a parallel execution API; the model normally lists capabilities with
+`mcp_list_tools` and invokes one MCP server tool with `mcp_call_tool`.
+
+```ts
+const harness = createHarness({
+  host: localHost({ dataDir: ".little-harness" }),
+  model,
+  mcp: {
+    servers: [
+      {
+        id: "figma",
+        description: "Read Figma design context and screenshots.",
+        transport: {
+          type: "stdio",
+          command: "node",
+          args: ["./mcp/figma.mjs"],
+        },
+        guide: {
+          description: "Use when a task depends on live Figma design context.",
+          body:
+            "Call `mcp_list_tools`, then `mcp_call_tool` with server `figma`.",
+        },
+      },
+    ],
+  },
+});
+```
+
+Gateway tools share the normal tool-call path: trace events, abort signal,
+durability replay, Runtime Tool Bridge access, and `toolResultSpooling` all work
+the same way as app tools. Oversized MCP outputs are spooled through the normal
+tool result artifact path.
+
+When `guide` is enabled, Little Harness stages a guide skill under
+`.agents/skills/<server-id>-mcp/SKILL.md`. Guide skills are only instructions;
+they do not grant capability. Tool availability is controlled by the `mcp`
+config and normal tool visibility.
 
 ### `toolResultSpooling`
 
@@ -253,6 +297,10 @@ skills: [
 Skill metadata is injected into the system prompt. Full skill bodies are mounted
 read-only under `.agents/skills/<name>/` so the model can inspect details only when needed.
 
+`skillMaxRisk` (`"NONE" | "LOW" | "MEDIUM" | "HIGH" | "CRITICAL"`) and
+`skillOidcToken` configure the optional remote-skill risk gate for every skill on
+this harness; see [`skill()`](/docs/v0.1.0-alpha/reference/skill-helper).
+
 ### `inputTypes`
 
 Record of input type names to `HarnessInputType` definitions.
@@ -276,7 +324,7 @@ inputTypes: {
 }
 ```
 
-Undefined input types should run with a host-facing warning rather than fail by
+Undefined input types run with a host-facing warning rather than fail by
 default.
 
 ### `memory`
@@ -385,6 +433,91 @@ streamHarness({
 });
 ```
 
+Under `localHost()`'s default `executionEnvironment: "auto"`, these toggles also
+choose where the turn's commands run: in-process just-bash only when `python`
+and `javascript` are both `false` and `network` is off, the subprocess sandbox
+otherwise. See
+[Execution Environments](/docs/v0.1.0-alpha/runtime/execution-environments).
+
+### `dynamicWorkflows`
+
+`DynamicWorkflowsConfig`
+
+Opt-in, model-authored one-shot plans. Pass the `dynamicWorkflows()` helper from
+`little-workflow` (not a bare `true` — the helper injects the plan-lowering
+factory, which the harness cannot import without a circular dependency). It adds
+two tools, `run_ad_hoc_plan` and `search_authored_plans`, and registers a durable
+plan store at `/persistent/dynamic-plans`.
+
+```ts
+import { dynamicWorkflows } from "little-workflow";
+
+const harness = createHarness({
+  host: localHost({ dataDir: ".little-harness" }),
+  model,
+  tools: { docsSearch, docsRead },
+  dynamicWorkflows: dynamicWorkflows(),
+});
+```
+
+A one-shot plan can never reference a capability outside the agent's own
+snapshot; anything else fails with `capability_not_allowed` before it runs. Narrow
+the ceiling or tune the caps with options:
+
+| Field | Default |
+|---|---|
+| `limits.maxSteps` | `8` |
+| `limits.maxRuntimeMs` | `120000` |
+| `exclude` | `[]` |
+
+```ts
+dynamicWorkflows: dynamicWorkflows({
+  exclude: ["dangerousTool"],
+  limits: { maxSteps: 6, maxRuntimeMs: 60_000 },
+})
+```
+
+Off by default. See
+[Letting an agent author its own workflow](/docs/v0.1.0-alpha/build-agents/dynamic-workflows)
+for the full guide.
+
+### `workflows`
+
+`readonly HarnessWorkflow[]`
+
+Workflows exposed to the agent as tools, one per workflow, named from the
+workflow id (`billing.refund` → `billing_refund`) and typed by its input schema.
+Adapt a Little Workflow `defineWorkflow` result with `asHarnessWorkflow` from
+`little-workflow`; `definitionIdentity` is required.
+
+```ts
+import { asHarnessWorkflow } from "little-workflow";
+
+workflows: [asHarnessWorkflow(refundWorkflow, { definitionIdentity: "billing.refund@1" })]
+```
+
+The model receives `{ status, runId, outputSummary?, outputPath? }` — the output
+rendered as text and capped at 4096 characters — not the typed output. Agent
+folders also discover workflows from `workflows/*.ts`. See
+[Triggering a workflow from an agent](/docs/v0.1.0-alpha/build-agents/workflows).
+
+### `workflowBudgets`
+
+`Partial<HarnessWorkflowBudgets>`
+
+Per-session limits. Omitted fields keep their defaults. The most commonly tuned
+fields:
+
+| Field | Default | Effect |
+|---|---|---|
+| `maxConcurrentWorkflowRuns` | `10` | Workflow-tool runs in flight at once per session; extra calls wait (FIFO). |
+| `maxQueuedWorkflowRuns` | `100` | Calls allowed to wait; past this a call fails with `causeCode: "max_queued_workflow_runs"`. |
+| `maxModelSteps` | `20` | Default step limit (`isStepCount(maxModelSteps)`) when a call passes no `stopWhen`. |
+
+```ts
+workflowBudgets: { maxConcurrentWorkflowRuns: 2, maxModelSteps: 12 }
+```
+
 ### `onEvent`
 
 Function that receives a `HarnessEvent`.
@@ -414,6 +547,35 @@ onPersistenceError: async (error) => {
 
 Commit failures are control-plane events. The session workspace should keep
 uncommitted changes recoverable.
+
+### `onTraceError`
+
+`(error: unknown, event: TraceHarnessEventInput) => void | Promise<void>`
+
+Called when a trace event cannot be written. Trace failures never fail the run;
+use this to log or count them.
+
+### `sessionLog`
+
+`HarnessSessionLog`
+
+The session log: the append-only durable event log a run appends to and replays
+from (`append` plus `priorEvents`). Re-invoking a run with the same `runId`
+against the same log replays recorded model and tool calls instead of
+re-executing tool side effects. `generateHarness()` and `streamHarness()` accept
+a per-call `sessionLog` that overrides this one.
+
+```ts
+import { createFileSessionLog, remoteSessionLog } from "little-harness";
+
+sessionLog: createFileSessionLog({ path: ".little-harness/session-log.ndjson" })
+// or, shared across processes:
+sessionLog: remoteSessionLog({ baseUrl: process.env.SESSION_LOG_URL!, authToken })
+```
+
+`durability` is the historical alias for the same option; `sessionLog` wins when
+both are set. See
+[Execution Environments](/docs/v0.1.0-alpha/runtime/execution-environments#the-session-log-as-a-service).
 
 ## Returns
 

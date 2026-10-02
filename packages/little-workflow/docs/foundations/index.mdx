@@ -1,0 +1,209 @@
+---
+title: Core Mental Model
+description: How Little Workflow moves from developer intent to harness-based durable execution.
+---
+
+Little Workflow separates authoring from execution. The developer writes a `WorkflowDefinition`. The runtime normalizes that into an `OrchestrationRequest`, asks an AI agent running in a **Harness** to draft LWIR, validates and repairs the draft, registers an immutable `WorkflowVersion`, then executes a `Run` — with each role operating in its own harness session.
+
+## The Pipeline
+
+```txt
+WorkflowDefinition
+-> OrchestrationRequest
+-> Harness session (Planner)
+-> LWIR
+-> WorkflowVersion
+-> Run
+-> StepAttempt (each step runs in a Worker harness session)
+-> Artifact and Event Log
+```
+
+The harness layer sits between `OrchestrationRequest` and `LWIR` — and again between `WorkflowVersion` and the completed step. Every decision-making role runs in a structured agent loop, not as a raw function call.
+
+## WorkflowDefinition
+
+The ergonomic TypeScript authoring object. It includes input and output schemas, execution model slots, `globalTools`, a `planner` config, an optional `worker` config, and memory mount settings.
+
+```ts
+const candidateReview = createLittleWorkflow({
+  id: "candidate.review",
+  description: "Review one candidate against a job description.",
+  inputSchema: z.object({ jobDescription: z.string(), candidate: z.object({ /* ... */ }) }),
+  outputSchema: z.object({ passed: z.boolean(), reasoning: z.string() }),
+  models: [model(openai("gpt-4o-mini"), { description: "Classifier" })],
+  planner: {
+    model: openai("gpt-5"),
+    system: "Design candidate-review workflows. Test code in scratch before committing.",
+    skills: [skill("./skills/writing-loop-lwir/")],
+  },
+  globalTools: ["fetchCandidates"],
+  memory: { workflow: "rw", org: "ro" },
+});
+```
+
+The `WorkflowDefinition` is not a runtime service handle. Runtime infrastructure belongs in `runWorkflow()`.
+
+## Running And Composing
+
+`runWorkflow` with a single definition starts a Planner session that plans the LWIR; Workers then execute it. To compose several workflows, hand them to a Little Harness agent as typed tools (`asHarnessWorkflow` → `createHarness({ workflows })`); see [Compose With Little Harness](/docs/v0.1.0-alpha/authoring/compose-with-harness).
+
+```ts
+// Single workflow → Planner session plans the LWIR, Workers execute it
+await runWorkflow({ world, workflows: candidateReview, input, tools });
+
+// DEPRECATED (LWF_DEP_ORCHESTRATOR): array of workflows → Orchestrator session
+await runWorkflow({
+  world,
+  workflows: [candidateReview, candidateScoring],
+  input,
+  tools,
+  orchestrator: {
+    model: openai("gpt-5"),
+    system: "Orchestrate candidate evaluation. Plan once, run in parallel.",
+  },
+});
+```
+
+The array form still runs in this release. It is the deprecated orchestrator surface and is scheduled to be unexported in the next minor release. Both forms use the same harness machinery; `task.kind` determines which role is active.
+
+## Harness — The Agent Runtime
+
+A **Harness** is the agent runtime each role lives in: a model running in a tool-using loop, with persistent conversation, scoped filesystem access, and observable tool calls. The SDK ships a default `workflowHarness`; devs substitute by conforming to a single-method contract:
+
+```ts
+type Harness = {
+  run(task: HarnessTask, ctx: HarnessContext): Promise<HarnessResult>;
+};
+```
+
+`HarnessContext` carries the model, system prompt, tools, runtime mounts, bash capabilities, memory mounts, scratch mounts, skills, and durability sink. Little Workflow also supplies optional `bash` and `recorder` conveniences for older custom harnesses. The harness exposes the context to the model in its agent loop; it doesn't need workflow domain knowledge.
+
+See [Harness Implementation](/docs/v0.1.0-alpha/internals/harness) for the full contract, event vocabulary, and durability model.
+
+> **The word "Harness" is overloaded.** In Little Workflow it is a per-role runtime *primitive* — the `workflowHarness` each role runs in. In Little Harness it is the whole *product* (`createHarness`). They are related but distinct; see the [Little Harness docs](https://github.com/samuelch727/little-workflow/tree/main/packages/little-harness) for the product. The default `workflowHarness` is in fact implemented on top of Little Harness.
+
+## The Four Roles
+
+Every role runs the same harness machinery — discriminated by `task.kind`:
+
+| Role | `task.kind` | Scope | Configured at |
+|---|---|---|---|
+| **Planner** | `"plan"` | One per workflow run | `WorkflowDefinition.planner` |
+| **Orchestrator** *(deprecated)* | `"orchestrate"` | One per pipeline run | `RunWorkflowOptions.orchestrator` |
+| **Worker** | `"execute_step"` | One per LWIR step | `WorkflowDefinition.worker` (defaults to `workflowHarness`) |
+| **Fixer** | `"fix_step"` | On-demand when a `code.run` step fails | LWIR step's `onFailure.fixer` field |
+
+The Planner and Orchestrator are run-level decision-makers. The Worker runs once per step. The Fixer runs only when a `code.run` step fails and declared a fixer config.
+
+### Orchestrator tools
+
+> **Deprecated.** These tools belong to the orchestrator surface (`LWF_DEP_ORCHESTRATOR`). New code composes workflows with [`asHarnessWorkflow` and `createHarness({ workflows })`](/docs/v0.1.0-alpha/authoring/compose-with-harness), where each workflow is its own typed tool.
+
+When `workflows` is an array, the Orchestrator's harness session receives three SDK-injected tools:
+
+- `plan_workflow(workflowId, input) → workflowVersionId` — drafts LWIR for one workflow; returns a locked version id
+- `run_workflow(workflowVersionId, input) → output` — executes a version; call many times with different inputs (plan-once-run-many)
+- `start_workflow(workflowId, input) → output` — convenience: plan + run in one shot
+
+The Orchestrator decides when to reuse a `WorkflowVersion` vs plan a new one. For N items sharing the same workflow shape, the pattern is `plan_workflow` once + `run_workflow` × N in parallel.
+
+## Memory Stores and Run Scratch
+
+Two storage surfaces are mounted into every harness session:
+
+**Memory Stores** — persistent, curated, Anthropic-aligned:
+
+```
+/mnt/memory/workflow/   (rw by that workflow's planner; lessons accumulate across runs)
+/mnt/memory/pipeline/   (rw by the orchestrator; pipeline-level notes)
+/mnt/memory/org/        (ro by all roles; org-wide runbooks and policies)
+```
+
+**Run Scratch** — ephemeral, top-down context passing within one pipeline run:
+
+```
+/mnt/scratch/own/                (rw; this role's working area)
+/mnt/scratch/from-orchestrator/  (ro; context the orchestrator wrote before spawning)
+/mnt/scratch/from-planner/       (ro; context the planner wrote before workers start)
+/mnt/scratch/peer-steps/         (ro; outputs of sibling steps in the current run)
+```
+
+Memory persists across runs; scratch is cleaned up when the run ends. See [Memory and Scratch](/docs/v0.1.0-alpha/internals/memory-scratch).
+
+## OrchestrationRequest
+
+The canonical planner input — `WorkflowDefinition` + run input + actor + capability locks. Declarative and versioned. The planner's harness session receives this as its task context; the planner reads the goal, schemas, and tool descriptions, then designs the LWIR.
+
+The planner may inspect capability metadata. It may not see secrets, raw tool implementations, or arbitrary raw artifacts.
+
+## LWIR
+
+Little Workflow Intermediate Representation is the deterministic JSON workflow graph emitted by the planner harness session. It contains model slot IDs, capability refs, step types, schemas, and expressions.
+
+LWIR must be canonicalizable, hashable, immutable once registered, and safe to replay from logs. The spec targets RFC 8785 JSON Canonicalization Scheme for hashable documents.
+
+Alpha step types: `ai.generate`, `code.run`, `tool.call`, `decision`, `parallel`.
+
+## Identity — Two Hashes, Three Manifests
+
+Alpha introduces a split identity model:
+
+**`WorkflowDefinitionHash`** — authoring-time identity; hash of the definition's identity-bearing fields (planner config, models, globalTools, worker config, memory config, schemas). Stable across runs as long as the definition doesn't change. Computed once when `createLittleWorkflow({...})` is called.
+
+**`WorkflowVersion`** — per-run identity (unchanged); `sha256(canonicalJson(LWIR))`. Two compiles that emit byte-identical LWIR collapse to the same version.
+
+```txt
+WorkflowDefinition
+    ↓ hash
+WorkflowDefinitionHash  (stable)
+    ↓ planner drafts LWIR for a given input
+WorkflowVersion         (per run; content-addressed)
+    ↓ execute
+RunCompleted
+```
+
+**Three manifests** are stored in `harness.session.started` events — one per role:
+
+- `OrchestratorManifest` — harness id, model, system hash, available workflow definition hashes, tool registry hash, memory store ids
+- `PlannerManifest` — same fields scoped to the planner session + `workflowDefinitionHash`
+- `WorkerManifest` — both `workflowDefinitionHash` AND `workflowVersionId` (the LWIR being executed), plus step config hash
+
+On resume, the SDK recomputes each manifest and compares to the stored hash. Any change — model swap, system prompt edit, tool schema change, workflow definition change — triggers a `CapabilityDriftError` before execution resumes (fail-closed policy).
+
+## WorkflowVersion
+
+A registered, immutable LWIR document plus its validation metadata:
+
+- canonical JSON hash
+- capability snapshot hash
+- compiled expression plan
+- validation result
+
+A pre-run **cost and risk estimate** belongs to this record in the target design, but nothing in alpha computes one. Cost in alpha is a post-run receipt: real dollars per step and per run, priced from recorded tokens — see [Cost Report](/docs/v0.1.0-alpha/running/inspect-runs#cost-report).
+
+Workers verify the snapshot before execution. If a model or tool surface has drifted, the run fails rather than silently executing against a different surface.
+
+## Run and StepAttempt
+
+A `Run` executes one `WorkflowVersion` with one input packet and runtime policy snapshot. A `StepAttempt` is one attempt to execute a step.
+
+Each step executes inside a **Worker** harness session. For `ai.generate` steps, the worker runs a full agent loop. For `tool.call` and `decision` steps, execution is direct (no model in the loop) but still mediated through the harness for observability uniformity. `code.run` steps are dispatched the same way, but the **default** worker harness declines to execute the code body and throws — running `code.run` requires a developer-supplied `worker.harness`. See [Runtime Execution](/docs/v0.1.0-alpha/internals/runtime-execution).
+
+Little Workflow promises at-least-once execution with idempotent commits, not general exactly-once execution.
+
+## Durability — Two Levels of Memoization
+
+Per-step memoization now applies at two levels:
+
+1. **Step level** — a `StepCompleted` event is the unit of durability; completed steps are never re-executed on resume.
+2. **Harness session level** — every `harness.model.called` and `harness.tool_call.started` is event-logged; on resume, committed calls are fast-forwarded without re-invoking.
+
+A crashed orchestrator session resumes by replaying completed tool calls and re-dispatching the ones that never got a `Succeeded` response. A crashed planner session re-runs the in-flight model turn from its last committed state.
+
+## Artifacts and Events
+
+Events store facts and pointers. Artifacts store payloads.
+
+Prompts, responses, files, code, logs, evidence, generated outputs, and tool results are preserved as artifacts when policy allows. Replay reconstructs state from events and artifact refs.
+
+The unified harness event vocabulary — `harness.session.*`, `harness.model.*`, `harness.tool_call.*` — applies to all four roles. Direct-execute steps (`code.run`, `tool.call`) emit session and tool-call events but no model events (there's no model in the loop).

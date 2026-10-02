@@ -5,6 +5,9 @@ import {
   LocalSessionStore,
   type LocalHarnessSession,
 } from "../local-host/session-store.js";
+import { aggregateOutcomes, outcomeEventFromTrace } from "../outcomes/aggregate.js";
+import type { OutcomeAggregate } from "../outcomes/aggregate.js";
+import type { HarnessOutcomeEvent } from "../outcomes/types.js";
 import type { ArtifactRef, FileEntry, HarnessEvent, HarnessSessionStatus, JsonObject } from "../types.js";
 import { validateTraceEvent, type HarnessTraceEventType } from "./validate.js";
 
@@ -15,6 +18,7 @@ const FAILURE_TYPES = new Set([
   "harness.tool_call.failed",
   "harness.persistent_dir.commit.failed",
   "harness.runtime.error",
+  "harness.runtime.dispose.failed",
 ]);
 
 export type TraceEvent = HarnessEvent<HarnessTraceEventType> & {
@@ -165,6 +169,65 @@ export async function doctorSession(options: {
     })),
     invalidEvents: trace.errors,
   };
+}
+
+export type OutcomeReport = OutcomeAggregate & {
+  /** Sessions whose traces were read. One entry when `sessionId` narrowed the read. */
+  sessionIds: string[];
+  /** Trace lines that failed validation and were skipped (they are NOT in any count above). */
+  invalidEventCount: number;
+};
+
+/**
+ * Aggregate `outcome.reported` events into success rates keyed by promptHash and stepPath.
+ *
+ * Reads every session under `dataDir` unless `sessionId` narrows it — rates per promptHash are
+ * only meaningful across the runs that shared a prompt, which is usually more than one session.
+ * Unlike `readLocalTrace`, an unparseable line does not abort the read: it is counted in
+ * `invalidEventCount` so a partly corrupt trace still yields a measurement with an honest
+ * caveat attached.
+ */
+export async function aggregateLocalOutcomes(options: {
+  dataDir: string;
+  sessionId?: string;
+  cwd?: string;
+}): Promise<OutcomeReport> {
+  const paths = resolveLocalHostPaths({ dataDir: options.dataDir }, options.cwd);
+  const traceFiles: Array<{ sessionId: string; traceFile: string }> = [];
+
+  if (options.sessionId === undefined) {
+    for (const entry of await safeReaddir(paths.sessionsDir)) {
+      if (!entry.isDirectory()) continue;
+      const session = sessionPaths(paths, entry.name);
+      const status = await readFile(session.statusFile, "utf8")
+        .then((text) => JSON.parse(text) as HarnessSessionStatus)
+        .catch(() => undefined);
+      traceFiles.push({ sessionId: status?.id ?? entry.name, traceFile: session.traceFile });
+    }
+  } else {
+    const session = await getSession({ ...options, sessionId: options.sessionId });
+    traceFiles.push({ sessionId: session.id, traceFile: session.paths.traceFile });
+  }
+
+  const outcomes: HarnessOutcomeEvent[] = [];
+  const sessionIds: string[] = [];
+  let invalidEventCount = 0;
+
+  for (const { sessionId, traceFile } of traceFiles.sort((left, right) =>
+    left.sessionId.localeCompare(right.sessionId),
+  )) {
+    sessionIds.push(sessionId);
+    const trace = await readTraceFile(traceFile);
+    invalidEventCount += trace.errors.length;
+    for (const event of trace.events) {
+      const outcome = outcomeEventFromTrace(event);
+      if (outcome) {
+        outcomes.push(outcome);
+      }
+    }
+  }
+
+  return { ...aggregateOutcomes(outcomes), sessionIds, invalidEventCount };
 }
 
 async function getSession(options: {

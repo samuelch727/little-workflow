@@ -1,0 +1,34 @@
+---
+title: Comparisons
+description: Where Little Workflow fits next to durable execution engines, agent graph frameworks, and low-code automation builders.
+---
+
+Little Workflow is an AI workflow compiler plus a durable runtime plus a capability firewall. That combination doesn't have a clean one-to-one analogue, so it's easier to define by contrast.
+
+## Versus Temporal
+
+Temporal is a durable execution engine for human-authored workflows. Developers write activities and workflow code in their chosen language and Temporal handles retries, timers, and replay through history.
+
+Little Workflow uses the same shape (durable state, replay from history) but the workflow graph is AI-generated from a declarative `WorkflowDefinition`, not hand-written. Temporal does not include a planner, a capability firewall, or a model-call boundary — those are the parts Little Workflow exists for. Use Temporal when humans design the graph; use Little Workflow when the developer supplies a goal, capabilities, and policy, and wants the graph compiled and locked.
+
+## Versus LangGraph
+
+LangGraph is an in-process graph framework for building agent loops in Python or TypeScript. Developers wire nodes, edges, and state explicitly.
+
+Little Workflow does not try to be a node graph library you compose in code. The IR (LWIR) is a compiled artifact, not an authoring surface. LangGraph runs in your process; Little Workflow runs durably against a local, replayable event log with content-addressed WorkflowVersions. If the goal is "give me a thin agent loop inside one service," LangGraph is closer. If the goal is "the workflow must survive crashes, be replayable, and pass an audit," Little Workflow is the shape.
+
+## Versus n8n
+
+n8n is a low-code automation builder with a visual node editor and a large connector catalog. It targets operators who wire integrations together by hand.
+
+Little Workflow is not low-code first. The authoring surface is TypeScript and JSON. Visual editing is planned for `v1.0.0`, but the core thesis is that the workflow itself is compiled from intent rather than dragged together. n8n connectors and Little Workflow capabilities also differ in posture: n8n grants the workflow whatever the connector allows; Little Workflow forces every capability through a firewall with planner-visible and workflow-callable as distinct flags.
+
+## When Little Workflow Is Not The Right Tool
+
+- A chat UI with no durable workflow underneath. Use the AI SDK directly.
+- An ad-hoc script that runs once. Use a script.
+- A sub-second interactive loop. The durability tax is not worth it.
+- A workflow whose graph never changes and was designed by a human. Use Temporal or write the graph by hand.
+- A multi-agent research framework with no policy or budget enforcement. Use a graph framework.
+
+Little Workflow earns its weight when the workflow is generated, the run is long-lived, the side effects matter, and someone will eventually ask "what exactly did the model decide, and why."

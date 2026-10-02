@@ -1,0 +1,202 @@
+---
+title: Tools
+description: AI SDK tool() as the primitive, MCP integration, and code.run tools proxy.
+---
+
+Tools in Little Workflow are AI SDK `tool({...})` values. The developer registers them in a `ToolRegistry`; the workflow references them by name in `globalTools`; the harness dispatches them at execution time.
+
+## Defining A Tool
+
+Use `tool()` from the `ai` package:
+
+```ts
+import { tool } from "ai";
+import { z } from "zod";
+
+const fetchCandidates = tool({
+  description: "Fetch candidates from ATS by job id.",
+  inputSchema: z.object({
+    jobId: z.string(),
+  }),
+  outputSchema: z.object({
+    candidates: z.array(z.object({
+      id: z.string(),
+      name: z.string(),
+      resume: z.string(),
+    })),
+  }),
+  execute: async ({ jobId }) => {
+    const res = await fetch(`https://ats.example.com/candidates?jobId=${jobId}`);
+    return res.json();
+  },
+});
+```
+
+Little Workflow does not introduce a custom descriptor shape. Any AI SDK `tool()` value works — including tools you already use in chat apps or generation pipelines.
+
+## Creating A Registry
+
+`createToolRegistry` is a thin typed wrapper around a `Record<string, AiSdkTool>`. Pass your tools as the initial map:
+
+```ts
+import { createToolRegistry } from "little-workflow";
+import { tool } from "ai";
+
+const tools = createToolRegistry({
+  fetchCandidates: tool({ /* ... */ }),
+  scoreCandidate: tool({ /* ... */ }),
+  lookupBackgroundCheck: tool({ /* ... */ }),
+});
+```
+
+The registry is mutable (new tools can be registered at any time) but immutable per-entry: re-registering an existing name with a different descriptor throws. Ids follow the pattern `[a-zA-Z][a-zA-Z0-9_.-]*` — dots are allowed for namespacing (e.g., MCP-prefixed `atlas.search`).
+
+## Workflow Tool Scope
+
+```ts
+import { createLittleWorkflow } from "little-workflow";
+import { z } from "zod";
+
+const candidateReview = createLittleWorkflow({
+  id: "candidate.review",
+  inputSchema: z.object({ /* ... */ }),
+  outputSchema: z.object({ /* ... */ }),
+  // ...
+  globalTools: ["fetchCandidates", "scoreCandidate"],  // names only
+});
+```
+
+`globalTools` is a `readonly string[]` of names registered in the registry. Every name must exist in the registry when `runWorkflow` starts; a missing name throws `WorkflowMissingToolError`.
+
+The planner sees tool descriptions and schemas (to design valid LWIR steps with `with.tools` allowlists) but does not execute them — tools are for the Worker role. LWIR steps reference tools from this allowlist; the harness enforces the constraint at runtime.
+
+## MCP Integration
+
+For ordinary workflow runs, prefer declarative MCP on `runWorkflow({ mcp })`. Little Workflow delegates MCP connection, tool discovery, guide-skill staging, tracing, spooling, and cleanup to Little Harness.
+
+```ts
+const tools = createToolRegistry({
+  fetchCandidates,
+  scoreCandidate,
+});
+
+await runWorkflow({
+  world,
+  workflows,
+  input,
+  tools,
+  mcp: {
+    servers: [
+      {
+        id: "atlas",
+        description: "Search and fetch documents from Atlas.",
+        transport: {
+          type: "stdio",
+          command: "node",
+          args: ["./mcp-servers/atlas-mcp.mjs"],
+        },
+      },
+    ],
+  },
+});
+```
+
+MCP is not a parallel execution API. It is exposed as ordinary gateway tools, normally `mcp_list_tools` and `mcp_call_tool`; include those names in `globalTools` when workflow steps need MCP access. Guide skills are guidance only and do not grant capability. Oversized MCP outputs use normal Little Harness tool result spooling and artifact paths.
+
+### Manual MCP Attachment
+
+Use `ToolRegistry.attachMcpTools(...)` only when your app already owns the MCP client lifetime and wants to register the server's AI SDK tools directly.
+
+The MCP client lives in AI SDK 7's companion package `@ai-sdk/mcp` (not the `ai` core package), so install it alongside `ai`: `pnpm add @ai-sdk/mcp`.
+
+```ts
+import { createMCPClient } from "@ai-sdk/mcp";
+import { Experimental_StdioMCPTransport as StdioMCPTransport } from "@ai-sdk/mcp/mcp-stdio";
+import { createToolRegistry, runWorkflow } from "little-workflow";
+
+const atlasClient = await createMCPClient({
+  transport: new StdioMCPTransport({
+    command: "node",
+    args: ["./mcp-servers/atlas-mcp.mjs"],
+  }),
+});
+
+const atlasTools = await atlasClient.tools();
+const tools = createToolRegistry({ fetchCandidates, scoreCandidate });
+tools.attachMcpTools(atlasTools, { prefix: "atlas" });
+
+await runWorkflow({ world, workflows, input, tools });
+await atlasClient.close();
+```
+
+If a name still collides after prefixing (or if you attach without a prefix and two servers both export `search`), `attachMcpTools` throws at registration time.
+
+## `code.run` Tools Proxy
+
+> **The default worker harness does not execute `code.run`.** A `code.run` step compiles and is dispatched, but the default `workflowHarness` checks its sandbox policy and then throws (`cannot safely execute code.run in the default workflow harness`). The contract below applies only when you supply a `worker.harness` that implements `execute_step`, and that harness owns execution and isolation. See [Security Model](/docs/v0.1.0-alpha/internals/security-model). For deterministic tool calls without a model, a `tool.call` step works with the default harness.
+
+`code.run` steps receive `{ input, tools }`. The `tools` object is a proxy over all globally-registered tools — callable as async functions, no model in the loop. This saves tokens vs routing through the model for deterministic data operations:
+
+```ts
+// LWIR step (shown in expanded form for readability):
+{
+  "id": "filter-top-candidates",
+  "uses": "code.run",
+  "needs": ["fetch"],
+  "with": {
+    "source": `
+      async ({ input, tools }) => {
+        const { candidates } = await tools.fetchCandidates({ jobId: input.jobId });
+        const filtered = candidates.filter(c => c.score > 0.8);
+        const enriched = await Promise.all(
+          filtered.map(c => tools.lookupBackgroundCheck({ candidateId: c.id }))
+        );
+        return { count: enriched.length, top: enriched.slice(0, 5) };
+      }
+    `
+  },
+  "input": { "jobId": "{{ input.jobId }}" },
+  "output": {
+    "mode": "object",
+    "schema": { "type": "object", "properties": { "count": {"type": "integer"}, "top": {"type": "array"} } }
+  }
+}
+```
+
+The model never sees the raw candidate list. Every tool invocation from code is event-logged with `caller: "code"` — distinguishable from model-driven calls in `little events`.
+
+`code.run` steps have access to all `globalTools` (no per-step allowlist). The code body is auditable (visible in the LWIR's `with.source`), so unrestricted tool access is intentional.
+
+### Signature Change vs Prior Alpha
+
+Prior alpha code bodies used `async (input) => output`. The new signature is:
+
+```diff
+- async (input) => {
++ async ({ input, tools }) => {
+    // ...
+  }
+```
+
+If your existing code body doesn't call tools, the change is just the destructuring at the parameter.
+
+## What The Compiler Does With Tools
+
+At compile time:
+
+- Each name in `globalTools` is read from the registry and its descriptor (`description` + `inputSchema` + `outputSchema`) is hashed into the `WorkflowVersion` capability snapshot.
+- Names not in the registry fail with `WorkflowMissingToolError`.
+- The planner sees tool descriptions and schemas when designing LWIR; it cannot invent new tools.
+
+At execution time:
+
+- The harness reads the `execute` function from the registry by name, validates input against `inputSchema`, and invokes it.
+- The live descriptor hash is compared against the locked snapshot. A mismatch fails the run with a `RunFailedError` whose `causeCode` is `"capability_drift"`. Re-run `runWorkflow()` to produce a fresh `WorkflowVersion`. The failed run is preserved in Local World for inspection.
+
+Implementation bodies (`execute`) are deliberately excluded from the descriptor hash — only the schema surface is locked. See [Security Model](/docs/v0.1.0-alpha/internals/security-model).
+
+## Cross-References
+
+- Memory + scratch: [Memory](/docs/v0.1.0-alpha/authoring/memory)
+- Skills for planner/worker: [Skills](/docs/v0.1.0-alpha/authoring/skills)
+- Multi-workflow composition: [Compose With Little Harness](/docs/v0.1.0-alpha/authoring/compose-with-harness)

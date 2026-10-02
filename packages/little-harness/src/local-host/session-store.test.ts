@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 import { withTempDir } from "../test/temp.js";
 import { resolveLocalHostPaths } from "./paths.js";
@@ -41,6 +41,25 @@ describe("LocalSessionStore", () => {
 
       expect((await session.status()).stagedMessageIds).toEqual(["msg_1"]);
       expect(await store.get("missing")).toBeUndefined();
+    });
+  });
+
+  it("recreates a session whose status.json was truncated by a crash mid-write", async () => {
+    await withTempDir(async (dir) => {
+      const paths = resolveLocalHostPaths({ dataDir: dir }, dir);
+      const store = new LocalSessionStore(paths);
+      const session = await store.getOrCreate({ id: "chat_123" });
+
+      // Simulate a crash mid-write: leave a truncated/partial status.json (invalid JSON).
+      await writeFile(session.paths.statusFile, '{ "id": "chat_1', "utf8");
+
+      // get() treats a corrupt status.json as absent rather than throwing.
+      expect(await store.get("chat_123")).toBeUndefined();
+
+      // getOrCreate() recovers by recreating the session instead of bricking it.
+      const recovered = await store.getOrCreate({ id: "chat_123" });
+      expect(recovered.id).toBe("chat_123");
+      expect((await recovered.status()).state).toBe("idle");
     });
   });
 });

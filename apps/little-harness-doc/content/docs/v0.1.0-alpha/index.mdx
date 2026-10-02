@@ -3,7 +3,7 @@ title: v0.1.0-alpha
 description: The Little Harness alpha developer API and local runtime.
 ---
 
-`v0.1.0-alpha` is the first shipped shape of Little Harness: a local-first agent runtime where the developer provides a host, model, system prompt, tools, skills, and optional Persistent Dirs.
+These docs cover the Little Harness alpha line — currently `0.2.0-alpha.0` on npm (`little-harness@alpha`; the URL path keeps `v0.1.0-alpha`). Little Harness is a local-first agent runtime where the developer provides a host, model, system prompt, tools, skills, and optional Persistent Dirs. It requires Node.js 22+ and AI SDK 7 (`ai` is a peer dependency).
 
 ## What This Version Proves
 
@@ -17,15 +17,21 @@ description: The Little Harness alpha developer API and local runtime.
 - After-turn commits for Persistent Dirs.
 - No parallel turns inside one session; same-session calls queue by default.
 - Persistence errors surfaced to the host app and trace, not injected into normal agent context.
-- A local runtime path powered by just-bash.
+- A local runtime path powered by just-bash, run in a subprocess sandbox by default for any turn that can execute code or reach the network.
+- Opt-in execution tiers that escalate commands just-bash cannot run to an environment you provide.
+- Little Workflow workflows exposed as typed tools, with per-session fan-out budgets.
+- Chat SDK and web-rich connectors, with inbound file attachments and reactions captured as run outcomes.
+- Outcome capture (`outcome.reported`) and success rates per prompt from the CLI.
 
 ## Start Here
 
-- [Developer Guide](/docs/v0.1.0-alpha/quickstart) — the first end-to-end usage shape.
-- [Core Mental Model](/docs/v0.1.0-alpha/mental-model) — sessions, files, tools, persistence, and traces.
+- [Getting Started](/docs/v0.1.0-alpha/getting-started) — scaffold an agent workspace and chat with it from the CLI in minutes.
+- [Embedding in Your App](/docs/v0.1.0-alpha/quickstart) — the API in depth: tools, skills, streaming, persistence, and embedding in your own app.
+- [Foundations](/docs/v0.1.0-alpha/foundations) — sessions, files, tools, persistence, and traces.
 - [Build Agents](/docs/v0.1.0-alpha/build-agents/basic-agent) — primitives for defining harness-backed agents.
 - [Memory](/docs/v0.1.0-alpha/build-agents/memory) — opt-in model-authored memory backed by Persistent Dirs.
 - [Generating And Streaming](/docs/v0.1.0-alpha/build-agents/generating-and-streaming) — detailed examples for routes, jobs, callbacks, files, and structured outputs.
 - [Cookbook](/docs/v0.1.0-alpha/cookbook/document-research-agent) — example recipes for common agent use cases.
-- [Runtime Overview](/docs/v0.1.0-alpha/runtime) — Local Host, just-bash, filesystem directories, commits, and isolation.
+- [Runtime Overview](/docs/v0.1.0-alpha/runtime) — Local Host, just-bash, execution environments and tiers, commits, and isolation.
+- [Outcome Capture](/docs/v0.1.0-alpha/build-agents/outcomes) — record whether runs worked and read success rates.
 - [API Reference](/docs/v0.1.0-alpha/reference/api-reference) — alpha package API shapes.

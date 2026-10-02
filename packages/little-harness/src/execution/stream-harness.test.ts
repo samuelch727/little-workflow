@@ -2,7 +2,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import * as path from "node:path";
 import { MockLanguageModelV3 } from "ai/test";
 import { tool, type UIMessage } from "ai";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { createHarness } from "../create-harness.js";
 import { HarnessInputError } from "../errors.js";
@@ -17,10 +17,28 @@ import { localHost } from "../local-host/index.js";
 import { withTempDir } from "../test/temp.js";
 import { streamHarness } from "./stream-harness.js";
 
+const mcpResolverMock = vi.hoisted(() => ({
+  resolveHarnessMcpGateway: vi.fn(),
+}));
+
+vi.mock("../mcp.js", () => ({
+  resolveHarnessMcpGateway: mcpResolverMock.resolveHarnessMcpGateway,
+}));
+
 const usage = {
   inputTokens: { total: 1, noCache: 1, cacheRead: 0, cacheWrite: 0 },
   outputTokens: { total: 1, text: 1, reasoning: 0 },
 };
+
+beforeEach(() => {
+  mcpResolverMock.resolveHarnessMcpGateway.mockReset();
+  mcpResolverMock.resolveHarnessMcpGateway.mockResolvedValue({
+    tools: {},
+    skills: [],
+    manifest: { servers: [] },
+    close: async () => {},
+  });
+});
 
 function finishChunk() {
   return { type: "finish" as const, finishReason: { unified: "stop" as const, raw: "stop" }, usage };
@@ -62,6 +80,22 @@ function reusableStreamingTextModel(text: string) {
       }),
     }),
   });
+}
+
+async function readStreamChunks(stream: ReadableStream): Promise<unknown[]> {
+  const reader = stream.getReader();
+  const chunks: unknown[] = [];
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) {
+        return chunks;
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
 }
 
 function replayDurability(seed: readonly PersistedDurableHarnessEvent[] = []) {
@@ -114,6 +148,62 @@ describe("streamHarness", () => {
 
       await expect(result.finished).rejects.toThrow(HarnessInputError);
       await expect(result.finished).rejects.toThrow(/model/i);
+    });
+  });
+
+  it("honors workflowBudgets.maxModelSteps for the per-turn step cap", async () => {
+    await withTempDir(async (dir) => {
+      let step = 0;
+      const model = new MockLanguageModelV3({
+        provider: "test",
+        modelId: "stream-max-model-steps",
+        // Always emit a fresh tool call so the turn only stops via the configured step cap.
+        doStream: async () => {
+          step += 1;
+          const toolCallId = `call_${step}`;
+          return {
+            stream: new ReadableStream({
+              start(controller) {
+                controller.enqueue({ type: "stream-start", warnings: [] });
+                controller.enqueue({
+                  type: "tool-call",
+                  toolCallId,
+                  toolName: "noop",
+                  input: JSON.stringify({}),
+                });
+                controller.enqueue({
+                  type: "finish",
+                  finishReason: { unified: "tool-calls", raw: "tool-calls" },
+                  usage,
+                });
+                controller.close();
+              },
+            }),
+          };
+        },
+      });
+      const harness = createHarness({
+        host: localHost({ dataDir: dir }),
+        model,
+        workflowBudgets: { maxModelSteps: 5 },
+        tools: {
+          noop: tool({
+            description: "No-op tool.",
+            inputSchema: z.object({}),
+            execute: async () => ({}),
+          }),
+        },
+      });
+
+      const result = streamHarness({
+        harness,
+        messages: [{ id: "m1", role: "user", parts: [{ type: "text", text: "loop" }] }] as UIMessage[],
+        session: "stream-max-model-steps",
+      });
+      await result.finished;
+
+      // Configured cap is 5; the hardcoded literal would let it run to 20.
+      expect(model.doStreamCalls).toHaveLength(5);
     });
   });
 
@@ -170,6 +260,50 @@ describe("streamHarness", () => {
     });
   });
 
+  it("applies the connector toolPolicy to filter the model toolset", async () => {
+    await withTempDir(async (dir) => {
+      let seenToolNames: string[] = [];
+      const model = new MockLanguageModelV3({
+        provider: "test",
+        modelId: "policy-model",
+        doStream: async (options) => {
+          seenToolNames = providerToolNames(options.tools);
+          return {
+            stream: new ReadableStream({
+              start(controller) {
+                controller.enqueue({ type: "stream-start", warnings: [] });
+                controller.enqueue({ type: "text-start", id: "0" });
+                controller.enqueue({ type: "text-delta", id: "0", delta: "ok" });
+                controller.enqueue({ type: "text-end", id: "0" });
+                controller.enqueue(finishChunk());
+                controller.close();
+              },
+            }),
+          };
+        },
+      });
+      const harness = createHarness({
+        host: localHost({ dataDir: dir }),
+        model,
+        tools: {
+          alpha: tool({ description: "alpha", inputSchema: z.object({}), execute: async () => "a" }),
+          beta: tool({ description: "beta", inputSchema: z.object({}), execute: async () => "b" }),
+        },
+      });
+
+      const result = streamHarness({
+        harness,
+        messages: [{ id: "m1", role: "user", parts: [{ type: "text", text: "Hi" }] }] as any,
+        toolPolicy: { deny: ["beta"] },
+        runtime: { bash: false },
+      });
+      await result.finished;
+
+      expect(seenToolNames).toContain("alpha");
+      expect(seenToolNames).not.toContain("beta");
+    });
+  });
+
   it("returns an AI SDK compatible UI message stream response and finished metadata", async () => {
     await withTempDir(async (dir) => {
       const harness = createHarness({ host: localHost({ dataDir: dir }), model: streamingTextModel("hello") });
@@ -187,6 +321,114 @@ describe("streamHarness", () => {
       expect(await result.text).toBe("hello");
       expect(finished.session.id).toBe("chat");
       expect(finished.persistence.status).toBe("not-configured");
+    });
+  });
+
+  it("reports a provider error through the turn without streamText's console.error default", async () => {
+    await withTempDir(async (dir) => {
+      const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        const model = new MockLanguageModelV3({
+          provider: "test",
+          modelId: "erroring-stream-model",
+          doStream: async () => {
+            throw new Error("provider down");
+          },
+        });
+        const harness = createHarness({ host: localHost({ dataDir: dir }), model });
+        const result = streamHarness({
+          harness,
+          messages: [{ id: "m1", role: "user", parts: [{ type: "text", text: "Hi" }] }] as UIMessage[],
+          session: "stream-quiet-error",
+        });
+        await readStreamChunks(result.toUIMessageStream());
+        await expect(result.finished).rejects.toThrow("provider down");
+        expect(consoleError).not.toHaveBeenCalled();
+      } finally {
+        consoleError.mockRestore();
+      }
+    });
+  });
+
+  it("rejects finished when the UI message stream emits an error chunk", async () => {
+    await withTempDir(async (dir) => {
+      const model = new MockLanguageModelV3({
+        provider: "test",
+        modelId: "erroring-stream-model",
+        doStream: async () => {
+          throw new Error("provider down");
+        },
+      });
+      const harness = createHarness({ host: localHost({ dataDir: dir }), model });
+
+      const result = streamHarness({
+        harness,
+        messages: [{ id: "m1", role: "user", parts: [{ type: "text", text: "Hi" }] }] as UIMessage[],
+        session: "stream-ui-error",
+        uiMessageStream: {
+          onError: (error) => error instanceof Error ? error.message : String(error),
+        },
+      });
+      const chunks = await readStreamChunks(result.toUIMessageStream());
+
+      expect(chunks).toContainEqual({ type: "error", errorText: "provider down" });
+      await expect(result.finished).rejects.toThrow("provider down");
+      const session = await harness.sessions.get("stream-ui-error");
+      await expect(session!.status()).resolves.toMatchObject({ state: "failed" });
+    });
+  });
+
+  it("rejects text and skips after-turn commits when the default UI stream emits an error chunk", async () => {
+    await withTempDir(async (dir) => {
+      const events: string[] = [];
+      const stored: unknown[] = [];
+      const model = new MockLanguageModelV3({
+        provider: "test",
+        modelId: "default-erroring-stream-model",
+        doStream: async () => {
+          throw new Error("provider down");
+        },
+      });
+      const harness = createHarness({
+        host: localHost({ dataDir: dir }),
+        model,
+        onEvent: async (event) => {
+          events.push(event.type);
+        },
+        persistentDirs: [
+          {
+            harnessDir: "/persistent/memory",
+            load: () => ({}),
+            store: ({ changes }) => {
+              stored.push(changes);
+            },
+          },
+        ],
+        inputTypes: {
+          job: inputType({
+            description: "Write memory before streaming.",
+            toMessages: async ({ files }) => {
+              await files.writeText("/persistent/memory/error.txt", "before error");
+              return [{ role: "user", content: "Write memory before error" }];
+            },
+          }),
+        },
+      });
+
+      const result = streamHarness({ harness, type: "job", input: {}, session: "stream-ui-default-error" });
+      const chunks = await readStreamChunks(result.toUIMessageStream());
+
+      expect(chunks).toContainEqual({ type: "error", errorText: "An error occurred." });
+      await expect(result.text).rejects.toThrow("provider down");
+      await expect(result.output).rejects.toThrow("provider down");
+      await expect(result.finished).rejects.toThrow("provider down");
+      await expect((await harness.sessions.get("stream-ui-default-error"))!.status()).resolves.toMatchObject({
+        state: "failed",
+      });
+      expect(stored).toEqual([]);
+      expect(events).toContain("harness.session.failed");
+      expect(events).not.toContain("harness.session.completed");
+      expect(events).not.toContain("harness.persistent_dir.commit.started");
     });
   });
 
@@ -381,6 +623,354 @@ describe("streamHarness", () => {
       expect(model.doStreamCalls).toHaveLength(2);
       const session = await harness.sessions.get("stream-tool-loop");
       expect((await session!.files.read("/artifacts/stream/out.txt")).text()).toBe("stream");
+    });
+  });
+
+  it("resolves MCP skills and tools for stream turns and closes the gateway after finish", async () => {
+    await withTempDir(async (dir) => {
+      const close = vi.fn(async () => {});
+      const mcpConfig = {
+        servers: [
+          {
+            id: "figma",
+            description: "Figma MCP server.",
+            transport: { type: "http" as const, url: "https://mcp.example.test/figma" },
+          },
+        ],
+      };
+      let seenToolNames: string[] = [];
+      let seenPrompt = "";
+      mcpResolverMock.resolveHarnessMcpGateway.mockResolvedValueOnce({
+        tools: {
+          mcp_call_tool: tool({
+            description: "Call an MCP server tool.",
+            inputSchema: z.object({}),
+            execute: async () => ({ ok: true }),
+          }),
+          mcp_list_tools: tool({
+            description: "List MCP server tools.",
+            inputSchema: z.object({}),
+            execute: async () => ({ servers: [] }),
+          }),
+        },
+        skills: [
+          {
+            name: "figma-mcp",
+            description: "Figma MCP guide.",
+            harnessDir: ".agents/skills/figma-mcp",
+            files: { "SKILL.md": "Streaming MCP guide body." },
+          },
+        ],
+        manifest: { servers: [] },
+        close,
+      });
+      const model = new MockLanguageModelV3({
+        provider: "test",
+        modelId: "stream-mcp",
+        doStream: async (options) => {
+          seenToolNames = providerToolNames(options.tools);
+          seenPrompt = JSON.stringify(options.prompt);
+          return {
+            stream: new ReadableStream({
+              start(controller) {
+                controller.enqueue({ type: "stream-start", warnings: [] });
+                controller.enqueue({ type: "text-start", id: "0" });
+                controller.enqueue({ type: "text-delta", id: "0", delta: "stream mcp done" });
+                controller.enqueue({ type: "text-end", id: "0" });
+                controller.enqueue(finishChunk());
+                controller.close();
+              },
+            }),
+          };
+        },
+      });
+      const harness = createHarness({
+        host: localHost({ dataDir: dir }),
+        model,
+        mcp: mcpConfig,
+        inputTypes: {
+          job: inputType({
+            description: "Read MCP stream guide.",
+            toMessages: async ({ files }) => {
+              const mcpGuide = await files.read("/.agents/skills/figma-mcp/SKILL.md");
+              return [{ role: "user", content: mcpGuide.text() }];
+            },
+          }),
+        },
+      });
+
+      const result = streamHarness({ harness, type: "job", input: {}, session: "stream-mcp" });
+
+      expect(await result.text).toBe("stream mcp done");
+      await result.finished;
+      expect(mcpResolverMock.resolveHarnessMcpGateway).toHaveBeenCalledTimes(1);
+      expect(mcpResolverMock.resolveHarnessMcpGateway).toHaveBeenCalledWith(mcpConfig);
+      expect(seenToolNames).toEqual(expect.arrayContaining(["mcp_call_tool", "mcp_list_tools"]));
+      expect(seenPrompt).toContain("Streaming MCP guide body.");
+      expect(close).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("filters abstract base tools during connector stream runs while keeping executable base tools", async () => {
+    await withTempDir(async (dir) => {
+      let seenToolNames: string[] = [];
+      const model = new MockLanguageModelV3({
+        provider: "test",
+        modelId: "stream-connector-filters-abstract",
+        doStream: async (options) => {
+          seenToolNames = providerToolNames(options.tools);
+          return {
+            stream: new ReadableStream({
+              start(controller) {
+                controller.enqueue({ type: "stream-start", warnings: [] });
+                controller.enqueue({ type: "text-start", id: "0" });
+                controller.enqueue({ type: "text-delta", id: "0", delta: "connector filtered" });
+                controller.enqueue({ type: "text-end", id: "0" });
+                controller.enqueue(finishChunk());
+                controller.close();
+              },
+            }),
+          };
+        },
+      });
+      const harness = createHarness({
+        host: localHost({ dataDir: dir }),
+        model,
+        tools: {
+          portableLookup: tool({
+            description: "Portable lookup.",
+            inputSchema: z.object({ query: z.string() }),
+            execute: async () => ({ ok: true }),
+          }),
+          addReaction: {
+            description: "React to the active connector message.",
+            inputSchema: z.object({ emoji: z.string() }),
+          },
+        } as any,
+      });
+
+      const result = streamHarness({
+        harness,
+        messages: [{ id: "m1", role: "user", parts: [{ type: "text", text: "Connector run." }] }] as UIMessage[],
+        session: "stream-connector-filtered",
+        connector: { id: "discord-main", kind: "discord" },
+        connectorTools: {},
+      });
+
+      expect(await result.text).toBe("connector filtered");
+      await result.finished;
+      expect(seenToolNames).toContain("portableLookup");
+      expect(seenToolNames).not.toContain("addReaction");
+    });
+  });
+
+  it("hides abstract tools from a plain stream run and warns once per hidden tool", async () => {
+    await withTempDir(async (dir) => {
+      let seenToolNames: string[] = [];
+      const model = new MockLanguageModelV3({
+        provider: "test",
+        modelId: "stream-hides-abstract",
+        doStream: async (options) => {
+          seenToolNames = providerToolNames(options.tools);
+          return {
+            stream: new ReadableStream({
+              start(controller) {
+                controller.enqueue({ type: "stream-start", warnings: [] });
+                controller.enqueue({ type: "text-start", id: "0" });
+                controller.enqueue({ type: "text-delta", id: "0", delta: "ok" });
+                controller.enqueue({ type: "text-end", id: "0" });
+                controller.enqueue(finishChunk());
+                controller.close();
+              },
+            }),
+          };
+        },
+      });
+      const harness = createHarness({
+        host: localHost({ dataDir: dir }),
+        model,
+        runtime: { bash: false },
+        tools: {
+          lookup: tool({
+            description: "Lookup data.",
+            inputSchema: z.object({ query: z.string() }),
+            execute: async () => ({ ok: true }),
+          }),
+          // Abstract tool: declared without execute, so it only becomes live on a connector that
+          // implements it. It must never be offered to the model on a plain streamHarness run.
+          sendChannelUpdate: {
+            description: "Post a channel update (implemented only on a connector).",
+            inputSchema: z.object({ text: z.string() }),
+          },
+        } as any,
+      });
+
+      const result = streamHarness({
+        harness,
+        messages: [{ id: "m1", role: "user", parts: [{ type: "text", text: "Hi" }] }] as UIMessage[],
+        session: "stream-hides-abstract",
+      });
+      expect(await result.text).toBe("ok");
+      const finished = await result.finished;
+
+      expect(seenToolNames).toContain("lookup");
+      expect(seenToolNames).not.toContain("sendChannelUpdate");
+      const abstractWarnings = finished.warnings.filter(
+        (warning) => warning.metadata?.reason === "abstract-tool-hidden",
+      );
+      expect(abstractWarnings).toHaveLength(1);
+      expect(abstractWarnings[0]).toMatchObject({
+        code: "policy_warning",
+        metadata: { reason: "abstract-tool-hidden", tool: "sendChannelUpdate" },
+      });
+    });
+  });
+
+  it("exposes executable connector tools to the stream model request and durable request refs", async () => {
+    await withTempDir(async (dir) => {
+      const durable: unknown[] = [];
+      let seenToolNames: string[] = [];
+      const model = new MockLanguageModelV3({
+        provider: "test",
+        modelId: "stream-connector-tools",
+        doStream: async (options) => {
+          seenToolNames = providerToolNames(options.tools);
+          return {
+            stream: new ReadableStream({
+              start(controller) {
+                controller.enqueue({ type: "stream-start", warnings: [] });
+                controller.enqueue({ type: "text-start", id: "0" });
+                controller.enqueue({ type: "text-delta", id: "0", delta: "connector visible" });
+                controller.enqueue({ type: "text-end", id: "0" });
+                controller.enqueue(finishChunk());
+                controller.close();
+              },
+            }),
+          };
+        },
+      });
+      const harness = createHarness({
+        host: localHost({ dataDir: dir }),
+        model,
+        durability: {
+          append: async (event) => {
+            durable.push(event);
+          },
+        },
+        tools: {
+          addReaction: {
+            description: "React to the active connector message.",
+            inputSchema: z.object({ emoji: z.string() }),
+          },
+        } as any,
+      });
+
+      const result = streamHarness({
+        harness,
+        messages: [{ id: "m1", role: "user", parts: [{ type: "text", text: "Connector tools." }] }] as UIMessage[],
+        session: "stream-connector-tools",
+        runId: "run_stream_connector_tools",
+        connector: { id: "discord-main", kind: "discord" },
+        connectorTools: {
+          addReaction: tool({
+            description: "React to the active Discord message.",
+            inputSchema: z.object({ emoji: z.string() }),
+            execute: async () => ({ ok: true }),
+          }),
+          sendEphemeral: tool({
+            description: "Send an ephemeral Discord reply.",
+            inputSchema: z.object({ text: z.string() }),
+            execute: async () => ({ ok: true }),
+          }),
+        },
+      });
+
+      expect(await result.text).toBe("connector visible");
+      await result.finished;
+      expect(seenToolNames).toContain("addReaction");
+      expect(seenToolNames).toContain("sendEphemeral");
+      const called = durable.find(
+        (event) => (event as { type?: string }).type === "harness.model.called",
+      ) as { payload?: { request?: { tools?: Array<{ toolName?: string }> } } } | undefined;
+      const durableToolNames = called?.payload?.request?.tools?.map((toolRef) => toolRef.toolName);
+      expect(durableToolNames).toContain("addReaction");
+      expect(durableToolNames).toContain("sendEphemeral");
+    });
+  });
+
+  it("passes active connector context to stream tool execute handlers", async () => {
+    await withTempDir(async (dir) => {
+      let call = 0;
+      let seenConnector: unknown;
+      const model = new MockLanguageModelV3({
+        provider: "test",
+        modelId: "stream-connector-context",
+        doStream: async () => {
+          call += 1;
+          return {
+            stream: new ReadableStream({
+              start(controller) {
+                controller.enqueue({ type: "stream-start", warnings: [] });
+                if (call === 1) {
+                  controller.enqueue({
+                    type: "tool-call",
+                    toolCallId: "call_connector_1",
+                    toolName: "addReaction",
+                    input: JSON.stringify({ emoji: "+1" }),
+                  });
+                  controller.enqueue({
+                    type: "finish",
+                    finishReason: { unified: "tool-calls", raw: "tool-calls" },
+                    usage,
+                  });
+                } else {
+                  controller.enqueue({ type: "text-start", id: "0" });
+                  controller.enqueue({ type: "text-delta", id: "0", delta: "connector context final" });
+                  controller.enqueue({ type: "text-end", id: "0" });
+                  controller.enqueue(finishChunk());
+                }
+                controller.close();
+              },
+            }),
+          };
+        },
+      });
+      const connector = {
+        id: "discord-main",
+        kind: "discord",
+        endpoint: { id: "C-1" },
+      };
+      const harness = createHarness({
+        host: localHost({ dataDir: dir }),
+        model,
+        tools: {
+          addReaction: {
+            description: "React to the active connector message.",
+            inputSchema: z.object({ emoji: z.string() }),
+          },
+        } as any,
+      });
+
+      const result = streamHarness({
+        harness,
+        messages: [{ id: "m1", role: "user", parts: [{ type: "text", text: "React." }] }] as UIMessage[],
+        session: "stream-connector-context",
+        connector,
+        connectorTools: {
+          addReaction: tool({
+            description: "React to the active Discord message.",
+            inputSchema: z.object({ emoji: z.string() }),
+            execute: async (_input, ctx: any) => {
+              seenConnector = ctx.connector;
+              return { ok: true };
+            },
+          }),
+        },
+      });
+
+      expect(await result.text).toBe("connector context final");
+      await result.finished;
+      expect(seenConnector).toEqual(connector);
     });
   });
 
@@ -706,6 +1296,69 @@ describe("streamHarness", () => {
     });
   });
 
+  it("parks the streaming turn when await_tasks waits on a non-terminal durable task", async () => {
+    await withTempDir(async (dir) => {
+      const host = localHost({ dataDir: dir });
+      await host.durable!.tasks.reserveTask({
+        sessionId: "stream-await-loop",
+        kind: "workflow",
+        purpose: "background review",
+      });
+      let calls = 0;
+      const model = new MockLanguageModelV3({
+        provider: "test",
+        modelId: "stream-await-task-parks",
+        doStream: async () => {
+          calls += 1;
+          return {
+            stream: new ReadableStream({
+              start(controller) {
+                controller.enqueue({ type: "stream-start", warnings: [] });
+                if (calls === 1) {
+                  controller.enqueue({
+                    type: "tool-call",
+                    toolCallId: "tool_await",
+                    toolName: "await_tasks",
+                    input: JSON.stringify({ taskIds: ["task_1"], mode: "all" }),
+                  });
+                  controller.enqueue({
+                    type: "finish",
+                    finishReason: { unified: "tool-calls", raw: "tool-calls" },
+                    usage,
+                  });
+                } else {
+                  controller.enqueue({ type: "text-start", id: "0" });
+                  controller.enqueue({ type: "text-delta", id: "0", delta: "should not run" });
+                  controller.enqueue({ type: "text-end", id: "0" });
+                  controller.enqueue(finishChunk());
+                }
+                controller.close();
+              },
+            }),
+          };
+        },
+      });
+      const harness = createHarness({ host, model, system: "Wait for tasks." });
+
+      const result = streamHarness({
+        harness,
+        messages: [{ id: "m1", role: "user", parts: [{ type: "text", text: "wait" }] }] as UIMessage[],
+        session: "stream-await-loop",
+      });
+      const finished = await result.finished as any;
+
+      expect(finished).toMatchObject({
+        status: "parked",
+        continuationId: expect.stringMatching(/^cont_[0-9a-v]+$/u),
+        pending: { taskIds: ["task_1"], mode: "all" },
+      });
+      expect(calls).toBe(1);
+      await expect(host.durable!.continuations.get(finished.continuationId)).resolves.toMatchObject({
+        parkedToolCallIds: ["tool_await"],
+      });
+    });
+  });
+
   it("emits durable model call and response payloads during streaming", async () => {
     await withTempDir(async (dir) => {
       const durable: unknown[] = [];
@@ -784,6 +1437,154 @@ describe("streamHarness", () => {
       await second.finished;
 
       expect(model.doStreamCalls).toHaveLength(1);
+    });
+  });
+
+  it("replays a completed MCP-configured stream response without resolving MCP again", async () => {
+    await withTempDir(async (dir) => {
+      const durability = replayDurability();
+      const close = vi.fn(async () => {});
+      mcpResolverMock.resolveHarnessMcpGateway.mockResolvedValueOnce({
+        tools: {},
+        skills: [],
+        manifest: { servers: [] },
+        close,
+      });
+      const model = streamingTextModel("cached mcp stream");
+      const harness = createHarness({
+        host: localHost({ dataDir: dir }),
+        model,
+        durability: durability.sink,
+        mcp: { servers: [] },
+      });
+      const messages = [{ id: "m1", role: "user", parts: [{ type: "text", text: "Cache stream with MCP." }] }] as UIMessage[];
+
+      const first = streamHarness({ harness, messages, session: "mcp-stream-replay", runId: "run_mcp_stream_replay" });
+      expect(await first.text).toBe("cached mcp stream");
+      await first.finished;
+
+      mcpResolverMock.resolveHarnessMcpGateway.mockRejectedValueOnce(new Error("mcp server down"));
+      const second = streamHarness({ harness, messages, session: "mcp-stream-replay", runId: "run_mcp_stream_replay" });
+      expect(await second.text).toBe("cached mcp stream");
+      await second.finished;
+
+      expect(model.doStreamCalls).toHaveLength(1);
+      expect(mcpResolverMock.resolveHarnessMcpGateway).toHaveBeenCalledTimes(1);
+      expect(close).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("does not replay a completed MCP-configured stream response when connectorTools changes", async () => {
+    await withTempDir(async (dir) => {
+      const durability = replayDurability();
+      const model = reusableStreamingTextModel("connector-sensitive mcp stream");
+      const harness = createHarness({
+        host: localHost({ dataDir: dir }),
+        model,
+        durability: durability.sink,
+        mcp: { servers: [] },
+        tools: {
+          addReaction: {
+            description: "React to the active connector message.",
+            inputSchema: z.object({ emoji: z.string() }),
+          },
+        } as any,
+      });
+      const messages = [
+        { id: "m1", role: "user", parts: [{ type: "text", text: "Connector-sensitive MCP stream." }] },
+      ] as UIMessage[];
+
+      const first = streamHarness({
+        harness,
+        messages,
+        session: "mcp-stream-connector-tools-replay",
+        runId: "run_mcp_stream_connector_tools_replay",
+        connector: { id: "discord-main", kind: "discord" },
+        connectorTools: {
+          addReaction: tool({
+            description: "React to the active Discord message.",
+            inputSchema: z.object({ emoji: z.string() }),
+            execute: async () => ({ ok: true }),
+          }),
+        },
+      });
+      expect(await first.text).toBe("connector-sensitive mcp stream");
+      await first.finished;
+
+      const second = streamHarness({
+        harness,
+        messages,
+        session: "mcp-stream-connector-tools-replay",
+        runId: "run_mcp_stream_connector_tools_replay",
+        connector: { id: "discord-main", kind: "discord" },
+        connectorTools: {
+          addReaction: tool({
+            description: "React to the active Discord message.",
+            inputSchema: z.object({ emoji: z.string() }),
+            execute: async () => ({ ok: true }),
+          }),
+          sendEphemeral: tool({
+            description: "Send an ephemeral Discord reply.",
+            inputSchema: z.object({ text: z.string() }),
+            execute: async () => ({ ok: true }),
+          }),
+        },
+      });
+      expect(await second.text).toBe("connector-sensitive mcp stream");
+      await second.finished;
+
+      expect(model.doStreamCalls).toHaveLength(2);
+      expect(
+        durability.events
+          .filter((event) => event.type === "harness.model.called")
+          .map((event) =>
+            (event.payload as { request?: { tools?: Array<{ toolName?: string }> } }).request?.tools?.map(
+              (toolRef) => toolRef.toolName,
+            )
+          ),
+      ).toEqual([
+        expect.arrayContaining(["addReaction"]),
+        expect.arrayContaining(["addReaction", "sendEphemeral"]),
+      ]);
+    });
+  });
+
+  it("does not replay a completed MCP-configured stream response when toolPolicy is set", async () => {
+    await withTempDir(async (dir) => {
+      const durability = replayDurability();
+      const model = reusableStreamingTextModel("policy-sensitive mcp stream");
+      const harness = createHarness({
+        host: localHost({ dataDir: dir }),
+        model,
+        durability: durability.sink,
+        mcp: { servers: [] },
+        tools: {
+          alpha: tool({ description: "alpha", inputSchema: z.object({}), execute: async () => "a" }),
+          beta: tool({ description: "beta", inputSchema: z.object({}), execute: async () => "b" }),
+        } as any,
+      });
+      const messages = [
+        { id: "m1", role: "user", parts: [{ type: "text", text: "Policy-sensitive MCP stream." }] },
+      ] as UIMessage[];
+      // connectorTools is undefined, so only the toolPolicy gate keeps the MCP
+      // simple-replay fast-path from reusing a stale completion. The two runs carry a
+      // policy that filters to different toolsets — without the gate, run 2 replays run 1.
+      const base = {
+        harness,
+        messages,
+        session: "mcp-stream-tool-policy-replay",
+        runId: "run_mcp_stream_tool_policy_replay",
+      } as const;
+
+      const first = streamHarness({ ...base, toolPolicy: { deny: ["beta"] } });
+      expect(await first.text).toBe("policy-sensitive mcp stream");
+      await first.finished;
+
+      const second = streamHarness({ ...base, toolPolicy: { deny: ["alpha"] } });
+      expect(await second.text).toBe("policy-sensitive mcp stream");
+      await second.finished;
+
+      expect(model.doStreamCalls).toHaveLength(2);
     });
   });
 
@@ -1011,7 +1812,8 @@ describe("streamHarness", () => {
         messages,
         session: "stream-tool-choice-replay",
         runId: "run_stream_tool_choice_replay",
-        toolChoice: { type: "tool", toolName: "lookup" } as any,
+        // AI SDK 7 rejects a text-only response to a forced tool choice; "none" still changes the choice.
+        toolChoice: "none",
       });
       expect(await second.text).toBe("tool-choice-sensitive stream");
       await second.finished;

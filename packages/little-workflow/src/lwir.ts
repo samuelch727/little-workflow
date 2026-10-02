@@ -26,8 +26,29 @@ export type LwirStepFixerConfig = {
   readonly system: string;
 };
 
+/** Output-repair policy for an `ai.generate` step whose output fails schema validation. */
+export type LwirStepRepairConfig = {
+  /**
+   * `"self"` re-runs the step's own model with the validator findings fed back.
+   *
+   * `"escalate"` (repair on a stronger model) is **declared but unimplemented**:
+   * it is reserved for a later phase and rejected by `validateLwir` today, so a
+   * workflow cannot reach the runtime with it. See `UNIMPLEMENTED_FIELDS`.
+   */
+  readonly mode: "self" | "escalate";
+  readonly maxAttempts: number;
+  /**
+   * The model slot to repair on. **Declared but unimplemented**: self-repair
+   * always re-runs the step's own `with.model`, and this only ever meant "the
+   * stronger model to escalate to". Reserved alongside `mode: "escalate"` and
+   * rejected by `validateLwir` today. See `UNIMPLEMENTED_FIELDS`.
+   */
+  readonly model?: string;
+};
+
 export type LwirStepOnFailure = {
   readonly fixer?: LwirStepFixerConfig;
+  readonly repair?: LwirStepRepairConfig;
 };
 
 export type LwirStep = {
@@ -36,7 +57,11 @@ export type LwirStep = {
   readonly needs?: readonly string[];
   readonly with?: Record<string, unknown>;
   readonly input?: unknown;
-  readonly cache?: unknown;
+  // `cache` used to be declared here. It had no runtime semantics — nothing read
+  // it — so it is gone from the type and rejected by `validateLwir` (see
+  // `UNIMPLEMENTED_FIELDS`) rather than left as an accepted no-op. Step
+  // validation has no unknown-key check, so removing it without the rejection
+  // would have made it silently ignored instead of merely undeclared.
   readonly onFailure?: LwirStepOnFailure;
   readonly output?: LwirStepOutput;
   readonly steps?: readonly LwirStep[];
@@ -139,6 +164,99 @@ const VALID_JSON_SCHEMA_TYPES = new Set([
   "object",
   "string",
 ]);
+/**
+ * Pure-annotation JSON Schema keywords: they carry documentation to whoever reads
+ * the schema (a model, a human) and constrain nothing.
+ *
+ * The bar for membership is the same one {@link UNIMPLEMENTED_FIELDS} enforces —
+ * a keyword may only be accepted if the runtime delivers what an author writing it
+ * believes they turned on. These three promise "documentation the model sees", and
+ * that is exactly what happens: the normalized schema object is handed verbatim to
+ * the AI SDK (`jsonSchema(schema)` in `ai-adapter.ts` for `ai.generate` output
+ * schemas, `toolInputSchemaFromWorkflowMarker` in little-harness for a workflow's
+ * model-facing tool input schema), so every annotation reaches the provider intact.
+ *
+ * - `description` — the annotation `zod`'s `.describe()` emits, and the standard way
+ *   to document a field for a model. Every JSON Schema validator (including the
+ *   three Ajv instances this package builds) ignores it when validating instances.
+ * - `title` — a human/model-readable label from `.meta({ title })`. Same story:
+ *   annotation only, no instance is accepted or rejected because of it.
+ * - `examples` — a draft-6+ annotation from `.meta({ examples })`. It illustrates
+ *   values; it does not restrict them, and it is not `default` (see below).
+ *
+ * Deliberately NOT here, because each would be a promise the alpha runtime breaks:
+ * - `default` — JSON Schema `default` means "substitute this when the value is
+ *   absent". Every Ajv instance in this package is built `{ allErrors: true,
+ *   strict: false, validateSchema: true }` with no `useDefaults`, so nothing
+ *   injects anything. Accepting it would let an author ship a workflow whose
+ *   optional fields silently stay `undefined`.
+ * - `deprecated`, `readOnly`, `writeOnly` — lifecycle/access assertions nothing in
+ *   the runtime enforces. Accepting them would install a boundary that does not
+ *   exist, the failure mode `permissions.secrets` is rejected for.
+ * - `format`, `pattern` — genuine validation semantics; they belong to the schema
+ *   subset question, not to this annotation allowlist, and stay rejected.
+ */
+const ANNOTATION_JSON_SCHEMA_KEYS = ["description", "examples", "title"] as const;
+/**
+ * The map-shape keyword, and the one `zod` emits for every `z.record(K, V)`:
+ * `{ type: "object", propertyNames: <K>, additionalProperties: <V> }`. Rejecting it made
+ * every map-shaped schema fail at compile time — LIT-53, found authoring the dreamer's
+ * `config-ab` workflow, which had to ship `z.looseObject` instead.
+ *
+ * It clears the same bar {@link ANNOTATION_JSON_SCHEMA_KEYS} documents, but for the
+ * opposite reason: `propertyNames` has REAL validation semantics ("every property NAME
+ * must validate against this schema"), and the alpha runtime really evaluates them. All
+ * three Ajv instances in this package (`lwir.ts`, `compiler.ts`, `runtime.ts`) are built
+ * `{ allErrors: true, strict: false, validateSchema: true }` on Ajv 8, whose draft-07
+ * validator implements `propertyNames` natively — so it is enforced at both sites that
+ * check an instance against a schema: `validateInputAgainstSchema` (compiler.ts, workflow
+ * input) and `validateJsonSchema` (runtime.ts, step and final output). A non-conforming
+ * key fails the run; nothing is accepted-and-ignored.
+ *
+ * The accepted form is "a `propertyNames` schema that is itself inside this subset",
+ * checked by the same recursion every other nested schema goes through. That draws the
+ * boundary for free, and draws it in the same place as everywhere else:
+ * - `z.record(z.string(), V)` — `propertyNames: { type: "string" }`. Works.
+ * - `z.record(z.enum([...]), V)` — `propertyNames: { type: "string", enum: [...] }` plus a
+ *   `required` listing every key (zod's exhaustive-record semantics). Works, via the
+ *   map-shape carve-out in {@link validateSchemaRecordSubset}: zod emits that `required`
+ *   with no `properties` object beside it.
+ * - `z.partialRecord(z.enum([...]), V)` — the same without `required`. Works.
+ * - `z.record(z.string().min(1), V)` — `propertyNames: { minLength }`. Works.
+ * - `z.record(z.string().regex(...), V)` — `propertyNames: { pattern }`. Still REJECTED,
+ *   with the standard unsupported-keyword message: `pattern` is outside the subset
+ *   wherever it appears, and a key schema is not a special case.
+ */
+const MAP_SHAPE_JSON_SCHEMA_KEYS = ["propertyNames"] as const;
+
+/**
+ * JSON object keys are always strings, so a key schema typed otherwise — what
+ * `z.record(z.number(), V)` emits — passes the subset walk yet rejects every non-empty
+ * instance at run time. Returns the first non-string type, searching `anyOf`/`oneOf`.
+ */
+function nonStringPropertyNameType(keySchema: unknown): string | undefined {
+  if (!isRecord(keySchema)) {
+    return undefined;
+  }
+  const types = Array.isArray(keySchema.type) ? keySchema.type : [keySchema.type];
+  const nonString = types.find((type) => type !== undefined && type !== "string");
+  if (typeof nonString === "string") {
+    return nonString;
+  }
+  for (const key of ["anyOf", "oneOf"]) {
+    const branches = keySchema[key];
+    if (!Array.isArray(branches)) {
+      continue;
+    }
+    for (const branch of branches) {
+      const branchType = nonStringPropertyNameType(branch);
+      if (branchType !== undefined) {
+        return branchType;
+      }
+    }
+  }
+  return undefined;
+}
 const SUPPORTED_JSON_SCHEMA_KEYS = new Set([
   "additionalProperties",
   "anyOf",
@@ -155,6 +273,8 @@ const SUPPORTED_JSON_SCHEMA_KEYS = new Set([
   "properties",
   "required",
   "type",
+  ...ANNOTATION_JSON_SCHEMA_KEYS,
+  ...MAP_SHAPE_JSON_SCHEMA_KEYS,
 ]);
 const EXPRESSION_ROOTS = new Set(["input", "item", "steps", "step", "workflow"]);
 const FORBIDDEN_PATH_SEGMENTS = new Set(["__proto__", "constructor", "prototype"]);
@@ -172,6 +292,91 @@ const COMPARISON_OPERATORS = ["===", "!==", ">=", "<=", "==", "!=", ">", "<"] as
 const nodeRequire = createRequire(import.meta.url);
 
 let cachedAjv: AjvInstance | undefined;
+
+/**
+ * The single finding code for "the schema accepts this field, the runtime does not
+ * implement it". See {@link UNIMPLEMENTED_FIELDS}.
+ */
+export const UNIMPLEMENTED_FIELD_CODE = "schema.unimplemented_field";
+
+type UnimplementedFieldSpec = {
+  /** What an author believes they are turning on by declaring the field. */
+  readonly declares: string;
+  /**
+   * What to do instead. Rendered verbatim into the finding message, which
+   * `compileWorkflow` feeds back to the planner as repair context — so phrase it
+   * as an instruction a planner can act on without interpretation.
+   */
+  readonly instead: string;
+};
+
+/**
+ * LWIR fields (and field values) that pass schema validation but that the alpha
+ * runtime does not implement.
+ *
+ * A declaration the runtime silently drops is worse than a missing feature: an
+ * absent feature is discoverable, a silently ignored one is not. An author who
+ * writes `permissions.secrets` believes a boundary was installed; nothing
+ * installs it, and nothing says so. So every entry here is rejected at
+ * validation time — the same standard `code.run` already holds itself to, where
+ * the default worker harness throws rather than pretending to sandbox.
+ *
+ * Because `validateLwir` gates `registerWorkflowVersion`, which is the only way
+ * to mint a `WorkflowVersion`, an entry here is unreachable from every execution
+ * path: the compiler's planner loop, the CLI's direct-LWIR path, dynamic-plan
+ * lowering, and `runWorkflow`.
+ *
+ * **Adding a fourth instance:** add an entry here, then call
+ * {@link unimplementedFieldFinding} from whichever validator already sees the
+ * field. Prefer rejecting only the specific unimplemented shape (a non-empty
+ * array, one enum member) so declarations that assert nothing keep working.
+ */
+const UNIMPLEMENTED_FIELDS = {
+  "permissions.secrets": {
+    declares: "a secret allowlist for the run",
+    instead:
+      "Remove `permissions.secrets` (or leave it as an empty array). Alpha has no secret broker: pass secrets to the tools you expose to the workflow instead.",
+  },
+  "permissions.network": {
+    declares: "a network egress allowlist for the run",
+    instead:
+      "Remove `permissions.network` (or leave it as an empty array). Alpha does not gate egress: confine network access to the tools you expose to the workflow instead.",
+  },
+  "onFailure.repair.mode=escalate": {
+    declares: "output repair on a stronger model than the step's own",
+    instead:
+      'Set `onFailure.repair.mode` to "self". Escalated repair is deferred; to repair on a different model today, run the step on that model.',
+  },
+  "onFailure.repair.model": {
+    declares: "the model slot the repair pass runs on",
+    instead:
+      "Remove `onFailure.repair.model`. Self-repair always re-runs the step's own `with.model`; to repair on a different model, run the step on that model.",
+  },
+  "steps[].cache": {
+    declares: "memoization of the step result",
+    instead:
+      "Remove `cache` from the step. Alpha has no step cache; re-running a workflow replays recorded steps from the run log instead.",
+  },
+} as const satisfies Record<string, UnimplementedFieldSpec>;
+
+type UnimplementedField = keyof typeof UNIMPLEMENTED_FIELDS;
+
+/**
+ * The finding for a declared-but-unimplemented field. Names the field, says what
+ * the author thought it did, and states that it takes no effect — so the failure
+ * is loud at compile time rather than silent at run time.
+ */
+function unimplementedFieldFinding(
+  field: UnimplementedField,
+  path: string,
+): LwirValidationFinding {
+  const spec = UNIMPLEMENTED_FIELDS[field];
+  return finding(
+    UNIMPLEMENTED_FIELD_CODE,
+    path,
+    `\`${field}\` declares ${spec.declares}, but the alpha runtime does not implement it — it would be accepted and then silently ignored, so it is rejected instead. ${spec.instead}`,
+  );
+}
 
 export class LwirValidationError extends TypeError {
   readonly findings: readonly LwirValidationFinding[];
@@ -203,10 +408,71 @@ export function validateLwir(value: unknown): LwirValidationResult {
     }
     if (Array.isArray(lwir.steps)) {
       validateStepList(lwir.steps, "$.steps", findings, validationContextFor(lwir));
+      validateTerminalSteps(lwir.steps, "$.steps", findings);
     }
   }
 
   return findings.length === 0 ? { valid: true, findings: [] } : invalid(findings);
+}
+
+/**
+ * Mirror the runtime's terminal-step resolution (which throws `Ambiguous terminal steps`):
+ * a workflow's output comes from the single non-decision step that nothing else `needs` and
+ * that no decision routes to. More than one such step is ambiguous — the runtime crashes — so
+ * flag it as a finding here, letting the planner's repair loop fix it instead of crashing.
+ */
+function validateTerminalSteps(
+  steps: readonly unknown[],
+  stepPath: string,
+  findings: LwirValidationFinding[],
+): void {
+  const needed = new Set<string>();
+  const decisionTargets = new Set<string>();
+  for (const step of steps) {
+    if (!isRecord(step)) {
+      continue;
+    }
+    const needs = step.needs;
+    if (Array.isArray(needs)) {
+      for (const need of needs) {
+        if (typeof need === "string") {
+          needed.add(need);
+        }
+      }
+    }
+    if (step.uses === "decision" && isRecord(step.with)) {
+      const cases = step.with.cases;
+      if (Array.isArray(cases)) {
+        for (const branch of cases) {
+          if (isRecord(branch) && typeof branch.to === "string" && branch.to !== "end") {
+            decisionTargets.add(branch.to);
+          }
+        }
+      }
+      const fallback = step.with.default;
+      if (typeof fallback === "string" && fallback !== "end") {
+        decisionTargets.add(fallback);
+      }
+    }
+  }
+  const terminalIds: string[] = [];
+  for (const step of steps) {
+    if (!isRecord(step) || typeof step.id !== "string") {
+      continue;
+    }
+    if (step.uses !== "decision" && !needed.has(step.id) && !decisionTargets.has(step.id)) {
+      terminalIds.push(step.id);
+    }
+  }
+  if (terminalIds.length > 1) {
+    findings.push(
+      finding(
+        "terminal.ambiguous",
+        stepPath,
+        `A workflow must have exactly one terminal step that produces its output, but found ${terminalIds.length}: ${terminalIds.join(", ")}. Chain steps with \`needs\` so a single final step produces the declared output.`,
+      ),
+    );
+  }
 }
 
 export function assertValidLwir(value: unknown): asserts value is LwirWorkflow {
@@ -304,7 +570,7 @@ function validatePermissions(
     );
     return;
   }
-  for (const key of ["models", "tools", "secrets", "network"]) {
+  for (const key of ["models", "tools", "secrets", "network"] as const) {
     const value = permissions[key];
     if (value === undefined) {
       continue;
@@ -316,6 +582,17 @@ function validatePermissions(
           `$.permissions.${key}`,
           "permission entries must be string arrays.",
         ),
+      );
+      continue;
+    }
+    // `models` and `tools` are enforced by the runtime (`assertAllowedModel`,
+    // scoped worker tools). `secrets` and `network` are not read by anything —
+    // an author who grants an entry here gets no boundary and no broker. An
+    // empty array grants nothing, so it stays legal: the compiler itself emits
+    // `secrets: [], network: []` on every LWIR it produces.
+    if ((key === "secrets" || key === "network") && value.length > 0) {
+      findings.push(
+        unimplementedFieldFinding(`permissions.${key}`, `$.permissions.${key}`),
       );
     }
   }
@@ -600,15 +877,27 @@ function validateStep(
     );
   }
 
+  if (step.cache !== undefined) {
+    findings.push(unimplementedFieldFinding("steps[].cache", `${stepPath}.cache`));
+  }
+
   const outputMode = stepType === "decision"
     ? undefined
     : validateOutput(step.output, `${stepPath}.output`, findings);
+  if (stepType === "decision" && step.output !== undefined) {
+    findings.push(
+      finding(
+        "decision.output_not_allowed",
+        `${stepPath}.output`,
+        "A decision step routes execution and cannot declare an output contract — its result is always { chosen: <target> }. Remove `output` from this step and produce the workflow output in a later non-decision step.",
+      ),
+    );
+  }
   const expressionContext = { allowItemExpressions: context.allowItemExpressions === true };
   if (stepType !== "parallel" && stepType !== "decision") {
     validateExpressions(step.with, `${stepPath}.with`, findings, expressionContext);
   }
   validateExpressions(step.input, `${stepPath}.input`, findings, expressionContext);
-  validateExpressions(step.cache, `${stepPath}.cache`, findings, expressionContext);
 
   validateSensitiveField(step, stepPath, findings);
   validateMaxVisitsField(step, stepPath, findings);
@@ -748,6 +1037,46 @@ function validateMaxVisitsField(
   }
 }
 
+function validateRepairConfig(
+  repair: unknown,
+  repairPath: string,
+  stepType: LwirStepType,
+  findings: LwirValidationFinding[],
+): void {
+  if (repair === undefined) {
+    return;
+  }
+  if (!isRecord(repair)) {
+    findings.push(finding("repair.invalid_config", repairPath, "onFailure.repair must be an object."));
+    return;
+  }
+  if (stepType !== "ai.generate") {
+    findings.push(
+      finding("repair.unsupported_step", repairPath, "onFailure.repair is supported only for ai.generate steps in alpha."),
+    );
+  }
+  if (repair.mode !== "self" && repair.mode !== "escalate") {
+    findings.push(finding("repair.invalid_mode", `${repairPath}.mode`, 'repair.mode must be "self" or "escalate".'));
+  } else if (repair.mode === "escalate") {
+    // The runtime's repair loop returns early for any mode but "self", which
+    // degraded an escalate declaration into no repair at all — silently.
+    findings.push(unimplementedFieldFinding("onFailure.repair.mode=escalate", `${repairPath}.mode`));
+  }
+  if (typeof repair.maxAttempts !== "number" || !Number.isInteger(repair.maxAttempts) || repair.maxAttempts < 1) {
+    findings.push(
+      finding("repair.invalid_max_attempts", `${repairPath}.maxAttempts`, "repair.maxAttempts must be an integer >= 1."),
+    );
+  }
+  if (repair.model !== undefined) {
+    // The repair loop resolves its model from the step's own `with.model` and
+    // never reads this — it only ever meant "the stronger model to escalate to",
+    // and escalation is deferred. Report only the unimplemented finding: adding
+    // `repair.model_disallowed` on top would tell a planner to fix an allowlist
+    // for a field the next sentence tells it to delete.
+    findings.push(unimplementedFieldFinding("onFailure.repair.model", `${repairPath}.model`));
+  }
+}
+
 function validateFixerConfig(
   step: JsonRecord,
   stepPath: string,
@@ -768,6 +1097,7 @@ function validateFixerConfig(
     );
     return;
   }
+  validateRepairConfig(step.onFailure.repair, `${stepPath}.onFailure.repair`, stepType, findings);
   const fixer = step.onFailure.fixer;
   if (fixer === undefined) {
     return;
@@ -1464,7 +1794,25 @@ function validateExpressions(
   }
 }
 
-function expressionsIn(value: string): readonly string[] {
+type ExpressionScan = {
+  /** The bodies of every `{{ … }}` match. Always empty when `unscannable` is true. */
+  readonly expressions: readonly string[];
+  /**
+   * True when a `{{` or `}}` survived after every match was stripped, so this scanner cannot say
+   * what the string contains. `expressions` is *not* "there are none" in that case — the runtime
+   * (`resolveString` in expressions.ts) only rejects a string whose `{{` and `}}` counts differ,
+   * and otherwise resolves every well-formed match inside it. Callers that decide anything on the
+   * absence of expressions must branch on this flag, never on `expressions.length === 0`.
+   */
+  readonly unscannable: boolean;
+};
+
+/**
+ * The single expression scan. `expressionsIn` and `lwirContainsUnscannableExpression` are both
+ * thin wrappers so validation and the input-cone walker cannot drift apart about what counts as
+ * an expression.
+ */
+function scanExpressions(value: string): ExpressionScan {
   const expressions: string[] = [];
   const matcher = /\{\{([^{}]+)\}\}/gu;
   let match: RegExpExecArray | null;
@@ -1473,7 +1821,13 @@ function expressionsIn(value: string): readonly string[] {
     expressions.push(match[1]?.trim() ?? "");
     covered = covered.replace(match[0], "");
   }
-  return covered.includes("{{") || covered.includes("}}") ? [] : expressions;
+  return covered.includes("{{") || covered.includes("}}")
+    ? { expressions: [], unscannable: true }
+    : { expressions, unscannable: false };
+}
+
+function expressionsIn(value: string): readonly string[] {
+  return scanExpressions(value).expressions;
 }
 
 function isValidTemplateExpression(
@@ -1594,7 +1948,17 @@ function validateSchemaRecordSubset(
       finding("schema.invalid", path, "JSON Schema required must be a string array."),
     );
   }
-  if (isStringArray(schema.required) && !isRecord(schema.properties)) {
+  // A map shape declares its keys with `propertyNames`, not with `properties`, so a
+  // `required` beside it is coherent on its own: Ajv evaluates `required` independently of
+  // `properties` and rejects an instance missing any listed key. This is exactly what
+  // `z.record(z.enum([...]), V)` emits for its exhaustive-record semantics. Everywhere
+  // else the rule stands — a bare `required` on a property-bearing object is an authoring
+  // slip, and catching it is why the check exists.
+  if (
+    isStringArray(schema.required) &&
+    !isRecord(schema.properties) &&
+    schema.propertyNames === undefined
+  ) {
     findings.push(
       finding(
         "schema.invalid",
@@ -1642,6 +2006,21 @@ function validateSchemaRecordSubset(
       );
     } else if (isRecord(additionalProperties)) {
       validateSchemaRecordSubset(additionalProperties, path, findings);
+    }
+  }
+  if (schema.propertyNames !== undefined) {
+    // Same recursion as every other nested schema position: a key schema outside the
+    // supported subset (`pattern`, `format`, …) is rejected with the standard message.
+    validateNestedSchemaSubset(schema.propertyNames, path, findings);
+    const keyType = nonStringPropertyNameType(schema.propertyNames);
+    if (keyType !== undefined) {
+      findings.push(
+        finding(
+          "schema.invalid",
+          path,
+          `JSON Schema propertyNames type '${keyType}' can never match: JSON object keys are strings. Use a string-keyed record (z.record(z.string(), ...)) or an enum of string keys.`,
+        ),
+      );
     }
   }
   if (schema.items !== undefined) {
@@ -2165,8 +2544,71 @@ function stepReferencesIn(step: JsonRecord, stepPath: string): readonly StepRefe
   const references: StepReference[] = [];
   collectStepReferences(step.with, `${stepPath}.with`, references);
   collectStepReferences(step.input, `${stepPath}.input`, references);
-  collectStepReferences(step.cache, `${stepPath}.cache`, references);
   return references;
+}
+
+/**
+ * Collect the ids of every step referenced by a `{{ steps.X … }}` expression anywhere inside an
+ * arbitrary JSON value (strings, arrays, and plain objects are walked).
+ *
+ * Exported so `lwir-input-cone.ts` walks the dependency graph using the *exact* notion of a step
+ * reference that validation uses. A second, independently written scanner would drift from this
+ * one and silently disagree about which steps influence a step's input.
+ */
+export function lwirStepReferenceIdsIn(value: unknown): readonly string[] {
+  const references: StepReference[] = [];
+  collectStepReferences(value, "$", references);
+  const ids = new Set<string>();
+  for (const reference of references) {
+    ids.add(reference.id);
+  }
+  return [...ids];
+}
+
+/**
+ * True when any `{{ … }}` expression inside `value` reads the given expression root
+ * (`input`, `item`, `step`, `steps`, or `workflow`).
+ *
+ * Exported for `lwir-input-cone.ts`: the `workflow` root resolves to the whole LWIR document at
+ * runtime (see `expressionContextFor` in runtime.ts), so a cone containing a `workflow.*`
+ * expression cannot be narrowed to a subset of steps.
+ */
+/**
+ * True when any string inside `value` defeats the expression scanner — a `{{` or `}}` survives
+ * after every well-formed `{{ … }}` match is stripped.
+ *
+ * Exported for `lwir-input-cone.ts`. `expressionsIn` reports such a string as *no expressions*,
+ * but the runtime happily resolves it whenever the `{{` and `}}` counts happen to match
+ * (`resolveString` in expressions.ts). Treating "the scanner found nothing" as "nothing is there"
+ * is therefore an under-invalidation hole: a `{{ steps.X … }}` or `{{ workflow… }}` read can hide
+ * behind a stray delimiter. The cone walker uses this to refuse to narrow instead.
+ */
+export function lwirContainsUnscannableExpression(value: unknown): boolean {
+  if (typeof value === "string") {
+    return scanExpressions(value).unscannable;
+  }
+  if (Array.isArray(value)) {
+    return value.some((item) => lwirContainsUnscannableExpression(item));
+  }
+  if (isRecord(value)) {
+    return Object.values(value).some((item) => lwirContainsUnscannableExpression(item));
+  }
+  return false;
+}
+
+export function lwirReferencesExpressionRoot(value: unknown, root: string): boolean {
+  if (typeof value === "string") {
+    return expressionsIn(value).some((expression) =>
+      expressionBodyReferencesRoot(expression, root)
+    );
+  }
+  if (Array.isArray(value)) {
+    return value.some((item) => lwirReferencesExpressionRoot(item, root));
+  }
+  if (isRecord(value)) {
+    return Object.values(value).some((item) => lwirReferencesExpressionRoot(item, root));
+  }
+  return false;
 }
 
 function collectStepReferences(

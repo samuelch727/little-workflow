@@ -1,0 +1,851 @@
+---
+title: Chat Connectors
+description: Expose an agent folder through Chat SDK platforms or a rich web chat route.
+---
+
+Chat connectors live under an agent folder's `connectors/` directory. They are connection layers, not
+model capabilities: `loadHarness()` still loads only the agent, tools, skills, and instructions.
+
+## Layout
+
+```txt
+agents/support/
+  agent.ts
+  tools/
+    add-reaction.ts
+  skills/
+  connectors/
+    slack/
+      connector.ts
+      tools/
+        add-reaction.ts
+    web-rich/
+      connector.ts
+      renderers/
+        lookup-order.tsx
+  ui/
+    types.ts
+    tool-parts/
+```
+
+Flat files such as `connectors/slack.ts` still work for simple descriptors, and a flat file can still
+carry a sibling `connectors/slack/tools/` directory. Use a nested folder such as
+`connectors/slack/connector.ts` when the connector also has tool extensions, renderers, or delivery
+helpers. A nested `connector.*` module that fails to import is a hard error (`Failed to load connector
+module.`); a flat helper file that is not a connector descriptor is skipped, not fatal.
+
+The `connectors/web-rich/renderers/` folder is a naming convention only. Little Harness does not load
+or execute it — put presentation code wherever you like and wire it up in your own client. See
+[Typed Tool UI](#typed-tool-ui).
+
+## Which Import Path?
+
+All connector APIs live under `little-harness/connectors*`. Both `/connectors` and `/connectors/runtime`
+statically reach `node:fs/promises` (through the shared `streamHarness` → skill-staging code), so a
+**value** import from either subpath is **server-only** — neither is bundle-safe for the browser. A
+**types-only** import (`import type { ... }`) from any subpath is always safe, because types are erased
+at build time. Pick the subpath by which helpers you need, not by hoping to avoid `node:fs`:
+
+| Import path | Contains | Use it for |
+|---|---|---|
+| `little-harness/connectors/runtime` | Descriptors, loaders, session registry, tool-context helpers, tool-UI types — everything **except** the discovery helpers | Server route bundles. Omitting the discovery helpers means a bundler never statically sees the connector-module dynamic-import machinery, so it does not try to trace your `connector.*`/tool files through this subpath. |
+| `little-harness/connectors` | Everything above **plus** `discoverConnectors` / `loadConnectorDescriptor` / `loadConnectorToolExtensions` | Build scripts, tests, or CLIs that enumerate connectors. A value import statically pulls the discovery module (and its connector-module traversal) into the graph. |
+| `little-harness/connectors/discovery` | Just the discovery helpers | Explicitly importing filesystem discovery without the rest of the surface. |
+
+The practical difference between the two main subpaths is the discovery surface, not `node:fs`: only
+`/connectors` statically links the filesystem connector-discovery helpers, so only it makes a bundler
+attempt to trace connector-module dynamic imports. String connector references (`connector: "slack"`)
+work from every path — the loaders import discovery *dynamically* at call time, so a `/runtime` bundle
+never statically links the discovery module even when you pass a connector id. The tool-context helpers
+(`harnessToolContext`, `tryHarnessToolContext`) and the tool-UI types (`ToolUI`, `ToolOutputPart`) are
+exported from both `/connectors` and `/connectors/runtime`.
+
+## Chat SDK Platforms
+
+Use `chatSdkConnector(...)` for Slack, Telegram, Discord, Teams, WhatsApp, and other Chat SDK
+adapters. Install `chat` and the adapter packages in the app that hosts the route.
+
+```ts
+// agents/support/connectors/slack/connector.ts
+import { createSlackAdapter } from "@chat-adapter/slack";
+import { createRedisState } from "@chat-adapter/state-redis";
+import { chatSdkConnector } from "little-harness/connectors/runtime";
+
+export default chatSdkConnector({
+  userName: "support",
+  adapter: { name: "slack", create: () => createSlackAdapter() },
+  state: () => createRedisState(),
+  triggers: {
+    directMessage: true,
+    mention: { subscribe: true },
+    subscribedMessage: true,
+  },
+});
+```
+
+```ts
+// app/api/slack/route.ts
+import { waitUntil } from "@vercel/functions";
+import { loadChatSdkConnector } from "little-harness/connectors/runtime";
+
+const supportSlack = await loadChatSdkConnector({
+  agentDir: "agents/support",
+  connector: "slack",
+});
+
+export async function POST(req: Request) {
+  return supportSlack.webhook(req, { waitUntil });
+}
+```
+
+`loadChatSdkConnector(...)` also returns the created adapter as `adapter` for platform-specific
+runtime hooks. For Discord, use this to start a Gateway listener from a protected cron route; regular
+DMs, mentions, and reactions do not arrive through the HTTP interactions endpoint alone.
+
+By default, platform sessions are keyed as `platform:threadId`, and message history is text-only —
+apart from files on the incoming message, which are inlined (see [Attachments](#attachments)).
+Tool calls and rich UI parts are not reconstructed from platform history.
+Direct messages and mentions are enabled by default; set `mention: false` when a connector should
+only respond to direct messages.
+
+Passing the string connector id lets Little Harness use the connector folder as the source of truth
+for connector identity. It also enables connector-scoped tool extension discovery from
+`agents/support/connectors/slack/tools/*`. A **statically imported descriptor object plus
+`connectorId: "slack"` is functionally equivalent** — it gets the same folder tool discovery, session
+attachment, and mirror delivery — and it is the **typed** option: a descriptor reference infers
+`TExtraBody` (and `TUser` for web-rich), whereas a string reference is typed `unknown`. Use whichever
+fits the route; neither is universally preferred. Loading a descriptor object *without* `connectorId`
+emits one `console.warn` per `loadChatSdkConnector`/`loadWebRichConnector` call and disables those three
+features (the agent still answers). Descriptor `tools` (see [Connector Tools](#connector-tools)) are the
+exception — they load even without `connectorId`.
+
+Telegram, Discord, Teams, and other Chat SDK adapters use the same connector shape. For example:
+
+```ts
+// agents/support/connectors/telegram/connector.ts
+import { createRedisState } from "@chat-adapter/state-redis";
+import { createTelegramAdapter } from "@chat-adapter/telegram";
+import { chatSdkConnector } from "little-harness/connectors/runtime";
+
+export default chatSdkConnector({
+  userName: "support",
+  adapter: { name: "telegram", create: () => createTelegramAdapter() },
+  state: () => createRedisState(),
+  triggers: { directMessage: true },
+});
+```
+
+## Attachments
+
+A file dropped into a chat thread arrives on the message as an attachment. The connector fetches the
+attachments of the **incoming** message and adds them to that message as UIMessage `file` parts, which
+puts them in two places at once: the app's [`chat.stageMessage`](/docs/v0.1.0-alpha/build-agents/message-files)
+hook (to write them into the session filesystem for tools and shell commands to work with) and the
+model's own context.
+
+```ts
+export default chatSdkConnector({
+  userName: "support",
+  adapter: { name: "slack", create: () => createSlackAdapter() },
+  state: () => createRedisState(),
+  attachments: {
+    maxBytes: 20 * 1024 * 1024,
+    onSkipped: ({ reason, attachment }) => log.warn("attachment skipped", { reason, name: attachment.name }),
+  },
+});
+```
+
+Bytes come from the attachment's own `data`, or from its `fetchData()` — which is where a platform's
+private-URL authentication lives, so a Slack upload works without any credential handling in your
+code. The connector never fetches an attachment's `url` itself; an attachment that offers only a URL
+is reported as unavailable rather than downloaded anonymously.
+
+**Nothing about an attachment can fail a turn.** A file that is over the cap, that `fetchData()`
+refuses to hand over, or that carries no bytes at all is replaced by a short note in the message text
+(`[attachment "report.pdf" could not be fetched]`), so the agent still answers and can say which file
+it did not get. The underlying error is passed to `onSkipped`, never into the model's context — a
+platform error can carry a signed URL.
+
+Defaults and options:
+
+- `maxBytes` — largest single file inlined, default 10 MiB. Checked against the platform's reported
+  size first (so an oversized file never crosses the network) and against the fetched bytes second.
+- `onSkipped({ reason, attachment, message, adapterName, note, error?, bytes? })` — observe files that
+  were not inlined (`"oversize"`, `"fetch-failed"`, `"no-data"`). Observation only; throwing is swallowed.
+- `attachments: false` — opt out entirely, like `reactions: false`. No attachment is read or fetched.
+
+Only the **current** message's attachments are inlined. Files on older messages in thread or transcript
+history stay text-only: re-embedding them on every turn would re-download each file from the platform
+and grow the request without bound. Stage the files you need to keep into the session filesystem, where
+they persist across turns.
+
+`simulateInbound` carries attachments too, and an attachment built with `data` needs no network at
+all — which is how a scripted demo hands the agent a file offline:
+
+```ts
+await connector.simulateInbound({
+  thread: createTestThread({ adapterName: "slack" }),
+  message: createTestMessage({
+    text: "what does this policy say about refunds?",
+    attachments: [
+      {
+        type: "file",
+        name: "refund-policy.md",
+        mimeType: "text/markdown",
+        data: await readFile("fixtures/refund-policy.md"),
+      },
+    ],
+  }),
+});
+```
+
+## Reactions
+
+Thumbs-up and thumbs-down reactions on the agent's replies are recorded as run outcomes by default,
+whenever the Chat instance exposes `onReaction`: 👍 / `+1` / `thumbs_up` records `success`, 👎 / `-1` /
+`thumbs_down` records `failure`, and removing the reaction withdraws it. The reacting user is stored only
+as a pseudonym (`anon_<16 hex>`). Recording never fails or delays a run.
+
+```ts
+export default chatSdkConnector({
+  userName: "support",
+  adapter: { name: "slack", create: () => createSlackAdapter() },
+  state: () => createRedisState(),
+  reactions: { positive: ["white_check_mark"], negative: ["x"] }, // or `false` to opt out
+});
+```
+
+Read the resulting success rates with `little-harness outcomes`. See
+[Outcome Capture](/docs/v0.1.0-alpha/build-agents/outcomes) for every option and the aggregation API.
+
+## Web Text Mode
+
+Use Chat SDK's Web adapter when the browser endpoint should behave like another text-oriented Chat
+SDK platform.
+
+```ts
+// agents/support/connectors/web-text/connector.ts
+import { createRedisState } from "@chat-adapter/state-redis";
+import { createWebAdapter } from "@chat-adapter/web";
+import { chatSdkConnector } from "little-harness/connectors/runtime";
+
+export default chatSdkConnector({
+  userName: "support",
+  adapter: {
+    name: "web",
+    create: () => createWebAdapter({ userName: "support", getUser }),
+  },
+  state: () => createRedisState(),
+  triggers: { directMessage: true },
+  history: "latest",
+});
+```
+
+```ts
+// app/api/chat/route.ts
+import { loadChatSdkConnector } from "little-harness/connectors/runtime";
+
+const supportWebText = await loadChatSdkConnector({
+  agentDir: "agents/support",
+  connector: "web-text",
+});
+
+export async function POST(req: Request) {
+  return supportWebText.webhook(req);
+}
+```
+
+For web text mode, `webhook(req)` returns the stream response consumed by the browser. It is useful
+when the same bot behavior should work across web and platform chat surfaces, but it is not the rich
+tool-rendering path. Chat SDK connector history can use thread history, Chat SDK transcripts, a
+custom history callback, or the latest message; raw `useChat` request history belongs to web-rich
+mode.
+
+## Web Rich Mode
+
+Use `webRichConnector(...)` when the browser should receive Little Harness `UIMessage.parts`,
+including typed tool output parts.
+
+```ts
+// agents/support/connectors/web-rich/connector.ts
+import { webRichConnector } from "little-harness/connectors/runtime";
+
+export default webRichConnector({
+  authenticate: async (request) => {
+    const user = await getUser(request);
+    return user ? { id: user.id, name: user.name } : null;
+  },
+  session: ({ body, user }) => `web:${user.id}:${body.id}`,
+  history: { source: "request" },
+  extraBody: ({ user }) => ({ userId: user.id }),
+});
+```
+
+```ts
+// app/api/chat/route.ts
+import { loadWebRichConnector } from "little-harness/connectors/runtime";
+
+const supportWeb = await loadWebRichConnector({
+  agentDir: "agents/support",
+  connector: "web-rich",
+});
+
+export async function POST(req: Request) {
+  return supportWeb.POST(req);
+}
+```
+
+Web-rich fidelity is live-stream fidelity. Current replay/resume streams are reconstructed from
+stored text and are text-only.
+
+## Portable Sessions And Delivery
+
+Point two surfaces at one harness session by returning the same session id from each connector, then
+let the second surface keep the first one mirrored. When a string connector id or explicit
+`connectorId` is set, each run records its endpoint in `/session/.harness/connectors.json`, so a
+session can remember several surfaces at once.
+
+### Delivery states
+
+Every recorded endpoint has a delivery state:
+
+- `active` — receives the live streamed reply for the current run. Exactly one per run: the surface
+  handling the request.
+- `passive` — remembered so the session can resume there later, but receives nothing. The default
+  state a previous `active` is demoted to.
+- `mirror` — receives a text copy through its deliverer *after* the active run finishes successfully.
+- `disabled` — remembered but never delivered to. Never auto-modified by another surface's attach.
+
+Only records that are currently `active` are demoted when a new surface takes over; `passive`,
+`mirror`, and `disabled` records are left alone. If a `mirror`/`disabled` surface answers one turn
+(so it is briefly promoted to `active` by a same-key re-attach), its prior state is remembered and
+restored the next time it is demoted — one reply from a mirrored surface no longer permanently drops
+it out of mirroring.
+
+### First-class two-surface flow
+
+Three things make mirroring work without any manual registry calls:
+
+1. Both connectors resolve the **same session id**.
+2. The run that takes over passes `delivery: { previousActive: "mirror" }`, so the surface it
+   replaces is demoted to `mirror` instead of `passive`.
+3. The mirror target declares a descriptor-owned `deliver` describing how to post text to itself.
+
+```ts
+// agents/support/connectors/slack/connector.ts
+import { createSlackAdapter } from "@chat-adapter/slack";
+import { createRedisState } from "@chat-adapter/state-redis";
+import { chatSdkConnector } from "little-harness/connectors/runtime";
+
+export default chatSdkConnector({
+  userName: "support",
+  adapter: { name: "slack", create: () => createSlackAdapter() },
+  state: () => createRedisState(),
+  session: ({ message }) => `support:${message.userKey ?? message.author.userId}`,
+  // How to post to this Slack thread when Slack is another surface's mirror target.
+  deliver: async ({ text, target }) => {
+    await postSlackThread(target.endpoint.threadId!, text);
+  },
+});
+```
+
+```ts
+// agents/support/connectors/web-rich/connector.ts
+import { webRichConnector } from "little-harness/connectors/runtime";
+
+export default webRichConnector({
+  authenticate: async (request) => {
+    const user = await getUser(request);
+    return user ? { id: user.id, name: user.name } : null;
+  },
+  // Same key format as the Slack connector, so both surfaces resolve one session.
+  session: ({ user }) => `support:${user.id}`,
+  history: { source: "request" },
+});
+```
+
+```ts
+// app/api/chat/route.ts — web-rich takes over, keeps Slack mirrored
+import { loadWebRichConnector } from "little-harness/connectors/runtime";
+
+const supportWeb = await loadWebRichConnector({
+  agentDir: "agents/support",
+  connector: "web-rich",
+  delivery: { previousActive: "mirror" },
+});
+
+export async function POST(req: Request) {
+  return supportWeb.POST(req);
+}
+```
+
+Now a reply generated on the web surface is streamed to the browser and, once the run finishes,
+mirrored to the Slack thread via Slack's descriptor `deliver`. The web route never names Slack: the
+loader discovers the mirror target from the registry and resolves its deliverer by connector id.
+
+A web-rich surface *can* be a mirror target — it may declare a descriptor `deliver` like any other
+connector — but that `deliver` **cannot push into the live browser stream**: by the time mirror
+delivery runs, the active run's response stream is already closed. So a web-rich `deliver` must post
+the mirrored text to an **out-of-band store the client polls or subscribes to** (a database row, a
+Redis key, a push channel). The demo does exactly this: its web-rich connector's `deliver` writes into
+an outbox that the console reads back. Platform connectors (Slack, Discord, Telegram) are simpler
+mirror targets because they can post after the fact directly to their own thread.
+
+### Deliverer resolution order
+
+For each mirror target, Little Harness resolves the deliverer in this order:
+
+1. An explicit `delivery.deliverers[connectorId]` on the active surface's loader — always wins.
+2. Otherwise the target connector's descriptor `deliver`, loaded lazily by connector id and cached.
+3. If loading the sibling descriptor fails, `delivery.onError` is called and that target is skipped.
+
+A target with neither an explicit deliverer nor a descriptor `deliver` is skipped. Failed harness runs
+do not mirror. Deliverer failures never fail the active response; they go to `delivery.onError`:
+
+```ts
+const supportWeb = await loadWebRichConnector({
+  agentDir: "agents/support",
+  connector: "web-rich",
+  delivery: {
+    previousActive: "mirror",
+    // Optional: override the target's descriptor deliver from this route.
+    deliverers: {
+      slack: async ({ text, target }) => postSlackThread(target.endpoint.threadId!, text),
+    },
+    onError: async ({ error, target }) => {
+      console.error("Mirror delivery failed", target?.connectorId, error);
+    },
+  },
+});
+```
+
+### Manual attach / detach / set delivery
+
+The loaders cover the common case. For advanced control, drive the registry directly. Build endpoint
+ids with the exported builders so your refs match what the loaders write — a mismatched id creates a
+duplicate attachment rather than updating the intended one:
+
+```ts
+import {
+  attachSessionConnector,
+  detachSessionConnector,
+  setSessionConnectorDelivery,
+  chatSdkEndpointId,
+  webRichEndpointId,
+  listSessionConnectors,
+} from "little-harness/connectors/runtime";
+
+const session = await harness.sessions.getOrCreate({ id: "support:user_1" });
+
+// Register (or re-register) a mirror endpoint explicitly.
+await attachSessionConnector(
+  session,
+  {
+    connectorId: "slack",
+    kind: "chat-sdk",
+    delivery: "mirror",
+    endpoint: { id: chatSdkEndpointId("slack", threadId), platform: "slack", threadId },
+  },
+  { previousActive: "mirror" },
+);
+
+// Change a surface's delivery state (clears any restore stickiness); throws if the ref is unknown.
+await setSessionConnectorDelivery(
+  session,
+  { connectorId: "web-rich", endpointId: webRichEndpointId(userId, conversationId) },
+  "disabled",
+);
+
+// Remove a surface. Returns false when nothing matched.
+await detachSessionConnector(session, {
+  connectorId: "slack",
+  endpointId: chatSdkEndpointId("slack", threadId),
+});
+
+const attached = await listSessionConnectors(session);
+```
+
+`attachSessionConnector` defaults `previousActive` to `"passive"`. `chatSdkEndpointId(adapterName,
+threadId)` produces `${adapterName}:${threadId}`; `webRichEndpointId(userId, conversationId)` produces
+`${userId}:${conversationId}` (the web `conversationId` is the request body `id`).
+
+Connector registry reads and writes are serialized inside one runtime process. That protects local and
+single-instance hosts from same-session read/write races. If the same session can run on multiple
+serverless instances, provide a host-level lock, compare-and-swap, or another shared concurrency
+control for session files before relying on portable connector updates as globally atomic. If the
+registry file is ever corrupted, Little Harness preserves the original alongside it as
+`connectors.recovered-*.json`, resets the registry to empty, and logs one `console.warn`.
+
+## Connector Tools
+
+**Tool availability is derived from structure.** Where a tool lives, and whether it has an `execute`,
+determines which connectors see it — you usually don't write a tool whitelist:
+
+- **Global tool** — `tools/<name>.ts` with an `execute`. Available on every connector.
+- **Abstract capability** — `tools/<name>.ts` *without* an `execute`. A contract that's exposed only on
+  connectors that provide an implementation for it.
+- **Connector-only tool** — any tool under `connectors/<id>/tools/`. Available only on connector `<id>`.
+
+The file name is the model-facing tool id, and the connector id comes from the folder name, so connector
+tool files never repeat `connector: "slack"`. A flat `connectors/slack.ts` connector still picks up a
+sibling `connectors/slack/tools/` directory. Tool filenames are validated with the same reserved/invalid
+name policy as agent tools: `bash`, `__proto__`, `constructor`, `prototype`, and names outside
+`[A-Za-z_][A-Za-z0-9_-]{0,63}` are rejected at load rather than silently overwritten by the runtime
+shell tool.
+
+### Reading the harness context (typed)
+
+A tool `execute(input, options)` receives the AI SDK `ToolExecutionOptions` with the Little Harness
+execution context (`session`, `files`, `artifacts`, `connector`, `extraBody`, ...) spread onto it. The
+AI SDK types do not declare the harness half, so read it through `harnessToolContext<TExtraBody>` — no
+casts, full autocomplete on `ctx.extraBody` and `ctx.connector.endpoint`:
+
+```ts
+// agents/support/connectors/slack/tools/post-to-channel.ts
+import { tool } from "ai";
+import { z } from "zod";
+import { harnessToolContext } from "little-harness/connectors/runtime";
+
+type SupportExtraBody = { slack: SlackClient };
+
+export default tool({
+  description: "Post a summary to a Slack channel.",
+  inputSchema: z.object({ channel: z.string(), summary: z.string() }),
+  execute: async ({ channel, summary }, options) => {
+    const ctx = harnessToolContext<SupportExtraBody>(options);
+    await ctx.extraBody?.slack.chat.postMessage({ channel, text: summary });
+    return { ok: true };
+  },
+});
+```
+
+`harnessToolContext` throws `Tool was executed outside a Little Harness run.` when the context is
+absent. For a tool that must also run standalone (outside any harness run), use
+`tryHarnessToolContext<TExtraBody>(options)`, which returns `undefined` instead of throwing.
+`ctx.connector?.endpoint` is a typed `SessionConnectorEndpoint` (`{ id, platform?, threadId?, userId?,
+label? }`), so a typo is a compile error rather than a silent `undefined`.
+
+A tool that exists only on one connector is just a plain `tool({ ..., execute })` placed in that
+connector's `tools/` folder — no `extendTool`, no shared base.
+
+### Shared capability, per-connector implementation (`extendTool`)
+
+Use `extendTool` only when a single capability (e.g. a `react` action both Slack and WhatsApp have, with
+different APIs) should expose one consistent tool name/schema across connectors. Declare the abstract
+base in `tools/`, then attach a per-connector `execute`:
+
+```ts
+// agents/support/tools/add-reaction.ts  (abstract — no execute)
+import { tool } from "ai";
+import { z } from "zod";
+
+export default tool({
+  description: "React to the current platform message.",
+  inputSchema: z.object({ emoji: z.string() }),
+});
+```
+
+```ts
+// agents/support/connectors/slack/tools/add-reaction.ts
+import addReaction from "../../../tools/add-reaction";
+import { extendTool, harnessToolContext } from "little-harness/connectors/runtime";
+
+type SupportExtraBody = { slack: SlackClient };
+
+export default extendTool(addReaction, {
+  execute: async ({ emoji }, options) => {
+    const ctx = harnessToolContext<SupportExtraBody>(options);
+    await ctx.extraBody?.slack.reactions.add({
+      emoji,
+      channel: ctx.connector?.endpoint?.threadId,
+    });
+    return { ok: true };
+  },
+});
+```
+
+`extendTool` keeps the base the author imported and passed in: if a same-named base tool also exists in
+`tools/`, the *explicitly imported* base wins, so a name collision never silently swaps the schema.
+
+### Programmatic connector tools (`tools`)
+
+A connector distributed as an npm package (or an inline descriptor with no `connectors/<id>/tools/`
+folder on disk) can carry tools on the descriptor via `tools?: ToolSet`. These load even without a
+`connectorId`. Folder-discovered `connectors/<id>/tools/*` win per name over descriptor tools, and an
+execute-less descriptor tool acts as an abstract base only when a folder extension implements it — the
+same structural model as files:
+
+```ts
+export default chatSdkConnector({
+  // ...
+  tools: {
+    "post-to-channel": tool({ /* ..., execute */ }),
+  },
+});
+```
+
+### At runtime
+
+Global executable tools stay available everywhere; abstract tools appear only where a connector
+extension provides `execute`; a connector extension can override a base tool's implementation; and
+connectors without the extension never see the connector-only capability.
+
+The abstract-tool rule now holds everywhere, not just on connector-loaded runs. Plain `streamHarness`,
+`generateHarness`, and the CLI REPL also hide execute-less tools from the model and emit one warning per
+hidden tool: `{ code: "policy_warning", metadata: { reason: "abstract-tool-hidden", tool } }` on the
+run's `warnings`. (`bash` and runtime tools are unaffected.)
+
+Renderers remain separate from tools. Put web/json-render/React rendering code under `ui/` or
+`connectors/web-rich/renderers/`; that folder is a naming convention with no runtime behavior. Do not
+expose presentation-only renderers as model tools.
+
+### Listing and diagnosing connectors
+
+`discoverConnectors(agentDir, { onSkip })` enumerates an agent's connectors. A nested
+`connectors/<id>/connector.*` that fails to import is a hard error; a flat `connectors/<id>.ts` helper
+that fails to load is skipped and reported through `onSkip({ id, path, error })` (or a single
+`console.warn` when no handler is given), and one candidate's failure no longer aborts the others. The
+CLI exposes the same information — see [`connectors <name>`](/docs/v0.1.0-alpha/reference/cli#connectors-name)
+and [`test <name> --connector <id>`](/docs/v0.1.0-alpha/reference/cli#test-name).
+
+## Tool Access Policy
+
+Because availability is structural, you rarely need an explicit whitelist. When you do want to narrow a
+connector's tools — most commonly to **hide a global tool from one connector** — set `toolPolicy` on the
+connector descriptor:
+
+```ts
+export default chatSdkConnector({
+  // ...
+  // Slack stays focused on posting — hide the global browsing tool from it.
+  toolPolicy: { deny: ["list-releases"] },
+});
+```
+
+- `allow` — expose ONLY these tool names on the connector (whitelist).
+- `deny` — remove these tool names from the connector (blacklist). Applied after `allow`, so `deny` wins.
+
+Both are optional; unknown names are ignored. Omit `toolPolicy` to expose the full structure-derived
+toolset. The policy scopes the agent's own tools (global + connector), not runtime tools like `bash`.
+
+## Typed Tool UI
+
+Keep shared agent-specific web UI under `ui/`, and import type information from individual tool
+modules so runtime tool discovery stays automatic.
+
+```ts
+// agents/support/ui/types.ts
+import type { UIMessage } from "ai";
+import type { ToolOutputPart, ToolUI } from "little-harness/connectors";
+
+export type LookupOrderTool = typeof import("../tools/lookup-order").default;
+
+export type SupportUITools = {
+  "lookup-order": ToolUI<LookupOrderTool>;
+};
+
+export type SupportUIMessage = UIMessage<unknown, never, SupportUITools>;
+export type LookupOrderOutputPart = ToolOutputPart<"lookup-order", LookupOrderTool>;
+```
+
+```tsx
+// agents/support/ui/tool-parts/lookup-order.tsx
+import type { LookupOrderOutputPart } from "../types";
+
+export function LookupOrderToolPart({ part }: { part: LookupOrderOutputPart }) {
+  return <OrderStatusCard order={part.output.order} />;
+}
+```
+
+The string in `ToolOutputPart<"lookup-order", ...>` must match the discovered tool filename. For
+tools with custom UI renderers, define an `outputSchema` on the AI SDK tool so output types stay
+precise.
+
+### Rendering tool parts on the client
+
+The web-rich POST route streams `UIMessage.parts`, so each tool call arrives as a message part whose
+`type` is `tool-` followed by the tool filename — `lookup-order` becomes `part.type ===
+"tool-lookup-order"`. A tool part carries its state through the call; narrow on `state ===
+"output-available"` before reading `part.output`:
+
+```tsx
+// app/support/support-chat.tsx
+"use client";
+import { useChat } from "@ai-sdk/react";
+import { DefaultChatTransport } from "ai";
+import type { SupportUIMessage } from "../../agents/support/ui/types";
+import { OrderStatusCard } from "./order-status-card";
+
+export function SupportChat() {
+  // Point the transport at the web-rich POST route, typed with the message shape from ui/types.ts.
+  const { messages, sendMessage } = useChat<SupportUIMessage>({
+    transport: new DefaultChatTransport<SupportUIMessage>({ api: "/api/chat" }),
+  });
+
+  return (
+    <>
+      {messages.map((message) => (
+        <article key={message.id}>
+          {message.parts.map((part, index) => {
+            if (part.type === "text") return <p key={index}>{part.text}</p>;
+            if (part.type === "tool-lookup-order" && part.state === "output-available") {
+              // part.output is typed from LookupOrderTool's outputSchema.
+              return <OrderStatusCard key={index} order={part.output.order} />;
+            }
+            return null;
+          })}
+        </article>
+      ))}
+    </>
+  );
+}
+```
+
+Because `SupportUIMessage` was built from the tool modules, `part.type` is a discriminated union: the
+`tool-lookup-order` case narrows `part` to the typed output part, and TypeScript flags a tool name that
+does not exist. Tool parts also pass through `input-streaming`, `input-available`, and `output-error`
+states before or instead of `output-available`; render a spinner or error affordance for those.
+
+## Deploying
+
+Connectors resolve by string id at runtime: the loaders read the `connectors/` directory and
+dynamically import `connector.*` and tool files. This works out of the box in `next dev`, but a
+serverless build (Vercel and similar) prunes files a bundler cannot statically see — so a route that
+worked in dev fails in production with `Connector not found.` (the connector module was pruned) or an
+`agent.ts` `ENOENT` (the agent folder was pruned).
+
+Fix it in `next.config.ts`: keep Little Harness and the Chat SDK packages external, and enumerate the
+agent files each connector route loads so output tracing includes them.
+
+```ts
+// next.config.ts (excerpt)
+const nextConfig: NextConfig = {
+  serverExternalPackages: [
+    "little-harness",
+    "chat",
+    "@chat-adapter/discord",
+    "@chat-adapter/slack",
+    "@chat-adapter/state-memory",
+  ],
+  // Connector modules load via dynamic import, which Next output tracing cannot
+  // follow, so enumerate the runtime files each route needs.
+  outputFileTracingIncludes: {
+    "/api/chat": [
+      "./agents/support/agent.ts",
+      "./agents/support/instructions.md",
+      "./agents/support/connectors/web-rich/connector.ts",
+      "./agents/support/tools/lookup-orders.ts",
+      // ...every agent.ts / tool / connector file this route loads at runtime
+    ],
+  },
+  outputFileTracingExcludes: {
+    "/api/chat": ["./agents/support/**/*.test.ts", "./agents/support/ui/**/*"],
+  },
+};
+```
+
+List one `outputFileTracingIncludes` entry per connector route, and exclude tests and browser-only
+`ui/` files so they do not bloat the function. The demo's `next.config.ts` shows a complete multi-route
+example.
+
+To skip the *dynamic* connector import — the part output tracing cannot follow — pass a **statically
+imported descriptor object** with an explicit `connectorId` and carry the connector's tools on the
+descriptor's `tools`, instead of a string id:
+
+```ts
+import supportWebRich from "../../agents/support/connectors/web-rich/connector";
+import { loadWebRichConnector } from "little-harness/connectors/runtime";
+
+const supportWeb = await loadWebRichConnector({
+  agentDir: "agents/support",
+  connector: supportWebRich, // statically imported — the bundler traces it
+  connectorId: "web-rich",
+});
+```
+
+The connector module is now traced normally by the static import. A descriptor object plus
+`connectorId` **tolerates a missing `connectors/<id>/` folder**: connector-scoped folder-tool discovery
+returns `{}` rather than throwing `Connector not found.`, so if the descriptor carries every
+connector-only tool on its `tools`, no `connectors/<id>/` files need to exist on disk at all. A
+`connectors/<id>/tools/` folder that exists **without** a `connector.*` module is still honored, too:
+its on-disk tools load and merge, with folder tools winning per name over the descriptor's `tools`. (A
+*string* connector reference still requires the folder — that is where the loader reads the descriptor
+from.)
+
+What this does **not** remove is the base-agent read: `loadHarness` still loads `agent.ts`, `tools/`,
+skills, and instructions from `agentDir`, so those files **still need `outputFileTracingIncludes`
+entries**. Only supplying your own `loadHarness` option (resolving the harness without the agent-folder
+read) removes that requirement.
+
+## Module Loading
+
+Connector modules (`connector.*` and `connectors/<id>/tools/*`) load through `jiti` in a **separate
+module graph** from your statically imported route code. Module-level state is therefore duplicated
+across that boundary: a file imported statically by a route and the same file imported by a connector
+tool each get their own instance, so a module-level singleton is not shared between them. Keep state
+that must be shared on `globalThis` or in an external store (Redis, a database) rather than a
+module-level variable.
+
+## Testing Connectors
+
+Chat SDK connectors run end to end without a real platform. `loadChatSdkConnector` accepts a
+`createChat` constructor, and the loaded connector exposes `simulateInbound` to push a synthetic
+message through the real run pipeline. `little-harness/connectors/runtime` ships test doubles that
+satisfy the Chat SDK structural types with zero casts:
+
+- `createTestChat({ adapterName? })` — a `ChatSdkChatConstructor` with no-op webhooks and recorded
+  `onDirectMessage` / `onNewMention` / `onSubscribedMessage` handlers.
+- `createTestThread({ id?, adapterName?, isDM?, messages? })` — a `ChatSdkThread` whose `post()`
+  collects streamed reply text into a `posts: string[]` array; `subscribe` / `startTyping` are
+  no-op recorders.
+- `createTestMessage({ text?, attachments?, ... })` — a `ChatSdkMessage` with sensible defaults. Pass
+  `attachments` with `data` to simulate a file upload offline (see [Attachments](#attachments)).
+
+```ts
+import {
+  loadChatSdkConnector,
+  createTestChat,
+  createTestThread,
+  createTestMessage,
+} from "little-harness/connectors/runtime";
+import supportSlack from "../agents/support/connectors/slack/connector";
+
+const connector = await loadChatSdkConnector({
+  agentDir: "agents/support",
+  connector: supportSlack,
+  connectorId: "slack",
+  createChat: createTestChat(),
+});
+
+const thread = createTestThread({ adapterName: "slack" });
+const message = createTestMessage({ text: "where is my order?" });
+
+await connector.simulateInbound({ thread, message });
+
+// The streamed reply text was collected on the thread.
+console.log(thread.posts.join(""));
+```
+
+`simulateInbound` runs the same internal pipeline as a real trigger — session resolution, history,
+tools, posting, mirror delivery, and the descriptor hooks all fire. It defaults to the
+`"directMessage"` trigger and accepts an explicit `trigger` for `"mention"` or `"subscribedMessage"`.
+Unlike a real inbound event it bypasses the connector's enabled-trigger check, because calling it is an
+explicit developer action. To drive the recorded handlers yourself instead, reach the *constructed
+instance*: `createTestChat()` returns a **constructor** (a `ChatSdkChatConstructor`), not an instance.
+The recorded `onDirectMessage` / `onNewMention` / `onSubscribedMessage` handlers live on each
+constructed instance's `handlers` record. The loaded connector's `chat` **is** the instance the loader
+constructed, so keep a reference to the constructor and read `handlers` off its typed `instances` array
+(cast-free); `loaded.chat` is that same instance:
+
+```ts
+const TestChat = createTestChat();
+const loaded = await loadChatSdkConnector({
+  agentDir: "agents/support",
+  connector: supportSlack,
+  connectorId: "slack",
+  createChat: TestChat,
+});
+
+// `loaded.chat` is the same instance; `TestChat.instances[0]` exposes its `handlers` cast-free.
+await TestChat.instances[0]!.handlers.directMessage[0]!(thread, message);
+```

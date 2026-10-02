@@ -17,8 +17,13 @@ export class LocalSessionQueue {
     this.maxConcurrentSessions = options.maxConcurrentSessions;
   }
 
-  async run<T>(sessionId: string, fn: () => Promise<T>): Promise<T> {
-    if (this.sameSession === "reject" && this.tails.has(sessionId)) {
+  async run<T>(
+    sessionId: string,
+    fn: () => Promise<T>,
+    options: { rejectIfBusy?: boolean } = {},
+  ): Promise<T> {
+    const reject = options.rejectIfBusy || this.sameSession === "reject";
+    if (reject && this.tails.has(sessionId)) {
       throw new HarnessConcurrencyError("Session already has a running turn", { sessionId });
     }
 

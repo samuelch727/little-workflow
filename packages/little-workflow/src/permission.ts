@@ -9,7 +9,7 @@
 export type PermissionAction = "allow" | "deny" | "ask";
 
 export type PermissionRule = {
-  /** Glob over the tool name, e.g. "*", "run_workflow", "bash*". */
+  /** Glob over the tool name, e.g. "*", "candidate_review", "bash*". */
   readonly tool: string;
   readonly action: PermissionAction;
 };

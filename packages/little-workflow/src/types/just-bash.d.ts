@@ -17,20 +17,22 @@ declare module "just-bash" {
     readonly dangerouslyAllowFullInternetAccess?: boolean;
   };
 
+  export type BashOptions = {
+    readonly fs?: unknown;
+    readonly cwd?: string;
+    readonly network?: NetworkConfig;
+    readonly python?: boolean;
+    readonly javascript?: boolean | { readonly invokeTool?: unknown };
+    readonly defenseInDepth?: boolean;
+    readonly executionLimits?: {
+      readonly maxCommandCount?: number;
+      readonly maxLoopIterations?: number;
+      readonly maxCallDepth?: number;
+    };
+  };
+
   export class Bash {
-    constructor(options: {
-      readonly fs?: unknown;
-      readonly cwd?: string;
-      readonly network?: NetworkConfig;
-      readonly python?: boolean;
-      readonly javascript?: boolean;
-      readonly defenseInDepth?: boolean;
-      readonly executionLimits?: {
-        readonly maxCommandCount?: number;
-        readonly maxLoopIterations?: number;
-        readonly maxCallDepth?: number;
-      };
-    });
+    constructor(options: BashOptions);
     getEnv(): Record<string, string>;
     exec(command: string, options: {
       readonly cwd?: string;

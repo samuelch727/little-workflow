@@ -1,0 +1,10 @@
+# Harness sessions and traces.
+.little-harness/
+
+# Live episode databases. One directory per scenario run, copied from the tracked
+# `seed-data/db.json` — see `experiment/run.mjs --seed`. Deliberately untracked: the demo
+# writes into them, so tracking them would make every run dirty the working tree.
+.episodes/
+
+# Graded results, per run (`experiment/run.mjs` writes them; `--baseline` reads them back).
+experiment/.results/

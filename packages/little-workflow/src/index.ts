@@ -1,11 +1,33 @@
 export {
+  asHarnessWorkflow,
+  toHarnessWorkflowInputSchemaMarker,
+} from "./harness-workflow.js";
+export type {
+  HarnessWorkflowAdapterOptions,
+  HarnessWorkflowSchemaMarkerOptions,
+} from "./harness-workflow.js";
+export {
+  buildRunWorkflowOptions,
   createLittleWorkflow,
+  defineWorkflow,
   localWorld,
   model,
+  runWorkflow,
   skill,
 } from "./authoring.js";
 export type {
+  DefineWorkflowInput,
   FailedRunResult,
+  HarnessMcpCapabilityManifest,
+  HarnessMcpClient,
+  HarnessMcpClientOptions,
+  HarnessMcpConfig,
+  HarnessMcpGatewayConfig,
+  HarnessMcpServerConfig,
+  HarnessMcpToolPolicy,
+  HarnessMcpToolSchema,
+  HarnessMcpToolSchemas,
+  HarnessMcpTransportConfig,
   InferWorkflowInput,
   InferWorkflowOutput,
   InputSchemaLike,
@@ -28,14 +50,17 @@ export type {
   SkillOidcToken,
   SkillRiskLevel,
   RemoteSkillOptions,
+  ResolvedHarnessMcpGateway,
   StandardSchemaLike,
   ToolSelectionPolicy,
   WorkerConfig,
   WorkflowDefinition,
+  WorkflowRunProgressEvent,
   WorkflowRunTarget,
 } from "./authoring.js";
 export * from "./bash-tool.js";
 export * from "./canonical.js";
+export * from "./dynamic-workflow.js";
 export type {
   SuperviseDecision,
   SuperviseOuterLoopState,
@@ -73,11 +98,16 @@ export type {
   ToolSet,
   WorkflowBashCapabilities,
 } from "./harness/index.js";
+export * from "./eval-set.js";
+export * from "./eval-set-store.js";
 export * from "./lwir.js";
+export * from "./lwir-input-cone.js";
 export * from "./manifests.js";
 export * from "./memory.js";
 export * from "./model-registry.js";
 export * from "./orchestrator.js";
+export * from "./pricing.js";
+export * from "./run-report.js";
 export * from "./planner-reuse.js";
 export {
   resolveModelSlots,
@@ -89,7 +119,6 @@ export type {
 export * from "./replay.js";
 export {
   executeWorkflowVersion,
-  runWorkflow,
   runWorkflowCycle,
   RunFailedError,
   RuntimeMaxVisitsError,
@@ -120,6 +149,16 @@ export type {
   ResolvedSkillDescriptor,
 } from "./skills.js";
 export * from "./tool-registry.js";
+export {
+  loadWorkflow,
+} from "./workspace/load-workflow.js";
+export type {
+  LoadedWorkflow,
+  LoadedWorkflowRunOptions,
+  LoadWorkflowOptions,
+  WorkflowExecutionMode,
+  WorkflowSourceIdentity,
+} from "./workspace/load-workflow.js";
 export * from "./world.js";
 export type { World } from "./world-port.js";
 export * from "./workflow-version-store.js";

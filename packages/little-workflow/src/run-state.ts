@@ -7,6 +7,7 @@ import type {
   RunId,
 } from "./world.js";
 import { normalizeHarnessEventType } from "./harness/event-names.js";
+import { type UsageTotals, addPricedCall, emptyUsageTotals, priceModelCall } from "./pricing.js";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -18,7 +19,7 @@ type MutableRunState = {
   finishedAt?: string;
   output?: unknown;
   outputRef?: ArtifactRef;
-  usage: { inputTokens: number; outputTokens: number; costUsd: number };
+  usage: UsageTotals;
   steps: Record<string, MutableStepState>;
   artifacts: ArtifactRef[];
   error?: unknown;
@@ -28,6 +29,7 @@ type MutableRunState = {
 type MutableStepState = {
   stepPath: string;
   status: MaterializedStepState["status"];
+  usage: UsageTotals;
   attempts: MutableStepAttempt[];
   output?: unknown;
   outputRef?: ArtifactRef;
@@ -61,7 +63,7 @@ export function materializeRunStateFromEvents(
   const state: MutableRunState = {
     runId,
     status: "pending",
-    usage: { inputTokens: 0, outputTokens: 0, costUsd: 0 },
+    usage: emptyUsageTotals(),
     steps: Object.create(null) as Record<string, MutableStepState>,
     artifacts: [],
     eventCount: events.length,
@@ -144,17 +146,19 @@ function applyEvent(state: MutableRunState, event: EventEnvelope): void {
       break;
     }
     case "ModelCallCompleted": {
-      const usage = isRecord(payload.usage) ? payload.usage : undefined;
-      state.usage.inputTokens += numberValue(usage?.inputTokens);
-      state.usage.outputTokens += numberValue(usage?.outputTokens);
-      state.usage.costUsd += numberValue(usage?.costUsd);
+      recordModelCall(state, event, payload.usage, payload.model);
+      break;
+    }
+    case "harness.model.responded": {
+      const response = isRecord(payload.response) ? payload.response : undefined;
+      recordModelCall(state, event, response?.usage, payload.model);
       break;
     }
     case "harness.session.completed": {
-      const usage = isRecord(payload.usage) ? payload.usage : undefined;
-      state.usage.inputTokens += numberValue(usage?.inputTokens);
-      state.usage.outputTokens += numberValue(usage?.outputTokens);
-      state.usage.costUsd += numberValue(usage?.costUsd);
+      // Intentionally does not accumulate `payload.usage`. That field is a per-session
+      // token rollup the harness computes by summing the very `harness.model.responded`
+      // events already recorded above — adding it here would double-count every model
+      // call in the session. Atomic model-call events are the single source of truth.
       break;
     }
     case "ArtifactCreated": {
@@ -234,11 +238,51 @@ function ensureStep(state: MutableRunState, stepPath: string): MutableStepState 
     state.steps[stepPath] = {
       stepPath,
       status: "pending",
+      usage: emptyUsageTotals(),
       attempts: [],
       artifactRefs: [],
     };
   }
   return state.steps[stepPath] as MutableStepState;
+}
+
+/**
+ * Prices one recorded model call and folds it into the run total and, when the event
+ * carries a `stepPath`, that step's total.
+ *
+ * This is the **only** place a run's dollar figure comes from. Events carry tokens and
+ * model identity; the registry supplies the rates. No event's own `costUsd` is ever read
+ * (the event recorder rejects the field outright), so a run total cannot be
+ * double-counted from a pre-computed figure.
+ */
+function recordModelCall(
+  state: MutableRunState,
+  event: EventEnvelope,
+  usageValue: unknown,
+  modelValue: unknown,
+): void {
+  if (!isRecord(usageValue)) {
+    return;
+  }
+  const model = isRecord(modelValue) ? modelValue : undefined;
+  const call = priceModelCall(
+    { provider: stringValue(model?.provider), modelId: stringValue(model?.modelId) },
+    {
+      inputTokens: numberValue(usageValue.inputTokens),
+      outputTokens: numberValue(usageValue.outputTokens),
+      // Harness traces store the AI SDK usage verbatim: v6 recorded the flat fields, v7 only the details.
+      cachedInputTokens: numberValue(usageValue.cachedInputTokens ?? usageDetail(usageValue.inputTokenDetails, "cacheReadTokens")),
+      reasoningTokens: numberValue(usageValue.reasoningTokens ?? usageDetail(usageValue.outputTokenDetails, "reasoningTokens")),
+    },
+  );
+
+  state.usage = addPricedCall(state.usage, call);
+
+  const stepPath = stringValue(event.payload.stepPath);
+  if (stepPath !== undefined) {
+    const step = ensureStep(state, stepPath);
+    step.usage = addPricedCall(step.usage, call);
+  }
 }
 
 function completeLastAttempt(step: MutableStepState, finishedAt: string): void {
@@ -328,4 +372,8 @@ function deepFreeze<T>(value: T): T {
 
 function isRecord(value: unknown): value is JsonRecord {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function usageDetail(details: unknown, key: string): unknown {
+  return isRecord(details) ? details[key] : undefined;
 }

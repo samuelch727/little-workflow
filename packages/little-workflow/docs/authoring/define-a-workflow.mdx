@@ -1,0 +1,108 @@
+---
+title: Define a Workflow
+description: The ergonomic defineWorkflow front door — one model, inline tools, and plain input/output schemas.
+---
+
+`defineWorkflow` is the recommended front door for authoring a single workflow. You describe the job — one model, inline tools keyed by name, and plain `input`/`output` schemas — and it normalizes into the engine's fully-specified shape (a `models` tuple plus a synthesized planner). The lower-level [`createLittleWorkflow`](/docs/v0.1.0-alpha/authoring/advanced-createlittleworkflow) surface is still exported for when you need the full models tuple and an explicit planner config; reach for it only when `defineWorkflow` can't express what you need.
+
+> **Related but distinct.** Little Workflow owns workflow *authoring* (`defineWorkflow`). To hand a defined workflow to a Little Harness agent as a typed tool, adapt it with `asHarnessWorkflow`; see [Compose With Little Harness](/docs/v0.1.0-alpha/authoring/compose-with-harness).
+
+## The minimal shape
+
+```ts
+import { anthropic } from "@ai-sdk/anthropic";
+import { tool } from "ai";
+import { z } from "zod";
+import { defineWorkflow, runWorkflow } from "little-workflow";
+
+const Applicant = z.object({ applicantId: z.string(), resume: z.string() });
+const Verdict = z.object({
+  applicantId: z.string(),
+  score: z.number().min(0).max(100),
+  decision: z.enum(["advance", "reject", "maybe"]),
+  reason: z.string(),
+});
+
+export const reviewApplicants = defineWorkflow({
+  id: "applicants.review",
+  description: "Review applicants against role criteria; score each independently.",
+  input: z.object({ role: z.string(), criteria: z.string(), applicants: z.array(Applicant) }),
+  output: z.array(Verdict),                  // z.array(...) => array output inferred
+  model: anthropic("claude-sonnet-4-6"),     // ONE model; no models[] tuple / planner block
+  tools: {                                   // inline, keyed by name; no registry
+    fetchScorecard: tool({
+      description: "Load the role scoring rubric.",
+      inputSchema: z.object({ role: z.string() }),
+      execute: async ({ role }) => loadRubric(role),
+    }),
+  },
+});
+```
+
+## What each field does
+
+| Field | Required | Notes |
+|---|---|---|
+| `id` | yes | Stable authoring identity for the workflow. |
+| `description` | no | Guides the planner; also surfaced in tooling. |
+| `label` | no | Human-friendly display name. |
+| `input` | no | A schema for the run input (mapped onto `inputSchema`). |
+| `output` | no | A plain schema — `z.array(...)` infers array output, a plain object infers object output, a string schema infers text — or an explicit `output.*` mode. |
+| `model` | yes | A single AI-SDK model for the worker(s); wrapped into a one-slot `models` tuple. |
+| `planner` | no | A bare model (lifted into a `PlannerConfig`) or a full `PlannerConfig`. Defaults to `model`. |
+| `tools` | no | Inline tools keyed by name; built into a registry, names exposed via `globalTools`. |
+| `worker` | no | A `WorkerConfig` for the worker harness. |
+| `memory` | no | A `MemoryConfig` for memory-store mounts. |
+| `bash` | no | Bash capabilities for the harness sessions. |
+
+Everything except `id` and `model` is optional. There is no `models[]` tuple to assemble, no separate `planner` block to wire, and no standalone tool registry.
+
+`input` and `output` must stay inside the [LWIR schema subset](/docs/v0.1.0-alpha/reference/lwir-reference#schema-subset). The subset accepts `.describe()`, `.min()`/`.max()`, enums, and string- or enum-keyed `z.record(...)`. It rejects `.positive()`/`.gt()` (`exclusiveMinimum`), `.regex()` (`pattern`), `.email()` (`format`), and `.default()`. The workflow fails to compile before any model is called. Validate finer constraints inside a tool.
+
+## Running it
+
+The two-argument `runWorkflow(def, input)` form defaults the world to `localWorld()` and auto-wires the workflow's inline tool registry, so a typical run needs no `world` or `tools` plumbing:
+
+```ts
+const result = await runWorkflow(reviewApplicants, {
+  role: "Staff Engineer",
+  criteria: "8+ yrs distributed systems; strong written communication.",
+  applicants: await loadApplicants(),
+});
+
+result.output;        // Verdict[] — typed from the output schema
+result.usage.costUsd; // number | null — real USD, or null when nothing could be priced
+result.runId;         // re-runnable / replayable
+```
+
+`result.usage` also carries `inputTokens`, `cachedInputTokens`, `outputTokens`, `reasoningTokens`, `pricedCalls`, and `unpricedCalls`. `costUsd` is `null` when the run made model calls but none of them matched a registry entry — that is *unpriced*, not free. A real `0` is a genuine zero-dollar total, normally because the run made no model calls. See [Quickstart → What The Run Cost](/docs/v0.1.0-alpha/getting-started/quickstart#what-the-run-cost).
+
+A defined workflow is also runnable directly via its `run` method, which defaults the world and inline tools the same way:
+
+```ts
+const result = await reviewApplicants.run({
+  role: "Staff Engineer",
+  criteria: "8+ yrs distributed systems; strong written communication.",
+  applicants: await loadApplicants(),
+});
+```
+
+## Giving the planner a stronger model
+
+The planner that designs the plan defaults to the workflow's `model`. To give it a stronger model than the workers, pass a bare model under `planner` — it is lifted into a `PlannerConfig`:
+
+```ts
+defineWorkflow({
+  id: "applicants.review",
+  model: anthropic("claude-sonnet-4-6"),       // workers
+  planner: anthropic("claude-opus-4-7"),       // planner only
+  // ...input, output, tools
+});
+```
+
+## When you outgrow the front door
+
+`defineWorkflow` covers a single workflow with one execution model. Reach past it when you need:
+
+- **Multiple execution model slots** the planner chooses among per step, or `toolSelection`, `suggestedInputSchema`, and `workflowVersionReuseStrategy`: use [`createLittleWorkflow`](/docs/v0.1.0-alpha/authoring/advanced-createlittleworkflow). A planner `system` prompt and skills do not require it; pass a full `PlannerConfig` as `planner`.
+- **Composition of distinct workflows**: adapt each one with `asHarnessWorkflow` and hand them to a Little Harness agent. See [Compose With Little Harness](/docs/v0.1.0-alpha/authoring/compose-with-harness). The array-plus-`orchestrator` form of `runWorkflow` is deprecated.

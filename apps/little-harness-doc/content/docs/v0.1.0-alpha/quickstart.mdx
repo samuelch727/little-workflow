@@ -1,9 +1,35 @@
 ---
-title: Developer Guide
-description: How to use the Little Harness alpha API.
+title: Embedding in Your App
+description: Configure and run a Little Harness agent inside your own app — createHarness, streaming, non-chat runs, and sessions.
 ---
 
 Little Harness is a local-first agent runtime for teams that want useful sessions before choosing managed hosting, sandboxes, artifact plumbing, or workflow orchestration. Give it a Local Host, model, system prompt, tools, skills, and optional persistent directories; it creates or resumes the session, exposes the right harness directories, captures traces, and keeps each execution isolated by default.
+
+<Callout title="New here?">
+  Start with [Getting Started](/docs/v0.1.0-alpha/getting-started) — scaffold an agent workspace and
+  chat with it from the CLI in a couple of minutes. This guide is the *embedding* path: how to call
+  `createHarness` from your own route, job, or worker.
+</Callout>
+
+There are two ways to run an agent, and they share the same `createHarness` config:
+
+- **A dedicated agent workspace** (recommended for iterating) — keep your agents in their own folder, define each in an `agent.ts` that default-exports `createHarness(...)`, and run them with the CLI (`little-harness test`) or [`loadHarness()`](/docs/v0.1.0-alpha/build-agents/agent-folders).
+- **Embedded in your own app** — call `createHarness` directly and serve it from a route, job, or worker, as shown below.
+
+Either way, everything here is the `createHarness` config — the exact object your `agent.ts` exports. For the full option-by-option reference, see [`createHarness()`](/docs/v0.1.0-alpha/reference/create-harness).
+
+## Install
+
+Little Harness needs Node.js 22+ and AI SDK 7. `ai` is a peer dependency, so install it alongside the
+package (from the `alpha` dist-tag during the alpha) and an AI SDK 7 provider package:
+
+```bash
+pnpm add little-harness@alpha ai@^7 zod @ai-sdk/openai
+```
+
+Swap `@ai-sdk/openai` for any AI SDK 7 provider (`@ai-sdk/anthropic`, `@ai-sdk/google`, ...).
+
+## Create And Serve A Harness
 
 ```ts
 import { openai } from "@ai-sdk/openai";
@@ -56,20 +82,7 @@ console.log(result.trace.path);
 
 Every `streamHarness()` or `generateHarness()` call runs inside an isolated session workspace. If you do not pass a session key, Little Harness creates an ephemeral session for that request. If you pass a stable session key, such as your app's chat id, Little Harness continues the same private workspace.
 
-One session never runs more than one turn at the same time. Local Host queues same-session calls by default, while different sessions can run concurrently.
-
-The default filesystem layout is small and predictable:
-
-| Path | Purpose |
-|---|---|
-| `/session/` | Private workspace for the current session |
-| `/artifacts/` | Large tool outputs and generated files |
-| `.agents/skills/` | Read-only skill directories, relative to the harness working directory |
-| `/persistent/` | Opt-in developer-backed persistent dirs |
-
-Session files are useful for scratch work, intermediate notes, and generated outputs that only belong to the current conversation. Persistent files are only exposed when the app provides a backing store.
-
-In Local Host, stable sessions are inspectable under `.little-harness/sessions/<session-id>/`.
+One session never runs more than one turn at the same time. Local Host queues same-session calls by default, while different sessions can run concurrently. The runtime exposes a small, predictable filesystem — `/session/`, `/artifacts/`, `.agents/skills/`, and opt-in `/persistent/` — described in [Files And Artifacts](/docs/v0.1.0-alpha/foundations/files-and-artifacts). In Local Host, stable sessions are inspectable under `.little-harness/sessions/<session-id>/`.
 
 ## Continue A Session
 
@@ -85,210 +98,27 @@ const result = streamHarness({
 
 Continuing a session preserves the agent's working files and lets the host app show a single evolving thread. Starting a new session gives the agent a fresh workspace.
 
-On the client, keep using ordinary AI SDK chat primitives.
+> **Note:** A continued session preserves the agent's files, artifacts, and trace — **not** the chat transcript. Pass the full `messages[]` history on every turn (standard AI SDK client-carries-history); `session` does not re-feed prior messages to the model.
 
-```ts
-import { useChat } from "@ai-sdk/react";
-import { DefaultChatTransport } from "ai";
+On the client, keep using ordinary AI SDK chat primitives (`useChat` from `@ai-sdk/react` with a `DefaultChatTransport` pointed at your route).
 
-const { messages, sendMessage } = useChat({
-  transport: new DefaultChatTransport({ api: "/api/chat" }),
-});
+## Configuring the Agent
 
-sendMessage({ text: "Add the last three support incidents." });
-```
+The building blocks below each have a dedicated guide. From the embedding side, they are all just fields on the `createHarness` config:
 
-## Stage Message Files
-
-When the user sends files through chat, the app can stage those files into the
-session before the model turn starts.
-
-```ts
-const harness = createHarness({
-  host: localHost(),
-  model: openai("gpt-5"),
-  system,
-  chat: {
-    stageMessage: async ({ message, inputFiles, files }) => {
-      const stagedFiles = await Promise.all(
-        inputFiles.map((file) =>
-          files.write(
-            `/session/user-input/${message.id}/${file.safeName}`,
-            file.content,
-            { mediaType: file.mediaType },
-          ),
-        ),
-      );
-
-      return {
-        stagedFiles,
-        notice: "Uploaded files were staged into /session/user-input/.",
-      };
-    },
-  },
-});
-```
-
-The model should receive paths and short descriptions, not raw uploaded file
-contents. The full files live in the harness filesystem where the agent can
-inspect them with tools, shell commands, or scripts.
-
-## Tools And Large Outputs
-
-Little Harness accepts normal AI SDK tools. Keep tool return
-values compact when they fit in context, and let tools write large results into
-session files or artifacts when they do not.
-
-```ts
-import { tool } from "ai";
-import { z } from "zod";
-
-const queryCustomers = tool({
-  name: "query_customers",
-  description: "Query customer account data by account id.",
-  inputSchema: z.object({
-    accountId: z.string().optional(),
-    query: z.string().optional(),
-  }),
-  execute: async (input, ctx) => {
-    const rows = await customerDb.query(input);
-
-    const file = await ctx.files.writeJSON(
-      "/artifacts/tool/query-customers/result.json",
-      rows,
-    );
-
-    return {
-      preview: "Customer query exported for analysis.",
-      path: file.path,
-      bytes: file.bytes,
-    };
-  },
-});
-```
-
-For large outputs, the agent receives a preview plus a stable path instead of a huge payload:
-
-```ts
-{
-  preview: "42 matching support incidents. The largest risk themes are...",
-  path: "/artifacts/tool/query-customers/result.json",
-  bytes: 184392
-}
-```
-
-The runtime supports ordinary developer tools: shell commands, JSON tools, SQLite queries, and Python-style scripts all fit the same session model.
-
-## Skills
-
-Skills are procedural instructions and reference material that can be disclosed without bloating the main system prompt.
-
-```ts
-const harness = createHarness({
-  host: localHost(),
-  model: openai("gpt-5"),
-  system: "You help account teams prepare renewal briefs.",
-  tools: { searchDocs, queryCustomers },
-  skills: [
-    skill("./skills/domain-glossary"),
-    skill("./skills/customer-renewal-analysis"),
-    skill("https://github.com/anthropics/skills", {
-      skills: ["frontend-design"],
-    }),
-  ],
-});
-```
-
-Little Harness injects skill descriptions at session start so the model knows what is available. Full skill bodies are staged read-only under `.agents/skills/<name>/`, which lets the agent inspect detailed instructions only when they matter:
-
-```bash
-cat .agents/skills/frontend-design/SKILL.md
-```
-
-## Persistent Dirs
-
-Cross-session persistence stays off by default. Add Persistent Dirs when your app wants the agent to remember files across sessions, users, teams, or accounts.
-
-For the common case where the model should save compact durable lessons itself,
-use [Memory](/docs/v0.1.0-alpha/build-agents/memory). Memory is still backed by
-a Persistent Dir, but it also injects a bounded `MEMORY.md` index into future
-turns and exposes a `remember` tool by default.
-
-```ts
-const harness = createHarness({
-  host: localHost(),
-  model: openai("gpt-5"),
-  system: "You help account teams prepare renewal briefs.",
-  tools: { searchDocs, queryCustomers },
-  persistentDirs: [
-    {
-      harnessDir: "/persistent/user",
-      load: async ({ extraBody }) =>
-        appStorage.loadFolder(`users/${extraBody.userId}/memory`),
-      store: async ({ extraBody, changes }) =>
-        appStorage.applyChanges({
-          prefix: `users/${extraBody.userId}/memory`,
-          changes,
-        }),
-    },
-  ],
-});
-```
-
-For writable Persistent Dirs, the model writes to the `harnessDir` inside the isolated session first. At the end of the agent turn, Little Harness computes the diff and calls `store()` with the changes. Read-only Persistent Dirs reject writes immediately.
-
-`extraBody` is app-defined request context. Little Harness does not define auth, tenancy, or product shape; it forwards whatever the app passes to tools, Persistent Dir callbacks, events, and trace metadata.
-
-Future advanced store shapes may receive a full folder snapshot instead of a diff, or expose lazy `list`, `read`, `write`, and `delete` operations for S3, R2, GCS, or application databases.
-
-For Local Host, use `localDir()` when the backing source is a local folder.
-
-```ts
-import { localDir, projectDir } from "little-harness";
-
-const harness = createHarness({
-  host: localHost({ dataDir: ".little-harness" }),
-  model: openai("gpt-5"),
-  persistentDirs: [
-    localDir({
-      harnessDir: "/persistent/company",
-      sourceDir: projectDir("./docs"),
-      commit: "read-only",
-    }),
-    localDir({
-      harnessDir: "/persistent/user",
-      sourceDir: ({ extraBody }) =>
-        `persistent/users/${extraBody.userId}/memory`,
-      commit: "after-turn",
-    }),
-  ],
-});
-```
-
-Plain relative `sourceDir` values resolve under `localHost({ dataDir })`.
-`projectDir(...)` is the explicit way to expose project files and must resolve
-inside `projectRoot`.
+- **Tools and large outputs** — pass normal AI SDK tools; let them write big results to session files or artifacts instead of flooding context. See [Tools](/docs/v0.1.0-alpha/build-agents/tools).
+- **Message-file staging** — move chat uploads into the session before the model turn via `chat.stageMessage`. See [Message Files](/docs/v0.1.0-alpha/build-agents/message-files).
+- **Skills** — expose procedural knowledge read-only, disclosed on demand. See [Skills](/docs/v0.1.0-alpha/build-agents/skills).
+- **Persistent Dirs and memory** — opt in to cross-session files and model-authored memory. See [Persistent Dirs](/docs/v0.1.0-alpha/foundations/persistent-dirs) and [Memory](/docs/v0.1.0-alpha/build-agents/memory).
+- **Runtime substrate** — the built-in command runtime (bash, `jq`, `sqlite3`, Python/JS) is powered by [just-bash](/docs/v0.1.0-alpha/runtime/just-bash). By default, turns that can run Python or JavaScript run it in a [subprocess sandbox](/docs/v0.1.0-alpha/runtime/execution-environments) with an empty environment.
+- **Workflows** — expose Little Workflow workflows as typed tools with `workflows: [asHarnessWorkflow(...)]`. See [Triggering a workflow from an agent](/docs/v0.1.0-alpha/build-agents/workflows).
+- **Outcomes** — record whether a run worked with `reportHarnessOutcome` (chat reactions are captured automatically). See [Outcome Capture](/docs/v0.1.0-alpha/build-agents/outcomes).
 
 ## Commit And Error Behavior
 
-Use after-turn commits when you want persistence to happen only after the agent finishes its normal response.
+When you use Persistent Dirs, writes land in the isolated session first and commit after the turn. Persistence failures are host-facing: inspect them on the result rather than in the model context.
 
 ```ts
-const harness = createHarness({
-  host: localHost(),
-  model: openai("gpt-5"),
-  system,
-  tools,
-  persistentDirs: [
-    {
-      harnessDir: "/persistent/user",
-      load,
-      store,
-      commit: "after-turn",
-    },
-  ],
-});
-
 const result = streamHarness({ harness, messages, session, extraBody });
 const finished = await result.finished;
 
@@ -297,47 +127,7 @@ if (finished.persistence.status === "failed") {
 }
 ```
 
-If a persistence commit fails, Little Harness does not inject that failure into the agent's normal context. The host app can inspect `finished.persistence.status`, notify the user, retry, or route the failed changes to support. Uncommitted files remain recoverable from the isolated session, and the trace records the commit failure for debugging.
-
-## Artifacts And Exports
-
-Artifacts are host-visible session paths for generated files and large tool
-outputs. The agent can reference an artifact path in its response, and host
-tools can promote artifacts into product records, reports, tickets, or
-downloads.
-
-```txt
-/artifacts/tool/query_customers/turn_003/result.json
-/artifacts/report/renewal-risk.md
-/artifacts/data/incidents.sqlite
-```
-
-```ts
-const saveReport = tool({
-  name: "save_report",
-  description: "Save a generated report into the app.",
-  inputSchema: z.object({
-    title: z.string(),
-    artifactPath: z.string(),
-  }),
-  execute: async ({ title, artifactPath }, ctx) => {
-    const file = await ctx.artifacts.read(artifactPath);
-
-    return reports.create({
-      title,
-      content: file.text(),
-    });
-  },
-});
-```
-
-Artifacts let the agent work with files that are too large for prompt context while keeping the app in control of what gets exported.
-
-## Powered By just-bash
-
-The first local runtime is powered by just-bash, a TypeScript virtual bash environment with an in-memory filesystem. The useful pieces are virtual and mountable filesystems, copy-on-write overlays, common shell, text, and data commands such as `rg`, `jq`, `sqlite3`, and `xan`, optional Python and JavaScript execution, network disabled by default, and Runtime Tool Bridge access to configured tools from `js-exec`.
-
-just-bash helps protect against untrusted scripts inside the managed environment, not untrusted host hooks. Tools, storage hooks, and export callbacks are host app capabilities and should be scoped accordingly.
+If a persistence commit fails, Little Harness does not inject that failure into the agent's normal context. Uncommitted files remain recoverable from the isolated session, and the trace records the commit failure for debugging. See [Persistent Dirs](/docs/v0.1.0-alpha/foundations/persistent-dirs) for the full commit model.
 
 ## Non-Goals
 
@@ -349,13 +139,8 @@ just-bash helps protect against untrusted scripts inside the managed environment
 
 ## Next Steps
 
-- Read [Sessions](/docs/v0.1.0-alpha/mental-model/sessions) to understand continuation and isolation.
+- Read [Foundations](/docs/v0.1.0-alpha/foundations) for sessions, files, tools, persistence, and traces.
 - Read [Generating And Streaming](/docs/v0.1.0-alpha/build-agents/generating-and-streaming) for deeper route, worker, file, and callback examples.
-- Read [Memory](/docs/v0.1.0-alpha/build-agents/memory) before letting the model save durable lessons during a turn.
-- Read [Message Files](/docs/v0.1.0-alpha/build-agents/message-files) before accepting uploads in chat.
-- Read [Input Types](/docs/v0.1.0-alpha/build-agents/input-types) before adding non-chat calls.
-- Read [Tools Vs Exports](/docs/v0.1.0-alpha/mental-model/tools-vs-exports) before adding side-effecting tools.
-- Read [Persistent Dirs](/docs/v0.1.0-alpha/mental-model/persistent-dirs) before adding cross-session storage.
+- Read [Sessions](/docs/v0.1.0-alpha/foundations/sessions) to understand continuation and isolation.
 - Read [Local Host](/docs/v0.1.0-alpha/runtime/local-host) for the local session, artifact, trace, and Persistent Dir layout.
-- Read [just-bash Runtime](/docs/v0.1.0-alpha/runtime/just-bash) for the first local command substrate.
 - Read [API Reference](/docs/v0.1.0-alpha/reference/api-reference) when shaping package exports.

@@ -41,6 +41,7 @@ export async function createWorkflowRuntime(
   const shell = runtime.shellTool();
 
   return {
+    ...(runtime.dispose === undefined ? {} : { dispose: runtime.dispose.bind(runtime) }),
     systemHints(hintOptions) {
       return [
         "The workflow harness filesystem exposes memory under /mnt/memory, scratch under /mnt/scratch, and skills under .agents/skills.",

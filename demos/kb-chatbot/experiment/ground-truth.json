@@ -1,0 +1,278 @@
+{
+  "$comment": [
+    "Ground truth for the dream-catch experiment. This file is BOTH the question set and the",
+    "grading key — there is no second questions.json to drift out of sync.",
+    "",
+    "Scenario shape:",
+    "  id          stable short id; the thread is `x-<id>-<runstamp>`, so one scenario is one run.",
+    "  tier        A = single turn + explicit reaction (the metric sees it).",
+    "              B = trap + frustration follow-ups + explicit reaction.",
+    "              C = trap/deep + frustration follow-ups and NO reaction at all. Invisible to the",
+    "                  success-rate metric: the only trace of the failure is the conversation text.",
+    "  kind        fair  — a root document the catalog names genuinely answers this. v1 should PASS.",
+    "              trap  — the catalog names a root document that answers it WRONGLY.",
+    "              deep  — the topic is absent from the catalog entirely; only content search finds it.",
+    "  turns       turns[0] is the graded question. turns[1..] are frustration follow-ups and fire",
+    "              ONLY when turns[0] failed grading (an accidentally-correct answer is not argued with).",
+    "  reaction    \"auto\" = 👍 on pass, 👎 on fail. null = no reaction is ever sent (tier C).",
+    "  mustContain every keyword must appear in the FIRST answer. Bare numbers match on word",
+    "              boundaries, so \"20\" is not satisfied by \"2019\".",
+    "  mustCite    the file the first answer must cite. Basename comparison, so a full path counts.",
+    "  trap        the root file the stale catalog points at — what a v1 failure is expected to cite.",
+    "  findableBy  a keyword from the question that `rg`s to mustCite. Every answer is reachable by",
+    "              content search, so a failure is a strategy failure and never an impossible task.",
+    "",
+    "Run order is file order: fair → tier-A traps → tier-A deep → tier B → tier C. The dream samples",
+    "the 3 NEWEST runs, so the tier-C threads (frustration, no reaction) land in its window on purpose."
+  ],
+  "scenarios": [
+    {
+      "id": "f1",
+      "tier": "A",
+      "kind": "fair",
+      "turns": ["What are the password requirements for a Northwind account?"],
+      "reaction": "auto",
+      "mustContain": ["14"],
+      "mustCite": "security.md",
+      "trap": null,
+      "findableBy": "password"
+    },
+    {
+      "id": "f2",
+      "tier": "A",
+      "kind": "fair",
+      "turns": ["Do I need approval before buying a 600 euro monitor for my desk?"],
+      "reaction": "auto",
+      "mustContain": ["500"],
+      "mustCite": "expense-guide.md",
+      "trap": null,
+      "findableBy": "approval"
+    },
+    {
+      "id": "f3",
+      "tier": "A",
+      "kind": "fair",
+      "turns": ["A customer is visiting our office next week. What do I need to do to get them in?"],
+      "reaction": "auto",
+      "mustContain": ["24"],
+      "mustCite": "office-access.md",
+      "trap": null,
+      "findableBy": "visitor"
+    },
+    {
+      "id": "t1",
+      "tier": "A",
+      "kind": "trap",
+      "turns": ["How many vacation days do full-time employees get per year?"],
+      "reaction": "auto",
+      "mustContain": ["20"],
+      "mustCite": "hr/policies/2026/time-off-rev3_FINAL.md",
+      "trap": "vacation-policy.md",
+      "findableBy": "vacation"
+    },
+    {
+      "id": "t2",
+      "tier": "A",
+      "kind": "trap",
+      "turns": ["How many unused vacation days can I carry into next year?"],
+      "reaction": "auto",
+      "mustContain": ["5"],
+      "mustCite": "hr/policies/2026/time-off-rev3_FINAL.md",
+      "trap": "vacation-policy.md",
+      "findableBy": "carry over"
+    },
+    {
+      "id": "t3",
+      "tier": "A",
+      "kind": "trap",
+      "turns": ["If vacation days carry over, when do they expire?"],
+      "reaction": "auto",
+      "mustContain": ["march", "31"],
+      "mustCite": "hr/policies/2026/time-off-rev3_FINAL.md",
+      "trap": "vacation-policy.md",
+      "findableBy": "expire"
+    },
+    {
+      "id": "t4",
+      "tier": "A",
+      "kind": "trap",
+      "turns": ["How much vacation do I accrue each month?"],
+      "reaction": "auto",
+      "mustContain": ["1.67"],
+      "mustCite": "hr/policies/2026/time-off-rev3_FINAL.md",
+      "trap": "vacation-policy.md",
+      "findableBy": "accrue"
+    },
+    {
+      "id": "t5",
+      "tier": "A",
+      "kind": "trap",
+      "turns": ["What is the daily meal allowance when I travel in Europe?"],
+      "reaction": "auto",
+      "mustContain": ["65"],
+      "mustCite": "finance/regional/emea/td-limits.md",
+      "trap": "expense-guide.md",
+      "findableBy": "meals"
+    },
+    {
+      "id": "t6",
+      "tier": "A",
+      "kind": "trap",
+      "turns": ["Is there a nightly hotel cap for a work trip to Berlin?"],
+      "reaction": "auto",
+      "mustContain": ["180"],
+      "mustCite": "finance/regional/emea/td-limits.md",
+      "trap": "expense-guide.md",
+      "findableBy": "hotel"
+    },
+    {
+      "id": "t7",
+      "tier": "A",
+      "kind": "trap",
+      "turns": ["Who do I page for a SEV-1 outage at 3am?"],
+      "reaction": "auto",
+      "mustContain": ["eng-primary"],
+      "mustCite": "departments/engineering/runbooks/pager_v2.md",
+      "trap": "on-call-runbook.md",
+      "findableBy": "SEV-1"
+    },
+    {
+      "id": "d1",
+      "tier": "A",
+      "kind": "deep",
+      "turns": ["How much paid parental leave does a new parent get?"],
+      "reaction": "auto",
+      "mustContain": ["16"],
+      "mustCite": "hr/policies/2026/appendix-c.md",
+      "trap": null,
+      "findableBy": "parental"
+    },
+    {
+      "id": "d2",
+      "tier": "A",
+      "kind": "deep",
+      "turns": ["How long do we keep customer application logs before they are deleted?"],
+      "reaction": "auto",
+      "mustContain": ["90"],
+      "mustCite": "it/data/retention-matrix.md",
+      "trap": null,
+      "findableBy": "logs"
+    },
+    {
+      "id": "d3",
+      "tier": "A",
+      "kind": "deep",
+      "turns": ["What payment terms do we give suppliers on their invoices?"],
+      "reaction": "auto",
+      "mustContain": ["30"],
+      "mustCite": "finance/ap/terms-2026.md",
+      "trap": null,
+      "findableBy": "invoice"
+    },
+    {
+      "id": "b1",
+      "tier": "B",
+      "kind": "trap",
+      "turns": [
+        "I am planning next year. How many days of paid vacation do I actually get?",
+        "That's not right - HR told me it's 20 days now, not 15. Can you check again?",
+        "You keep citing vacation-policy.md. That document is outdated."
+      ],
+      "reaction": "auto",
+      "mustContain": ["20"],
+      "mustCite": "hr/policies/2026/time-off-rev3_FINAL.md",
+      "trap": "vacation-policy.md",
+      "findableBy": "vacation"
+    },
+    {
+      "id": "b2",
+      "tier": "B",
+      "kind": "trap",
+      "turns": [
+        "My laptop was stolen last night. How fast do I have to report it, and which form do I file?",
+        "That can't be all of it. There is a specific incident form and a hard deadline - a colleague had to file one last month.",
+        "I asked this last week and got the same non-answer. Can you actually search the knowledge base?"
+      ],
+      "reaction": "auto",
+      "mustContain": ["4", "SEC-19"],
+      "mustCite": "it/security/incident-procedures/laptop-theft.md",
+      "trap": "security.md",
+      "findableBy": "stolen"
+    },
+    {
+      "id": "b3",
+      "tier": "B",
+      "kind": "trap",
+      "turns": [
+        "I am in Amsterdam for three nights next week. What can I claim per day for food?",
+        "That is about equipment purchases, not travel. I asked about meals on a trip.",
+        "This is the third time I have asked something like this and been given the wrong document."
+      ],
+      "reaction": "auto",
+      "mustContain": ["65"],
+      "mustCite": "finance/regional/emea/td-limits.md",
+      "trap": "expense-guide.md",
+      "findableBy": "meals"
+    },
+    {
+      "id": "c1",
+      "tier": "C",
+      "kind": "trap",
+      "turns": [
+        "If the primary on-call does not acknowledge a SEV-1 page, how long before it escalates, and to whom?",
+        "Are you sure? That runbook looks ancient - @oncall-eng has not resolved to anyone for a year.",
+        "Never mind, I will ask someone on the team."
+      ],
+      "reaction": null,
+      "mustContain": ["15", "secondary"],
+      "mustCite": "departments/engineering/runbooks/pager_v2.md",
+      "trap": "on-call-runbook.md",
+      "findableBy": "escalat"
+    },
+    {
+      "id": "c2",
+      "tier": "C",
+      "kind": "trap",
+      "turns": [
+        "Which Slack channel do I use to reach the on-call engineer?",
+        "That channel is archived. Nobody reads it.",
+        "Forget it."
+      ],
+      "reaction": null,
+      "mustContain": ["eng-oncall-v2"],
+      "mustCite": "departments/engineering/runbooks/pager_v2.md",
+      "trap": "on-call-runbook.md",
+      "findableBy": "on-call"
+    },
+    {
+      "id": "c3",
+      "tier": "C",
+      "kind": "trap",
+      "turns": [
+        "I have unused vacation days left at the end of December. Do I lose them?",
+        "That contradicts what my manager told me. Is that document even current?",
+        "I will go with what my manager said then."
+      ],
+      "reaction": null,
+      "mustContain": ["5", "march"],
+      "mustCite": "hr/policies/2026/time-off-rev3_FINAL.md",
+      "trap": "vacation-policy.md",
+      "findableBy": "carry over"
+    },
+    {
+      "id": "c4",
+      "tier": "C",
+      "kind": "deep",
+      "turns": [
+        "We are adopting in the autumn. How much paid leave do I get?",
+        "It must be written down somewhere. Can you look harder than the index?",
+        "OK, I will email HR instead."
+      ],
+      "reaction": null,
+      "mustContain": ["16"],
+      "mustCite": "hr/policies/2026/appendix-c.md",
+      "trap": null,
+      "findableBy": "adoption"
+    }
+  ]
+}

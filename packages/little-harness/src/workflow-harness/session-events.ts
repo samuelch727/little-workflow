@@ -132,12 +132,29 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/**
+ * Session-scoped token rollup for `harness.session.completed`.
+ *
+ * Deliberately token-only: this package cannot see the model pricing registry (it lives
+ * in `little-workflow`, which depends on this package), so a cost computed here could
+ * only ever be a stub. Cost is derived once, downstream, by pricing the atomic
+ * `harness.model.responded` events — see `little-workflow/src/pricing.ts`. The value
+ * here is a convenience rollup for session consumers and is **not** re-summed by the run
+ * materializer, which would double-count it.
+ */
 function createUsageAccumulator(): {
   readonly add: (event: unknown) => void;
-  readonly value: () => { readonly inputTokens: number; readonly outputTokens: number; readonly costUsd: number };
+  readonly value: () => {
+    readonly inputTokens: number;
+    readonly outputTokens: number;
+    readonly cachedInputTokens: number;
+    readonly reasoningTokens: number;
+  };
 } {
   let inputTokens = 0;
   let outputTokens = 0;
+  let cachedInputTokens = 0;
+  let reasoningTokens = 0;
   return {
     add(event) {
       const usage = modelResponseUsage(event);
@@ -146,8 +163,11 @@ function createUsageAccumulator(): {
       }
       inputTokens += numberValue(usage.inputTokens);
       outputTokens += numberValue(usage.outputTokens);
+      // Traces store the AI SDK usage verbatim: v6 recorded the flat fields, v7 only the details.
+      cachedInputTokens += numberValue(usage.cachedInputTokens ?? detail(usage.inputTokenDetails, "cacheReadTokens"));
+      reasoningTokens += numberValue(usage.reasoningTokens ?? detail(usage.outputTokenDetails, "reasoningTokens"));
     },
-    value: () => ({ inputTokens, outputTokens, costUsd: 0 }),
+    value: () => ({ inputTokens, outputTokens, cachedInputTokens, reasoningTokens }),
   };
 }
 
@@ -157,6 +177,10 @@ function modelResponseUsage(event: unknown): Record<string, unknown> | undefined
   }
   const response = isRecord(event.payload.response) ? event.payload.response : undefined;
   return isRecord(response?.usage) ? response.usage : undefined;
+}
+
+function detail(details: unknown, key: string): unknown {
+  return isRecord(details) ? details[key] : undefined;
 }
 
 function numberValue(value: unknown): number {

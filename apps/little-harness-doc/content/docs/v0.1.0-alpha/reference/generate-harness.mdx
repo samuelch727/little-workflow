@@ -174,6 +174,36 @@ output: Output.object({ schema: renewalBriefSchema })
 
 Cancels the run when possible.
 
+### `runId`
+
+`string`
+
+Durable identity of this run for kill-and-resume. Re-invoking with the same
+`runId` (and the same inputs) against the same session log replays the
+recorded run instead of re-calling models and re-executing tool side effects.
+Defaults to a fresh id per call.
+
+```ts
+const result = await generateHarness({
+  harness,
+  messages,
+  session: chatId,
+  runId: "run_123",
+  sessionLog: remoteSessionLog({ baseUrl, authToken }),
+});
+```
+
+### `sessionLog`
+
+`HarnessSessionLog`
+
+Per-call session-log override (the durable event log this run appends to and
+replays from). When omitted, the log configured on `createHarness()` is used.
+`durability` is the historical alias for the same option; `sessionLog` wins
+when both are set. See
+[Execution Environments](/docs/v0.1.0-alpha/runtime/execution-environments)
+for the remote session-log adapter.
+
 ### `onEvent`
 
 Function that receives a `HarnessEvent`.
@@ -241,7 +271,9 @@ await generateHarness({
 });
 ```
 
-When `stopWhen` is omitted, Little Harness uses `stepCountIs(20)` so a model can
+`stopWhen` takes AI SDK 7 stop conditions such as `isStepCount(8)` (imported
+from `ai`). When it is omitted, Little Harness uses
+`isStepCount(workflowBudgets.maxModelSteps)` — 20 by default — so a model can
 continue after executed tool calls instead of stopping after the first step.
 
 ## Returns
@@ -303,6 +335,24 @@ if (result.warnings.some((warning) => warning.code === "undefined_input_type")) 
 ```
 
 ## Examples
+
+### From A Script (No HTTP Request)
+
+In a plain script or worker there is no `req.json()` to read `messages` from, so
+build the `UIMessage[]` array yourself.
+
+```ts
+import { generateHarness } from "little-harness";
+import type { UIMessage } from "ai";
+
+const messages: UIMessage[] = [
+  { id: "u1", role: "user", parts: [{ type: "text", text: "Summarize the latest incident." }] },
+];
+const result = await generateHarness({ harness, messages });
+console.log(result.text);
+```
+
+Each `UIMessage` requires an `id`; omitting it is a TypeScript error.
 
 ### Generate A Structured Brief
 

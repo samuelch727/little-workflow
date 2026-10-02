@@ -11,14 +11,25 @@ import type {
   HarnessToolExecutionContext,
   JsonObject,
 } from "../types.js";
-import { wrapToolsWithHarnessContext } from "./tools.js";
+import { errorFromReplayEnvelope, wrapToolsWithHarnessContext } from "./tools.js";
 
 const RUNTIME_TOOL_NO_ARGS = { type: "harness.runtime_tool.no_args" } as const;
 
+/**
+ * The tool proxy an execution environment calls out to: `invokeTool(name, argsJson) → JSON`.
+ * The serialized signature is deliberate — it is the managed-agents boundary where sandbox
+ * code (in-process, subprocess, or remote) reaches configured harness tools without ever
+ * holding tool implementations or credentials. Replay short-circuiting, durable call
+ * identity (callIndex per canonical args+scope), and harness.tool_call.* emission all live
+ * behind this interface.
+ */
 export type RuntimeToolBridge = {
   readonly toolNames: readonly string[];
   invokeTool(path: string, argsJson: string): Promise<string>;
 };
+
+/** Managed-agents-named alias for the sandbox-facing tool proxy. */
+export type HarnessToolProxy = RuntimeToolBridge;
 
 export type RuntimeToolBridgeOptions<TExtraBody = unknown> = {
   tools: ToolSet;
@@ -185,7 +196,7 @@ function isExposedRuntimeTool(name: string, harnessTool: unknown): boolean {
 }
 
 function hasExecuteFunction(value: unknown): value is { execute: (...args: unknown[]) => unknown } {
-  return isObject(value) && typeof value.execute === "function";
+  return typeof value === "object" && value !== null && typeof (value as Record<string, unknown>).execute === "function";
 }
 
 function parseRuntimeToolArgs(argsJson: string): ParsedRuntimeToolArgs {
@@ -280,13 +291,3 @@ async function emitToolCallEvent<TExtraBody>(
   });
 }
 
-function errorFromReplayEnvelope(value: unknown): Error {
-  const envelope = isObject(value) ? value : {};
-  const error = new Error(typeof envelope.message === "string" ? envelope.message : "Harness tool call failed.");
-  error.name = typeof envelope.name === "string" ? envelope.name : "Error";
-  return Object.assign(error, envelope);
-}
-
-function isObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}

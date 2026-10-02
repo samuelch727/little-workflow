@@ -81,6 +81,17 @@ jobs:
       - name: Install dependencies without dependency scripts
         run: pnpm install --frozen-lockfile --ignore-scripts
 
+      # npm trusted publishing (OIDC) needs npm >= 11.5.1.
+      - name: Update npm
+        run: npm install -g npm@^11.5.1
+
+      # Build every package up front: a package whose version is already on npm is
+      # skipped (and never packed), but its dist must still exist for its dependents.
+      - name: Build packages
+        run: |
+          pnpm --filter little-harness run build
+          pnpm --filter little-workflow run build
+
       - name: Publish missing alpha package versions
         run: |
           set -euo pipefail
@@ -98,9 +109,13 @@ jobs:
             local package_dir="$2"
             local package_version
             local tarball
+            local tarball_name
 
             package_version="$(node -p "require('./${package_dir}/package.json').version")"
-            tarball="${pack_dir}/${package_name}-${package_version}.tgz"
+            # pnpm pack writes scoped names as <scope>-<name>: strip leading @ and replace / with -
+            tarball_name="${package_name#@}"
+            tarball_name="${tarball_name//\//-}"
+            tarball="${pack_dir}/${tarball_name}-${package_version}.tgz"
 
             if npm view "${package_name}@${package_version}" version >/dev/null 2>&1; then
               echo "${package_name}@${package_version} already exists on npm; skipping publish."

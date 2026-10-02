@@ -1,0 +1,13 @@
+{
+  "title": "Authoring",
+  "pages": [
+    "define-a-workflow",
+    "compose-with-harness",
+    "tools-and-capabilities",
+    "ai-sdk-native",
+    "memory",
+    "skills",
+    "orchestrating-workflows",
+    "advanced-createlittleworkflow"
+  ]
+}

@@ -1,8 +1,11 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
+import { z } from "zod";
 import { sha256Digest } from "./canonical.js";
+import { normalizeSchema } from "./schema.js";
 import {
   LwirValidationError,
+  UNIMPLEMENTED_FIELD_CODE,
   assertValidLwir,
   registerWorkflowVersion,
   validateLwir,
@@ -340,7 +343,7 @@ describe("alpha LWIR validation", () => {
     );
   });
 
-  it("accepts the documented expression subset across with, input, and cache fields", () => {
+  it("accepts the documented expression subset across with and input fields", () => {
     const result = validateLwir(
       workflow({
         steps: [
@@ -365,10 +368,6 @@ describe("alpha LWIR validation", () => {
             input: {
               stableId: "{{ sha256(input.ticketId, steps.extract.output.name) }}",
             },
-            cache: {
-              enabled: true,
-              key: "{{ sha256(input.ticketId) }}",
-            },
             output: { mode: "text" },
           },
         ],
@@ -378,7 +377,7 @@ describe("alpha LWIR validation", () => {
     expect(result).toEqual({ valid: true, findings: [] });
   });
 
-  it("validates expressions in step input and cache fields", () => {
+  it("validates expressions in step input fields", () => {
     const result = validateLwir(
       workflow({
         steps: [
@@ -392,9 +391,6 @@ describe("alpha LWIR validation", () => {
             input: {
               value: "{{ input.ticketId.constructor }}",
             },
-            cache: {
-              key: "{{ require('node:fs') }}",
-            },
             output: { mode: "text" },
           },
         ],
@@ -407,10 +403,6 @@ describe("alpha LWIR validation", () => {
         expect.objectContaining({
           code: "expression.invalid",
           path: "$.steps[0].input.value",
-        }),
-        expect.objectContaining({
-          code: "expression.invalid",
-          path: "$.steps[0].cache.key",
         }),
       ]),
     );
@@ -571,6 +563,7 @@ describe("alpha LWIR validation", () => {
             {
               id: "generate-array",
               uses: "ai.generate",
+              needs: ["generate-object"],
               with: { model: "model.text" },
               output: {
                 mode: "array",
@@ -580,12 +573,14 @@ describe("alpha LWIR validation", () => {
           {
             id: "generate-choice",
             uses: "ai.generate",
+            needs: ["generate-array"],
             with: { model: "model.text" },
             output: { mode: "choice", values: ["approve", "reject"] },
           },
           {
             id: "generate-text",
             uses: "ai.generate",
+            needs: ["generate-choice"],
             with: { model: "model.text" },
             output: { mode: "text" },
           },
@@ -704,6 +699,292 @@ describe("alpha LWIR validation", () => {
       expect.arrayContaining([
         expect.objectContaining({ code: "schema.invalid", path: "$.input.schema" }),
         expect.objectContaining({ code: "schema.invalid", path: "$.output.schema" }),
+      ]),
+    );
+  });
+
+  it("accepts pure-annotation schema keywords in every nested schema position", () => {
+    // `zod`'s `.describe()` emits `description`, and `.meta({ title, examples })` emits the
+    // other two. Rejecting them made every described schema fail at registration, which is
+    // the whole of LIT-43. Annotations constrain nothing, so they are legal wherever a
+    // schema is — including the recursion paths with their own shape logic (`items`,
+    // `additionalProperties`, and `anyOf` branches, which must still discriminate).
+    const annotated = {
+      type: "object",
+      title: "Ticket",
+      description: "A support ticket.",
+      required: ["ticketId", "tags", "route"],
+      additionalProperties: false,
+      properties: {
+        ticketId: {
+          type: "string",
+          description: "The upstream ticket identifier.",
+          title: "Ticket id",
+          examples: ["TIN-13"],
+        },
+        tags: {
+          type: "array",
+          description: "Free-form labels.",
+          items: { type: "string", description: "One label." },
+        },
+        route: {
+          anyOf: [
+            {
+              type: "object",
+              description: "Escalate to a human.",
+              required: ["kind", "assignee"],
+              properties: {
+                kind: { type: "string", const: "human", description: "Discriminator." },
+                assignee: { type: "string", description: "Who picks it up." },
+              },
+            },
+            {
+              type: "object",
+              description: "Answer automatically.",
+              required: ["kind", "reply"],
+              properties: {
+                kind: { type: "string", const: "auto", description: "Discriminator." },
+                reply: { type: "string", description: "What to send." },
+              },
+            },
+          ],
+        },
+      },
+    };
+    const bag = {
+      type: "object",
+      description: "An open-ended bag.",
+      additionalProperties: { type: "string", description: "Any extra value." },
+    };
+
+    const lwir = workflow({
+      input: { schema: annotated },
+      output: { schema: bag },
+      steps: [
+        {
+          id: "summarize",
+          uses: "ai.generate",
+          with: { model: "model.structured", prompt: "Summarize {{ input.ticketId }}." },
+          output: { mode: "object", schema: bag },
+        },
+      ],
+    });
+
+    expect(validateLwir(lwir)).toEqual({ valid: true, findings: [] });
+    // registerWorkflowVersion is the only way to mint a WorkflowVersion, so this is the
+    // gate every execution path goes through.
+    expect(registerWorkflowVersion(lwir).id).toMatch(/^wfver_[0-9a-f]{16}$/);
+  });
+
+  it("rejects schema keywords that assert unimplemented runtime behaviour", () => {
+    // The other side of the annotation boundary: `default` promises value substitution and
+    // `readOnly`/`deprecated` promise access/lifecycle enforcement. No Ajv instance here is
+    // built with `useDefaults` and nothing enforces access, so accepting them would be a
+    // declaration the runtime silently drops.
+    for (const [keyword, value] of [
+      ["default", "unset"],
+      ["readOnly", true],
+      ["writeOnly", true],
+      ["deprecated", true],
+    ] as const) {
+      const result = validateLwir(
+        workflow({
+          input: {
+            schema: {
+              type: "object",
+              required: ["ticketId"],
+              properties: { ticketId: { type: "string", [keyword]: value } },
+            },
+          },
+        }),
+      );
+
+      expect(result.valid).toBe(false);
+      expect(result.findings).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            code: "schema.invalid",
+            path: "$.input.schema",
+            message: `Unsupported JSON Schema keyword '${keyword}' in alpha LWIR.`,
+          }),
+        ]),
+      );
+    }
+  });
+
+  it("still rejects annotation keywords whose value has the wrong JSON Schema type", () => {
+    const result = validateLwir(
+      workflow({
+        input: {
+          schema: {
+            type: "object",
+            required: ["ticketId"],
+            properties: { ticketId: { type: "string", description: 42 } },
+          },
+        },
+      }),
+    );
+
+    expect(result.valid).toBe(false);
+    expect(result.findings).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: "schema.invalid", path: "$.input.schema" }),
+      ]),
+    );
+  });
+
+  it("accepts the propertyNames map shape zod emits for z.record(), in every nested position", () => {
+    // Derived from zod rather than hand-copied: the fixture is what the installed zod
+    // ACTUALLY emits today, so it cannot drift away from the construct it stands for.
+    // Before LIT-53 each of these failed with "Unsupported JSON Schema keyword
+    // 'propertyNames' in alpha LWIR" — the dreamer's config-ab workflow had to ship
+    // `z.looseObject` to get a map-shaped input past compile time at all.
+    const stringKeyed = normalizeSchema(z.record(z.string(), z.string()));
+    expect(stringKeyed).toEqual({
+      type: "object",
+      propertyNames: { type: "string" },
+      additionalProperties: { type: "string" },
+    });
+
+    // The dreamer's shape: a record nested under a named property, values themselves
+    // objects, plus `.describe()` on the map (LIT-43's annotations, on this keyword).
+    const dreamerConfig = normalizeSchema(
+      z.object({
+        variants: z
+          .record(
+            z.string(),
+            z.object({ prompt: z.string(), temperature: z.number() }),
+          )
+          .describe("Config bundles keyed by version id."),
+      }),
+    );
+    expect(dreamerConfig).toMatchObject({
+      properties: {
+        variants: {
+          type: "object",
+          propertyNames: { type: "string" },
+          description: "Config bundles keyed by version id.",
+        },
+      },
+    });
+
+    const lwir = workflow({
+      input: { schema: dreamerConfig },
+      output: { schema: stringKeyed },
+      steps: [
+        {
+          id: "summarize",
+          uses: "ai.generate",
+          with: { model: "model.structured", prompt: "Compare the variants." },
+          // A record in a step's own output contract, and one nested inside an array's
+          // items — the recursion paths with their own shape logic.
+          output: {
+            mode: "object",
+            schema: {
+              type: "object",
+              required: ["labels"],
+              properties: {
+                labels: { type: "array", items: stringKeyed },
+              },
+            },
+          },
+        },
+      ],
+    });
+
+    expect(validateLwir(lwir)).toEqual({ valid: true, findings: [] });
+    // registerWorkflowVersion is the only way to mint a WorkflowVersion, so this is the
+    // gate every execution path goes through.
+    expect(registerWorkflowVersion(lwir).id).toMatch(/^wfver_[0-9a-f]{16}$/);
+  });
+
+  it("accepts the key-constrained record forms whose key schema stays inside the subset", () => {
+    // Enum keys carry a `required` listing every key and NO `properties` object — zod's
+    // exhaustive-record semantics. Ajv enforces that `required` on its own, which is why
+    // the map-shape carve-out is honest rather than a hole. `z.partialRecord` is the same
+    // shape without `required`, and `.min(1)` keys land on `minLength`, already supported.
+    const exhaustive = normalizeSchema(z.record(z.enum(["fast", "cheap"]), z.number()));
+    expect(exhaustive).toEqual({
+      type: "object",
+      propertyNames: { type: "string", enum: ["fast", "cheap"] },
+      additionalProperties: { type: "number" },
+      required: ["fast", "cheap"],
+    });
+
+    for (const schema of [
+      exhaustive,
+      normalizeSchema(z.partialRecord(z.enum(["fast", "cheap"]), z.number())),
+      normalizeSchema(z.record(z.string().min(1), z.string())),
+    ]) {
+      const lwir = workflow({ input: { schema } });
+      expect(validateLwir(lwir)).toEqual({ valid: true, findings: [] });
+      expect(registerWorkflowVersion(lwir).id).toMatch(/^wfver_[0-9a-f]{16}$/);
+    }
+  });
+
+  it("rejects key schemas outside the subset, and keeps the required rule for non-map objects", () => {
+    // The boundary, both ways. `pattern` is out of the subset wherever it appears, so a
+    // regex-keyed record is rejected with the standard message — the key schema recurses
+    // through the same validator as everything else and gets no exemption.
+    const regexKeyed = normalizeSchema(z.record(z.string().regex(/^cfg_/u), z.string()));
+    expect(regexKeyed).toMatchObject({ propertyNames: { pattern: "^cfg_" } });
+
+    const rejectedKeys = validateLwir(workflow({ input: { schema: regexKeyed } }));
+    expect(rejectedKeys.valid).toBe(false);
+    expect(rejectedKeys.findings).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: "schema.invalid",
+          path: "$.input.schema",
+          message: "Unsupported JSON Schema keyword 'pattern' in alpha LWIR.",
+        }),
+      ]),
+    );
+
+    // A number-keyed record passes the subset walk but could never accept data: JSON keys
+    // are strings, so Ajv would reject every non-empty instance at run time. Reject it here.
+    const numberKeyed = normalizeSchema(z.record(z.number(), z.string()));
+    const rejectedNumberKeys = validateLwir(workflow({ input: { schema: numberKeyed } }));
+    expect(rejectedNumberKeys.valid).toBe(false);
+    expect(rejectedNumberKeys.findings).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: "schema.invalid",
+          path: "$.input.schema",
+          message: expect.stringContaining("JSON object keys are strings"),
+        }),
+      ]),
+    );
+
+    // A `propertyNames` that is not a schema at all is rejected too — here by the Ajv
+    // meta-schema check that runs before the subset walk, so the message is Ajv's.
+    const notASchema = validateLwir(
+      workflow({ input: { schema: { type: "object", propertyNames: "string" } } }),
+    );
+    expect(notASchema.valid).toBe(false);
+    expect(notASchema.findings).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: "schema.invalid",
+          path: "$.input.schema",
+          message: expect.stringContaining("propertyNames"),
+        }),
+      ]),
+    );
+
+    // And the carve-out really is scoped to map shapes: `required` with neither
+    // `properties` nor `propertyNames` still fails with the message it always did.
+    const bareRequired = validateLwir(
+      workflow({ input: { schema: { type: "object", required: ["ticketId"] } } }),
+    );
+    expect(bareRequired.valid).toBe(false);
+    expect(bareRequired.findings).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: "schema.invalid",
+          path: "$.input.schema",
+          message: "JSON Schema required keys must have a matching properties object.",
+        }),
       ]),
     );
   });
@@ -3032,5 +3313,243 @@ describe("alpha LWIR validation", () => {
         ),
       ).toBe(false);
     });
+  });
+});
+
+/**
+ * Regression guard for one recurring defect shape: a field the schema validates
+ * and the runtime silently ignores. These assert the *loud* behaviour — that
+ * declaring an unimplemented field fails validation and names itself — because
+ * silent acceptance is the bug, and only a test that demands noise prevents it
+ * from coming back. A fourth instance belongs here.
+ */
+describe("declared but unimplemented fields", () => {
+  function unimplementedFindings(result: ReturnType<typeof validateLwir>) {
+    return result.findings.filter((f) => f.code === UNIMPLEMENTED_FIELD_CODE);
+  }
+
+  it("rejects a non-empty permissions.secrets instead of installing nothing", () => {
+    const result = validateLwir(
+      workflow({
+        permissions: {
+          models: ["model.structured", "model.text", "model.fast"],
+          tools: ["lookupCustomer"],
+          secrets: ["licenseApiKey"],
+          network: [],
+        },
+      }),
+    );
+
+    expect(result.valid).toBe(false);
+    expect(unimplementedFindings(result)).toEqual([
+      expect.objectContaining({
+        severity: "error",
+        code: UNIMPLEMENTED_FIELD_CODE,
+        path: "$.permissions.secrets",
+      }),
+    ]);
+    // The message must name the field and say what to do instead — the planner
+    // repair loop reads it verbatim.
+    expect(unimplementedFindings(result)[0]?.message).toContain("permissions.secrets");
+    expect(unimplementedFindings(result)[0]?.message).toContain("silently ignored");
+  });
+
+  it("rejects a non-empty permissions.network instead of installing nothing", () => {
+    const result = validateLwir(
+      workflow({
+        permissions: {
+          models: ["model.structured", "model.text", "model.fast"],
+          tools: ["lookupCustomer"],
+          secrets: [],
+          network: ["https://api.example.com"],
+        },
+      }),
+    );
+
+    expect(result.valid).toBe(false);
+    expect(unimplementedFindings(result)).toEqual([
+      expect.objectContaining({
+        code: UNIMPLEMENTED_FIELD_CODE,
+        path: "$.permissions.network",
+      }),
+    ]);
+  });
+
+  it("still accepts empty secrets and network arrays, which grant nothing", () => {
+    const result = validateLwir(
+      workflow({
+        permissions: {
+          models: ["model.structured", "model.text", "model.fast"],
+          tools: ["lookupCustomer"],
+          secrets: [],
+          network: [],
+        },
+      }),
+    );
+
+    expect(result).toEqual({ valid: true, findings: [] });
+  });
+
+  it("rejects onFailure.repair mode escalate rather than degrading it to no repair", () => {
+    const result = validateLwir(
+      workflow({
+        steps: [
+          {
+            id: "summarize",
+            uses: "ai.generate",
+            with: { model: "model.text", prompt: "Summarize {{ input.transcript }}." },
+            onFailure: { repair: { mode: "escalate", maxAttempts: 2 } },
+            output: { mode: "object", schema: summarySchema },
+          },
+        ],
+      }),
+    );
+
+    expect(result.valid).toBe(false);
+    expect(unimplementedFindings(result)).toEqual([
+      expect.objectContaining({
+        code: UNIMPLEMENTED_FIELD_CODE,
+        path: "$.steps[0].onFailure.repair.mode",
+      }),
+    ]);
+    expect(unimplementedFindings(result)[0]?.message).toContain('"self"');
+  });
+
+  // The fourth instance, found while fixing the first three: `repair.model` is
+  // validated (shape + allowlist) and never read — the repair loop resolves the
+  // step's own `with.model`. Rejecting escalate while still accepting escalate's
+  // parameter would leave the same defect inside the config object being fixed.
+  it("rejects onFailure.repair.model, which the repair loop never reads", () => {
+    const result = validateLwir(
+      workflow({
+        steps: [
+          {
+            id: "summarize",
+            uses: "ai.generate",
+            with: { model: "model.text", prompt: "Summarize {{ input.transcript }}." },
+            onFailure: { repair: { mode: "self", maxAttempts: 2, model: "model.structured" } },
+            output: { mode: "object", schema: summarySchema },
+          },
+        ],
+      }),
+    );
+
+    expect(result.valid).toBe(false);
+    expect(unimplementedFindings(result)).toEqual([
+      expect.objectContaining({
+        code: UNIMPLEMENTED_FIELD_CODE,
+        path: "$.steps[0].onFailure.repair.model",
+      }),
+    ]);
+    // An allowlisted model must not also draw `repair.model_disallowed`, and a
+    // malformed one must not draw `repair.model.missing` — one field, one
+    // instruction, or the planner gets contradictory repair advice.
+    expect(result.findings.map((f) => f.code)).toEqual([UNIMPLEMENTED_FIELD_CODE]);
+  });
+
+  it("reports only the unimplemented finding for a malformed repair.model", () => {
+    const result = validateLwir(
+      workflow({
+        steps: [
+          {
+            id: "summarize",
+            uses: "ai.generate",
+            with: { model: "model.text", prompt: "Summarize {{ input.transcript }}." },
+            onFailure: { repair: { mode: "self", maxAttempts: 2, model: "" } },
+            output: { mode: "object", schema: summarySchema },
+          },
+        ],
+      }),
+    );
+
+    expect(result.findings.map((f) => f.code)).toEqual([UNIMPLEMENTED_FIELD_CODE]);
+  });
+
+  it("still accepts onFailure.repair mode self, which the runtime implements", () => {
+    const result = validateLwir(
+      workflow({
+        steps: [
+          {
+            id: "summarize",
+            uses: "ai.generate",
+            with: { model: "model.text", prompt: "Summarize {{ input.transcript }}." },
+            onFailure: { repair: { mode: "self", maxAttempts: 2 } },
+            output: { mode: "object", schema: summarySchema },
+          },
+        ],
+      }),
+    );
+
+    expect(result).toEqual({ valid: true, findings: [] });
+  });
+
+  it("rejects a step cache declaration, which had no runtime semantics", () => {
+    const result = validateLwir(
+      workflow({
+        steps: [
+          {
+            id: "summarize",
+            uses: "ai.generate",
+            with: { model: "model.text", prompt: "Summarize {{ input.transcript }}." },
+            cache: { enabled: true, key: "{{ sha256(input.ticketId) }}" },
+            output: { mode: "object", schema: summarySchema },
+          },
+        ],
+      }),
+    );
+
+    expect(result.valid).toBe(false);
+    expect(unimplementedFindings(result)).toEqual([
+      expect.objectContaining({
+        code: UNIMPLEMENTED_FIELD_CODE,
+        path: "$.steps[0].cache",
+      }),
+    ]);
+  });
+
+  it("rejects a step cache declaration inside a parallel branch", () => {
+    const result = validateLwir(
+      workflow({
+        steps: [
+          {
+            id: "fan-out",
+            uses: "parallel",
+            with: { over: "{{ input.transcript }}", as: "item" },
+            steps: [
+              {
+                id: "score",
+                uses: "ai.generate",
+                with: { model: "model.text", prompt: "Score {{ item }}." },
+                cache: { key: "{{ sha256(item) }}" },
+                output: { mode: "text" },
+              },
+            ],
+            output: { mode: "object", schema: summarySchema },
+          },
+        ],
+      }),
+    );
+
+    expect(result.valid).toBe(false);
+    expect(
+      unimplementedFindings(result).map((f) => f.path),
+    ).toContain("$.steps[0].steps[0].cache");
+  });
+
+  it("blocks an unimplemented declaration from ever reaching the runtime", () => {
+    // registerWorkflowVersion is the only way to mint a WorkflowVersion, and it
+    // runs assertValidLwir — so rejection here closes every execution path.
+    expect(() =>
+      registerWorkflowVersion(
+        workflow({
+          permissions: {
+            models: ["model.structured", "model.text", "model.fast"],
+            tools: ["lookupCustomer"],
+            secrets: ["licenseApiKey"],
+            network: [],
+          },
+        }),
+      ),
+    ).toThrow(LwirValidationError);
   });
 });

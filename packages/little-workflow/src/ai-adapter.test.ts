@@ -67,12 +67,8 @@ function moduleWithOutput() {
         return {
           output: { ok: true },
           text: "ok",
+          // AI SDK 7: `usage` totals every step (v6 called this `totalUsage`).
           usage: {
-            inputTokens: 1,
-            outputTokens: 1,
-            totalTokens: 2,
-          },
-          totalUsage: {
             inputTokens: 11,
             outputTokens: 7,
             totalTokens: 18,
@@ -208,7 +204,7 @@ describe("AI SDK adapter", () => {
       text: Promise.resolve(""),
       toolCalls: Promise.resolve([{ toolName: "lookup", input: { x: 1 }, toolCallId: "c1" }]),
       output: Promise.resolve({ ok: true }),
-      totalUsage: Promise.resolve({ inputTokens: 9, outputTokens: 4, totalTokens: 13 }),
+      usage: Promise.resolve({ inputTokens: 9, outputTokens: 4, totalTokens: 13 }),
       finishReason: Promise.resolve("tool-calls"),
       providerMetadata: Promise.resolve({ deepseek: { promptCacheHitTokens: 7 } }),
       _request: options,
@@ -254,6 +250,39 @@ describe("AI SDK adapter", () => {
     expect(calls).toHaveLength(1);
   });
 
+  it("reads cached and reasoning tokens from AI SDK 7 usage details", async () => {
+    // AI SDK 7 dropped the flat `cachedInputTokens`/`reasoningTokens`; missing them would bill
+    // cached input at the full rate.
+    const { moduleLike } = moduleWithOutput();
+    moduleLike.generateText.mockResolvedValueOnce({
+      output: { ok: true },
+      text: "ok",
+      usage: {
+        inputTokens: 10,
+        inputTokenDetails: { noCacheTokens: 4, cacheReadTokens: 6, cacheWriteTokens: 0 },
+        outputTokens: 5,
+        outputTokenDetails: { textTokens: 3, reasoningTokens: 2 },
+        totalTokens: 15,
+      },
+      finishReason: "stop",
+      providerMetadata: {},
+    } as never);
+
+    const result = await generateWithAdapter(createAiSdkAdapter(moduleLike), {
+      model: "model.fast",
+      prompt: "Extract a profile.",
+      output: { mode: "object", schema: profileSchema },
+    });
+
+    expect(result.usage).toEqual({
+      inputTokens: 10,
+      outputTokens: 5,
+      totalTokens: 15,
+      cachedInputTokens: 6,
+      reasoningTokens: 2,
+    });
+  });
+
   it("captures output, usage, finish reason, provider metadata, and mapping lock", async () => {
     const { moduleLike } = moduleWithOutput();
     const adapter = createAiSdkAdapter(moduleLike);
@@ -286,7 +315,7 @@ describe("AI SDK adapter", () => {
     expect(moduleLike.generateText).toHaveBeenCalledWith(
       expect.objectContaining({
         model: "model.fast",
-        system: "Be precise.",
+        instructions: "Be precise.",
         prompt: "Extract a profile.",
         providerOptions: { gateway: { tags: ["alpha"] } },
         abortSignal: abortController.signal,
@@ -295,7 +324,7 @@ describe("AI SDK adapter", () => {
     );
   });
 
-  it("passes output: helper result to generateText (v6 contract)", async () => {
+  it("passes output: helper result to generateText (AI SDK contract)", async () => {
     const calls: Array<Record<string, unknown>> = [];
     const moduleLike = {
       generateText: async (request: Record<string, unknown>) => {

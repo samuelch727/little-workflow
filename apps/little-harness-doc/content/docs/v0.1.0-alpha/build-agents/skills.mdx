@@ -3,20 +3,32 @@ title: Skills
 description: How skills teach an agent procedures without bloating every prompt.
 ---
 
+import { Files, File, Folder } from 'fumadocs-ui/components/files';
+
 Skills are procedural knowledge. They tell the model how to handle a situation, when to use tools, and what quality bar to apply.
 
 They are different from tools. Tools do things. Skills teach the agent how to work.
+
+MCP guide skills follow the same rule. When `createHarness({ mcp })` includes a
+server guide, Little Harness stages a guide under
+`.agents/skills/<server-id>-mcp/SKILL.md`; that file explains when and how to
+use the server, but it does not grant access. MCP access comes from the
+configured gateway tools, usually `mcp_list_tools` and `mcp_call_tool`.
 
 ## Skill Shape
 
 A skill can be a directory with a `SKILL.md` file:
 
-```txt
-skills/customer-briefs/
-  SKILL.md
-  examples/
-    renewal-brief.md
-```
+<Files>
+  <Folder name="skills" defaultOpen>
+    <Folder name="customer-briefs" defaultOpen>
+      <File name="SKILL.md" />
+      <Folder name="examples" defaultOpen>
+        <File name="renewal-brief.md" />
+      </Folder>
+    </Folder>
+  </Folder>
+</Files>
 
 `SKILL.md` should contain frontmatter and instructions:
 

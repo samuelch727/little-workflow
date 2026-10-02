@@ -1,0 +1,52 @@
+---
+title: Roadmap
+description: Where Little Harness goes after the alpha — direction, not shipped versions.
+---
+
+Little Harness ships today as `0.2.0-alpha.0` (these docs keep the
+`v0.1.0-alpha` URL path): a local-first agent runtime with isolated sessions,
+artifacts, traces, skills, Persistent Dirs, chat connectors, and a just-bash
+command substrate that runs in a subprocess sandbox by default. This page describes the intended direction after alpha. It is
+framing for where the SDK is headed, not a list of released versions — treat
+everything here as subject to change.
+
+## Beta polish
+
+The near-term focus is hardening the alpha developer experience: steadier SDK
+surfaces, sharper error messages, and refinement of the host and runtime adapter
+boundaries so that swapping the execution environment or session log stays a
+one-line change. The public API shape from alpha should carry forward with as few
+breaking changes as possible.
+
+## Production durability
+
+Alpha durability is proven through the file-backed and remote session logs
+(`createFileSessionLog`, `remoteSessionLog` over `startSessionLogServer`) and the
+subprocess execution adapter; there is no built-in remote execution adapter yet —
+a remote or container sandbox plugs in as a custom execution-environment factory
+or as the `nextTier` of `tieredExecutionEnvironment`. The next step is making crash-safe,
+resumable runs a first-class production story: durable session logs behind real
+stores, replay that survives process restarts across machines, and clear
+operational guidance for retrying failed Persistent Dir commits.
+
+## High-throughput fan-out
+
+The alpha runs a single process against a Local Host. A later direction is
+scale-out execution — coordinating many stateless harness processes through the
+durable orchestration ledgers, so batch and fan-out workloads can run wide without
+changing the developer-facing configuration object.
+
+## Managed and enterprise hosting
+
+The host contract is deliberately abstract so that the same `createHarness`
+config can target Local Host today and a managed or self-hosted control plane
+later. Post-alpha work explores hosted execution pools, stronger multi-tenant
+isolation, and the policy, audit, and capability controls that enterprise
+deployments need — without forcing those decisions into a developer's first agent.
+
+## What is not on this page
+
+Anything documented elsewhere as shipped is shipped. Where a reference page marks
+a shape as **proposed** (for example, the object-store and lazy
+[storage adapters](/docs/v0.1.0-alpha/reference/storage-adapters)), that is a
+roadmap item expressed at the API level, not a current capability.

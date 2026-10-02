@@ -413,18 +413,39 @@ describe("validateTraceEvent", () => {
       }),
     ).toThrow(/path|root/);
 
+    // Custom workspace mounts are valid roots, but the path must still belong to them.
     expect(() =>
       validateTraceEvent({
         ...baseEvent,
         type: "harness.file.created",
         metadata: {
-          path: "/tmp/outside.txt",
+          path: "/elsewhere/outside.txt",
           root: "tmp",
           after: { bytes: 1, sha256: "a".repeat(64) },
           diff: { available: false, reason: "disabled" },
         },
       }),
     ).toThrow(/root/);
+
+    for (const metadata of [
+      // A custom mount at /agents must not be conflated with the managed /.agents root…
+      { path: "/agents/plan.md", root: "agents" },
+      // …while the historical managed shape keeps validating.
+      { path: "/.agents/skills/x.md", root: "agents" },
+      { path: "/data/report.csv", root: "data" },
+    ]) {
+      expect(() =>
+        validateTraceEvent({
+          ...baseEvent,
+          type: "harness.file.created",
+          metadata: {
+            ...metadata,
+            after: { bytes: 1, sha256: "a".repeat(64) },
+            diff: { available: false, reason: "disabled" },
+          },
+        }),
+      ).not.toThrow();
+    }
 
     expect(() =>
       validateTraceEvent({
@@ -494,5 +515,54 @@ describe("validateTraceEvent", () => {
         metadata: { harnessDir: "/persistent/project", commit: "after-turn" },
       }),
     ).toThrow(/error/);
+  });
+
+  it("accepts tier events with their escalation cause, and requires the cause", () => {
+    expect(
+      validateTraceEvent({
+        ...baseEvent,
+        type: "harness.runtime.tier.escalated",
+        metadata: {
+          from: "tier-0",
+          to: "next-tier",
+          trigger: "classification",
+          command: "cargo build",
+          decision: "escalate",
+          reasons: [{ kind: "needs-real-exec", command: "cargo", reason: "build-toolchain" }],
+        },
+      }),
+    ).toMatchObject({ metadata: { trigger: "classification" } });
+
+    expect(
+      validateTraceEvent({
+        ...baseEvent,
+        type: "harness.runtime.tier.unavailable",
+        metadata: {
+          from: "tier-0",
+          to: "next-tier",
+          trigger: "emulation-gap",
+          command: "sh ./build.sh",
+          gap: { kind: "emulation-gap", signal: "command-not-found", command: "cargo" },
+          detail: "no higher execution tier is configured",
+        },
+      }),
+    ).toMatchObject({ metadata: { detail: "no higher execution tier is configured" } });
+
+    // Escalation telemetry is only useful if it says what triggered it.
+    expect(() =>
+      validateTraceEvent({
+        ...baseEvent,
+        type: "harness.runtime.tier.escalated",
+        metadata: { from: "tier-0", to: "next-tier", command: "cargo build" },
+      }),
+    ).toThrow(/trigger/);
+
+    expect(() =>
+      validateTraceEvent({
+        ...baseEvent,
+        type: "harness.runtime.command.denied",
+        metadata: { command: "docker ps" },
+      }),
+    ).toThrow(/reasons/);
   });
 });

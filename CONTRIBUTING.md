@@ -6,7 +6,7 @@ are all welcome.
 
 ## Getting started
 
-Requires Node.js `>=20.19` and `pnpm@10`.
+Requires Node.js `>=22` and `pnpm@10`.
 
 ```sh
 git clone https://github.com/samuelch727/little-workflow.git

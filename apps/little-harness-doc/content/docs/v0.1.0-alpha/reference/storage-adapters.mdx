@@ -1,59 +1,25 @@
 ---
 title: Storage Adapters
-description: Proposed adapter shapes for object stores, app databases, and local development.
+description: The shipped local and customDir adapters, plus a proposed object-store shape.
 ---
 
-Persistent Dirs should be developer-backed. First-party adapters can make common stores easy without forcing Little Harness to own every app's data model.
+Persistent Dirs are developer-backed. First-party adapters make common stores easy without forcing Little Harness to own every app's data model.
 
-## Object Store Adapter
+<Callout type="info" title="What ships in alpha">
+  `localHost`, `localDir`, `projectDir`, and `customDir` are exported today. The
+  `s3Dir` object-store shape below is **proposed** — it is not exported yet; use
+  `customDir(...)` with your own callbacks to back an object store in the meantime.
+</Callout>
 
-An object store adapter maps a `harnessDir` to a bucket and prefix.
+## Shipped: Local Adapter
 
-```ts
-s3Dir({
-  harnessDir: "/persistent/user",
-  bucket: "app-agent-memory",
-  prefix: ({ extraBody }) => `users/${extraBody.userId}/`,
-});
-```
-
-Equivalent adapters could exist for Cloudflare R2 and Google Cloud Storage.
-
-## App Database Adapter
-
-Some apps store files in rows rather than object storage.
+`localDir()` is the shipped filesystem adapter. It maps a `harnessDir` to a local folder and
+is exposed through Little Harness rather than leaking arbitrary host paths to the
+model.
 
 ```ts
-customDir({
-  harnessDir: "/persistent/user",
-  load: ({ extraBody }) => db.files.loadFolder(extraBody.userId),
-  store: ({ extraBody, changes }) =>
-    db.files.applyChanges(extraBody.userId, changes),
-});
-```
+import { localDir, projectDir } from "little-harness";
 
-## Lazy Store Shape
-
-For large stores, future adapter shapes may avoid loading the whole directory up front.
-
-```ts
-customDir({
-  harnessDir: "/persistent/docs",
-  list: ({ extraBody, path }) => docs.list(extraBody.userId, path),
-  read: ({ extraBody, path }) => docs.read(extraBody.userId, path),
-  write: ({ extraBody, path, content }) =>
-    docs.write(extraBody.userId, path, content),
-  delete: ({ extraBody, path }) => docs.delete(extraBody.userId, path),
-});
-```
-
-The runtime still needs to preserve the commit model. A lazy store should not turn every shell write into an immediate backing-store mutation unless the developer explicitly chooses that behavior.
-
-## Local Development
-
-A local adapter is useful for demos and internal tools, but it should still be exposed through Little Harness rather than leaking arbitrary host paths to the model.
-
-```ts
 localDir({
   harnessDir: "/persistent/dev",
   sourceDir: "persistent/dev-memory",
@@ -69,3 +35,68 @@ localDir({
   commit: "read-only",
 });
 ```
+
+See the [`localHost()` reference](/docs/v0.1.0-alpha/reference/local-host) for the
+full `localDir` / `projectDir` signatures.
+
+## Shipped: customDir (app databases and object stores)
+
+`customDir()` is the shipped, typed helper for backing a `harnessDir` with your
+own storage. It is a thin wrapper over a `PersistentDir` entry — the same object
+you could place directly in `persistentDirs` — so you get types and intent without
+Little Harness owning your data model.
+
+The simplest shape provides `load` / `store` (load the whole directory, commit
+changes at the [commit boundary](/docs/v0.1.0-alpha/foundations/persistent-dirs)):
+
+```ts
+import { customDir } from "little-harness";
+
+customDir({
+  harnessDir: "/persistent/user",
+  load: async ({ extraBody }) => db.files.loadFolder(extraBody.userId),
+  store: async ({ extraBody, changes }) =>
+    db.files.applyChanges(extraBody.userId, changes),
+});
+```
+
+You can also express the store as per-path `list` / `read` / `write` / `delete`
+callbacks instead of `load` / `store`:
+
+```ts
+customDir({
+  harnessDir: "/persistent/docs",
+  list: ({ extraBody, path }) => docs.list(extraBody.userId, path),
+  read: ({ extraBody, path }) => docs.read(extraBody.userId, path),
+  write: ({ extraBody, path, content }) =>
+    docs.write(extraBody.userId, path, content),
+  delete: ({ extraBody, path }) => docs.delete(extraBody.userId, path),
+});
+```
+
+Note this shape is **not lazy yet**: at turn start the runtime calls `list` once
+at the root (`path: ""`) and then `read`s every `file` entry that single call
+returned, before execution. It does **not** recurse into `directory` entries —
+your root `list` must return a flattened list of every file (with nested paths
+like `guides/setup.md`) or nested files are silently skipped. Truly lazy loading
+(fetching files only when touched) is future work, so keep large stores out of
+hot dirs for now. A per-path store still preserves the commit model: it does not
+turn every shell write into an immediate backing-store mutation unless the
+developer explicitly chooses that behavior.
+
+## Proposed: Object Store Adapter
+
+A convenience adapter mapping a `harnessDir` to a bucket and prefix. This shape is
+illustrative — `s3Dir` is not exported yet; back an object store with `customDir`
+today.
+
+```ts
+// Proposed shape — not exported yet.
+s3Dir({
+  harnessDir: "/persistent/user",
+  bucket: "app-agent-memory",
+  prefix: ({ extraBody }) => `users/${extraBody.userId}/`,
+});
+```
+
+Equivalent adapters could exist for Cloudflare R2 and Google Cloud Storage.

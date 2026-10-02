@@ -1,4 +1,5 @@
 import type { Harness, ToolSet } from "./harness/types.js";
+import type { UsageTotals } from "./pricing.js";
 import type { ArtifactRef, EventEnvelope, RunId } from "./world.js";
 import { createLocalWorld } from "./world.js";
 import { model as createModelSlot } from "./model-slots.js";
@@ -8,9 +9,26 @@ import type { BashCapabilities } from "./bash-tool.js";
 import type { ToolPermissions } from "./permission.js";
 import type { World } from "./world-port.js";
 import type { WorkflowVersionReuseStrategy } from "./workflow-version-reuse.js";
+import type { HarnessMcpConfig } from "little-harness";
+import { normalizeSchema, output as outputBuilder } from "./schema.js";
+import { createToolRegistry, type AiSdkTool, type ToolRegistry } from "./tool-registry.js";
+import { runWorkflow as runWorkflowCore } from "./runtime.js";
 
-export { RunFailedError, runWorkflow } from "./runtime.js";
+export { RunFailedError } from "./runtime.js";
 export type { RunFailedCauseCode } from "./runtime.js";
+export type {
+  HarnessMcpCapabilityManifest,
+  HarnessMcpClient,
+  HarnessMcpClientOptions,
+  HarnessMcpConfig,
+  HarnessMcpGatewayConfig,
+  HarnessMcpServerConfig,
+  HarnessMcpToolPolicy,
+  HarnessMcpToolSchema,
+  HarnessMcpToolSchemas,
+  HarnessMcpTransportConfig,
+  ResolvedHarnessMcpGateway,
+} from "little-harness";
 export type { Skill } from "./skills.js";
 export type { RemoteSkillOptions, SkillGitAuth, SkillOidcToken, SkillRiskLevel } from "./skills.js";
 
@@ -101,6 +119,14 @@ export type WorkerConfig = {
   readonly tools?: ToolSet;
 };
 
+/**
+ * Configures the orchestrator agent for `runWorkflow({ workflows: [...], orchestrator })`.
+ *
+ * @deprecated The orchestrator is one of two composition surfaces and the one being retired.
+ * Compose with the Harness surface instead: author each workflow with `defineWorkflow`, adapt it
+ * with `asHarnessWorkflow`, and pass the adapters to `createHarness({ workflows })`. Still
+ * supported in this release; scheduled to be unexported in the next minor.
+ */
 export type OrchestratorConfig = {
   readonly model: unknown | ModelSlot;
   readonly harness?: Harness;
@@ -230,17 +256,23 @@ export type FailedRunResult = RunResultBase & {
 type RunResultBase = {
   runId: string;
   workflowVersionId: string;
-  usage: {
-    inputTokens: number;
-    outputTokens: number;
-    costUsd: number;
-  };
+  /**
+   * Real tokens and real dollars for the run, priced from the model registry.
+   * `costUsd` is `null` when the run made model calls that could not be priced at all —
+   * check `unpricedCalls` to tell an under-reported receipt from a genuine $0.
+   */
+  usage: UsageTotals;
   events: readonly EventEnvelope[];
   artifacts: readonly ArtifactRef[];
 };
 
 export type WorkflowRunTarget = AnyAuthoredWorkflow | WorkflowRunList;
 type WorkflowRunList = NonEmptyWorkflowList;
+
+export type WorkflowRunProgressEvent = {
+  readonly currentStep?: string;
+  readonly lastEvent?: unknown;
+};
 
 type InferRunWorkflowInput<TWorkflow extends WorkflowRunTarget> =
   TWorkflow extends WorkflowRunList ? unknown : InferWorkflowInput<TWorkflow>;
@@ -253,6 +285,7 @@ type BaseRunWorkflowOptions<TWorkflow extends WorkflowRunTarget> = {
   timeout?: string | number;
   signal?: AbortSignal;
   tools?: import("./tool-registry.js").ToolRegistry;
+  mcp?: HarnessMcpConfig;
   bash?: BashCapabilities;
   maxAttempts?: number;
   maxOuterCycles?: number;
@@ -263,6 +296,11 @@ type BaseRunWorkflowOptions<TWorkflow extends WorkflowRunTarget> = {
   /** Free-form tags for filtering in the trace store. */
   tags?: readonly string[];
   workflowVersionReuseStrategy?: WorkflowVersionReuseStrategy;
+  /**
+   * Receives step lifecycle progress after runtime StepScheduled,
+   * StepAttemptStarted, StepFailed, and StepCompleted events are recorded.
+   */
+  progress?: (event: WorkflowRunProgressEvent) => void | Promise<void>;
   /**
    * Runtime tool-call policy for the model (allow/deny/ask over tool names).
    * Governs the orchestrator's own tool calls; every sub-run inherits the
@@ -278,6 +316,12 @@ type SingleRunWorkflowOptions<TWorkflow extends AnyAuthoredWorkflow> = BaseRunWo
 };
 
 type MultiRunWorkflowOptions<TWorkflows extends WorkflowRunList> = BaseRunWorkflowOptions<TWorkflows> & {
+  /**
+   * @deprecated Passing an array of workflows plus an `orchestrator` config selects the
+   * deprecated orchestrator composition surface (`plan_workflow` / `run_workflow` /
+   * `start_workflow`). Compose with `asHarnessWorkflow` + `createHarness({ workflows })` instead.
+   * `runWorkflow` with a single workflow is not deprecated.
+   */
   orchestrator: OrchestratorConfig;
 };
 
@@ -292,6 +336,7 @@ export type RuntimeOptions = {
   world?: LocalWorld;
   plugins?: unknown[];
   skills?: unknown[];
+  mcp?: HarnessMcpConfig;
 };
 
 type WorkflowDefinitionInput = {
@@ -449,6 +494,183 @@ export function createLittleWorkflow<const TDefinition extends WorkflowDefinitio
   WorkflowTypeBrand<InferDefinitionInput<TDefinition>, InferDefinitionOutput<TDefinition>>;
 export function createLittleWorkflow(definition: WorkflowDefinitionInput): WorkflowDefinitionInput {
   return definition;
+}
+
+export type DefineWorkflowInput = {
+  readonly id: string;
+  readonly description?: string;
+  readonly label?: string;
+  /** A schema for the workflow's input (mapped onto `inputSchema`). */
+  readonly input?: unknown;
+  /** A plain schema (array/object/text inferred) or an explicit `output.*` mode. */
+  readonly output?: unknown;
+  /** A single AI-SDK model for the worker(s); wrapped into a one-slot `models` tuple. */
+  readonly model: unknown;
+  /** Optional planner override: a bare model (lifted into a PlannerConfig) or a full PlannerConfig. */
+  readonly planner?: unknown;
+  /** Inline tools keyed by name; built into a registry, names exposed via `globalTools`. */
+  readonly tools?: Record<string, AiSdkTool>;
+  readonly worker?: WorkerConfig;
+  readonly memory?: MemoryConfig;
+  readonly bash?: BashCapabilities;
+};
+
+const inlineToolRegistryByWorkflow = new WeakMap<object, ToolRegistry>();
+
+/** The tool registry built from a `defineWorkflow` definition's inline `tools`, if any. */
+export function inlineToolRegistryFor(workflow: object): ToolRegistry | undefined {
+  return inlineToolRegistryByWorkflow.get(workflow);
+}
+
+/** A workflow authored via {@link defineWorkflow}: the full definition plus a typed `run` method. */
+export type DefinedWorkflow<TInput = unknown, TOutput = unknown> = WorkflowDefinition<TInput, TOutput> & {
+  /** Run this workflow against a typed input, defaulting the world and inline tool registry. */
+  run(input: TInput, options?: ErgonomicRunWorkflowOptions): Promise<RunResult<TOutput>>;
+};
+
+type DefineWorkflowInputOf<TDefinition> = TDefinition extends { readonly input: infer TInputSchema }
+  ? InferSchemaInput<TInputSchema>
+  : unknown;
+
+type DefineWorkflowOutputOf<TDefinition> = TDefinition extends { readonly output: infer TOutputValue }
+  ? TOutputValue extends { readonly kind: string }
+    ? InferOutputMode<TOutputValue>
+    : InferSchemaOutput<TOutputValue>
+  : unknown;
+
+/**
+ * Ergonomic, eve-style front door over {@link createLittleWorkflow}: a single `model`,
+ * plain `input`/`output` schemas, and inline `tools` are normalized into the
+ * fully-specified shape the runtime already expects (a `models` tuple, a synthesized
+ * `planner`, an inferred `OutputMode`, and `globalTools`). The input/output schema types
+ * flow through to the brand, so `runWorkflow(def, input).output` is fully typed. The engine
+ * is unchanged.
+ */
+export function defineWorkflow<const TDefinition extends DefineWorkflowInput>(
+  options: TDefinition,
+): DefinedWorkflow<DefineWorkflowInputOf<TDefinition>, DefineWorkflowOutputOf<TDefinition>> {
+  const registry = options.tools === undefined ? undefined : createToolRegistry(options.tools);
+  const normalized: WorkflowDefinitionInput = {
+    id: options.id,
+    ...(options.description === undefined ? {} : { description: options.description }),
+    ...(options.label === undefined ? {} : { label: options.label }),
+    ...(options.input === undefined ? {} : { inputSchema: options.input }),
+    ...(options.output === undefined ? {} : { output: inferOutputMode(options.output) }),
+    models: [model(options.model)] as readonly [ModelSlot, ...ModelSlot[]],
+    planner: normalizePlanner(options),
+    ...(options.worker === undefined ? {} : { worker: options.worker }),
+    ...(options.memory === undefined ? {} : { memory: options.memory }),
+    ...(options.bash === undefined ? {} : { bash: options.bash }),
+    ...(registry === undefined ? {} : { globalTools: registry.names() }),
+  };
+  const workflow = createLittleWorkflow(normalized);
+  if (registry !== undefined) {
+    inlineToolRegistryByWorkflow.set(workflow as object, registry);
+  }
+  return Object.assign(workflow, {
+    run(input: unknown, runOptions?: ErgonomicRunWorkflowOptions) {
+      return runWorkflowCore(
+        buildRunWorkflowOptions(workflow as AnyAuthoredWorkflow, input as never, runOptions),
+      );
+    },
+  }) as unknown as DefinedWorkflow<
+    DefineWorkflowInputOf<TDefinition>,
+    DefineWorkflowOutputOf<TDefinition>
+  >;
+}
+
+function normalizePlanner(options: DefineWorkflowInput): PlannerConfig {
+  if (isPlannerConfig(options.planner)) {
+    return options.planner;
+  }
+  return { model: options.planner ?? options.model };
+}
+
+function isPlannerConfig(value: unknown): value is PlannerConfig {
+  return typeof value === "object" && value !== null && "model" in value;
+}
+
+function inferOutputMode(value: unknown): LooseOutputModeInput {
+  if (isOutputModeInput(value)) {
+    return value;
+  }
+  const descriptor = normalizeSchema(value);
+  if (typeof descriptor === "object" && descriptor !== null) {
+    const type = (descriptor as { readonly type?: unknown }).type;
+    if (type === "array") {
+      const items = (descriptor as { readonly items?: unknown }).items;
+      return outputBuilder.array({ element: (items === undefined ? true : items) as never });
+    }
+    if (type === "string") {
+      return outputBuilder.text();
+    }
+    if (type === "object") {
+      return outputBuilder.object({ schema: descriptor as never });
+    }
+  }
+  return outputBuilder.object({ schema: descriptor as never });
+}
+
+function isOutputModeInput(value: unknown): value is LooseOutputModeInput {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    typeof (value as { readonly kind?: unknown }).kind === "string"
+  );
+}
+
+/** Ergonomic `runWorkflow(def, input, opts?)` options: everything but the implied workflow/input, with an optional world. */
+export type ErgonomicRunWorkflowOptions = Omit<
+  RunWorkflowOptions<AnyAuthoredWorkflow>,
+  "workflows" | "input" | "world"
+> & { readonly world?: LocalWorld };
+
+/** Build the runtime's options object for the ergonomic two-arg `runWorkflow(def, input)` form. */
+export function buildRunWorkflowOptions<TWorkflow extends AnyAuthoredWorkflow>(
+  workflow: TWorkflow,
+  input: InferWorkflowInput<TWorkflow>,
+  options?: ErgonomicRunWorkflowOptions,
+): RunWorkflowOptions<TWorkflow> {
+  const { world, tools, ...rest } = options ?? {};
+  const resolvedTools = tools ?? inlineToolRegistryFor(workflow);
+  return {
+    world: world ?? localWorld(),
+    workflows: workflow,
+    input,
+    ...(resolvedTools === undefined ? {} : { tools: resolvedTools }),
+    ...rest,
+  } as RunWorkflowOptions<TWorkflow>;
+}
+
+/**
+ * Run a workflow. Accepts the power-user options object **or** the ergonomic
+ * `runWorkflow(def, input, opts?)` form (defaults the world + inline tool registry).
+ */
+export async function runWorkflow<TWorkflow extends WorkflowRunTarget = WorkflowRunTarget>(
+  options: RunWorkflowOptions<TWorkflow>,
+): Promise<RunResult<InferWorkflowOutput<TWorkflow>>>;
+export async function runWorkflow<TWorkflow extends AnyAuthoredWorkflow>(
+  workflow: TWorkflow,
+  input: InferWorkflowInput<TWorkflow>,
+  options?: ErgonomicRunWorkflowOptions,
+): Promise<RunResult<InferWorkflowOutput<TWorkflow>>>;
+export async function runWorkflow(
+  optionsOrWorkflow: RunWorkflowOptions<WorkflowRunTarget> | AnyAuthoredWorkflow,
+  input?: unknown,
+  options?: ErgonomicRunWorkflowOptions,
+): Promise<RunResult<unknown>> {
+  if (isRunWorkflowOptionsObject(optionsOrWorkflow)) {
+    return runWorkflowCore<WorkflowRunTarget>(optionsOrWorkflow);
+  }
+  return runWorkflowCore(
+    buildRunWorkflowOptions(optionsOrWorkflow, input as never, options),
+  );
+}
+
+function isRunWorkflowOptionsObject(
+  value: RunWorkflowOptions<WorkflowRunTarget> | AnyAuthoredWorkflow,
+): value is RunWorkflowOptions<WorkflowRunTarget> {
+  return typeof value === "object" && value !== null && "workflows" in value;
 }
 
 export function model<const TModel = unknown>(

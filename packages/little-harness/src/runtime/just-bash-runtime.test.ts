@@ -4,12 +4,17 @@ import { tool } from "ai";
 import * as path from "node:path";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
-import { localHost } from "../local-host/index.js";
+import { localHost, localSessionWorkspace } from "../local-host/index.js";
 import { resolveLocalHostPaths } from "../local-host/paths.js";
 import { LocalSessionStore, type LocalHarnessSession } from "../local-host/session-store.js";
 import { withTempDir } from "../test/temp.js";
 import { resolveTraceOptions } from "../trace/options.js";
-import { createJustBashRuntime } from "./just-bash-runtime.js";
+import {
+  bashOptionsForRuntime,
+  buildWorkspaceFs,
+  createJustBashRuntime,
+  defenseInDepthForAdapter,
+} from "./just-bash-runtime.js";
 
 describe("createJustBashRuntime", () => {
   it("runs shell commands against /session and /artifacts", async () => {
@@ -19,7 +24,7 @@ describe("createJustBashRuntime", () => {
       });
       await session.files.writeText("/session/input.txt", "hello");
 
-      const runtime = await createJustBashRuntime({ session, files: session.files });
+      const runtime = await createJustBashRuntime({ workspace: localSessionWorkspace(session), files: session.files });
       const shell = runtime.shellTool();
       const result = await (shell as any).execute(
         { command: "cat /session/input.txt > /artifacts/out.txt" },
@@ -37,7 +42,7 @@ describe("createJustBashRuntime", () => {
         id: "chat",
       });
 
-      const runtime = await createJustBashRuntime({ session, files: session.files });
+      const runtime = await createJustBashRuntime({ workspace: localSessionWorkspace(session), files: session.files });
       const shell = runtime.shellTool();
       const result = await (shell as any).execute({ command: "echo nope > /tmp/out.txt" }, {});
 
@@ -55,7 +60,7 @@ describe("createJustBashRuntime", () => {
       await session.files.writeText("/persistent/work/.keep", "");
       session.setReadOnlyPersistentDirs(["/persistent/knowledge/"]);
 
-      const runtime = await createJustBashRuntime({ session, files: session.files });
+      const runtime = await createJustBashRuntime({ workspace: localSessionWorkspace(session), files: session.files });
       const shell = runtime.shellTool();
       const read = await (shell as any).execute({ command: "cat /persistent/knowledge/source.txt" }, {});
       const write = await (shell as any).execute(
@@ -83,7 +88,7 @@ describe("createJustBashRuntime", () => {
       const events: any[] = [];
 
       const runtime = await createJustBashRuntime({
-        session,
+        workspace: localSessionWorkspace(session),
         files: session.files,
         traceOptions: resolveTraceOptions(
           { fileDiffs: { maxInlineBytes: 24, maxBytesToDiff: 4096 } },
@@ -117,7 +122,7 @@ describe("createJustBashRuntime", () => {
         id: "chat",
       });
 
-      const runtime = await createJustBashRuntime({ session, files: session.files });
+      const runtime = await createJustBashRuntime({ workspace: localSessionWorkspace(session), files: session.files });
       const shell = runtime.shellTool();
       const result = await (shell as any).execute({ command: "cat /skills/new.txt" }, {});
 
@@ -134,7 +139,7 @@ describe("createJustBashRuntime", () => {
       await mkdir(skillDir, { recursive: true });
       await writeFile(path.join(skillDir, "SKILL.md"), "remote skill", "utf8");
 
-      const runtime = await createJustBashRuntime({ session, files: session.files });
+      const runtime = await createJustBashRuntime({ workspace: localSessionWorkspace(session), files: session.files });
       const shell = runtime.shellTool();
       const read = await (shell as any).execute({ command: "cat /.agents/skills/remote/SKILL.md" }, {});
       const write = await (shell as any).execute(
@@ -156,7 +161,7 @@ describe("createJustBashRuntime", () => {
       await mkdir(skillDir, { recursive: true });
       await writeFile(path.join(skillDir, "SKILL.md"), "relative remote skill", "utf8");
 
-      const runtime = await createJustBashRuntime({ session, files: session.files });
+      const runtime = await createJustBashRuntime({ workspace: localSessionWorkspace(session), files: session.files });
       const shell = runtime.shellTool();
       const read = await (shell as any).execute({
         command: "cat .agents/skills/remote/SKILL.md && echo working > note.txt",
@@ -164,6 +169,28 @@ describe("createJustBashRuntime", () => {
 
       expect(read).toMatchObject({ exitCode: 0, stdout: "relative remote skill" });
       expect((await session.files.read("/session/note.txt")).text()).toBe("working\n");
+    });
+  });
+
+  it("hardens the subprocess adapter and only the subprocess adapter", async () => {
+    expect(defenseInDepthForAdapter("subprocess")).toBe(true);
+    // Not an oversight: the layer patches process-wide globals, so the in-process adapter
+    // opts out of a just-bash default that would otherwise reach the embedding host.
+    expect(defenseInDepthForAdapter("in-process")).toBe(false);
+
+    await withTempDir(async (dir) => {
+      const session = await new LocalSessionStore(
+        resolveLocalHostPaths({ dataDir: dir }, dir),
+      ).getOrCreate({ id: "adapter-options" });
+      const fs = await buildWorkspaceFs(localSessionWorkspace(session), []);
+      const optionsFor = (adapter: "in-process" | "subprocess") =>
+        bashOptionsForRuntime(fs, "/session", undefined, {
+          javascript: true,
+          defenseInDepth: defenseInDepthForAdapter(adapter),
+        });
+
+      expect(optionsFor("subprocess").defenseInDepth).toBe(true);
+      expect(optionsFor("in-process").defenseInDepth).toBe(false);
     });
   });
 
@@ -378,7 +405,7 @@ describe("createJustBashRuntime", () => {
       const events: any[] = [];
 
       const runtime = await createJustBashRuntime({
-        session,
+        workspace: localSessionWorkspace(session),
         files: session.files,
         emit: async (event) => {
           events.push(event);

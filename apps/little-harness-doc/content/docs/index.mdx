@@ -1,11 +1,11 @@
 ---
 title: What Little Harness Is
-description: A proposed zero-config managed agent runtime for tools, skills, files, traces, and isolated sessions.
+description: A zero-config agent runtime for tools, skills, files, traces, and isolated sessions.
 ---
 
-Little Harness is a proposed managed runtime for apps that need agents to use tools, skills, files, and scripts without making the developer design the sandbox, storage, artifact, or tracing layer first.
+Little Harness is an agent runtime for apps that need agents to use tools, skills, files, and scripts without making the developer design the sandbox, storage, artifact, or tracing layer first.
 
-The developer-facing contract should stay small: provide instructions, tools, optional skills, and optional Persistent Dirs. Little Harness creates the session workspace, isolates it from other sessions, stores large outputs as artifacts, records a trace, and returns a result.
+The developer-facing contract stays small: provide instructions, tools, optional skills, optional workflows, and optional Persistent Dirs. Little Harness creates the session workspace, isolates it from other sessions, stores large outputs as artifacts, records a trace, and returns a result. A `workflows` option lets the agent trigger a Little Workflow as a typed tool.
 
 ```txt
 app request
@@ -19,7 +19,7 @@ app request
 
 Little Harness is:
 
-- a managed agent runtime
+- a local-first agent runtime
 - an isolated session workspace
 - a tool and skill harness
 - an artifact-first file surface
@@ -36,11 +36,9 @@ Little Harness is not:
 
 ## Start Here
 
-- [v0.1.0-alpha](/docs/v0.1.0-alpha) — proposed first developer API and local runtime shape
-- [Developer Guide](/docs/v0.1.0-alpha/quickstart) — tools, skills, artifacts, Persistent Dirs, and after-turn commits
-- [Core Mental Model](/docs/v0.1.0-alpha/mental-model) — the concepts behind sessions, files, tools, persistence, and traces
-- [Runtime Overview](/docs/v0.1.0-alpha/runtime) — the proposed just-bash-backed local runtime
-- [v0.1.0-beta](/docs/v0.1.0-beta) — planned SDK polish and hosted/runtime adapter refinements
-- [v0.1.0](/docs/v0.1.0) — planned stable local/self-hosted runtime
-- [v0.2.0](/docs/v0.2.0) — planned scale-out runtime and adapters
-- [v1.0.0](/docs/v1.0.0) — planned production control plane
+- [v0.1.0-alpha](/docs/v0.1.0-alpha) — the alpha developer API and local runtime (currently `0.2.0-alpha.0` on npm)
+- [Getting Started](/docs/v0.1.0-alpha/getting-started) — scaffold an agent workspace and chat with it from the CLI in minutes
+- [Embedding in Your App](/docs/v0.1.0-alpha/quickstart) — tools, skills, artifacts, Persistent Dirs, and after-turn commits
+- [Foundations](/docs/v0.1.0-alpha/foundations) — the concepts behind sessions, files, tools, persistence, and traces
+- [Runtime Overview](/docs/v0.1.0-alpha/runtime) — the just-bash-backed local runtime
+- [Roadmap](/docs/v0.1.0-alpha/roadmap) — where Little Harness goes after alpha

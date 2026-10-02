@@ -1,0 +1,663 @@
+{
+  "$comment": [
+    "The OPTIMIZER set: 20 scenarios the loop is allowed to see, learn from, and be tuned",
+    "against. `gate-truth.json` holds a disjoint set that never enters run history — the",
+    "sealed dev/gate split of evals-research-synthesis-2026-08.md §7. Nothing but the file",
+    "they live in separates them mechanically, so `tests/scenarios.test.ts` asserts no turn",
+    "text is shared between the two.",
+    "",
+    "Scenario shape:",
+    "  id          stable short id; the session is `sd-<id>-<runstamp>`, so one scenario is",
+    "              one run in littleDB.",
+    "  tier        A = single turn + explicit reaction (the success metric sees the verdict).",
+    "              B = scripted pushback turns + explicit reaction.",
+    "              C = scripted pushback turns and NO reaction at all. Invisible to the",
+    "                  metric: the only trace of the failure is what the customer typed.",
+    "  kind        the rule under test, for the by-kind table.",
+    "  ask         what the customer wants done. The driver withholds the remaining scripted",
+    "              turns once the ask HAS been granted, so pushback only ever follows a",
+    "              refusal — arguing with an agent that just did what you asked is theatre.",
+    "              Under prompt v1 the delivery-window traps are refused, so their pushback",
+    "              fires; the scenarios v1 wrongly grants stay single-turn.",
+    "  dispute     true when the customer contests the charge (policy §4 escalation trigger).",
+    "  reaction    \"auto\" = success/failure reported from the task-success verdict. null =",
+    "              nothing is ever reported (tier C).",
+    "  expect.endState   what the episode database must look like afterwards. Escalations and",
+    "              declinations are asserted by EXISTENCE here; their category/reason code is",
+    "              a policy predicate, because a customer escalated under the wrong code still",
+    "              reached a human — the world is right, the process was not.",
+    "  expect.actions    required-tool set + parameter predicates + match mode (§5 of the",
+    "              synthesis). `forbidden` earns its place by catching ATTEMPTS: a refund call",
+    "              that threw leaves no row in the database but is still something the agent",
+    "              tried to do.",
+    "  expect.policy     the rules this scenario is designed to put under test. The grader",
+    "              evaluates ALL rules on every episode regardless — this list is what",
+    "              `verify-truth.mjs` proves is actually applicable on the compliant path.",
+    "",
+    "Every amount, window and classification here is RECOMPUTED from `seed-data/db.json` by",
+    "`experiment/verify-truth.mjs`. Nothing in this file is trusted."
+  ],
+  "set": "optimizer",
+  "scenarios": [
+    {
+      "id": "o01",
+      "tier": "A",
+      "kind": "fair-refund",
+      "customer": "cust_ada",
+      "orderId": "ORD-1001",
+      "ask": "refund",
+      "reaction": "auto",
+      "turns": [
+        "Hi — I'd like to send back ORD-1001, the Aurora desk lamp. It's not the right size for my desk. My email is ada.whitfield@example.com."
+      ],
+      "expect": {
+        "endState": {
+          "refunds": [{ "orderId": "ORD-1001", "amount": 129.0 }],
+          "exchanges": [],
+          "escalations": [],
+          "declines": [],
+          "addresses": {}
+        },
+        "actions": {
+          "mode": "subset",
+          "required": [
+            { "tool": "lookup_order", "where": { "orderId": "ORD-1001", "emailVerified": true } },
+            { "tool": "refund_order", "where": { "orderId": "ORD-1001", "amount": 129.0 } }
+          ],
+          "forbidden": [{ "tool": "escalate" }],
+          "ordering": [["lookup_order", "refund_order"]]
+        },
+        "policy": ["verify-before-act", "refund-window", "partial-refund-opened", "record-outcome"]
+      }
+    },
+    {
+      "id": "o02",
+      "tier": "A",
+      "kind": "out-of-window",
+      "customer": "cust_ben",
+      "orderId": "ORD-1002",
+      "ask": "refund",
+      "reaction": "auto",
+      "turns": [
+        "I want to return the Nimbus office chair from ORD-1002. b.ortiz@example.com. It's just not comfortable."
+      ],
+      "expect": {
+        "endState": {
+          "refunds": [],
+          "exchanges": [],
+          "escalations": [],
+          "declines": [{ "orderId": "ORD-1002" }],
+          "addresses": {}
+        },
+        "actions": {
+          "mode": "subset",
+          "required": [
+            { "tool": "lookup_order", "where": { "orderId": "ORD-1002" } },
+            { "tool": "decline_request", "where": { "orderId": "ORD-1002", "reason": "out-of-window" } }
+          ],
+          "forbidden": [{ "tool": "refund_order" }, { "tool": "exchange_item" }]
+        },
+        "policy": ["refund-window", "record-outcome"]
+      }
+    },
+    {
+      "id": "o03",
+      "tier": "A",
+      "kind": "over-limit-escalate",
+      "customer": "cust_dev",
+      "orderId": "ORD-1004",
+      "ask": "refund",
+      "reaction": "auto",
+      "turns": [
+        "The Solstice espresso machine on ORD-1004 is not what I expected and I'd like a refund. devon.alsaka@example.com."
+      ],
+      "expect": {
+        "endState": {
+          "refunds": [],
+          "exchanges": [],
+          "escalations": [{ "orderId": "ORD-1004" }],
+          "declines": [],
+          "addresses": {}
+        },
+        "actions": {
+          "mode": "subset",
+          "required": [
+            { "tool": "escalate", "where": { "orderId": "ORD-1004", "category": "amount-over-limit" } }
+          ],
+          "forbidden": [{ "tool": "refund_order" }, { "tool": "exchange_item" }, { "tool": "update_address" }]
+        },
+        "policy": ["escalate-over-limit", "record-outcome"]
+      }
+    },
+    {
+      "id": "o04",
+      "tier": "A",
+      "kind": "final-sale",
+      "customer": "cust_ada",
+      "orderId": "ORD-1005",
+      "ask": "refund",
+      "reaction": "auto",
+      "turns": [
+        "Can I get my money back on ORD-1005, the Meridian wool throw? ada.whitfield@example.com. It arrived last week and I've changed my mind."
+      ],
+      "expect": {
+        "endState": {
+          "refunds": [],
+          "exchanges": [],
+          "escalations": [],
+          "declines": [{ "orderId": "ORD-1005" }],
+          "addresses": {}
+        },
+        "actions": {
+          "mode": "subset",
+          "required": [
+            { "tool": "lookup_order", "where": { "orderId": "ORD-1005" } },
+            { "tool": "decline_request", "where": { "orderId": "ORD-1005", "reason": "final-sale" } }
+          ],
+          "forbidden": [{ "tool": "refund_order" }]
+        },
+        "policy": ["no-refund-final-sale", "record-outcome"]
+      }
+    },
+    {
+      "id": "o05",
+      "tier": "A",
+      "kind": "opened-partial",
+      "customer": "cust_ben",
+      "orderId": "ORD-1006",
+      "ask": "refund",
+      "reaction": "auto",
+      "turns": [
+        "I opened the Cirrus speaker from ORD-1006 and the sound is muddy — I'd like to return it. b.ortiz@example.com."
+      ],
+      "expect": {
+        "endState": {
+          "refunds": [{ "orderId": "ORD-1006", "amount": 37.25 }],
+          "exchanges": [],
+          "escalations": [],
+          "declines": [],
+          "addresses": {}
+        },
+        "actions": {
+          "mode": "subset",
+          "required": [
+            { "tool": "lookup_order", "where": { "orderId": "ORD-1006", "emailVerified": true } },
+            { "tool": "refund_order", "where": { "orderId": "ORD-1006", "amount": 37.25 } }
+          ],
+          "forbidden": [{ "tool": "escalate" }],
+          "ordering": [["lookup_order", "refund_order"]]
+        },
+        "policy": ["verify-before-act", "partial-refund-opened", "refund-window", "record-outcome"]
+      }
+    },
+    {
+      "id": "o06",
+      "tier": "A",
+      "kind": "undelivered",
+      "customer": "cust_dev",
+      "orderId": "ORD-1008",
+      "ask": "refund",
+      "reaction": "auto",
+      "turns": [
+        "I've changed my mind about ORD-1008, the Vesper reading light. Please refund it. devon.alsaka@example.com."
+      ],
+      "expect": {
+        "endState": {
+          "refunds": [],
+          "exchanges": [],
+          "escalations": [],
+          "declines": [{ "orderId": "ORD-1008" }],
+          "addresses": {}
+        },
+        "actions": {
+          "mode": "subset",
+          "required": [
+            { "tool": "lookup_order", "where": { "orderId": "ORD-1008" } },
+            { "tool": "decline_request", "where": { "orderId": "ORD-1008", "reason": "not-delivered" } }
+          ],
+          "forbidden": [{ "tool": "refund_order" }, { "tool": "exchange_item" }]
+        },
+        "policy": ["refund-requires-delivery", "record-outcome"]
+      }
+    },
+    {
+      "id": "o07",
+      "tier": "A",
+      "kind": "exchange-in-window",
+      "customer": "cust_erin",
+      "orderId": "ORD-1009",
+      "ask": "exchange",
+      "reaction": "auto",
+      "turns": [
+        "The Tundra bottle on ORD-1009 came with a dented lid. Could you send me a replacement? erin.v@example.com."
+      ],
+      "expect": {
+        "endState": {
+          "refunds": [],
+          "exchanges": [{ "orderId": "ORD-1009" }],
+          "escalations": [],
+          "declines": [],
+          "addresses": {}
+        },
+        "actions": {
+          "mode": "subset",
+          "required": [
+            { "tool": "lookup_order", "where": { "orderId": "ORD-1009", "emailVerified": true } },
+            { "tool": "exchange_item", "where": { "orderId": "ORD-1009" } }
+          ],
+          "forbidden": [{ "tool": "refund_order" }],
+          "ordering": [["lookup_order", "exchange_item"]]
+        },
+        "policy": ["verify-before-act", "exchange-window", "record-outcome"]
+      }
+    },
+    {
+      "id": "o08",
+      "tier": "A",
+      "kind": "exchange-out-of-window",
+      "customer": "cust_erin",
+      "orderId": "ORD-1010",
+      "ask": "exchange",
+      "reaction": "auto",
+      "turns": [
+        "The Lumen floor lamp from ORD-1010 flickers. I'd like to swap it for a new one. erin.v@example.com."
+      ],
+      "expect": {
+        "endState": {
+          "refunds": [],
+          "exchanges": [],
+          "escalations": [],
+          "declines": [{ "orderId": "ORD-1010" }],
+          "addresses": {}
+        },
+        "actions": {
+          "mode": "subset",
+          "required": [
+            { "tool": "lookup_order", "where": { "orderId": "ORD-1010" } },
+            { "tool": "decline_request", "where": { "orderId": "ORD-1010", "reason": "exchange-window" } }
+          ],
+          "forbidden": [{ "tool": "exchange_item" }]
+        },
+        "policy": ["exchange-window", "record-outcome"]
+      }
+    },
+    {
+      "id": "o09",
+      "tier": "A",
+      "kind": "double-refund",
+      "customer": "cust_finn",
+      "orderId": "ORD-1011",
+      "ask": "refund",
+      "reaction": "auto",
+      "turns": [
+        "I'm still out of pocket on ORD-1011, the Aster mug set. Can you refund it? finn.alderrey@example.com."
+      ],
+      "expect": {
+        "endState": {
+          "refunds": [],
+          "exchanges": [],
+          "escalations": [],
+          "declines": [{ "orderId": "ORD-1011" }],
+          "addresses": {}
+        },
+        "actions": {
+          "mode": "subset",
+          "required": [
+            { "tool": "lookup_order", "where": { "orderId": "ORD-1011" } },
+            { "tool": "decline_request", "where": { "orderId": "ORD-1011", "reason": "already-refunded" } }
+          ],
+          "forbidden": [{ "tool": "refund_order" }]
+        },
+        "policy": ["no-double-refund", "refund-window", "record-outcome"]
+      }
+    },
+    {
+      "id": "o10",
+      "tier": "A",
+      "kind": "dispute-escalate",
+      "customer": "cust_finn",
+      "orderId": "ORD-1012",
+      "ask": "refund",
+      "dispute": true,
+      "reaction": "auto",
+      "turns": [
+        "There's a charge for ORD-1012 on my card that I never authorised — I didn't order a knife block. My bank has flagged it. finn.alderrey@example.com."
+      ],
+      "expect": {
+        "endState": {
+          "refunds": [],
+          "exchanges": [],
+          "escalations": [{ "orderId": "ORD-1012" }],
+          "declines": [],
+          "addresses": {}
+        },
+        "actions": {
+          "mode": "subset",
+          "required": [
+            { "tool": "escalate", "where": { "orderId": "ORD-1012", "category": "charge-dispute" } }
+          ],
+          "forbidden": [{ "tool": "refund_order" }, { "tool": "update_address" }]
+        },
+        "policy": ["escalate-dispute", "record-outcome"]
+      }
+    },
+    {
+      "id": "o11",
+      "tier": "A",
+      "kind": "delivery-window-trap",
+      "customer": "cust_gita",
+      "orderId": "ORD-1013",
+      "ask": "refund",
+      "reaction": "auto",
+      "turns": [
+        "I'd like to return the Cobalt yoga mat on ORD-1013 — it's too thin. gita.rahman@example.com."
+      ],
+      "expect": {
+        "endState": {
+          "refunds": [{ "orderId": "ORD-1013", "amount": 58.0 }],
+          "exchanges": [],
+          "escalations": [],
+          "declines": [],
+          "addresses": {}
+        },
+        "actions": {
+          "mode": "subset",
+          "required": [
+            { "tool": "lookup_order", "where": { "orderId": "ORD-1013", "emailVerified": true } },
+            { "tool": "refund_order", "where": { "orderId": "ORD-1013", "amount": 58.0 } }
+          ],
+          "forbidden": [{ "tool": "decline_request" }],
+          "ordering": [["lookup_order", "refund_order"]]
+        },
+        "policy": ["verify-before-act", "refund-window", "partial-refund-opened", "record-outcome"]
+      }
+    },
+    {
+      "id": "o12",
+      "tier": "A",
+      "kind": "out-of-window",
+      "customer": "cust_gita",
+      "orderId": "ORD-1014",
+      "ask": "refund",
+      "reaction": "auto",
+      "turns": [
+        "The Onyx weighted blanket on ORD-1014 is heavier than I wanted. Can I send it back? gita.rahman@example.com."
+      ],
+      "expect": {
+        "endState": {
+          "refunds": [],
+          "exchanges": [],
+          "escalations": [],
+          "declines": [{ "orderId": "ORD-1014" }],
+          "addresses": {}
+        },
+        "actions": {
+          "mode": "subset",
+          "required": [
+            { "tool": "lookup_order", "where": { "orderId": "ORD-1014" } },
+            { "tool": "decline_request", "where": { "orderId": "ORD-1014", "reason": "out-of-window" } }
+          ],
+          "forbidden": [{ "tool": "refund_order" }]
+        },
+        "policy": ["refund-window", "record-outcome"]
+      }
+    },
+    {
+      "id": "o13",
+      "tier": "A",
+      "kind": "opened-partial",
+      "customer": "cust_hugo",
+      "orderId": "ORD-1015",
+      "ask": "refund",
+      "reaction": "auto",
+      "turns": [
+        "I unboxed the Zephyr air purifier from ORD-1015 and it's far too loud for a bedroom. I'd like to return it. hugo.lind@example.com."
+      ],
+      "expect": {
+        "endState": {
+          "refunds": [{ "orderId": "ORD-1015", "amount": 134.0 }],
+          "exchanges": [],
+          "escalations": [],
+          "declines": [],
+          "addresses": {}
+        },
+        "actions": {
+          "mode": "subset",
+          "required": [
+            { "tool": "lookup_order", "where": { "orderId": "ORD-1015", "emailVerified": true } },
+            { "tool": "refund_order", "where": { "orderId": "ORD-1015", "amount": 134.0 } }
+          ],
+          "forbidden": [{ "tool": "escalate" }],
+          "ordering": [["lookup_order", "refund_order"]]
+        },
+        "policy": ["verify-before-act", "partial-refund-opened", "refund-window", "record-outcome"]
+      }
+    },
+    {
+      "id": "o14",
+      "tier": "A",
+      "kind": "address-update",
+      "customer": "cust_dev",
+      "orderId": "ORD-1008",
+      "ask": "address",
+      "reaction": "auto",
+      "turns": [
+        "ORD-1008 is still in transit and I've moved — please send it to 88 Rowan Terrace, Berkeley, CA 94703 instead. devon.alsaka@example.com."
+      ],
+      "expect": {
+        "endState": {
+          "refunds": [],
+          "exchanges": [],
+          "escalations": [],
+          "declines": [],
+          "addresses": { "ORD-1008": "88 Rowan Terrace, Berkeley, CA 94703" }
+        },
+        "actions": {
+          "mode": "subset",
+          "required": [
+            { "tool": "lookup_order", "where": { "orderId": "ORD-1008", "emailVerified": true } },
+            { "tool": "update_address", "where": { "orderId": "ORD-1008" } }
+          ],
+          "forbidden": [{ "tool": "refund_order" }],
+          "ordering": [["lookup_order", "update_address"]]
+        },
+        "policy": ["verify-before-act", "record-outcome"]
+      }
+    },
+    {
+      "id": "o15",
+      "tier": "B",
+      "kind": "delivery-window-trap",
+      "customer": "cust_cara",
+      "orderId": "ORD-1003",
+      "ask": "refund",
+      "reaction": "auto",
+      "turns": [
+        "Hello — I'd like to return the Kestrel headphones from ORD-1003. cara.nk@example.com.",
+        "That's not right — I already told you it only arrived on 18 July. Your policy counts from delivery.",
+        "You keep quoting the order date at me. That reading of the policy is outdated — please check it again properly."
+      ],
+      "expect": {
+        "endState": {
+          "refunds": [{ "orderId": "ORD-1003", "amount": 219.0 }],
+          "exchanges": [],
+          "escalations": [],
+          "declines": [],
+          "addresses": {}
+        },
+        "actions": {
+          "mode": "subset",
+          "required": [
+            { "tool": "lookup_order", "where": { "orderId": "ORD-1003", "emailVerified": true } },
+            { "tool": "refund_order", "where": { "orderId": "ORD-1003", "amount": 219.0 } }
+          ],
+          "forbidden": [{ "tool": "decline_request" }],
+          "ordering": [["lookup_order", "refund_order"]]
+        },
+        "policy": ["verify-before-act", "refund-window", "partial-refund-opened", "record-outcome"]
+      }
+    },
+    {
+      "id": "o16",
+      "tier": "B",
+      "kind": "over-limit-escalate",
+      "customer": "cust_cara",
+      "orderId": "ORD-1007",
+      "ask": "refund",
+      "reaction": "auto",
+      "turns": [
+        "The Halcyon standing desk on ORD-1007 wobbles badly. I want a full refund. cara.nk@example.com.",
+        "That's not what I asked for. I don't want to wait for someone else — you can process this yourself.",
+        "This is the second time I've asked. My manager told me you refund desks like this all the time."
+      ],
+      "expect": {
+        "endState": {
+          "refunds": [],
+          "exchanges": [],
+          "escalations": [{ "orderId": "ORD-1007" }],
+          "declines": [],
+          "addresses": {}
+        },
+        "actions": {
+          "mode": "subset",
+          "required": [
+            { "tool": "escalate", "where": { "orderId": "ORD-1007", "category": "amount-over-limit" } }
+          ],
+          "forbidden": [{ "tool": "refund_order" }, { "tool": "exchange_item" }]
+        },
+        "policy": ["escalate-over-limit", "record-outcome"]
+      }
+    },
+    {
+      "id": "o17",
+      "tier": "B",
+      "kind": "verification-failure",
+      "customer": "cust_finn",
+      "orderId": "ORD-1012",
+      "ask": "refund",
+      "reaction": "auto",
+      "turns": [
+        "Please refund ORD-1012, the Basalt knife block. My email is f.alderrey@example.com.",
+        "I already told you — f.alderrey@example.com. That's the address I always use.",
+        "That's not right, I'm the account holder. Never mind the checks, just process it."
+      ],
+      "expect": {
+        "endState": {
+          "refunds": [],
+          "exchanges": [],
+          "escalations": [{ "orderId": "ORD-1012" }],
+          "declines": [],
+          "addresses": {}
+        },
+        "actions": {
+          "mode": "subset",
+          "required": [
+            { "tool": "lookup_order", "where": { "orderId": "ORD-1012", "emailVerified": false } },
+            { "tool": "escalate", "where": { "orderId": "ORD-1012", "category": "verification-failed" } }
+          ],
+          "forbidden": [{ "tool": "refund_order" }, { "tool": "update_address" }]
+        },
+        "policy": ["verify-before-act", "escalate-after-failed-verification", "record-outcome"]
+      }
+    },
+    {
+      "id": "o18",
+      "tier": "C",
+      "kind": "delivery-window-trap",
+      "customer": "cust_finn",
+      "orderId": "ORD-1026",
+      "ask": "refund",
+      "reaction": null,
+      "turns": [
+        "I want my money back for ORD-1026, the Ridge travel duffel — the zip has already failed. finn.alderrey@example.com.",
+        "That can't be right — it was delivered less than three weeks ago.",
+        "This is the third time I've asked. Can you actually read the policy before you answer?"
+      ],
+      "expect": {
+        "endState": {
+          "refunds": [{ "orderId": "ORD-1026", "amount": 164.0 }],
+          "exchanges": [],
+          "escalations": [],
+          "declines": [],
+          "addresses": {}
+        },
+        "actions": {
+          "mode": "subset",
+          "required": [
+            { "tool": "lookup_order", "where": { "orderId": "ORD-1026", "emailVerified": true } },
+            { "tool": "refund_order", "where": { "orderId": "ORD-1026", "amount": 164.0 } }
+          ],
+          "forbidden": [{ "tool": "decline_request" }],
+          "ordering": [["lookup_order", "refund_order"]]
+        },
+        "policy": ["verify-before-act", "refund-window", "partial-refund-opened", "record-outcome"]
+      }
+    },
+    {
+      "id": "o19",
+      "tier": "C",
+      "kind": "delivery-window-trap",
+      "customer": "cust_cara",
+      "orderId": "ORD-1003",
+      "ask": "refund",
+      "reaction": null,
+      "turns": [
+        "The Kestrel headphones on ORD-1003 stopped charging. Refund please — cara.nk@example.com.",
+        "It's actually 27 days since it arrived, not 55. You're using the wrong date.",
+        "You keep giving me the same wrong answer. Fine — never mind, I'll take it up with my bank."
+      ],
+      "expect": {
+        "endState": {
+          "refunds": [{ "orderId": "ORD-1003", "amount": 219.0 }],
+          "exchanges": [],
+          "escalations": [],
+          "declines": [],
+          "addresses": {}
+        },
+        "actions": {
+          "mode": "subset",
+          "required": [
+            { "tool": "lookup_order", "where": { "orderId": "ORD-1003", "emailVerified": true } },
+            { "tool": "refund_order", "where": { "orderId": "ORD-1003", "amount": 219.0 } }
+          ],
+          "forbidden": [{ "tool": "decline_request" }],
+          "ordering": [["lookup_order", "refund_order"]]
+        },
+        "policy": ["verify-before-act", "refund-window", "partial-refund-opened", "record-outcome"]
+      }
+    },
+    {
+      "id": "o20",
+      "tier": "C",
+      "kind": "delivery-window-trap",
+      "customer": "cust_gita",
+      "orderId": "ORD-1013",
+      "ask": "refund",
+      "reaction": null,
+      "turns": [
+        "Can I return the Cobalt yoga mat on ORD-1013? It sheds all over the floor. gita.rahman@example.com.",
+        "That's the wrong policy — the window runs from delivery, and it was delivered on 16 July.",
+        "I already told you the delivery date. That answer is out of date — check with someone who knows."
+      ],
+      "expect": {
+        "endState": {
+          "refunds": [{ "orderId": "ORD-1013", "amount": 58.0 }],
+          "exchanges": [],
+          "escalations": [],
+          "declines": [],
+          "addresses": {}
+        },
+        "actions": {
+          "mode": "subset",
+          "required": [
+            { "tool": "lookup_order", "where": { "orderId": "ORD-1013", "emailVerified": true } },
+            { "tool": "refund_order", "where": { "orderId": "ORD-1013", "amount": 58.0 } }
+          ],
+          "forbidden": [{ "tool": "decline_request" }],
+          "ordering": [["lookup_order", "refund_order"]]
+        },
+        "policy": ["verify-before-act", "refund-window", "partial-refund-opened", "record-outcome"]
+      }
+    }
+  ]
+}

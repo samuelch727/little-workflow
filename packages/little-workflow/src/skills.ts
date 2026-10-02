@@ -4,6 +4,7 @@ import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   resolveSkills as rawResolveHarnessSkills,
+  type SkillInput,
 } from "little-harness";
 import { sha256Digest } from "./canonical.js";
 import type { SkillDescriptor } from "./harness/types.js";
@@ -180,6 +181,17 @@ export async function resolveSkillsWithWarnings(
   options: ResolveSkillsOptions,
 ): Promise<ResolveSkillsWithWarningsResult> {
   return resolveSkillsInternal(skills, options, true);
+}
+
+export async function resolveHarnessSkillInputs(
+  inputs: readonly SkillInput[],
+  options: ResolveSkillsOptions,
+): Promise<readonly ResolvedSkillDescriptor[]> {
+  const resolved = await resolveSharedHarnessSkills(inputs as readonly HarnessSkillInput[], {
+    ...(options.skillMaxRisk === undefined ? {} : { skillMaxRisk: options.skillMaxRisk }),
+    ...(options.skillOidcToken === undefined ? {} : { skillOidcToken: options.skillOidcToken }),
+  });
+  return Promise.all(resolved.map((skill) => resolvedHarnessSkillDescriptor("mcp-gateway", skill, options)));
 }
 
 async function resolveSkillsInternal(

@@ -1,0 +1,50 @@
+{
+  "name": "@little-workflow/littledb",
+  "version": "0.1.0-alpha.2",
+  "private": true,
+  "description": "littledb client for little-workflow and little-harness: Tracing World + managed-config harness adapter.",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/samuelch727/little-workflow.git",
+    "directory": "packages/littledb-client"
+  },
+  "bugs": {
+    "url": "https://github.com/samuelch727/little-workflow/issues"
+  },
+  "homepage": "https://github.com/samuelch727/little-workflow/tree/main/packages/littledb-client#readme",
+  "keywords": [
+    "ai-sdk",
+    "agents",
+    "tracing",
+    "observability",
+    "littledb",
+    "workflow"
+  ],
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" },
+    "./harness": { "types": "./dist/harness/index.d.ts", "default": "./dist/harness/index.js" },
+    "./contract": { "types": "./dist/contract.d.ts", "default": "./dist/contract.js" }
+  },
+  "files": ["dist"],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "prepack": "pnpm run build",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "little-workflow": "workspace:*",
+    "little-harness": "workspace:*",
+    "zod": "^4.4.3"
+  },
+  "peerDependencies": { "ai": "^7.0.0" },
+  "devDependencies": { "ai": "^7.0.126", "@types/node": "^22.0.0", "typescript": "^6.0.0", "vitest": "^4.0.0" }
+}

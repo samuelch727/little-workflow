@@ -1,0 +1,72 @@
+---
+title: Using littledb
+description: Preview — durable trace storage and a viewer via the littledb Tracing World. Not yet available on npm.
+---
+
+> **Preview — not yet available.** `@little-workflow/littledb` is **not published to npm**, and it needs a littleDB trace engine that is not public. This page describes the adapter as it exists in the repository (`packages/littledb-client`) so you can see the API ahead of release. You cannot install it or point it at an engine today, so use the default [Local World](/docs/v0.1.0-alpha/running/local-world).
+
+littledb is an optional drop-in `World` for Little Workflow that tees every committed event to the littledb trace engine. The runtime stores events locally first (same durability guarantee as [Local World](/docs/v0.1.0-alpha/running/local-world)), then forwards them to the engine for indexed storage, query, and the littledb viewer.
+
+The embedded Local World is the default. littledb wraps it — swap one line and you get durable remote traces without changing anything else.
+
+## Install
+
+Not available yet. The package is private to the repository until the littleDB service is public; there is no npm package to install.
+
+## Use (preview)
+
+```ts
+import { runWorkflow } from "little-workflow";
+import { littleDB } from "@little-workflow/littledb";
+
+const world = littleDB({
+  dataDir: ".little-workflow",
+  engineUrl: "http://localhost:4200",
+});
+
+const result = await runWorkflow({
+  world,
+  workflows: myWorkflow,
+  input: myInput,
+  tools,
+});
+```
+
+### Options
+
+```ts
+interface LittleDbOptions {
+  dataDir: string;
+  engineUrl: string;
+  fetchImpl?: typeof fetch;
+}
+```
+
+- **`dataDir`** — root directory for local event storage. Passed through to the embedded Local World. Required.
+- **`engineUrl`** — base URL of the littledb trace engine (e.g. `http://localhost:4200` for a local instance). Required.
+- **`fetchImpl`** — optional custom `fetch` implementation. Defaults to the global `fetch`. Useful in environments that require custom TLS configuration or proxying.
+
+## What you get
+
+Every `appendEvent` call commits the event to the local SQLite store first, then tees a copy to the engine asynchronously. The tee is best-effort on each write; the engine is rebuildable from local storage via backfill, so a failed push never fails the run.
+
+With events in the engine you can:
+
+- **Query runs** — filter by time range, label, tags, status, and model via `world.listRuns()`.
+- **Load a trace** — retrieve all events for a run with `world.loadRun(runId)`, or load the full nested trace tree starting from a root run with `world.loadTraceTree(rootRunId)`.
+- **Search** — full-text and structured JSON search across event payloads via `world.search({ q, jsonKey, jsonValue })`.
+- **Viewer** — open the littledb viewer (served by the engine) to browse runs, inspect events, and compare traces visually.
+
+## Flushing the tee
+
+The tee drains asynchronously in the background. For scripts and tests where you want to ensure all events have been delivered to the engine before the process exits, call `flushTee()`:
+
+```ts
+await world.flushTee();
+```
+
+## Relation to Local World
+
+littledb wraps `localWorld()` internally. All Local World guarantees apply: events are committed durably to SQLite before the tee runs, replay works from local state if the engine is unreachable, and the `dataDir` layout is identical to a plain Local World. See [Local World](/docs/v0.1.0-alpha/running/local-world) for the full directory layout and durability semantics.
+
+littledb is optional. The open-source runtime works with the default Local World without it, and every feature on the other pages works without littledb.

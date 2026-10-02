@@ -127,7 +127,7 @@ describe("workflowHarness", () => {
     });
     expect(receivedOptions?.signal).toBe(signal);
     expect(receivedOptions?.abortSignal).toBe(signal);
-    expect(receivedOptions?.experimental_context).toBe(runtimeContext);
+    expect(receivedOptions?.context).toBe(runtimeContext);
     const started = events.find((event) => event.type === "harness.tool_call.started");
     expect(started?.payload.scope).toEqual({
       stepPath: "review[a].lookup",
@@ -230,6 +230,71 @@ describe("workflowHarness", () => {
     ).rejects.toThrow(/declined/i);
 
     expect(calls).toBe(0);
+  });
+
+  it("matches permission rules as globs over the tool name", async () => {
+    let calls = 0;
+    const harness = createWorkflowHarness();
+    const taskFor = (tool: string) => ({
+      kind: "execute_step" as const,
+      step: { id: tool, uses: "tool.call" as const, with: { tool } },
+      stepInput: { id: "1" },
+      stepContext: { stepPath: tool, visitIndex: 0 },
+    });
+    const tools = {
+      delete_record: {
+        execute: async () => {
+          calls += 1;
+          return { ok: true };
+        },
+      },
+      lookup: {
+        execute: async () => {
+          calls += 1;
+          return { ok: true };
+        },
+      },
+    };
+
+    // "delete_*" denies delete_record; the "*" allow rule does not override deny.
+    await expect(
+      harness.run(
+        taskFor("delete_record"),
+        workflowHarnessTestContext({
+          tools,
+          permissions: {
+            ruleset: [
+              { tool: "*", action: "allow" },
+              { tool: "delete_*", action: "deny" },
+            ],
+          },
+        }),
+      ),
+    ).rejects.toThrow(/denied/i);
+    expect(calls).toBe(0);
+
+    // A non-matching glob leaves other tools allowed.
+    const allowed = await harness.run(
+      taskFor("lookup"),
+      workflowHarnessTestContext({
+        tools,
+        permissions: { ruleset: [{ tool: "delete_*", action: "deny" }] },
+      }),
+    );
+    expect(allowed).toBeDefined();
+    expect(calls).toBe(1);
+
+    // "*" ask applies to every tool and fails closed without onAsk.
+    await expect(
+      harness.run(
+        taskFor("lookup"),
+        workflowHarnessTestContext({
+          tools,
+          permissions: { ruleset: [{ tool: "*", action: "ask" }] },
+        }),
+      ),
+    ).rejects.toThrow(/approval/i);
+    expect(calls).toBe(1);
   });
 
   it("records session failure without marking a failed step as succeeded", async () => {
@@ -405,9 +470,12 @@ describe("workflowHarness", () => {
     expect(events).toContainEqual(expect.objectContaining({ type: "harness.model.called", runId: "run_test" }));
     expect(events).toContainEqual(expect.objectContaining({ type: "harness.model.responded", runId: "run_test" }));
     expect(events.find((event) => event.type === "harness.session.completed")?.payload.usage).toEqual({
+      // Session rollup is token-only: cost is derived downstream from the model registry,
+      // which this package cannot see (little-workflow depends on it, not the reverse).
       inputTokens: 1,
       outputTokens: 1,
-      costUsd: 0,
+      cachedInputTokens: 0,
+      reasoningTokens: 0,
     });
   });
 
@@ -445,6 +513,101 @@ describe("workflowHarness", () => {
     expect(seenSystem).toContain("<description>Use for worker tasks.</description>");
     expect(seenSystem).toContain("<read>cat .agents/skills/worker-guide/SKILL.md</read>");
     expect(seenSystem?.match(/<available_skills>/gu)).toHaveLength(1);
+  });
+
+  it("surfaces step.with.outputRepairNote into the ai.generate model messages", async () => {
+    let seenMessages: unknown;
+    const harness = createWorkflowHarness({
+      aiLoop: {
+        generate: async ({ messages }) => {
+          seenMessages = messages;
+          return { output: { value: 42 } };
+        },
+      },
+    });
+
+    await harness.run(
+      {
+        kind: "execute_step",
+        step: {
+          id: "draft",
+          uses: "ai.generate",
+          with: {
+            model: "worker",
+            outputRepairNote: '[OUTPUT REPAIR] rejected; required schema: {"required":["value"]}',
+          },
+        },
+        stepInput: { prompt: "Draft." },
+        stepContext: { stepPath: "draft", visitIndex: 0 },
+      },
+      workflowHarnessTestContext({}),
+    );
+
+    // The repair note must reach the model — it is the entire point of self-repair.
+    const serialized = JSON.stringify(seenMessages);
+    expect(serialized).toContain("[OUTPUT REPAIR]");
+    expect(serialized).toContain("required");
+  });
+
+  it("does NOT offer workflow tools to a structured-output ai.generate step (so the model produces the object, not a tool call)", async () => {
+    let seenTools: Record<string, unknown> | undefined;
+    const harness = createWorkflowHarness({
+      aiLoop: {
+        generate: async ({ tools }) => {
+          seenTools = tools as Record<string, unknown>;
+          return { output: { value: 1 } };
+        },
+      },
+    });
+
+    await harness.run(
+      {
+        kind: "execute_step",
+        step: {
+          id: "summarize",
+          uses: "ai.generate",
+          with: { model: "worker" },
+          output: { mode: "object", schema: { type: "object" } },
+        },
+        stepInput: { data: "x" },
+        stepContext: { stepPath: "summarize", visitIndex: 0 },
+      },
+      workflowHarnessTestContext({
+        tools: {
+          issueRefund: { execute: async () => ({ ok: true }) },
+          lookupOrder: { execute: async () => ({ ok: true }) },
+        },
+      }),
+    );
+
+    // A structured-output generation step must produce its declared output from its input —
+    // offering it the workflow's action tools invites a spurious tool call that ends the
+    // generation with empty output (and could re-fire a side-effecting tool like issueRefund).
+    expect(Object.keys(seenTools ?? {})).toHaveLength(0);
+  });
+
+  it("still offers tools to a free-text (non-structured) ai.generate step", async () => {
+    let seenTools: Record<string, unknown> | undefined;
+    const harness = createWorkflowHarness({
+      aiLoop: {
+        generate: async ({ tools }) => {
+          seenTools = tools as Record<string, unknown>;
+          return { text: "ok" };
+        },
+      },
+    });
+
+    await harness.run(
+      {
+        kind: "execute_step",
+        step: { id: "research", uses: "ai.generate", with: { model: "worker" } },
+        stepInput: { data: "x" },
+        stepContext: { stepPath: "research", visitIndex: 0 },
+      },
+      workflowHarnessTestContext({ tools: { lookupOrder: { execute: async () => ({ ok: true }) } } }),
+    );
+
+    expect(Object.keys(seenTools ?? {})).toContain("lookupOrder");
   });
 
   it("exposes ctx.bash to ai.generate model loops", async () => {
@@ -519,7 +682,8 @@ describe("workflowHarness", () => {
     expect(events.find((event) => event.type === "harness.session.completed")?.payload.usage).toEqual({
       inputTokens: 0,
       outputTokens: 0,
-      costUsd: 0,
+      cachedInputTokens: 0,
+      reasoningTokens: 0,
     });
   });
 

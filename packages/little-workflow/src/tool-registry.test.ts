@@ -85,6 +85,18 @@ describe("createToolRegistry", () => {
       }),
     })).toThrow(/tool id/i);
   });
+
+  it("allows underscores in tool ids", () => {
+    const registry = createToolRegistry({
+      lookup_order: tool({
+        description: "Lookup order",
+        inputSchema: z.object({ id: z.string() }),
+        execute: async ({ id }) => ({ id }),
+      }),
+    });
+
+    expect(registry.has("lookup_order")).toBe(true);
+  });
 });
 
 describe("AiSdkTool — v6 needsApproval signature", () => {

@@ -1,0 +1,251 @@
+---
+title: Orchestrator
+description: Compose multiple workflows dynamically — chains, fan-out, and schema transformation between workflows.
+---
+
+> **Deprecated composition surface.** Little Workflow has two ways to compose workflows, and the orchestrator is the one being retired. That means `workflows: [...]` plus an `orchestrator` config, and the `plan_workflow` / `run_workflow` / `start_workflow` tools it injects. Use the Harness surface instead: author each workflow with `defineWorkflow`, adapt it with `asHarnessWorkflow`, and hand the adapters to `createHarness({ workflows })`, which exposes every workflow to the agent as its own typed tool. See [Compose With Little Harness](/docs/v0.1.0-alpha/authoring/compose-with-harness), which includes a migration table. Nothing on this page has been removed and every example still runs. The orchestrator entry points emit a one-time `DeprecationWarning` (code `LWF_DEP_ORCHESTRATOR`) and are scheduled to be unexported in the next minor. One orchestrator behaviour has no Harness equivalent yet, planning once and running many; see [Plan once, run many](/docs/v0.1.0-alpha/cookbook/plan-once-run-many). `maxConcurrentSubRuns` maps to `workflowBudgets.maxConcurrentWorkflowRuns`.
+
+An **Orchestrator** is an agent that operates over multiple `WorkflowDefinition`s together. Where a Planner designs the LWIR for one workflow, the Orchestrator decides how several workflows combine at runtime: which runs sequentially, which run in parallel, and how data flows between them.
+
+There is no static pipeline graph. The pipeline emerges from the orchestrator's tool calls — a live Harness session that calls workflows as tools, reads memory, and writes its decision log as events. See [the SDK implementation spec](/docs/v0.1.0-alpha/internals/sdk-implementation) for the reasoning behind this design.
+
+## When to use an orchestrator
+
+Use `workflows: [w1, w2]` (an array) when you need any of:
+
+- **Sequential chains** — pass the output of `candidate.review` into `candidate.scoring`
+- **Fan-out / fan-in** — run `candidate.review` 50 times in parallel for one job opening, then reduce
+- **Schema transformation** — reshape data between workflows whose output and input schemas don't match
+
+A single workflow with `workflows: candidateReview` (not an array) runs just a Planner. No orchestrator is involved.
+
+## Polymorphic `runWorkflow`
+
+Passing a single `WorkflowDefinition` vs an array changes the type contract. TypeScript enforces this at compile time.
+
+```ts
+import { runWorkflow, localWorld, skill } from "little-workflow";
+import { openai } from "@ai-sdk/openai";
+
+// Single workflow — planner runs; orchestrator field is forbidden
+const result = await runWorkflow({
+  world: localWorld({ dataDir: ".little-workflow" }),
+  workflows: candidateReview,
+  input: { jobDescription, candidate },
+  tools,
+});
+
+// Multiple workflows — orchestrator is required
+const result2 = await runWorkflow({
+  world: localWorld({ dataDir: ".little-workflow" }),
+  workflows: [candidateReview, candidateScoring],
+  input: { jobDescription, candidates: [...50 items] },
+  tools,
+  orchestrator: {
+    model: openai("gpt-5"),
+    system: "Orchestrate candidate evaluation. For batch work, plan once and run many.",
+    skills: [skill("./skills/batch-fan-out/")],
+  },
+});
+```
+
+The type system rejects `orchestrator` on a single-workflow call, and errors if `orchestrator` is missing when `workflows` is an array.
+
+## Orchestrator config shape
+
+```ts
+type OrchestratorConfig = {
+  readonly model: AiSdkModel | ModelSlot;
+  readonly harness?: Harness; // defaults to workflowHarness
+  readonly system?: string;
+  readonly skills?: readonly Skill[];
+  readonly tools?: ToolSet;  // extra tools beyond SDK-injected (bash, plan_workflow, run_workflow, start_workflow)
+};
+```
+
+The SDK injects the three orchestrator tools automatically and uses `workflowHarness` when no custom harness is supplied. Any `globalTools` declared on available workflows are also surfaced to the orchestrator — it can call them directly for data transformation between steps.
+
+## The three orchestrator tools
+
+The orchestrator's agent loop has three SDK-injected tools:
+
+### `plan_workflow`
+
+Drafts an LWIR for one workflow with a representative input shape. Returns a locked `workflowVersionId` you can pass to `run_workflow` as many times as needed for structure-compatible inputs.
+
+```ts
+plan_workflow({
+  workflowId: "candidate.review",
+  input: { jobDescription: "Senior backend engineer...", candidate: candidates[0] },
+})
+// → { workflowVersionId: "abc123", summary?: "5-step review with gap analysis" }
+```
+
+One planner session fires per call. If the same workflow and effective input produce a byte-identical LWIR, the existing `WorkflowVersion` is reused — content-addressed dedupe, zero extra cost.
+
+### `run_workflow`
+
+Executes a previously planned `WorkflowVersion` with the given input. The same `workflowVersionId` can be run many times with different same-shape per-item inputs — this is the plan-once-run-many pattern.
+
+```ts
+run_workflow({
+  workflowVersionId: "abc123",
+  input: { jobDescription, candidate: candidates[7] },
+})
+// → {
+//   runId: "run_Y",
+//   status: "completed",
+//   outputRef: "artifact://art_...",
+//   outputPath: "/mnt/scratch/own/workflow-results/run_Y/output.json",
+//   outputSummary: { kind: "object", fieldCount: 2, sizeBytes: 842, sha256: "sha256:..." },
+// }
+```
+
+Each call creates its own sub-run with its own event log and per-step memoization. Model-facing calls return compact metadata, not the full payload. Use the bash tool to inspect `outputPath` only when the orchestrator needs the full result.
+
+The run input must remain structure-compatible with the input used for `plan_workflow`: the same object keys and value kinds, with arrays in compatible length categories. For batch prompts, include optional fields and zero-valued distribution labels in the representative plan input so later batch inputs keep the same shape.
+
+### `start_workflow`
+
+Convenience: plans and runs in one call. Equivalent to `plan_workflow` followed immediately by `run_workflow` with the same input.
+
+```ts
+start_workflow({
+  workflowId: "candidate.scoring",
+  input: { jobDescription, reviews: [...] },
+})
+// → { workflowVersionId, runId, status, outputRef, outputPath, outputSummary }
+```
+
+Use `start_workflow` for one-off calls. For batch parallel work, prefer `plan_workflow` once then `run_workflow` N times.
+
+## Plan-once-run-many
+
+The key cost pattern: for N items that share the same workflow shape, plan once and run N times.
+
+The orchestrator's system prompt teaches the trade-off:
+
+- **Same workflow shape across N items** → `plan_workflow` once with a representative same-shape input, then `run_workflow` N times. Saves N - 1 planner sessions, gives consistent LWIR across all runs.
+- **Each item needs a different workflow shape** → `start_workflow` per item, each gets its own LWIR.
+- **Multi-step chains** → plan each workflow once, chain via `run_workflow`.
+
+### Worked example: 50 candidates
+
+```ts
+const result = await runWorkflow({
+  world,
+  workflows: [candidateReview, candidateScoring],
+  input: {
+    jobId: "ENG-123",
+    jobDescription: "Senior backend engineer...",
+    candidates: [/* 50 items */],
+  },
+  tools,
+  orchestrator: {
+    model: openai("gpt-5"),
+    system: "Orchestrate candidate evaluation. For batch work, plan once and run many.",
+    skills: [skill("./skills/batch-fan-out/")],
+  },
+});
+```
+
+The orchestrator's session trace (conceptual):
+
+```
+Turn 1: plan_workflow("candidate.review", candidates[0])
+         → workflowVersionId "abc123"
+
+Turn 2: 50 parallel run_workflow calls, all reusing "abc123"
+         → 50 sub-runs execute concurrently (capped at maxConcurrentSubRuns)
+         → 50 compact result refs returned; full outputs remain in artifacts/scratch
+
+Turn 3: plan_workflow("candidate.scoring", { reviewsRef: "artifact://..." })
+         → workflowVersionId "def456"
+
+Turn 4: run_workflow("def456", { jobDescription, reviews: [...] })
+         → final ranking
+
+Turn 5: orchestrator emits final output
+```
+
+Total planner sessions: 2 (one per distinct workflow shape). Without plan-once-run-many, a naive `start_workflow` per candidate would cost 51.
+
+## Parallel fan-out
+
+The AI SDK supports parallel tool calling — the model can emit multiple `tool_use` blocks in one turn. The harness dispatches them concurrently:
+
+```
+Turn 2 tool calls (model emits all 50 at once):
+  run_workflow({ workflowVersionId: "abc123", input: { candidate: candidates[0], ... } })
+  run_workflow({ workflowVersionId: "abc123", input: { candidate: candidates[1], ... } })
+  ... 50 total ...
+```
+
+The harness starts up to `maxConcurrentSubRuns` (default: **10**) at a time. Excess calls queue and dispatch as slots free. Configure the cap on `runWorkflow`:
+
+```ts
+runWorkflow({
+  // ...
+  orchestrator: { model, harness, system },
+  maxConcurrentSubRuns: 25,  // default 10
+});
+```
+
+## Schema transformation between workflows
+
+When workflow A's output doesn't match workflow B's input, the orchestrator transforms the data itself — it has bash and any registered `globalTools`. No special transform primitive is needed.
+
+Via bash:
+
+```bash
+node -e '
+const reviews = JSON.parse(process.argv[2]);
+const aggregated = reviews.map(r => ({ candidateId: r.candidateId, score: r.passed ? 1 : 0 }));
+process.stdout.write(JSON.stringify({ candidates: aggregated }));
+' '<json output from workflow A>'
+```
+
+Via a registered tool the orchestrator can call directly:
+
+```ts
+// orchestrator invokes a tool from the shared tool registry
+const transformed = await tools.aggregateReviews({ reviews: reviewOutputs });
+const final = await run_workflow({ workflowVersionId, input: transformed });
+```
+
+## Memory — what the orchestrator sees
+
+The orchestrator's harness mounts read-only views into each available workflow's memory store, plus its own pipeline memory store (read-write):
+
+```
+/mnt/memory/pipeline/                      ← rw — orchestrator's own persistent notes
+/mnt/memory/available-workflows/
+├── candidate-review/                      ← ro — that workflow's accumulated lessons
+└── candidate-scoring/                     ← ro — that workflow's accumulated lessons
+```
+
+The orchestrator can inspect prior run lessons before deciding how to configure a planner call. See [Memory](/docs/v0.1.0-alpha/authoring/memory) for the full mount reference.
+
+## Durability
+
+The orchestrator's session is durable: every model turn and every tool call is event-logged and memoized. On resume after a crash:
+
+- Completed `run_workflow` calls are replayed from the log — sub-runs are not re-executed.
+- A `plan_workflow` result that was recorded resumes from the returned `workflowVersionId`.
+- Sub-runs that had started but not finished resume from their own per-step event logs.
+- The orchestrator's `OrchestratorManifest` (hash of config + available workflow definitions) is checked on resume; drift fails closed.
+
+## Not in alpha
+
+- **Nested orchestrators** — one orchestrator calling another. Alpha is one level deep.
+- **Long-running sessions** spanning multiple `runWorkflow` invocations. Each call is one orchestrator session.
+- **Approval gates** between sub-workflow runs.
+- **Streaming sub-run results** to the orchestrator turn-by-turn. Sub-runs complete fully before returning.
+- **Budget enforcement** at the sub-workflow boundary. Cost is *observed* — real dollars per step and per run, via `result.usage` and `little report` — but nothing pauses or fails a run for spending too much. Note that each sub-run reports its own usage under its own `runId`; the orchestrator's total does not roll them up. Enforcement, and pre-run cost estimation, are post-alpha.
+
+## Cross-references
+
+- [Memory](/docs/v0.1.0-alpha/authoring/memory) — memory mounts the orchestrator sees
+- [Skills](/docs/v0.1.0-alpha/authoring/skills) — how to configure `orchestrator.skills`
+- [Create A Workflow](/docs/v0.1.0-alpha/authoring/advanced-createlittleworkflow) — single-workflow planner path
+- [Tools](/docs/v0.1.0-alpha/authoring/tools-and-capabilities) — registering tools the orchestrator can call

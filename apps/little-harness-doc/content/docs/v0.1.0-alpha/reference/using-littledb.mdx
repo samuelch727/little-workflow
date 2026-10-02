@@ -1,0 +1,288 @@
+---
+title: Using littledb
+description: Preview — the managed-config harness adapter that resolves config, stamps traces, and reports outcomes to littleDB.
+---
+
+<Callout title="Preview — not yet available" type="warn">
+  `@little-workflow/littledb` is **not published to npm yet**, and it needs a littleDB control plane
+  and trace engine, which are not publicly available. This page documents the adapter's shape so you
+  can plan around it; the install and examples below will not work until the package and service are
+  released. Everything else in Little Harness — including [Outcome Capture](/docs/v0.1.0-alpha/build-agents/outcomes)
+  to local traces — works without it.
+</Callout>
+
+`littledb()` is the managed-config adapter for Little Harness. It resolves a
+session's system prompt, model, and skills from a littleDB control plane once per
+session, produces a pre-wired trace reporter that stamps every event with the
+pinned `configVersionId`, and reports run outcomes back to the platform.
+
+All reporting (traces, outcomes) is best-effort: failures never propagate into
+the harness hot path.
+
+## Install
+
+Not yet available. Once the package is published, it will install as:
+
+```bash
+# Preview — @little-workflow/littledb is not published yet.
+pnpm add @little-workflow/littledb
+```
+
+## Import
+
+```ts
+import { littledb } from "@little-workflow/littledb/harness";
+```
+
+## Basic Usage
+
+```ts
+import { createHarness, generateHarness, localHost } from "little-harness";
+import { littledb } from "@little-workflow/littledb/harness";
+
+const db = littledb({
+  controlPlaneUrl: process.env.LITTLEDB_CONTROL_PLANE_URL!,
+  engineUrl: process.env.LITTLEDB_ENGINE_URL!,
+  harnessId: "my-agent",
+  // projectKey: process.env.LITTLEDB_PROJECT_KEY,  // omit for a local control plane
+  modelFor: (slot) => resolveModel(slot),   // return a LanguageModel for the managed modelSlot
+  // skillFor: (name) => skill(name),       // required if managed config declares skills
+});
+
+// Resolve managed config once per session.
+const session = await db.createSessionConfig(bootstrapConfig);
+
+if (session.staleConfig) {
+  console.warn("Using stale config:", session.configVersionId);
+}
+
+const harness = createHarness({
+  host: localHost({ dataDir: ".little-harness" }),
+  // Spread system, model, and skills from managed config.
+  ...session.harnessOptions,
+  tools: { myTool },
+  onEvent: session.reporter.onEvent,
+});
+
+// Run the harness.
+const result = await generateHarness({ harness, messages });
+
+// Flush any buffered trace data after the run.
+await session.reporter.flush();
+
+// Report the outcome (best-effort).
+await db.reportOutcome({
+  runId: "run_abc123",
+  status: "success",
+});
+```
+
+## API Signature
+
+```ts
+function littledb(options: LittleDbOptions): LittleDb;
+
+interface LittleDb {
+  createSessionConfig(bootstrapConfig: ConfigBundle): Promise<SessionConfig>;
+  reportOutcome(outcome: ReportOutcome): Promise<{ ok: boolean }>;
+  readonly outcomeSink: HarnessOutcomeSink;
+}
+```
+
+## `littledb()` Options
+
+### `controlPlaneUrl`
+
+`string`
+
+URL of the littleDB control plane. Config is resolved from this endpoint.
+
+```ts
+controlPlaneUrl: process.env.LITTLEDB_CONTROL_PLANE_URL!
+```
+
+### `engineUrl`
+
+`string`
+
+URL of the littleDB trace engine. Session events are posted here.
+
+```ts
+engineUrl: process.env.LITTLEDB_ENGINE_URL!
+```
+
+### `harnessId`
+
+`string`
+
+The harness identifier registered in littleDB. Used to look up the active
+config and tag traces.
+
+```ts
+harnessId: "renewal-brief-agent"
+```
+
+### `projectKey`
+
+`string | undefined`
+
+Per-project API key. Omit when targeting a local control plane.
+
+```ts
+projectKey: process.env.LITTLEDB_PROJECT_KEY
+```
+
+### `channel`
+
+`string | undefined`
+
+Release channel to resolve config from. Defaults to `"production"`.
+
+```ts
+channel: "staging"
+```
+
+### `modelFor`
+
+`(slot: string) => LanguageModel | undefined`
+
+Resolves a `LanguageModel` instance from the `modelSlot` string stored in
+managed config. The adapter calls this during `createSessionConfig`. If it
+returns `undefined` for the resolved slot, `createSessionConfig` throws.
+
+```ts
+modelFor: (slot) => {
+  if (slot === "claude-sonnet") return gateway("anthropic/claude-sonnet-4-6");
+  if (slot === "claude-opus") return gateway("anthropic/claude-opus-4-7");
+},
+```
+
+### `skillFor`
+
+`((name: string) => SkillInput) | undefined`
+
+Resolves a `SkillInput` from a skill name declared in managed config. Required
+when the resolved config bundle declares any skills — `createSessionConfig`
+throws if skills are present and no resolver is provided.
+
+```ts
+skillFor: (name) => skill(`./skills/${name}`)
+```
+
+### `fetchImpl`
+
+`typeof fetch | undefined`
+
+Custom fetch implementation. Useful in environments where the global `fetch` is
+not available or needs wrapping.
+
+### `cache`
+
+`ConfigCache | undefined`
+
+Optional cache for resolved config bundles. When provided, the adapter reads
+from and writes to this cache, making `createSessionConfig` resilient to
+transient control plane failures.
+
+## `createSessionConfig(bootstrapConfig)`
+
+Resolves managed config and returns a `SessionConfig` ready to pass to
+`createHarness()`.
+
+`bootstrapConfig` is a `ConfigBundle` sent to the control plane to seed the
+first resolution for a harness/channel that has not been configured yet. It is
+the server-side bootstrap — not a client-side outage fallback (the client falls
+back to the disk cache; see "Outage behavior" below).
+
+### `SessionConfig`
+
+| Field | Type | Description |
+|---|---|---|
+| `configVersionId` | `string` | The pinned config version for this session. Recorded into every trace event. |
+| `channel` | `string` | The channel the config was resolved from. |
+| `staleConfig` | `boolean` | `true` when the adapter served the last cached config because the control plane was unreachable. |
+| `harnessOptions` | `ManagedHarnessOptions` | `{ system, model, skills }` — spread directly into `createHarness()`. |
+| `reporter` | `LittleDbHarnessReporter` | Trace reporter pre-wired with `configVersionId` and `channel`. |
+
+Config is resolved exactly once per call to `createSessionConfig`. Calling it
+again for a resumed session is safe and returns an independently pinned config
+for that session.
+
+## `reportOutcome(outcome)`
+
+Reports a run outcome to the control plane. Best-effort — the returned promise
+resolves with `{ ok: boolean }` and never rejects.
+
+### `ReportOutcome`
+
+| Field | Type | Description |
+|---|---|---|
+| `runId` | `string` | The run identifier to associate the outcome with. |
+| `status` | `"success" \| "failure" \| "partial"` | The outcome status. |
+| `score` | `number` (optional) | A numeric score for eval use cases. |
+| `detail` | `string` (optional) | Free-form note about the outcome. |
+| `metadata` | `Record<string, unknown>` (optional) | Additional structured metadata. |
+
+## `outcomeSink`
+
+A `HarnessOutcomeSink` that forwards every recorded `outcome.reported` event to
+`reportOutcome`. Hand it to Little Harness's own outcome capture so the local
+trace and littleDB receive the same outcome:
+
+```ts
+import { reportHarnessOutcome } from "little-harness";
+
+await reportHarnessOutcome({
+  session: result.session,
+  status: "success",
+  sinks: [db.outcomeSink],
+});
+```
+
+It also works as a Chat SDK connector's `reactions: { sinks: [db.outcomeSink] }`.
+See [Outcome Capture](/docs/v0.1.0-alpha/build-agents/outcomes).
+
+## The Reporter
+
+`session.reporter` is a `LittleDbHarnessReporter` with two methods:
+
+| Method | Description |
+|---|---|
+| `onEvent(event)` | Receives each `HarnessEvent`. Wire this to `createHarness({ onEvent })`. Events are posted to the engine best-effort. |
+| `flush()` | Uploads any pending session state (eval transcript, file snapshots). Call this after the harness run completes. |
+
+```ts
+const harness = createHarness({
+  ...session.harnessOptions,
+  host: localHost(),
+  tools: { myTool },
+  onEvent: session.reporter.onEvent,
+});
+
+await generateHarness({ harness, messages });
+await session.reporter.flush();
+```
+
+## Notes
+
+- **Replay-safe:** config is resolved once at the start of a session, before
+  the model loop. The pinned `configVersionId` is stamped on every trace event
+  so replays use the same version.
+- **Stale config:** when `session.staleConfig` is `true`, the adapter served the
+  last cached config because the control plane was unreachable. The run is safe
+  to continue; check `staleConfig` if you need to alert or log.
+- **Outage behavior:** on a control-plane outage (network error or `5xx`), the
+  adapter serves the last cached config (`staleConfig: true`). If no cache entry
+  exists, `createSessionConfig` throws rather than starting a run on an
+  unverified config. (`4xx` responses and schema mismatches always throw — a
+  revoked key or changed contract surfaces immediately, even if a cache exists.)
+- **Best-effort reporting:** trace and outcome HTTP calls are wrapped in
+  `try/catch`, so failures are swallowed and never throw into the harness. They
+  are awaited inline, though — not fire-and-forget — so a slow or hung endpoint
+  can add latency to a run. Pass a timeout-bounded `fetchImpl` if you need to
+  bound that.
+- **Skills require a resolver:** if the managed config declares skill names, a
+  `skillFor` resolver is required. Omitting it causes `createSessionConfig` to
+  throw before the harness is built.
+- **Local control plane:** omit `projectKey` when pointing at a local or
+  self-hosted control plane that does not require authentication.

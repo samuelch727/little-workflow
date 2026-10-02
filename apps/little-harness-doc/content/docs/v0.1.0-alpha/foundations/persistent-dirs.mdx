@@ -1,0 +1,147 @@
+---
+title: Persistent Dirs
+description: Cross-session files backed by developer-provided storage logic, and how their writes commit.
+---
+
+import { Files, File, Folder } from 'fumadocs-ui/components/files';
+
+Persistent Dirs are opt-in directories whose files can survive beyond one session.
+
+Harness memory is a convenience layer on top of this model. `memory(...)` creates
+a normal Persistent Dir, adds a bounded memory index to future prompts, and can
+add the built-in `remember` tool for model-authored durable notes.
+
+They are not global scratch folders. They are developer-backed harness directories: the app decides how to fetch and store files, and Little Harness handles the safe session directory, diffing, tracing, and commit boundary.
+
+```ts
+persistentDirs: [
+  {
+    harnessDir: "/persistent/user",
+    load: async ({ extraBody }) =>
+      appStorage.loadFolder(`users/${extraBody.userId}/memory`),
+    store: async ({ extraBody, changes }) =>
+      appStorage.applyChanges({
+        prefix: `users/${extraBody.userId}/memory`,
+        changes,
+      }),
+  },
+]
+```
+
+## Load
+
+`load` runs before the agent uses the Persistent Dir. It returns the files Little Harness exposes at `harnessDir` for this session.
+
+For simple apps, that can be a folder snapshot. For larger stores, future adapter shapes may load lazily.
+
+## Work
+
+The agent edits the `harnessDir` inside the isolated session. The backing store is not mutated on every write.
+
+<Files>
+  <Folder name="persistent" defaultOpen>
+    <Folder name="user" defaultOpen>
+      <File name="preferences.md" />
+      <Folder name="research-notes" defaultOpen>
+        <File name="acme.md" />
+      </Folder>
+    </Folder>
+  </Folder>
+</Files>
+
+## Mixed Sources
+
+One harness can expose several Persistent Dirs with different backing sources
+and write policies.
+
+```ts
+persistentDirs: [
+  localDir({
+    harnessDir: "/persistent/company",
+    sourceDir: projectDir("./docs/company-knowledge"),
+    commit: "read-only",
+  }),
+  localDir({
+    harnessDir: "/persistent/user",
+    sourceDir: ({ extraBody }) =>
+      `persistent/users/${extraBody.userId}/memory`,
+    commit: "after-turn",
+  }),
+]
+```
+
+The `read-only` company directory rejects writes immediately. The writable user
+directory accepts changes in the session first, then commits them after the turn.
+
+Little Harness does not infer sharing or read/write policy from names such as
+`company`, `project`, or `user`. The developer controls the backing source and
+commit mode for each directory.
+
+## The Commit Model
+
+Persistent Dir writes happen in two phases:
+
+1. The agent writes files inside the isolated session.
+2. Little Harness commits changes to developer-backed storage at a defined boundary.
+
+The default boundary for agent and tool work is after each agent turn.
+
+### After-Turn Commit
+
+An agent turn is one full response to one input, including tool calls, shell
+commands, generated artifacts, and model output.
+
+```ts
+persistentDirs: [
+  {
+    harnessDir: "/persistent/user",
+    load,
+    store,
+    commit: "after-turn",
+  },
+]
+```
+
+After the turn, the runtime computes a diff and calls `store`.
+
+### Host-Staged Writes
+
+The host can write into a Persistent Dir path without a model turn.
+
+```ts
+await session.files.write("/persistent/user/uploads/report.pdf", stream);
+```
+
+`session.files` is a session-workspace writer: the file lands in the isolated
+session checkout only, and starting the **next turn does not commit it** — each
+turn begins by resetting every `/persistent/...` checkout from backing storage,
+which discards uncommitted host writes. The one durable host-staging path today
+is a `commit: "manual"` dir: write, then call `result.commitManual()` (on the
+most recent completed turn's result) **before** starting another turn.
+`commitManual()` skips `after-turn` dirs, so a host-only write into an
+`after-turn` dir never reaches backing storage — have the agent (or a tool)
+write it during a turn instead, or stage it in a manual-commit dir.
+
+### Why Not "Session Done"
+
+"Session done" is not a reliable event. A user can close a tab, a phone can
+background the app, a serverless function can end, or a network request can
+disconnect. After-turn commits give a predictable boundary that works for chat,
+jobs, and APIs.
+
+## Commit Failures
+
+Commit failures are host-facing runtime events. They are recorded in the trace
+and exposed on the result, not injected into the model's normal context. The
+agent already finished the turn, and the host app is better positioned to retry
+or warn the user.
+
+```ts
+const result = streamHarness({ harness, messages, session, extraBody });
+const finished = await result.finished;
+
+if (finished.persistence.status === "failed") {
+  // Host app decides whether to retry, warn, or escalate.
+  await retryQueue.enqueue(finished.persistence.failedCommits);
+}
+```

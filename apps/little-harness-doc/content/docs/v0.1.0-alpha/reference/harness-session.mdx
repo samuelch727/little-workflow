@@ -36,15 +36,31 @@ const result = streamHarness({
 ```ts
 type HarnessSession = {
   id: string;
+  dataDir?: string;
   files: FileWriter;
-  artifacts: ArtifactStore;
+  artifacts: HarnessArtifactAccessor;
   trace: TraceRef;
   status(): Promise<HarnessSessionStatus>;
+  setStatus(patch: Partial<HarnessSessionStatus>): Promise<void>;
+  markMessageStaged(messageId: string): Promise<void>;
+  setReadOnlyPersistentDirs(harnessDirs: readonly string[]): void;
+  getReadOnlyPersistentDirs(): readonly string[];
 };
 ```
 
-The exact shape can stay small. Session handles should be stable enough to pass
-between host setup code and execution calls.
+`dataDir` is an optional absolute directory for host-managed data the session
+owns, such as the event stores of workflow runs its workflow tools start
+(`<dataDir>/workflows`). `localHost()` sets it to the session folder; a custom
+host that omits it gets stores relative to the process working directory
+(`<sessionId>/workflows`).
+
+The typed mutators (`setStatus`, `markMessageStaged`) and the read-only
+Persistent-Dir accessors are part of the session port — the loops record turn
+state through them instead of duck-typing host internals. Session handles
+should be stable enough to pass between host setup code and execution calls.
+The loops call the mutators as optional (`session.setStatus?.(...)`), so a
+session written against the older five-member shape still runs — it just loses
+status tracking and staging dedupe until the mutators are implemented.
 
 ## Session Manager
 
@@ -109,17 +125,19 @@ The next agent turn can see the file in the same private workspace.
 
 ## Persistent Dir Writes
 
-If the staged path is inside a Persistent Dir, Little Harness should still write
-into the session first.
+If the staged path is inside a Persistent Dir, the write still lands in the
+session checkout only.
 
 ```ts
 await session.files.write("/persistent/user/uploads/report.pdf", reportStream);
 ```
 
-Because host-staged writes can happen without a future model turn, the runtime
-may commit that one operation immediately. If the commit fails, the host
-operation should receive the failure and the file should remain recoverable from
-the session workspace.
+Nothing is committed at write time, and the next turn **resets** every
+`/persistent/...` checkout from backing storage before executing — discarding
+uncommitted host writes. To persist a host-staged write, stage it in a
+`commit: "manual"` dir and call `result.commitManual()` before starting another
+turn. See [Persistent Dirs](/docs/v0.1.0-alpha/foundations/persistent-dirs) for
+the full commit model.
 
 ## Isolation Rule
 

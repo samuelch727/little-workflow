@@ -1,5 +1,6 @@
 import { resolve } from "node:path";
 import {
+  aggregateLocalOutcomes,
   doctorSession,
   latestDiffForPath,
   listLocalArtifacts,
@@ -7,6 +8,7 @@ import {
   listLocalSessions,
   readLocalTrace,
 } from "./trace/inspect.js";
+import { connectorsCommand, initCommand, newCommand, testCommand } from "./cli/agent-commands.js";
 
 export type CliIo = {
   stdout?: (text: string) => void | Promise<void>;
@@ -42,6 +44,16 @@ export async function runCli(
         return diffCommand(args, parsed.dataDir, io);
       case "doctor":
         return doctorCommand(args, parsed.dataDir, io);
+      case "outcomes":
+        return outcomesCommand(args, parsed.dataDir, io);
+      case "init":
+        return initCommand(args, io);
+      case "new":
+        return newCommand(args, io);
+      case "test":
+        return testCommand(args, parsed.dataDir, io);
+      case "connectors":
+        return connectorsCommand(args, parsed.dataDir, io);
       default:
         throw new CliUsageError(`Unknown command: ${command}`);
     }
@@ -171,6 +183,26 @@ async function doctorCommand(
   );
   await writeJsonLine(io, summary);
   return summary.invalidEventCount > 0 || summary.failureCount > 0 ? 2 : 0;
+}
+
+async function outcomesCommand(
+  args: readonly string[],
+  dataDir: string,
+  io: CliIo,
+): Promise<number> {
+  const parsed = parseCommandOptions(args);
+  if (parsed.positionals.length > 1) {
+    throw new CliUsageError("Usage: little-harness outcomes [session-id] [--data-dir <dir>]");
+  }
+  const sessionId = parsed.positionals[0];
+  const report = await aggregateLocalOutcomes(
+    withCwd(io, {
+      dataDir: resolvePath(dataDir, io),
+      ...(sessionId === undefined ? {} : { sessionId }),
+    }),
+  );
+  await writeJsonLine(io, report);
+  return 0;
 }
 
 function parseSharedArgs(argv: readonly string[]): { args: string[]; dataDir: string } {
@@ -310,6 +342,17 @@ function usage(): string {
     "  diff <session-id> --path <harness-path>",
     "                           Print the latest traced file diff metadata",
     "  doctor <session-id>      Summarize trace failures and debug signals",
+    "  outcomes [session-id]    Success rate (with sample size) per promptHash and stepPath,",
+    "                           folded from outcome.reported events. Omit the session id to",
+    "                           aggregate across every session in the data dir.",
+    "",
+    "  init [name]              Guided project setup wizard",
+    "                           Flags: --provider, --model, --yes, --no-install, --here, --force",
+    "  new <name>               Scaffold a new agent folder under agents/",
+    "                           Flags: --provider, --model, --force",
+    "  test <name>              Interactively chat with an agent (REPL)",
+    "                           Flags: --connector <id> (exercise a connector's toolset)",
+    "  connectors <name>        List an agent's discovered connectors and skipped candidates",
     "",
   ].join("\n");
 }

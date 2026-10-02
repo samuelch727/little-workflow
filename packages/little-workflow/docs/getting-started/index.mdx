@@ -1,0 +1,64 @@
+---
+title: Overview
+description: What Little Workflow is, how it moves from developer intent to durable execution, and where to start.
+---
+
+Little Workflow is a TypeScript library for AI-generated work that must be bounded, durable, inspectable, and replayable. You describe a goal, inputs, schemas, a model, tools, skills, and safety rules; an AI agent running in a structured **Harness** designs the workflow graph, executes the steps, and self-recovers from code failures — all observable via a unified event log, all durable via per-step memoization.
+
+The alpha is the minimum implementation that proves the thesis: a developer-supplied control plane compiles to validated LWIR and executes durably enough for a local development loop. These docs track the current alpha release, `0.2.0-alpha.0`. The `v0.1.0-alpha` URL path is kept so existing links keep working. The package requires Node.js 22+ and AI SDK 7 (`ai` is a peer dependency).
+
+## The pipeline
+
+```txt
+WorkflowDefinition
+-> Harness session (Planner)
+-> planner drafts LWIR
+-> deterministic validation and repair
+-> immutable WorkflowVersion
+-> durable Run (Workers execute each step via a Harness)
+-> artifacts, events, replay, retry, fork
+```
+
+## The four roles
+
+Every role runs the same harness machinery, discriminated by `task.kind`:
+
+- **Planner** — a harness session that designs LWIR for one workflow run; has bash, memory, scratch, and skills.
+- **Orchestrator** *(deprecated)* — a harness session that composes multiple workflow definitions via `plan_workflow` / `run_workflow` / `start_workflow` tools. To compose workflows, use [Compose With Little Harness](/docs/v0.1.0-alpha/authoring/compose-with-harness) instead: `asHarnessWorkflow` turns each workflow into a typed tool for a `createHarness` agent.
+- **Worker** — a harness session (or direct execution) for each LWIR step; unified across `ai.generate`, `code.run`, `tool.call`, and `decision` step types.
+- **Fixer** — a per-step, opt-in harness session that self-heals failed `code.run` steps before escalating.
+
+See [How It Works](/docs/v0.1.0-alpha/foundations) for the full mental model.
+
+## Key primitives
+
+**Harness** — the agent runtime each role lives in: a model in a tool-using loop, with scoped filesystem access and observable tool calls. The SDK ships a default `workflowHarness`; devs can substitute by implementing the single `run(task, ctx)` interface. Every model call and tool call inside a session is event-logged for deterministic crash recovery.
+
+**Memory Stores** — persistent, filesystem-shaped documents mounted at `/mnt/memory/{workflow,pipeline,org}/`, rw/ro per scope. Planners write lessons learned; future planners read them, so agents improve across runs without fine-tuning.
+
+**Run Scratch** — ephemeral, top-down context passing within a run at `/mnt/scratch/{own,from-orchestrator,from-planner,peer-steps}/`.
+
+**Skills** — `SKILL.md` packages materialized at `.agents/skills/<name>/`; metadata is added to the initial prompt and bodies are read on demand.
+
+**Identity and durability** — a `WorkflowDefinitionHash` (stable authoring-time identity) distinct from a `WorkflowVersion` (per-run LWIR hash); three manifests stored in `harness.session.started` events that fail-closed on drift; per-step and per-session memoization for deterministic fast-forward on resume.
+
+## What ships in alpha
+
+- Local World only — SQLite/WAL event storage, artifact manifests, and local run locks.
+- The LWIR step types `ai.generate`, `code.run`, `tool.call`, `decision`, `parallel`; expressions, validator, and repair loop. `code.run` compiles, but the default worker harness refuses to execute it; it needs a worker harness you supply.
+- AI SDK `tool({...})` as the canonical tool primitive; MCP via `runWorkflow({ mcp })` gateway tools.
+- Composition with Little Harness: `asHarnessWorkflow` and `loadWorkflow` expose workflows to an agent as typed tools.
+- Real USD cost per run, step, and session from a bundled model registry (`result.usage.costUsd`, `little report`).
+- A CLI: `init`, `add`, `validate`, `run`, `test`, `events`, `replay`, `report`.
+- A kill-and-resume demo.
+
+Cost and budget **enforcement**, production durability (Postgres, Redis, S3), the full capability firewall, streaming session events, and visual authoring are post-alpha — see the [Roadmap](/docs/v0.1.0-alpha/roadmap) and [Changelog](/docs/v0.1.0-alpha/reference/changelog).
+
+## Start here
+
+- [Quickstart](/docs/v0.1.0-alpha/getting-started/quickstart) — define a workflow and run it in one call.
+- [Define a Workflow](/docs/v0.1.0-alpha/authoring/define-a-workflow) — the ergonomic `defineWorkflow` front door.
+- [Compose With Little Harness](/docs/v0.1.0-alpha/authoring/compose-with-harness) — hand workflows to an agent as typed tools.
+- [How It Works](/docs/v0.1.0-alpha/foundations) — the core mental model.
+- [Planner Lifecycle](/docs/v0.1.0-alpha/foundations/planner-lifecycle).
+- [Internals](/docs/v0.1.0-alpha/internals) — the diagrammed walkthrough of every module in the alpha SDK.

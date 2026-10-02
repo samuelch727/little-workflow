@@ -44,7 +44,7 @@ export async function POST(req: Request) {
 
 ```ts
 function streamHarness<TOutput = string, TInput = unknown, TExtraBody = unknown>(
-  options: StreamHarnessOptions<TInput, TExtraBody>,
+  options: StreamHarnessOptions<TInput, TExtraBody, TOutput>,
 ): StreamHarnessResult<TOutput>;
 ```
 
@@ -162,7 +162,7 @@ streamHarness({
 
 ### `system`
 
-`string | SystemModelMessage | SystemModelMessage[]`
+`string | ModelMessage | ModelMessage[]`
 
 Per-call system override. When provided, it replaces the harness-level system
 prompt for this turn. Input Type instructions, skills, memory, and runtime
@@ -255,6 +255,36 @@ streamHarness({
 Use this only when intentionally rebuilding the session filesystem from message
 history.
 
+### `runId`
+
+`string`
+
+Durable identity of this run for kill-and-resume. Re-invoking with the same
+`runId` (and the same inputs) against the same session log replays the
+recorded run: recorded tool results are reused instead of re-executing tool
+side effects. Defaults to a fresh id per call.
+
+```ts
+streamHarness({
+  harness,
+  messages,
+  session: chatId,
+  runId: `chat:${chatId}:${messageId}`,
+  sessionLog: remoteSessionLog({ baseUrl, authToken }),
+});
+```
+
+### `sessionLog`
+
+`HarnessSessionLog`
+
+Per-call session-log override (the durable event log this run appends to and
+replays from). When omitted, the log configured on `createHarness()` is used.
+`durability` is the historical alias for the same option; `sessionLog` wins
+when both are set. See
+[Execution Environments](/docs/v0.1.0-alpha/runtime/execution-environments#the-session-log-as-a-service)
+for the remote session-log adapter.
+
 ### `onEvent`
 
 Function that receives a `HarnessEvent`.
@@ -282,6 +312,14 @@ streamHarness({
   onPersistenceError: (error) => retryQueue.enqueue(error.failedCommits),
 });
 ```
+
+### `uiMessageStream`
+
+`{ onError?: (error: unknown) => string }`
+
+Optional UI message stream formatting options. `onError` maps thrown stream errors to the text sent
+in AI SDK `error` chunks. Keep the default for public web responses when server-side error details
+should stay hidden; local tools such as the CLI can pass a more detailed formatter.
 
 ### `toolResultSpooling`
 
@@ -335,8 +373,53 @@ streamHarness({
 });
 ```
 
-When `stopWhen` is omitted, Little Harness uses `stepCountIs(20)` so streamed
-turns can continue after executed tool calls.
+`stopWhen` takes AI SDK 7 stop conditions such as `isStepCount(8)` (imported
+from `ai`). When it is omitted, Little Harness uses
+`isStepCount(workflowBudgets.maxModelSteps)` — 20 by default — so streamed turns
+can continue after executed tool calls.
+
+### `connector`
+
+`HarnessActiveConnector`
+
+Identity of the active connector for this turn: `{ id, kind, endpoint? }`. It is
+surfaced to tool execute handlers as `ctx.connector`. Connector loaders
+(`loadChatSdkConnector` / `loadWebRichConnector`) populate it automatically when a
+string connector reference or explicit `connectorId` is used; direct callers
+rarely set it themselves.
+
+### `connectorTools`
+
+`ToolSet`
+
+Connector-scoped tool overrides resolved from
+`connectors/<id>/tools/*` by the connector loaders. When present, Little Harness
+runs `resolveConnectorTools(harnessTools, connectorTools)` before MCP/workflow
+merging: executable connector tools override or add to the base tools, and
+abstract base tools (no `execute`) are exposed to the model only when the active
+connector supplies an executable extension. Like `connector`, this is loader
+plumbing and is not usually set by hand.
+
+### `toolPolicy`
+
+`{ allow?: string[]; deny?: string[] }`
+
+Optional connector tool access policy applied after connector tools resolve. `allow` exposes only the
+listed names; `deny` removes names and wins over `allow`; unknown names are ignored. The connector
+loaders forward `descriptor.toolPolicy` here. It scopes the agent's own tools, not `bash` or
+MCP/workflow tools.
+
+### Abstract-tool hiding
+
+Abstract tools (declared without an `execute`) are structural placeholders and are never sent to the
+model — this now holds on plain `streamHarness`/`generateHarness`/CLI runs, not just connector-loaded
+ones. Each hidden tool adds one warning to `result.finished.warnings`:
+
+```ts
+{ code: "policy_warning", metadata: { reason: "abstract-tool-hidden", tool } }
+```
+
+`bash` and runtime tools are unaffected.
 
 ## Returns
 
@@ -362,6 +445,22 @@ The parsed structured output when `output` is provided.
 const output = await result.output;
 ```
 
+### `textStream`
+
+`AsyncIterable<string>`
+
+Incremental assistant text, like AI SDK `streamText`'s `.textStream` — for non-AI-SDK consumers that
+need to pipe the reply elsewhere (chat frameworks, CLIs, queues). It yields only assistant text deltas;
+reasoning and protocol chunks are skipped. This is the surface the Chat SDK connector loader posts to a
+platform thread (`thread.post(result.textStream)`). Like the UI message stream, it lazily consumes the
+underlying stream, so iterate it or `toUIMessageStream*()` — not both.
+
+```ts
+for await (const delta of result.textStream) {
+  process.stdout.write(delta);
+}
+```
+
 ### `toUIMessageStream()`
 
 Function that returns a readable stream of `UIMessageChunk` values.
@@ -384,6 +483,13 @@ Promise that resolves to `StreamHarnessFinished`.
 
 Resolves after the model, tools, file writes, artifact creation, and persistence
 commit work has finished.
+
+If the AI SDK UI message stream emits an `error` chunk, the turn is failed even
+when partial text already reached the client. `uiMessageStream.onError` only
+formats the client-facing error chunk; `result.text`, `result.output`, and
+`result.finished` still reject with the underlying error when available.
+After-turn Persistent Dir commits run only for successful turns, so apps should
+handle `finished` rejection when they need retry or cleanup behavior.
 
 ```ts
 const finished = await result.finished;

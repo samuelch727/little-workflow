@@ -1,0 +1,59 @@
+---
+title: Resume after a crash
+description: A run survives a mid-flight SIGKILL and resumes deterministically from the durable event log.
+---
+
+Little Workflow memoizes every step to a durable event log. If the process dies mid-run — a `SIGKILL`, a deploy, an OOM — you resume by calling `runWorkflow` again with the **same `runId`** against the **same `world` data directory**. Completed steps are fast-forwarded from the log; only the unfinished work re-executes.
+
+This recipe is lifted from [`demos/kill-resume`](https://github.com/samuelch727/little-workflow/tree/main/demos/kill-resume), which fans out two parallel branches, `SIGKILL`s the process after the fast branch commits, then respawns and proves the fast branch is **not** re-scored.
+
+## Durable World + a stable run id
+
+The Local World backs its event log with SQLite (WAL), so the log survives a process kill. Give the run a stable id you can reuse on resume:
+
+```ts
+import {
+  createLittleWorkflow,
+  createToolRegistry,
+  createWorkflowHarness,
+  localWorld,
+  runWorkflow,
+} from "little-workflow";
+
+const dataDir = "./.little-workflow-world"; // same dir across runs
+const runId = "run_candidate_review_2026_07_08"; // stable across resume
+
+const result = await runWorkflow({
+  world: localWorld({ dataDir }),
+  workflows: workflow, // a workflow whose steps include a `parallel` fan-out
+  input: {
+    candidates: [
+      { id: "fast-a", score: 1 },
+      { id: "slow-b", score: 2 },
+    ],
+  },
+  runId,
+  tools,
+});
+```
+
+## What resume guarantees
+
+If the process is killed after `fast-a` commits but before `slow-b` finishes, re-running the **exact same call** (same `dataDir`, same `runId`) does not re-execute `fast-a`. Its committed output is replayed from the event log; execution continues from `slow-b`. The demo verifies this by writing a heartbeat on every tool call and asserting the fast branch's heartbeat count does not increase after resume.
+
+Resume validates the persisted input, output schema, and artifact payload hashes before returning, and fails closed on drift. To inspect a run's log directly:
+
+```bash
+little events run_candidate_review_2026_07_08
+little replay run_candidate_review_2026_07_08
+```
+
+See [Replay and Durability](/docs/v0.1.0-alpha/running/replay-and-durability) for the full replay-vs-retry semantics.
+
+## Run it
+
+```bash
+pnpm --filter kill-resume demo
+```
+
+The demo spawns a child process, kills it mid-run with `SIGKILL`, then respawns a fresh process that resumes the same run id — no re-scoring of committed branches.

@@ -153,6 +153,7 @@ export type CapabilityManifest = {
   readonly tools: readonly ToolSnapshot[];
   readonly models: readonly ModelSlotSnapshot[];
   readonly modelSlots: readonly string[];
+  readonly mcpCapabilitiesHash?: string;
   readonly workerHarness?: {
     readonly harnessId: string;
   };
@@ -256,6 +257,7 @@ export type WorkflowCompileOptions = {
   readonly outerLoop?: OrchestrationRequestOptions["outerLoop"];
   readonly promptNote?: string;
   readonly bash?: BashCapabilities;
+  readonly mcpCapabilities?: unknown;
   readonly onCompilerLifecycleEvent?: (
     event: CompilerLifecycleEvent,
   ) => Promise<void> | void;
@@ -271,6 +273,7 @@ export type PlannerHarnessRuntimeContext = {
   readonly scratchMounts: readonly ScratchMount[];
   readonly skills: readonly SkillDescriptor[];
   readonly skillWarnings?: readonly Record<string, unknown>[];
+  readonly mcpCapabilities?: unknown;
   readonly bashCapabilities?: BashCapabilities;
   readonly abortSignal?: AbortSignal;
 };
@@ -287,6 +290,7 @@ export type OrchestrationRequestOptions = {
   readonly outerLoop?: Omit<OrchestrationRequestOuterLoop, "isFinalCycle"> & { readonly isFinalCycle?: boolean };
   readonly promptNote?: string;
   readonly bash?: BashCapabilities;
+  readonly mcpCapabilities?: unknown;
 };
 
 export type WorkflowCompileResult = {
@@ -375,6 +379,9 @@ const ALPHA_STEP_TYPES = [
   "parallel",
   "decision",
 ] as const;
+// 3 real attempts: the Md2 repair-loop fix means each revision now genuinely re-prompts
+// the planner with its prior validation findings (they used to be useless replays), so 3
+// is already 3 self-correction passes.
 const DEFAULT_MAX_WORKFLOW_REVISIONS = 3;
 const nodeRequire = createRequire(import.meta.url);
 
@@ -485,6 +492,9 @@ export function toOrchestrationRequest(
     tools,
     models: models.map((entry) => entry.snapshot),
     modelSlots: modelLocks.map((slot) => slot.slotId),
+    ...(options.mcpCapabilities === undefined
+      ? {}
+      : { mcpCapabilitiesHash: sha256Digest(options.mcpCapabilities) }),
     ...(workerHarness === undefined ? {} : { workerHarness }),
     secrets: [],
     network: { default: "deny", allow: [] },
@@ -770,6 +780,84 @@ export function synthesizeSimpleLwir(request: OrchestrationRequest): LwirWorkflo
   } as LwirWorkflow;
 }
 
+/**
+ * A format-valid LWIR reference for the planner to ADAPT — used only as a planner
+ * reference example, never as a deterministic compile fallback. For a tool-free
+ * workflow this is {@link synthesizeSimpleLwir} (the exact one-step plan). For a
+ * tool-registering workflow (where the simple plan is gated out) it returns a valid
+ * `tool.call` -> `ai.generate` skeleton showing the required format and how to bind
+ * this workflow's own tools — so a planner model never has to author the proprietary
+ * LWIR format blind from a bare capability list.
+ */
+export function synthesizeReferenceLwir(request: OrchestrationRequest): LwirWorkflow | undefined {
+  const simple = synthesizeSimpleLwir(request);
+  if (simple !== undefined) {
+    return simple;
+  }
+  const modelSlots = request.capabilityManifest.modelSlots;
+  const tools = request.capabilityManifest.tools;
+  if (modelSlots.length === 0 || tools.length === 0) {
+    return undefined;
+  }
+  const modelSlot = modelSlots[0];
+  const firstTool = tools[0];
+  const requested = request.requestedOutput;
+  const outputSchema = requestedOutputSchema(requested);
+  const description = request.metadata.description;
+  const toolStepId = "call_tool";
+  return {
+    apiVersion: "littleworkflow.dev/v0.1",
+    kind: "Workflow",
+    metadata: {
+      name: request.metadata.name,
+      version: "0.1.0-alpha",
+      ...(description === undefined ? {} : { description }),
+    },
+    input: { schema: request.inputSchema },
+    output: { schema: outputSchema },
+    permissions: { tools: tools.map((tool) => tool.name), models: [modelSlot], secrets: [], network: [] },
+    steps: [
+      {
+        id: toolStepId,
+        uses: "tool.call",
+        with: { tool: firstTool.name, args: skeletonToolArgs(firstTool.inputSchema) },
+        output: { mode: "json", schema: true },
+      },
+      {
+        id: "generate",
+        uses: "ai.generate",
+        needs: [toolStepId],
+        input: "{{ input }}",
+        with: { model: modelSlot, ...(description === undefined ? {} : { prompt: description }) },
+        output: stepOutputForRequested(requested),
+      },
+    ],
+  } as LwirWorkflow;
+}
+
+/**
+ * Build a `tool.call` step's `with.args` from a tool's input schema: map each input
+ * property to a `{{ input.<prop> }}` expression. Passing the whole `{{ input }}` would
+ * break tools with strict (`additionalProperties: false`) schemas, so the skeleton must
+ * show per-field args. Falls back to the whole input for a tool with no object schema.
+ */
+function skeletonToolArgs(inputSchema: NormalizedSchemaDescriptor | undefined): unknown {
+  if (typeof inputSchema === "object" && inputSchema !== null) {
+    const properties = (inputSchema as { readonly properties?: unknown }).properties;
+    if (typeof properties === "object" && properties !== null) {
+      const keys = Object.keys(properties as Record<string, unknown>);
+      if (keys.length > 0) {
+        const args: Record<string, string> = {};
+        for (const key of keys) {
+          args[key] = `{{ input.${key} }}`;
+        }
+        return args;
+      }
+    }
+  }
+  return "{{ input }}";
+}
+
 /** The ai.generate step output that produces the workflow's requested output. */
 function stepOutputForRequested(requested: CompilerOutputMode): LwirStepOutput {
   switch (requested.mode) {
@@ -796,7 +884,16 @@ export function buildPlanningContext(request: OrchestrationRequest): string {
   const lines: string[] = [];
   lines.push("Available capabilities for this workflow (use ONLY these ids — never invent model or tool ids):");
   lines.push(`- model slots (set as a step's with.model): ${manifest.modelSlots.length === 0 ? "(none)" : manifest.modelSlots.join(", ")}`);
-  lines.push(`- tools (set as a tool.call step's with.tool): ${manifest.tools.length === 0 ? "(none)" : manifest.tools.map((t) => t.name).join(", ")}`);
+  if (manifest.tools.length === 0) {
+    lines.push("- tools (set as a tool.call step's with.tool): (none)");
+  } else {
+    lines.push("- tools (call via a tool.call step; the step's with.args object MUST match that tool's input schema below — pass only the listed properties):");
+    for (const t of manifest.tools) {
+      const desc = t.description === undefined ? "" : ` — ${t.description}`;
+      const schema = t.inputSchema === undefined ? "(no input)" : JSON.stringify(t.inputSchema);
+      lines.push(`    - ${t.name}${desc}; input schema: ${schema}`);
+    }
+  }
   lines.push(`- step types (a step's uses): ${manifest.stepTypes.join(", ")}`);
   const reference = synthesizeSimpleLwir(request);
   if (reference !== undefined) {
@@ -805,12 +902,44 @@ export function buildPlanningContext(request: OrchestrationRequest): string {
       "A valid reference LWIR for THIS workflow is below. It already satisfies the output contract — return it as-is, or adapt it (e.g. add steps) if the task needs more. Return ONLY the LWIR JSON, no prose or markdown fences:",
     );
     lines.push(JSON.stringify(reference, null, 2));
+    return lines.join("\n");
+  }
+  // Tool-registering workflows have no simple synthesis, but must NOT be left to author
+  // the LWIR format from a bare id list (weak models can't). Give them a valid skeleton.
+  const skeleton = synthesizeReferenceLwir(request);
+  if (skeleton !== undefined) {
+    lines.push("");
+    lines.push(
+      'This workflow registers tools, so author the plan yourself. Below is a VALID LWIR skeleton in the required format that calls a tool and then generates the declared output. Adapt it: add a `tool.call` step for each tool you need, chain steps with `needs: ["<step id>"]`, reference a prior result with a `{{ steps.<id>.output }}` expression, and keep the final step producing the declared output schema. Return ONLY the LWIR JSON, no prose or markdown fences:',
+    );
+    lines.push(JSON.stringify(skeleton, null, 2));
   }
   return lines.join("\n");
 }
 
 function composePlanningContext(planningContext: string, priorNote: string | undefined): string {
   return priorNote === undefined ? planningContext : `${planningContext}\n\n${priorNote}`;
+}
+
+/**
+ * Turn a rejected draft + its validation findings into a repair note appended to the
+ * planner's prompt on the next revision. This both (a) tells the model exactly what to
+ * fix and (b) changes the prompt so the durable planner harness re-invokes the model
+ * instead of replaying the same invalid draft.
+ */
+export function buildPlannerRepairNote(repair: PlannerRepairContext): string {
+  const findings = repair.findings.length === 0
+    ? "(validator reported no specific findings)"
+    : repair.findings.map((finding) => `- ${finding.path}: ${finding.message}`).join("\n");
+  return [
+    "Your previous LWIR draft was REJECTED by the validator. Fix EVERY error listed below and return corrected LWIR — ONLY the JSON, no prose or markdown fences.",
+    "",
+    "Validation errors:",
+    findings,
+    "",
+    "Your previous (invalid) draft was:",
+    JSON.stringify(repair.previousLwir),
+  ].join("\n");
 }
 
 function unwrapPlannerDecision(value: unknown): {
@@ -948,7 +1077,8 @@ function plannerAdapterForCompile(
   };
 
   return {
-    async draft(requestInput): Promise<unknown> {
+    async draft(requestInput, repair): Promise<unknown> {
+      const repairNote = repair === undefined ? undefined : buildPlannerRepairNote(repair);
       const task = {
         kind: "plan" as const,
         workflowSnapshot: {
@@ -964,10 +1094,12 @@ function plannerAdapterForCompile(
         input: requestInput.input,
         // Always give the planner the concrete capabilities + a valid reference
         // LWIR for this workflow, so it can author a plan with no dev-provided
-        // system prompt. Any prior-cycle note is appended after.
+        // system prompt. On a repair revision, the prior draft's validation errors
+        // are appended so the model corrects them (and the changed prompt prevents
+        // the durable harness from replaying the same rejected draft).
         systemMessage: composePlanningContext(
-          buildPlanningContext(requestInput),
-          requestInput.messages.system,
+          composePlanningContext(buildPlanningContext(requestInput), requestInput.messages.system),
+          repairNote,
         ),
         ...(requestInput.outerLoop === undefined
           ? {}
@@ -978,6 +1110,7 @@ function plannerAdapterForCompile(
         plannerModelSlotId: resolvedModel.slotId,
         ...(plannerConfig.system === undefined ? {} : { systemPrompt: plannerConfig.system }),
         skills: context.skills.map(skillManifestIdentity),
+        mcpCapabilities: runtime?.mcpCapabilities ?? options.mcpCapabilities,
         workflowDefinitionHash: requestInput.locks.workflowDefinitionHash,
         toolRegistry: options.tools,
         memoryStoreIds: context.memoryMounts.map((mount) => mount.storeId),
@@ -1018,6 +1151,7 @@ function plannerAdapterForCompile(
           plannerModelSlotId: resolvedModel.slotId,
           ...(plannerConfig.system === undefined ? {} : { systemPrompt: plannerConfig.system }),
           skills: context.skills.map(skillManifestIdentity),
+          mcpCapabilities: runtime?.mcpCapabilities ?? options.mcpCapabilities,
           workflowDefinitionHash: requestInput.locks.workflowDefinitionHash,
           toolRegistry: options.tools,
           memoryStoreIds: context.memoryMounts.map((mount) => mount.storeId),

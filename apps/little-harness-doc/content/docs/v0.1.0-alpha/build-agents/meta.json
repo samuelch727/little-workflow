@@ -2,11 +2,16 @@
   "title": "Build Agents",
   "pages": [
     "basic-agent",
-    "generating-and-streaming",
     "tools",
+    "skills",
     "memory",
     "message-files",
     "input-types",
-    "skills"
+    "generating-and-streaming",
+    "agent-folders",
+    "chat-connectors",
+    "outcomes",
+    "workflows",
+    "dynamic-workflows"
   ]
 }

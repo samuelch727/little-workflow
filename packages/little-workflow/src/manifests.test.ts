@@ -164,6 +164,76 @@ describe("manifest builders", () => {
     expect(first.bashCapabilitiesHash).not.toBe(second.bashCapabilitiesHash);
     expect(hashHarnessManifest(first)).not.toBe(hashHarnessManifest(second));
   });
+
+  it("hashes sanitized MCP capability manifests without serializing the raw manifest", () => {
+    const mcpCapabilities = {
+      gateway: { listToolName: "mcp_list_tools", callToolName: "mcp_call_tool" },
+      servers: [
+        {
+          id: "figma",
+          description: "Figma.",
+          transport: { type: "http", url: "https://mcp.example.test/figma" },
+          guide: {
+            name: "figma-mcp",
+            description: "Use Figma.",
+            bodyHash: "sha256:guide-a",
+          },
+          tools: [
+            {
+              serverId: "figma",
+              sourceName: "search",
+              visibleName: "search",
+              description: "Search Figma files.",
+              inputSchemaHash: "sha256:input-a",
+            },
+          ],
+        },
+      ],
+    };
+    const first = plannerManifest({
+      harnessId: "workflowHarness@1.0.0",
+      plannerModelSlotId: "gpt-5",
+      workflowDefinitionHash: "sha256:wf",
+      mcpCapabilities,
+    });
+    const second = plannerManifest({
+      harnessId: "workflowHarness@1.0.0",
+      plannerModelSlotId: "gpt-5",
+      workflowDefinitionHash: "sha256:wf",
+      mcpCapabilities: {
+        ...mcpCapabilities,
+        servers: [
+          {
+            ...mcpCapabilities.servers[0],
+            tools: [
+              {
+                ...mcpCapabilities.servers[0].tools[0],
+                description: "Search Figma files and comments.",
+              },
+            ],
+          },
+        ],
+      },
+    });
+
+    expect(first.mcpCapabilitiesHash).toMatch(/^sha256:/u);
+    expect(first.mcpCapabilitiesHash).not.toBe(second.mcpCapabilitiesHash);
+    expect(hashHarnessManifest(first)).not.toBe(hashHarnessManifest(second));
+    expect(JSON.stringify(first)).not.toContain("mcp.example.test");
+    expect(JSON.stringify(first)).not.toContain("Search Figma files");
+  });
+
+  it("omits absent MCP capability hashes from orchestrator manifests", () => {
+    const manifest = orchestratorManifest({
+      harnessId: "workflowHarness@1.0.0",
+      orchestratorModelSlotId: "gpt-5",
+      availableWorkflows: [{ id: "support.mcp", definitionHash: "sha256:wf" }],
+      maxConcurrentSubRuns: 2,
+    });
+
+    expect(Object.hasOwn(manifest, "mcpCapabilitiesHash")).toBe(false);
+    expect(() => hashHarnessManifest(manifest)).not.toThrow();
+  });
 });
 
 describe("checkHarnessManifestDrift", () => {

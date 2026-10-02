@@ -4,9 +4,8 @@
     "index",
     "local-host",
     "just-bash",
-    "filesystem-model",
-    "commit-model",
-    "isolation-and-security",
-    "subagents"
+    "execution-environments",
+    "execution-tiers",
+    "isolation-and-security"
   ]
 }

@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import type {
   ArtifactRef,
   FileWriter,
@@ -15,10 +15,6 @@ import { sessionPaths, type LocalHostPaths, type LocalSessionPaths } from "./pat
 export type LocalHarnessSession = HarnessSession & {
   pathKey: string;
   paths: LocalSessionPaths;
-  setStatus(patch: Partial<HarnessSessionStatus>): Promise<void>;
-  markMessageStaged(messageId: string): Promise<void>;
-  setReadOnlyPersistentDirs(harnessDirs: readonly string[]): void;
-  getReadOnlyPersistentDirs(): readonly string[];
 };
 
 export class LocalSessionStore<TExtraBody = unknown>
@@ -84,12 +80,21 @@ async function readStatus(pathname: string): Promise<HarnessSessionStatus | unde
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
       return undefined;
     }
+    // A truncated/partial status.json (e.g. a crash mid-write) is treated as absent so the
+    // session can be recreated rather than becoming permanently unreopenable.
+    if (error instanceof SyntaxError) {
+      return undefined;
+    }
     throw error;
   }
 }
 
 async function writeStatus(pathname: string, status: HarnessSessionStatus): Promise<void> {
-  await writeFile(pathname, JSON.stringify(status, null, 2), "utf8");
+  // Atomic temp-file-then-rename, matching the durability layer's writeJson, so a crash
+  // mid-write never leaves a truncated status.json for a reader to observe.
+  const tempPath = `${pathname}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
+  await writeFile(tempPath, JSON.stringify(status, null, 2), "utf8");
+  await rename(tempPath, pathname);
 }
 
 function createLocalHarnessSession(
@@ -109,6 +114,7 @@ function createLocalHarnessSession(
     id,
     pathKey,
     paths,
+    dataDir: paths.root,
     files,
     artifacts: {
       async list() {

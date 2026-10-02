@@ -28,6 +28,7 @@ export type PlannerManifest = {
   readonly plannerModelSlotId: string;
   readonly systemPromptHash: string;
   readonly skillsHash: string;
+  readonly mcpCapabilitiesHash?: string;
   readonly workflowDefinitionHash: string;
   readonly globalToolsHash: string;
   readonly memoryStoreIds: readonly string[];
@@ -42,6 +43,7 @@ export type WorkerManifest = {
   readonly stepPath: string;
   readonly stepConfigHash: string;
   readonly skillsHash: string;
+  readonly mcpCapabilitiesHash?: string;
   readonly allowedToolsHash: string;
   readonly memoryStoreIds: readonly string[];
   readonly bashCapabilitiesHash: string;
@@ -54,6 +56,7 @@ export type OrchestratorManifest = {
   readonly orchestratorModelSlotId: string;
   readonly systemPromptHash: string;
   readonly skillsHash: string;
+  readonly mcpCapabilitiesHash?: string;
   readonly availableWorkflows: ReadonlyArray<{
     readonly id: string;
     readonly definitionHash: string;
@@ -75,6 +78,7 @@ export type PlannerManifestInput = {
   readonly plannerModelSlotId: string;
   readonly systemPrompt?: string;
   readonly skills?: ReadonlyArray<SkillManifestIdentity>;
+  readonly mcpCapabilities?: unknown;
   readonly workflowDefinitionHash: string;
   readonly toolRegistry?: ToolRegistry;
   readonly memoryStoreIds?: readonly string[];
@@ -89,6 +93,7 @@ export type WorkerManifestInput = {
   readonly stepPath: string;
   readonly stepConfig: unknown;
   readonly skills?: ReadonlyArray<SkillManifestIdentity>;
+  readonly mcpCapabilities?: unknown;
   readonly allowedTools: readonly string[];
   readonly memoryStoreIds?: readonly string[];
   readonly bashCapabilities?: BashCapabilities;
@@ -101,6 +106,7 @@ export type OrchestratorManifestInput = {
   readonly orchestratorModelSlotId: string;
   readonly systemPrompt?: string;
   readonly skills?: ReadonlyArray<SkillManifestIdentity>;
+  readonly mcpCapabilities?: unknown;
   readonly availableWorkflows: ReadonlyArray<{
     readonly id: string;
     readonly definitionHash: string;
@@ -148,6 +154,7 @@ export function plannerManifest(input: PlannerManifestInput): PlannerManifest {
     plannerModelSlotId: input.plannerModelSlotId,
     systemPromptHash: sha256Digest(input.systemPrompt ?? ""),
     skillsHash: skillsHash(input.skills),
+    mcpCapabilitiesHash: hashMcpCapabilities(input.mcpCapabilities),
     workflowDefinitionHash: input.workflowDefinitionHash,
     globalToolsHash: hashToolRegistry(input.toolRegistry),
     memoryStoreIds: sortedStrings(input.memoryStoreIds ?? []),
@@ -170,6 +177,7 @@ export function workerManifest(input: WorkerManifestInput): WorkerManifest {
       ? {}
       : { systemPromptHash: sha256Digest(input.systemPrompt) }),
     skillsHash: skillsHash(input.skills),
+    mcpCapabilitiesHash: hashMcpCapabilities(input.mcpCapabilities),
     allowedToolsHash: sha256Digest(sortedStrings(input.allowedTools)),
     memoryStoreIds: sortedStrings(input.memoryStoreIds ?? []),
     bashCapabilitiesHash: hashBashCapabilities(input.bashCapabilities),
@@ -177,18 +185,19 @@ export function workerManifest(input: WorkerManifestInput): WorkerManifest {
 }
 
 export function orchestratorManifest(input: OrchestratorManifestInput): OrchestratorManifest {
-  return {
+  return stripUndefined({
     harnessId: input.harnessId,
     orchestratorModelSlotId: input.orchestratorModelSlotId,
     systemPromptHash: sha256Digest(input.systemPrompt ?? ""),
     skillsHash: skillsHash(input.skills),
+    mcpCapabilitiesHash: hashMcpCapabilities(input.mcpCapabilities),
     availableWorkflows: [...input.availableWorkflows]
       .sort((left, right) => compareStrings(left.id, right.id)),
     globalToolsHash: hashToolRegistry(input.toolRegistry),
     memoryStoreIds: sortedStrings(input.memoryStoreIds ?? []),
     bashCapabilitiesHash: hashBashCapabilities(input.bashCapabilities),
     maxConcurrentSubRuns: input.maxConcurrentSubRuns,
-  };
+  }) as OrchestratorManifest;
 }
 
 export function fixerManifest(input: FixerManifestInput): FixerManifest {
@@ -247,6 +256,10 @@ function hashToolRegistry(registry: ToolRegistry | undefined): string {
 
 function hashBashCapabilities(capabilities: BashCapabilities | undefined): string {
   return sha256Digest(normalizeBashCapabilities(capabilities));
+}
+
+function hashMcpCapabilities(manifest: unknown): string | undefined {
+  return manifest === undefined ? undefined : sha256Digest(manifest);
 }
 
 function skillsHash(

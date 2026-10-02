@@ -170,12 +170,28 @@ code and closure internals are never traced.
 harness.runtime.command.started
 harness.runtime.command.succeeded
 harness.runtime.command.failed
+harness.runtime.command.denied
+harness.runtime.tier.escalated
+harness.runtime.tier.unavailable
 harness.runtime.error
+harness.runtime.dispose.failed
 ```
 
 Runtime events are for the execution substrate, such as the built-in bash tool.
-They should record commands, exit codes, duration, bounded stdout and stderr
-previews, and file changes discovered by the runtime.
+`harness.runtime.command.*` events record commands, exit codes, duration, bounded
+stdout and stderr previews, and file changes discovered by the runtime. Every
+execution environment emits them identically.
+
+`harness.runtime.tier.escalated`, `harness.runtime.tier.unavailable`, and
+`harness.runtime.command.denied` appear only under `tieredExecutionEnvironment`.
+They record why a turn switched execution tier, why a needed tier could not be
+used, or why a policy refused a command — with the classification reasons — and
+never reach the model's prompt. See
+[Execution Tiers](/docs/v0.1.0-alpha/runtime/execution-tiers#events).
+
+`harness.runtime.dispose.failed` records an execution environment whose teardown
+threw, with the error envelope under `metadata.error`. It never fails the turn,
+but `little-harness doctor` counts it as a failure.
 
 ## File Events
 
@@ -252,6 +268,22 @@ Commit failures should be host-facing. They should not be automatically inserted
 Persistent Dir metadata should include `harnessDir`, commit policy, file counts,
 change counts, storage adapter metadata allowed by policy, duration, and error
 details for failed commits.
+
+## Outcome Events
+
+```txt
+outcome.reported
+```
+
+`outcome.reported` is a side-channel event: a verdict appended to a session's
+trace after a run by `reportHarnessOutcome`, `createHarnessOutcomeReporter`, or a
+Chat SDK reaction. It is a valid trace event but deliberately not part of the
+durable session log — an outcome is never an input to the run it describes.
+
+Metadata carries `status` (`"success" | "failure" | "partial"`) and `source`,
+plus optional `retracted`, `score`, `detail`, `reporter` (always a pseudonym),
+`reportKey`, `stepPath`, `promptHash`, and caller-supplied extras. See
+[Outcome Capture](/docs/v0.1.0-alpha/build-agents/outcomes).
 
 ## Subagent Events
 

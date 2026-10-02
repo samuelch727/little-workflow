@@ -51,7 +51,7 @@ function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-function errorFromReplayEnvelope(value: unknown): Error {
+export function errorFromReplayEnvelope(value: unknown): Error {
   const envelope = isObject(value) ? value : {};
   const error = new Error(typeof envelope.message === "string" ? envelope.message : "Harness tool call failed.");
   error.name = typeof envelope.name === "string" ? envelope.name : "Error";

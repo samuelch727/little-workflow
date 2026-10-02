@@ -1,0 +1,9 @@
+# Harness sessions and traces.
+.little-harness/
+
+# Workflow event stores. These do NOT land under `.little-harness/`: the harness hands a
+# workflow `persistence.dataDir = "<sessionId>/workflows"` (a RELATIVE path — see
+# packages/little-harness/src/execution/turn-tools.ts) and `localWorld` resolves it against
+# `process.cwd()`, so an inline workflow spills its sqlite store next to wherever the
+# process was started. The dreamer's sessions are named `dream-<slug>-<timestamp>`.
+/dream-*/

@@ -288,7 +288,7 @@ async function executeScopedToolCall(
       toolCallId: callId,
       messages: [],
       abortSignal: executionContext.signal,
-      experimental_context: isRecord(options.toolExecutionContext) ? options.toolExecutionContext : executionContext,
+      context: isRecord(options.toolExecutionContext) ? options.toolExecutionContext : executionContext,
     });
     const durableResult = output === undefined ? null : output;
     await emitHarnessOccurrence({
@@ -404,11 +404,24 @@ async function runAiGenerateStep(
   ctx: WorkflowHarnessContext,
   options: CreateWorkflowHarnessOptions,
 ): Promise<Extract<WorkflowHarnessResult, { kind: "execute_step" }> | { readonly kind: "delegate_to_default" }> {
-  const messages = [{ role: "user", content: stepInput }];
+  const withConfig = step.with as Record<string, unknown> | undefined;
+  const outputRepairNote = typeof withConfig?.outputRepairNote === "string"
+    ? withConfig.outputRepairNote
+    : undefined;
+  // On a self-repair re-run the runtime sets `with.outputRepairNote` with the validator findings
+  // and the required schema. Surface it to the model as a trailing user turn so the worker can
+  // actually correct its output — without it, the re-run is a blind retry.
+  const messages = outputRepairNote === undefined
+    ? [{ role: "user", content: stepInput }]
+    : [{ role: "user", content: stepInput }, { role: "user", content: outputRepairNote }];
   const model = ctx.model.model;
   const system = systemWithSkills(ctx.system, ctx.skills);
   const scope = toolCallScopeForStepContext(stepContext);
-  const executableTools = workflowToolsForContext(ctx);
+  // A structured-output ai.generate step must produce its declared output from its input.
+  // Offering it the workflow's action tools invites a spurious tool call that ends the
+  // single-shot generation with empty output (and could re-fire a side-effecting tool).
+  // Tool use in a workflow is expressed as explicit tool.call steps, so this is safe.
+  const executableTools = isStructuredAiGenerateStep(step) ? {} : workflowToolsForContext(ctx);
   const tools = workflowToolRefs(executableTools);
   const request = {
     model: ctx.model.modelId,
@@ -481,6 +494,9 @@ async function runAiGenerateStep(
       payload: {
         callId,
         turn,
+        // Model identity must ride the payload, not just the metadata: only the payload
+        // is written to the durable event log, and downstream cost pricing keys off it.
+        model: { provider: ctx.model.providerId, modelId: ctx.model.modelId },
         response: {
           text: responseText,
           output,
@@ -629,6 +645,8 @@ async function runModelLikeTask(
         payload: {
           callId,
           turn,
+          // See the single-turn site above: pricing reads model identity off the payload.
+          model: { provider: ctx.model.providerId, modelId: ctx.model.modelId },
           response: {
             text: responseText,
             output,
@@ -860,6 +878,18 @@ function workflowToolRefs(tools: Readonly<Record<string, unknown>>): JsonObject[
   return toolRefsForDurableRequest(tools as Parameters<typeof toolRefsForDurableRequest>[0]);
 }
 
+/** True when the ai.generate step declares a structured (non-text) output contract. */
+function isStructuredAiGenerateStep(step: unknown): boolean {
+  if (!isRecord(step)) {
+    return false;
+  }
+  const output = step.output;
+  if (!isRecord(output)) {
+    return false;
+  }
+  return typeof output.mode === "string" && output.mode !== "text";
+}
+
 function workflowToolsForContext(ctx: WorkflowHarnessContext): Record<string, unknown> {
   const tools = { ...ctx.tools };
   const bash = (ctx as WorkflowHarnessContext & { readonly bash?: unknown }).bash;
@@ -979,13 +1009,27 @@ function hashToolCallEvent(event: DurableHarnessEvent): string | undefined {
   });
 }
 
+/**
+ * Match a tool name against a permission glob where `*` stands for any run of
+ * characters. Mirrors `matchToolGlob` in little-workflow's `permission.ts` —
+ * the documented `PermissionRule.tool` contract (e.g. `"*"`, `"bash*"`) —
+ * duplicated here because little-harness cannot depend on little-workflow.
+ */
+function matchToolPermissionGlob(pattern: string, toolName: string): boolean {
+  if (pattern === "*") return true;
+  const regex = pattern
+    .replace(/[.+?^${}()|[\]\\]/gu, "\\$&")
+    .replace(/\*/gu, ".*");
+  return new RegExp(`^${regex}$`, "u").test(toolName);
+}
+
 async function assertToolAllowed(
   toolName: string,
   args: unknown,
   ctx: WorkflowHarnessContext,
 ): Promise<void> {
   const rules = ctx.permissions?.ruleset ?? [];
-  const matchingRules = rules.filter((rule) => rule.tool === toolName);
+  const matchingRules = rules.filter((rule) => matchToolPermissionGlob(rule.tool, toolName));
   if (matchingRules.some((rule) => rule.action === "deny")) {
     throw new Error(`Tool '${toolName}' denied by workflow permissions.`);
   }
@@ -1014,7 +1058,7 @@ function aiLoopFromAiSdkModule(aiSdkModule: AiSdkModuleLike | undefined): AiLoop
       const outputSpec = aiSdkOutputSpec(aiSdkModule, outputSpecForAiSdkStep(options.step));
       const request = stripUndefined({
         model: options.model,
-        system: options.system,
+        instructions: options.system,
         messages: toAiSdkMessages(options),
         tools: modelFacingTools(options.tools, aiSdkModule.jsonSchema),
         abortSignal: options.signal,
@@ -1056,8 +1100,8 @@ async function resolveAiSdkStreamResult(stream: unknown): Promise<JsonObject> {
     toolCalls: await settleValue(stream.toolCalls),
     output: await settleValue(stream.output),
     object: await settleValue(stream.object),
+    // AI SDK 7: `usage` totals every step (the deprecated `totalUsage` is its alias).
     usage: await settleValue(stream.usage),
-    totalUsage: await settleValue(stream.totalUsage),
     finishReason: await settleValue(stream.finishReason),
     providerMetadata: await settleValue(stream.providerMetadata),
   });
@@ -1242,7 +1286,8 @@ function toolCallsFromAiSdkRaw(raw: Record<string, unknown>): AiLoopResult["tool
 }
 
 function normalizeAiSdkUsage(result: Record<string, unknown>): AiLoopResult["usage"] | undefined {
-  const usage = isRecord(result.totalUsage) ? result.totalUsage : result.usage;
+  // AI SDK 7: `usage` totals every step; `totalUsage` only appears on v6-shaped results.
+  const usage = isRecord(result.usage) ? result.usage : result.totalUsage;
   if (!isRecord(usage)) {
     return undefined;
   }
@@ -1250,6 +1295,7 @@ function normalizeAiSdkUsage(result: Record<string, unknown>): AiLoopResult["usa
     inputTokens: numberValue(usage.inputTokens, usage.promptTokens),
     outputTokens: numberValue(usage.outputTokens, usage.completionTokens),
     cachedInputTokens: numberValue(
+      nestedNumber(usage, "inputTokenDetails", "cacheReadTokens"),
       usage.cachedInputTokens,
       nestedNumber(usage, "inputTokenDetails", "cachedTokens"),
       nestedNumber(usage, "promptTokensDetails", "cachedTokens"),

@@ -1,0 +1,16 @@
+{
+  "name": "delegated-candidates",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "demo": "node run.mjs",
+    "demo:stub": "node run.mjs stub",
+    "test": "node --test ./*.test.mjs"
+  },
+  "dependencies": {
+    "@ai-sdk/deepseek": "^3.0.58",
+    "ai": "^7.0.126",
+    "little-workflow": "workspace:*"
+  }
+}

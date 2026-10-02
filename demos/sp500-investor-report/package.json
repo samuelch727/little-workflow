@@ -1,0 +1,19 @@
+{
+  "name": "sp500-investor-report",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "demo": "node run.mjs",
+    "demo:live": "node run.mjs live",
+    "demo:stub": "node run.mjs stub",
+    "test:dataset": "node --test dataset.test.mjs",
+    "test:lwir": "node --test workflow-lwir.test.mjs",
+    "test:markdown": "node --test markdown.test.mjs",
+    "test:run-cli": "node --test run-cli.test.mjs"
+  },
+  "dependencies": {
+    "@ai-sdk/deepseek": "^3.0.58",
+    "ai": "^7.0.126",
+    "little-workflow": "workspace:*"
+  }
+}

@@ -1,0 +1,204 @@
+---
+title: AI SDK Native
+description: How Little Workflow uses AI SDK tool(), model(), and Output.* as first-class primitives.
+---
+
+Little Workflow is built on the AI SDK. Developers pass AI SDK models, tools, and output specs directly — no adapter layer to learn. The runtime uses AI SDK agent primitives under the hood; the planner and worker harnesses run AI SDK model calls.
+
+## `tool()` As The Canonical Primitive
+
+Tools are declared with `tool()` from the `ai` package. This is the same shape used anywhere in the AI SDK ecosystem:
+
+```ts
+import { tool } from "ai";
+import { z } from "zod";
+
+const lookupCustomer = tool({
+  description: "Look up customer metadata by account ID.",
+  inputSchema: z.object({ accountId: z.string() }),
+  outputSchema: z.object({ accountId: z.string(), plan: z.string() }),
+  execute: async ({ accountId }) => ({ accountId, plan: "enterprise" }),
+});
+```
+
+Little Workflow does not introduce a custom tool shape. Existing AI SDK tools are usable directly in the registry. See [Tools](/docs/v0.1.0-alpha/authoring/tools-and-capabilities) for the full tool API including MCP integration.
+
+## `model()` Factory
+
+`model()` wraps an AI SDK model object into a `ModelSlot` — a planner-visible execution model option that LWIR steps reference by stable slot id.
+
+```ts
+import { model } from "little-workflow";
+import { openai } from "@ai-sdk/openai";
+
+// Minimum — slot id auto-derived from model name.
+// Description auto-filled from the bundled registry if the model is known.
+const slot1 = model(openai("gpt-4o-mini"));
+// → slot id "gpt-4o-mini"
+
+// With description override:
+const slot2 = model(openai("gpt-4o-mini"), {
+  description: "Used for short-text classification tasks.",
+});
+// → slot id "gpt-4o-mini" (or "gpt-4o-mini-{animal}" if name taken — see below)
+
+// Explicit id to bypass auto-derivation:
+const slot3 = model(openai("gpt-4o-mini"), {
+  id: "fast-classifier",
+  description: "...",
+});
+// → slot id "fast-classifier"
+```
+
+### Signature
+
+```ts
+export function model(
+  aiSdkModel: AiSdkModel,
+  metadata?: ModelSelectionMetadata,
+): ModelSlot;
+
+export type ModelSelectionMetadata = {
+  readonly id?: string;           // override auto-derivation
+  readonly description?: string;  // override bundled registry default
+};
+```
+
+That is the entire metadata surface. There is no `qualityTier`, `costClass`, `useFor`, `capabilities`, `defaults`, `allowOverrides`, or `limits`. Pricing and capabilities come from the bundled model registry — the developer does not redeclare them.
+
+### Slot Id Auto-Derivation
+
+Slot ids derive from the AI SDK model's `modelId`. The sanitization rules:
+
+- Lowercase ASCII.
+- Replace `/`, `.`, `:`, `_`, whitespace with `-`.
+- Collapse consecutive hyphens; trim leading/trailing hyphens.
+
+Examples:
+
+| `modelId` | Slot id |
+|---|---|
+| `gpt-4o-mini` | `gpt-4o-mini` |
+| `gpt-4o-mini-2024-07-18` | `gpt-4o-mini-2024-07-18` |
+| `claude-sonnet-4-6` | `claude-sonnet-4-6` |
+| `openai/gpt-5.4` | `openai-gpt-5-4` |
+
+### Animal Disambiguator
+
+When two slots in the same workflow wrap the same model, the second gets a deterministic animal suffix:
+
+```ts
+const a = model(openai("gpt-4o-mini"), { description: "Classifier." });
+// → "gpt-4o-mini"
+
+const b = model(openai("gpt-4o-mini"), { description: "Summarizer." });
+// → "gpt-4o-mini-tiger" (hash of modelId + description → picks from a list of 64 animals)
+```
+
+The first registered slot wins the unsuffixed id. Suffixes are deterministic — same description always produces the same animal — so slot ids are stable across restarts.
+
+If you want two models from different providers with the same `modelId` (e.g., `openai("gpt-4o")` vs `azure("gpt-4o")`), supply `id:` explicitly to avoid the auto-generated suffix:
+
+```ts
+const a = model(openai("gpt-4o"), { id: "openai-gpt-4o" });
+const b = model(azureOpenai("gpt-4o"), { id: "azure-gpt-4o" });
+```
+
+## Bundled Model Registry
+
+The SDK ships a bundled model registry at `packages/little-workflow/src/model-registry.json`. When `model()` wraps a known model, the registry auto-fills `description`, `pricing` (USD per 1M tokens), `contextWindow`, and `capabilities`:
+
+```jsonc
+{
+  "openai/gpt-4o-mini": {
+    "description": "Fast, low-cost model for short text and structured outputs.",
+    "capabilities": ["text", "structured", "tools"],
+    // USD per 1M tokens. `cachedInput` is the published cache-read rate.
+    "pricing": { "input": 0.15, "output": 0.6, "cachedInput": 0.075, "currency": "USD" },
+    "contextWindow": 128000
+  }
+}
+```
+
+The planner sees these descriptions when choosing which model to assign to each LWIR step.
+
+### Registry Keys And Provider Ids
+
+Registry keys are `provider/modelId`, lowercased, with a **bare** provider name. The AI SDK does not report a bare provider name: every provider package stamps its language models with `` `${providerName}.${modelType}` `` — `openai("gpt-4o-mini")` returns the responses model, whose `.provider` is `openai.responses`, and `deepseek(...)` reports `deepseek.chat`.
+
+The lookup therefore tries the reported provider verbatim first, then strips one trailing dot-segment at a time until it matches or runs out of dots: `openai.responses/gpt-4o-mini` → `openai/gpt-4o-mini`. Consequences worth knowing:
+
+- You write registry keys against the bare provider (`openai/…`, `deepseek/…`). Adding `openai.responses/…` entries is unnecessary — though if you do add one, it wins for models reporting exactly that provider.
+- Only the provider is stripped, never the model id, so ids containing dots (`gpt-4.1`) are matched intact.
+- A model absent under every candidate stays unpriced (`costUsd: null` plus an `unpricedCalls` increment). The fallback narrows the provider, never the model id, so it cannot silently substitute a different model's rates.
+
+### How Registry Pricing Becomes Dollars
+
+Durable events record tokens and the `{ provider, modelId }` that served each call — never a dollar figure. Cost is computed once, when a run's events are materialized, by multiplying those tokens against the registry rates above. It surfaces as `result.usage.costUsd`, `MaterializedRunState.steps[stepPath].usage.costUsd`, and `little report <run-id>`. It does **not** appear on `harness.session.completed`, or on any other event — a `costUsd` on a recorded usage payload is rejected outright.
+
+Two properties matter when you read a total:
+
+- **Unpriced calls are counted, not zeroed.** A model with no registry entry prices as `costUsd: null` and increments `unpricedCalls`; it never contributes `0`. A `null` aggregate means *nothing in scope could be priced*, which is not the same claim as "this was free". When some calls priced and others did not, the number covers only the priced ones and `unpricedCalls` records the gap.
+- **`cachedInput` is present for only some models.** Ten of the eighteen registry entries carry a cache-read rate sourced from the provider's pricing page: `openai/gpt-4o-mini`, `openai/gpt-4o`, `openai/gpt-5`, `openai/o4-mini`, `anthropic/claude-sonnet-4-6`, `anthropic/claude-opus-4-7`, `google/gemini-2.5-pro`, `google/gemini-2.5-flash`, `deepseek/deepseek-v4-flash`, and `deepseek/deepseek-v4-pro`. For every other model, cache hits are billed at the **full input rate**. That is a conservative over-estimate, chosen over inventing a discount that was never published.
+- **Provenance.** Every priced entry cites its `pricingSource` and the date it was checked (`pricingVerifiedAt`), and a test fails when those dates go stale. Four entries without a citable published rate (`meta/llama-4-maverick`, `qwen/qwen3-coder`, `cohere/command-a`, `azure/gpt-4o`) are marked `unverified`.
+
+You can inspect registry metadata programmatically:
+
+```ts
+import { getModelInfoFor } from "little-workflow";
+
+const info = getModelInfoFor("openai", "gpt-4o-mini");
+// → { description, capabilities, pricing, contextWindow } | undefined
+```
+
+## Structured Output In LWIR Steps
+
+AI SDK `Output.*` describes the target output shape for `ai.generate` steps in LWIR. Five output modes are recognized:
+
+| Mode | Use |
+|---|---|
+| `text` | Narrative output; no downstream step needs to parse it structurally. |
+| `object` | Schema-backed extraction, scoring, and validation. |
+| `array` | Bounded lists, including small parallel branch outputs. |
+| `choice` | Classification and routing values with a closed set of allowed strings. |
+| `json` | JSON Schema-backed output when a Zod schema is not available. |
+
+`ai.generate` steps declare output mode in the LWIR `step.output` field. The worker harness validates the model's output against the declared schema before passing it to downstream steps.
+
+The workflow-level `outputSchema` (on `createLittleWorkflow`) is a Zod schema — not an `Output.*` value. `Output.*` is a step-level concept.
+
+## Worker Harness + AI Step Execution
+
+The runtime no longer has a separate `RuntimeAiAdapter`. The worker harness owns all step execution:
+
+- `ai.generate` steps — the worker runs an AI SDK agent loop in the harness session, calling the model with the step's prompt, tools allowlist, and output schema.
+- `code.run` steps — the default worker harness refuses to execute them (it validates the sandbox policy, then throws). A custom `worker.harness` must run the source, which receives `{input, tools}`.
+- `tool.call` steps — the worker invokes the named tool from the registry directly.
+
+This unification means the event log is uniform across all step types. `harness.tool_call.started, harness.tool_call.succeeded, harness.tool_call.failed` events record every tool call whether it came from the model (`caller: "model"`) or from code (`caller: "code"`).
+
+The harness is substitutable: `workflowHarness` is the SDK default; you can provide a custom `Harness` implementation conforming to `run(task, ctx)` for Cloudflare Workers or other runtimes.
+
+## Planner Model
+
+The planner's model is configured under `WorkflowDefinition.planner.model` — separate from the `models` array (which lists execution model options for LWIR steps):
+
+```ts
+createLittleWorkflow({
+  models: [
+    model(openai("gpt-4o-mini")),   // LWIR can use this for steps
+  ],
+  planner: {
+    model: openai("gpt-5"),         // planner's own model — private, not in LWIR
+    system: "...",
+  },
+});
+```
+
+If `planner.model` is a raw AI SDK model (not a `ModelSlot`), the SDK auto-wraps it with an auto-derived slot id. The planner slot is never added to `WorkflowDefinition.models`.
+
+## Cross-References
+
+- Tool() API + MCP + code.run proxy: [Tools](/docs/v0.1.0-alpha/authoring/tools-and-capabilities)
+- Full createLittleWorkflow config: [Create A Workflow](/docs/v0.1.0-alpha/authoring/advanced-createlittleworkflow)
+- Harness contract: [SDK Implementation Spec](/docs/v0.1.0-alpha/internals/sdk-implementation)

@@ -156,6 +156,8 @@ The session can keep:
 - Persistent Dir checkouts
 - trace continuity
 
+> **Note:** A continued session preserves the agent's files, artifacts, and trace — **not** the chat transcript. Pass the full `messages[]` history on every turn (standard AI SDK client-carries-history); `session` does not re-feed prior messages to the model.
+
 Omit `session` for one-shot work.
 
 ## Generate A Final Result
@@ -387,6 +389,13 @@ return result.toUIMessageStreamResponse();
 
 This is where apps can enqueue retries, update dashboards, or persist host-side
 status after the response has been sent to the browser.
+
+Handle rejection on `result.finished` as well as success. If the underlying AI
+SDK UI stream emits an error chunk, Little Harness fails the turn: partial text
+may already have streamed to the browser, `result.text` and `result.output`
+reject, `finished` rejects, and after-turn Persistent Dir commits are skipped.
+`uiMessageStream.onError` customizes the client-facing error chunk only; it does
+not convert the turn into a successful completion.
 
 ## Lifecycle Callbacks
 

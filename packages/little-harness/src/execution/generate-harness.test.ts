@@ -4,7 +4,7 @@ import { pathToFileURL } from "node:url";
 import { MockLanguageModelV3 } from "ai/test";
 import { tool } from "ai";
 import { z } from "zod";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createHarness } from "../create-harness.js";
 import { HarnessInputError } from "../errors.js";
 import type {
@@ -18,10 +18,28 @@ import { skill } from "../skills/skill.js";
 import { withTempDir } from "../test/temp.js";
 import { generateHarness } from "./generate-harness.js";
 
+const mcpResolverMock = vi.hoisted(() => ({
+  resolveHarnessMcpGateway: vi.fn(),
+}));
+
+vi.mock("../mcp.js", () => ({
+  resolveHarnessMcpGateway: mcpResolverMock.resolveHarnessMcpGateway,
+}));
+
 const usage = {
   inputTokens: { total: 1, noCache: 1, cacheRead: 0, cacheWrite: 0 },
   outputTokens: { total: 1, text: 1, reasoning: 0 },
 };
+
+beforeEach(() => {
+  mcpResolverMock.resolveHarnessMcpGateway.mockReset();
+  mcpResolverMock.resolveHarnessMcpGateway.mockResolvedValue({
+    tools: {},
+    skills: [],
+    manifest: { servers: [] },
+    close: async () => {},
+  });
+});
 
 function textModel(text: string, warnings: Array<{ type: "other"; message: string }> = []) {
   return new MockLanguageModelV3({
@@ -87,6 +105,54 @@ describe("generateHarness", () => {
     });
   });
 
+  it("honors workflowBudgets.maxModelSteps for the per-turn step cap", async () => {
+    await withTempDir(async (dir) => {
+      let step = 0;
+      const model = new MockLanguageModelV3({
+        provider: "test",
+        modelId: "max-model-steps",
+        // Always emit a fresh tool call so the turn only stops via the configured step cap.
+        doGenerate: async () => {
+          step += 1;
+          return {
+            content: [
+              {
+                type: "tool-call",
+                toolCallId: `call_${step}`,
+                toolName: "noop",
+                input: JSON.stringify({}),
+              },
+            ],
+            finishReason: { unified: "tool-calls", raw: "tool-calls" },
+            usage,
+            warnings: [],
+          };
+        },
+      });
+      const harness = createHarness({
+        host: localHost({ dataDir: dir }),
+        model,
+        workflowBudgets: { maxModelSteps: 5 },
+        tools: {
+          noop: tool({
+            description: "No-op tool.",
+            inputSchema: z.object({}),
+            execute: async () => ({}),
+          }),
+        },
+      });
+
+      await generateHarness({
+        harness,
+        messages: [{ id: "m1", role: "user", parts: [{ type: "text", text: "loop" }] }] as any,
+        session: "max-model-steps",
+      });
+
+      // Configured cap is 5; the hardcoded literal would let it run to 20.
+      expect(model.doGenerateCalls).toHaveLength(5);
+    });
+  });
+
   it("supports per-call model, system, and temperature overrides", async () => {
     await withTempDir(async (dir) => {
       const defaultModel = textModel("default response");
@@ -120,6 +186,7 @@ describe("generateHarness", () => {
         temperature: 0.2,
       });
 
+      expect(result.status).toBe("completed");
       expect(result.text).toBe("request response");
       expect(defaultModel.doGenerateCalls).toHaveLength(0);
       expect(requestModel.doGenerateCalls).toHaveLength(1);
@@ -207,6 +274,152 @@ describe("generateHarness", () => {
 
       expect(seenToolNames).toContain("lookup");
       expect(seenToolNames).not.toContain("bash");
+    });
+  });
+
+  it("hides abstract tools from a generate run and warns once per hidden tool", async () => {
+    await withTempDir(async (dir) => {
+      let seenToolNames: string[] = [];
+      const model = new MockLanguageModelV3({
+        provider: "test",
+        modelId: "generate-hides-abstract",
+        doGenerate: async (options) => {
+          seenToolNames = providerToolNames(options.tools);
+          return {
+            content: [{ type: "text", text: "done" }],
+            finishReason: { unified: "stop", raw: "stop" },
+            usage,
+            warnings: [],
+          };
+        },
+      });
+      const harness = createHarness({
+        host: localHost({ dataDir: dir }),
+        model,
+        runtime: { bash: false },
+        tools: {
+          lookup: tool({
+            description: "Lookup data.",
+            inputSchema: z.object({ query: z.string() }),
+            execute: async () => ({ ok: true }),
+          }),
+          // Abstract tool: declared without execute, so it only becomes live on a connector that
+          // implements it. It must never be offered to the model on a plain generateHarness run.
+          sendChannelUpdate: {
+            description: "Post a channel update (implemented only on a connector).",
+            inputSchema: z.object({ text: z.string() }),
+          },
+        } as any,
+      });
+
+      const result = await generateHarness({
+        harness,
+        messages: [{ id: "m1", role: "user", parts: [{ type: "text", text: "Hi" }] }] as any,
+      });
+
+      expect(seenToolNames).toContain("lookup");
+      expect(seenToolNames).not.toContain("sendChannelUpdate");
+      const abstractWarnings = result.warnings.filter(
+        (warning) => warning.metadata?.reason === "abstract-tool-hidden",
+      );
+      expect(abstractWarnings).toHaveLength(1);
+      expect(abstractWarnings[0]).toMatchObject({
+        code: "policy_warning",
+        metadata: { reason: "abstract-tool-hidden", tool: "sendChannelUpdate" },
+      });
+    });
+  });
+
+  it("exposes durable task control tools to model turns", async () => {
+    await withTempDir(async (dir) => {
+      let seenToolNames: string[] = [];
+      const model = new MockLanguageModelV3({
+        provider: "test",
+        modelId: "task-control-tools",
+        doGenerate: async (options) => {
+          seenToolNames = providerToolNames(options.tools);
+          return {
+            content: [{ type: "text", text: "done" }],
+            finishReason: { unified: "stop", raw: "stop" },
+            usage,
+            warnings: [],
+          };
+        },
+      });
+      const harness = createHarness({
+        host: localHost({ dataDir: dir }),
+        model,
+        system: "Use tasks.",
+      });
+
+      const result = await generateHarness({ harness, type: "job", input: {} });
+
+      expect(result.status).toBe("completed");
+      expect(seenToolNames).toEqual(expect.arrayContaining([
+        "list_tasks",
+        "get_task",
+        "task_result",
+        "await_tasks",
+        "set_task_wakeup",
+      ]));
+      expect(seenToolNames).not.toContain("cancel_task");
+    });
+  });
+
+  it("parks the turn when await_tasks waits on a non-terminal durable task", async () => {
+    await withTempDir(async (dir) => {
+      const host = localHost({ dataDir: dir });
+      await host.durable!.tasks.reserveTask({
+        sessionId: "await-loop",
+        kind: "workflow",
+        purpose: "background review",
+      });
+      let calls = 0;
+      const model = new MockLanguageModelV3({
+        provider: "test",
+        modelId: "await-task-parks",
+        doGenerate: async () => {
+          calls += 1;
+          if (calls === 1) {
+            return {
+              content: [
+                {
+                  type: "tool-call",
+                  toolCallId: "tool_await",
+                  toolName: "await_tasks",
+                  input: JSON.stringify({ taskIds: ["task_1"], mode: "all" }),
+                },
+              ],
+              finishReason: { unified: "tool-calls", raw: "tool-calls" },
+              usage,
+              warnings: [],
+            };
+          }
+          return {
+            content: [{ type: "text", text: "should not run" }],
+            finishReason: { unified: "stop", raw: "stop" },
+            usage,
+            warnings: [],
+          };
+        },
+      });
+      const harness = createHarness({ host, model, system: "Wait for tasks." });
+
+      const result = await generateHarness({
+        harness,
+        messages: [{ id: "m1", role: "user", parts: [{ type: "text", text: "wait" }] }] as any,
+        session: "await-loop",
+      }) as any;
+
+      expect(result).toMatchObject({
+        status: "parked",
+        continuationId: expect.stringMatching(/^cont_[0-9a-v]+$/u),
+        pending: { taskIds: ["task_1"], mode: "all" },
+      });
+      expect(calls).toBe(1);
+      await expect(host.durable!.continuations.get(result.continuationId)).resolves.toMatchObject({
+        parkedToolCallIds: ["tool_await"],
+      });
     });
   });
 
@@ -410,6 +623,236 @@ describe("generateHarness", () => {
     });
   });
 
+  it("resolves MCP skills and tools for generate turns and closes the gateway after a normal return", async () => {
+    await withTempDir(async (dir) => {
+      const configuredSkillRoot = path.join(dir, "skills", "configured-review");
+      await mkdir(configuredSkillRoot, { recursive: true });
+      await writeFile(
+        path.join(configuredSkillRoot, "SKILL.md"),
+        "---\nname: configured-review\ndescription: Configured review.\n---\n\nConfigured body.",
+        "utf8",
+      );
+      const close = vi.fn(async () => {});
+      const mcpConfig = {
+        servers: [
+          {
+            id: "figma",
+            description: "Figma MCP server.",
+            transport: { type: "http" as const, url: "https://mcp.example.test/figma" },
+          },
+        ],
+      };
+      let seenToolNames: string[] = [];
+      let seenPrompt = "";
+      mcpResolverMock.resolveHarnessMcpGateway.mockResolvedValueOnce({
+        tools: {
+          mcp_call_tool: tool({
+            description: "Call an MCP server tool.",
+            inputSchema: z.object({}),
+            execute: async () => ({ ok: true }),
+          }),
+          mcp_list_tools: tool({
+            description: "List MCP server tools.",
+            inputSchema: z.object({}),
+            execute: async () => ({ servers: [] }),
+          }),
+        },
+        skills: [
+          skill({
+            name: "figma-mcp",
+            description: "Figma MCP guide.",
+            harnessDir: ".agents/skills/figma-mcp",
+            files: { "SKILL.md": "MCP guide body." },
+          }),
+        ],
+        manifest: { servers: [] },
+        close,
+      });
+      const model = new MockLanguageModelV3({
+        provider: "test",
+        modelId: "mcp-generate",
+        doGenerate: async (options) => {
+          seenToolNames = providerToolNames(options.tools);
+          seenPrompt = JSON.stringify(options.prompt);
+          return {
+            content: [{ type: "text", text: "mcp done" }],
+            finishReason: { unified: "stop", raw: "stop" },
+            usage,
+            warnings: [],
+          };
+        },
+      });
+      const harness = createHarness({
+        host: localHost({ dataDir: path.join(dir, "harness") }),
+        model,
+        mcp: mcpConfig,
+        skills: [configuredSkillRoot],
+        inputTypes: {
+          job: inputType({
+            description: "Read configured and MCP skills.",
+            toMessages: async ({ files }) => {
+              const configured = await files.read("/.agents/skills/configured-review/SKILL.md");
+              const mcpGuide = await files.read("/.agents/skills/figma-mcp/SKILL.md");
+              return [{ role: "user", content: `${configured.text()}\n${mcpGuide.text()}` }];
+            },
+          }),
+        },
+      });
+
+      const result = await generateHarness({ harness, type: "job", input: {}, session: "mcp-generate" });
+
+      expect(result.text).toBe("mcp done");
+      expect(mcpResolverMock.resolveHarnessMcpGateway).toHaveBeenCalledTimes(1);
+      expect(mcpResolverMock.resolveHarnessMcpGateway).toHaveBeenCalledWith(mcpConfig);
+      expect(seenToolNames).toEqual(expect.arrayContaining(["mcp_call_tool", "mcp_list_tools"]));
+      expect(seenPrompt).toContain("Configured body.");
+      expect(seenPrompt).toContain("MCP guide body.");
+      expect(close).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("spools large MCP gateway tool results when called through the generate runtime bridge", async () => {
+    await withTempDir(async (dir) => {
+      const close = vi.fn(async () => {});
+      const longResult = `MCP_SENTINEL_2481\n${"alpha\n".repeat(80)}`;
+      let call = 0;
+      mcpResolverMock.resolveHarnessMcpGateway.mockResolvedValueOnce({
+        tools: {
+          mcp_call_tool: tool({
+            description: "Call an MCP server tool.",
+            inputSchema: z.object({ server: z.string(), tool: z.string(), args: z.unknown().optional() }),
+            execute: async () => longResult,
+          }),
+        },
+        skills: [],
+        manifest: { servers: [] },
+        close,
+      });
+      const model = new MockLanguageModelV3({
+        provider: "test",
+        modelId: "mcp-runtime-spooling",
+        doGenerate: async () => {
+          call += 1;
+          return call === 1
+            ? {
+                content: [
+                  {
+                    type: "tool-call",
+                    toolCallId: "call_bash",
+                    toolName: "bash",
+                    input: JSON.stringify({
+                      command:
+                        "js-exec -c 'const result = await tools.mcp_call_tool({server:\"figma\",tool:\"search\",args:{query:\"alpha\"}}); console.log(result.path); if (!result.path) throw new Error(\"missing spooled MCP path\")' > /artifacts/mcp-runtime-path.txt",
+                    }),
+                  },
+                ],
+                finishReason: { unified: "tool-calls", raw: "tool-calls" },
+                usage,
+                warnings: [],
+              }
+            : {
+                content: [{ type: "text", text: "final after mcp runtime spooling" }],
+                finishReason: { unified: "stop", raw: "stop" },
+                usage,
+                warnings: [],
+              };
+        },
+      });
+      const harness = createHarness({
+        host: localHost({ dataDir: dir }),
+        model,
+        mcp: { servers: [] },
+        toolResultSpooling: { maxInlineBytes: 64, previewBytes: 24 },
+      });
+
+      const result = await generateHarness({
+        harness,
+        messages: [{ id: "m1", role: "user", parts: [{ type: "text", text: "Use MCP through bash." }] }] as any,
+        session: "mcp-runtime-spooling",
+        activeTools: ["bash"],
+      });
+
+      const spooledPath = (await result.session.files.read("/artifacts/mcp-runtime-path.txt")).text().trim();
+      expect(result.text).toBe("final after mcp runtime spooling");
+      expect(spooledPath).toMatch(/^\/artifacts\/tool-results\/mcp_call_tool\/.+\.txt$/u);
+      expect((await result.session.files.read(spooledPath)).text()).toBe(longResult);
+      expect(close).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("closes the resolved MCP gateway when generate model execution fails", async () => {
+    await withTempDir(async (dir) => {
+      const close = vi.fn(async () => {});
+      mcpResolverMock.resolveHarnessMcpGateway.mockResolvedValueOnce({
+        tools: {},
+        skills: [],
+        manifest: { servers: [] },
+        close,
+      });
+      const harness = createHarness({
+        host: localHost({ dataDir: dir }),
+        model: new MockLanguageModelV3({
+          provider: "test",
+          modelId: "mcp-generate-fails",
+          doGenerate: async () => {
+            throw new Error("provider down");
+          },
+        }),
+        mcp: { servers: [] },
+      });
+
+      await expect(
+        generateHarness({
+          harness,
+          messages: [{ id: "m1", role: "user", parts: [{ type: "text", text: "Fail." }] }] as any,
+          session: "mcp-generate-fails",
+        }),
+      ).rejects.toThrow("provider down");
+      expect(close).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("rejects MCP gateway tool names that collide with configured generate tools before model calls", async () => {
+    await withTempDir(async (dir) => {
+      const close = vi.fn(async () => {});
+      mcpResolverMock.resolveHarnessMcpGateway.mockResolvedValueOnce({
+        tools: {
+          mcp_call_tool: tool({
+            description: "Call an MCP server tool.",
+            inputSchema: z.object({}),
+            execute: async () => ({ ok: true }),
+          }),
+        },
+        skills: [],
+        manifest: { servers: [] },
+        close,
+      });
+      const model = textModel("should not run");
+      const harness = createHarness({
+        host: localHost({ dataDir: dir }),
+        model,
+        mcp: { servers: [] },
+        tools: {
+          mcp_call_tool: tool({
+            description: "User-defined colliding tool.",
+            inputSchema: z.object({}),
+            execute: async () => ({ ok: true }),
+          }),
+        },
+      });
+
+      await expect(
+        generateHarness({
+          harness,
+          messages: [{ id: "m1", role: "user", parts: [{ type: "text", text: "Hi" }] }] as any,
+          session: "mcp-generate-collision",
+        }),
+      ).rejects.toThrow(HarnessInputError);
+      expect(model.doGenerateCalls).toHaveLength(0);
+      expect(close).toHaveBeenCalledTimes(1);
+    });
+  });
+
   it("continues the default agent loop after tool calls and passes artifact helpers to tools", async () => {
     await withTempDir(async (dir) => {
       let call = 0;
@@ -467,6 +910,87 @@ describe("generateHarness", () => {
       expect(result.text).toBe("final after tool");
       expect(model.doGenerateCalls).toHaveLength(2);
       expect((await result.session.files.read("/artifacts/tool/out.txt")).text()).toBe("hello");
+    });
+  });
+
+  it("records the model step, duration, and failure of model-driven tool calls", async () => {
+    // AI SDK 7 tool-execution events carry no step number or success flag; the harness
+    // restores both, and durable tool replay keys calls by `turn`.
+    await withTempDir(async (dir) => {
+      const durability = replayDurability();
+      let call = 0;
+      const model = new MockLanguageModelV3({
+        provider: "test",
+        modelId: "tool-events",
+        doGenerate: async () => {
+          call += 1;
+          if (call <= 2) {
+            return {
+              content: [
+                {
+                  type: "tool-call",
+                  toolCallId: `call_${call}`,
+                  toolName: call === 1 ? "ok" : "boom",
+                  input: JSON.stringify({ query: "q" }),
+                },
+              ],
+              finishReason: { unified: "tool-calls", raw: "tool-calls" },
+              usage,
+              warnings: [],
+            };
+          }
+          return {
+            content: [{ type: "text", text: "done" }],
+            finishReason: { unified: "stop", raw: "stop" },
+            usage,
+            warnings: [],
+          };
+        },
+      });
+      const harness = createHarness({
+        host: localHost({ dataDir: dir }),
+        model,
+        sessionLog: durability.sink,
+        tools: {
+          ok: tool({
+            description: "Succeeds.",
+            inputSchema: z.object({ query: z.string() }),
+            execute: async () => ({ value: 1 }),
+          }),
+          boom: tool({
+            description: "Fails.",
+            inputSchema: z.object({ query: z.string() }),
+            execute: async (): Promise<{ value: number }> => {
+              throw new Error("tool exploded");
+            },
+          }),
+        },
+      });
+
+      const result = await generateHarness({
+        harness,
+        messages: [{ id: "m1", role: "user", parts: [{ type: "text", text: "Run tools." }] }] as any,
+        session: "tool-events",
+        runId: "run_tool_events",
+      });
+
+      expect(result.text).toBe("done");
+      const succeeded = durability.events.find((event) => event.type === "harness.tool_call.succeeded");
+      const failed = durability.events.find((event) => event.type === "harness.tool_call.failed");
+      expect(succeeded?.payload).toEqual(expect.objectContaining({
+        callId: "call_1",
+        toolName: "ok",
+        turn: 1,
+        durationMs: expect.any(Number),
+        result: { value: 1 },
+      }));
+      expect(failed?.payload).toEqual(expect.objectContaining({
+        callId: "call_2",
+        toolName: "boom",
+        turn: 2,
+        durationMs: expect.any(Number),
+        error: expect.objectContaining({ message: "tool exploded" }),
+      }));
     });
   });
 
@@ -1490,6 +2014,38 @@ describe("generateHarness", () => {
     });
   });
 
+  it("replays a completed MCP-configured model response without resolving MCP again", async () => {
+    await withTempDir(async (dir) => {
+      const durability = replayDurability();
+      const close = vi.fn(async () => {});
+      mcpResolverMock.resolveHarnessMcpGateway.mockResolvedValueOnce({
+        tools: {},
+        skills: [],
+        manifest: { servers: [] },
+        close,
+      });
+      const model = textModel("cached mcp response");
+      const harness = createHarness({
+        host: localHost({ dataDir: dir }),
+        model,
+        durability: durability.sink,
+        mcp: { servers: [] },
+      });
+      const messages = [{ id: "m1", role: "user", parts: [{ type: "text", text: "Cache me with MCP." }] }] as any;
+
+      const first = await generateHarness({ harness, messages, session: "mcp-model-replay", runId: "run_mcp_model_replay" });
+
+      mcpResolverMock.resolveHarnessMcpGateway.mockRejectedValueOnce(new Error("mcp server down"));
+      const second = await generateHarness({ harness, messages, session: "mcp-model-replay", runId: "run_mcp_model_replay" });
+
+      expect(first.text).toBe("cached mcp response");
+      expect(second.text).toBe("cached mcp response");
+      expect(model.doGenerateCalls).toHaveLength(1);
+      expect(mcpResolverMock.resolveHarnessMcpGateway).toHaveBeenCalledTimes(1);
+      expect(close).toHaveBeenCalledTimes(1);
+    });
+  });
+
   it("does not replay a completed model response when per-call temperature changes", async () => {
     await withTempDir(async (dir) => {
       const durability = replayDurability();
@@ -1725,7 +2281,8 @@ describe("generateHarness", () => {
         messages,
         session: "tool-choice-replay",
         runId: "run_tool_choice_replay",
-        toolChoice: { type: "tool", toolName: "lookup" } as any,
+        // AI SDK 7 rejects a text-only response to a forced tool choice; "none" still changes the choice.
+        toolChoice: "none",
       });
 
       expect(model.doGenerateCalls).toHaveLength(2);

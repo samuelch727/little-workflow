@@ -1,0 +1,119 @@
+---
+title: Outcome Capture
+description: Record whether a run actually worked — from app code or chat reactions — and read success rates back per prompt.
+---
+
+A trace tells you what a run did; an **outcome** records whether it worked. Little Harness stores
+outcomes as `outcome.reported` events appended to the session trace, so success rates can be read back
+per prompt version (`promptHash`) and per workflow step (`stepPath`) from the same Local Host data.
+
+Outcomes are observations, never gates. Reporting one never throws, never blocks, and never changes the
+run it describes; it is also kept out of the durable session log, because an outcome is never an input
+to a replayed run.
+
+## Report From Your App
+
+Grade a run you just finished with `reportHarnessOutcome`:
+
+```ts
+import { generateHarness, reportHarnessOutcome } from "little-harness";
+
+const result = await generateHarness({ harness, messages, session: "ticket:TCK-1" });
+
+const accepted = await reviewDraft(result.text);
+await reportHarnessOutcome({
+  session: result.session,
+  status: accepted ? "success" : "failure",
+});
+```
+
+Or bind a reporter to a harness once and report by session id later — from a webhook, a review queue,
+or a feedback button:
+
+```ts
+import { createHarnessOutcomeReporter } from "little-harness";
+
+const outcomes = createHarnessOutcomeReporter({ harness, source: "review-queue" });
+
+await outcomes.report({ sessionId: "ticket:TCK-1", status: "partial", score: 0.5 });
+```
+
+| Field | Notes |
+|---|---|
+| `status` | `"success" \| "failure" \| "partial"`. Required. |
+| `score` | Optional numeric grade alongside the status. |
+| `detail` | Free-text note, written to the trace verbatim — keep personal data out of it. |
+| `source` | Where the report came from. Defaults to `"programmatic"`; chat reactions use `"chat-sdk"`. |
+| `reporter` | Who reported, as a **pseudonym** — never a handle, name, or raw platform user id. |
+| `reportKey` | Reports sharing a key describe the same subject; the latest one wins when rates are computed. |
+| `retracted` | Withdraws an earlier report with the same `reportKey` and status (a user removing a reaction). |
+| `stepPath` | The workflow step this outcome is about, when it is about one step rather than the run. |
+| `promptHash` | The prompt being graded. Resolved from the session's last `harness.model.called` when omitted. |
+| `turnId`, `metadata` | Optional turn id and extra observation-only fields. |
+| `sinks` | Best-effort downstream consumers (`{ name?, deliver(event) }`) such as a metrics client. |
+
+Both functions resolve to `{ recorded, event?, delivered, failed, errors }` instead of throwing: a missing
+session, an unwritable trace, or a failing sink is reported in `errors` and counted, and your code can
+ignore the result entirely.
+
+## Chat Reactions
+
+[Chat SDK connectors](/docs/v0.1.0-alpha/build-agents/chat-connectors) record thumbs-up and thumbs-down
+reactions on the agent's replies as outcomes **by default**, whenever the Chat instance exposes
+`onReaction`. A positive reaction (`thumbs_up`, `+1`, 👍) records `success`, a negative one (`thumbs_down`,
+`-1`, 👎) records `failure`, and removing the reaction records a retraction. Other emoji, the bot's own
+reactions, and reactions on messages the agent did not write are ignored.
+
+The reporter is stored as `anon_<16 hex>` — a SHA-256 of `platform:userId` — so two raters stay distinct
+without a handle ever reaching the append-only trace. Tune or disable it on the descriptor:
+
+```ts
+export default chatSdkConnector({
+  userName: "support",
+  adapter: { name: "slack", create: () => createSlackAdapter() },
+  state: () => createRedisState(),
+  reactions: {
+    positive: ["white_check_mark"],
+    negative: ["x"],
+    onRemoved: "ignore",
+    sinks: [metricsSink],
+  },
+  // reactions: false, // opt out
+});
+```
+
+`reactions` also accepts `session(event, { adapterName })` (map a reaction to a harness session; the
+default is `<adapter>:<threadId>`, matching the connector's own session ids), `reporterId(event, ctx)`,
+and `onOutcome(result, event)` to observe what was recorded.
+
+## Read The Rates
+
+From the terminal, aggregate every session in a data dir, or one session:
+
+```bash
+little-harness outcomes --data-dir .little-harness
+little-harness outcomes ticket:TCK-1 --data-dir .little-harness
+```
+
+From code, `aggregateLocalOutcomes` returns the same report:
+
+```ts
+import { aggregateLocalOutcomes } from "little-harness";
+
+const report = await aggregateLocalOutcomes({ dataDir: ".little-harness" });
+
+report.overall; // { n, success, failure, partial, successRate }
+report.byPromptHash; // one rate per prompt version
+report.byStepPath; // one rate per workflow step
+```
+
+Every rate carries its sample size `n`, and `successRate` is `null` (not `0`) when `n` is 0. The report
+also counts superseded and retracted reports, reports with no `promptHash`/`stepPath` to group by, and
+trace lines that failed validation. For events you already hold, `aggregateOutcomes(events)` and
+`foldOutcomeReports(events)` apply the same rules.
+
+## Next Steps
+
+- [Events](/docs/v0.1.0-alpha/reference/events#outcome-events) — the `outcome.reported` event.
+- [CLI](/docs/v0.1.0-alpha/reference/cli#outcomes-session-id) — the `outcomes` command.
+- [Chat Connectors](/docs/v0.1.0-alpha/build-agents/chat-connectors#reactions) — reactions on the descriptor.

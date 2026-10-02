@@ -1,0 +1,45 @@
+---
+title: Core Mental Model
+description: "The main concepts behind Little Harness: sessions, files, tools, persistence, and traces."
+---
+
+Little Harness is a runtime boundary around an agent. The developer gives the agent instructions and capabilities; the harness supplies the working environment.
+
+<Callout title="One word, two meanings">
+  "Harness" is used by both projects. Here it means the whole product — the thing
+  `createHarness()` builds. In Little Workflow, `workflowHarness` is a narrower
+  per-role runtime primitive inside a workflow run. They are related but distinct;
+  this site always means the `createHarness` sense.
+</Callout>
+
+The important shift is that the developer does not define every directory, shell, artifact sink, and session store before the first useful agent works. Those are managed defaults. The developer only opts into app-specific persistence, exports, and policy.
+
+```txt
+developer config
+-> tools + skills + optional Persistent Dirs
+-> auto-created session
+-> isolated workspace + artifacts + trace
+-> assistant result + host-visible status
+```
+
+## The Main Surfaces
+
+**Session** is the private conversation workspace. It persists across turns in one conversation and is isolated from other sessions.
+
+**Session Files** are files inside that workspace. They can be staged by chat messages, written by the app between turns, produced by tools, or edited by the agent.
+
+**Tools** are host-provided capabilities. They can query app data, call APIs, or create side effects when the developer exposes them.
+
+**Artifacts** are durable large files and tool outputs produced inside the harness. The model can inspect them without spending context on every byte.
+
+**Persistent Dirs** are opt-in developer-backed directories for cross-session files.
+
+**Trace** is the host-facing record of model calls, tool calls, file activity, artifact writes, commits, and failures.
+
+## What To Read Next
+
+- [Sessions](/docs/v0.1.0-alpha/foundations/sessions) explains auto-created sessions and continuation.
+- [Files And Artifacts](/docs/v0.1.0-alpha/foundations/files-and-artifacts) explains the virtual filesystem.
+- [Tools Vs Exports](/docs/v0.1.0-alpha/foundations/tools-vs-exports) explains ordinary tool calls and deliberate app writes.
+- [Persistent Dirs](/docs/v0.1.0-alpha/foundations/persistent-dirs) explains cross-session storage.
+- [Tracing](/docs/v0.1.0-alpha/foundations/tracing) explains observability.

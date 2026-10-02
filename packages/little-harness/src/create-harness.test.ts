@@ -2,6 +2,7 @@ import { tool } from "ai";
 import { z } from "zod";
 import { describe, expect, it } from "vitest";
 import { HarnessInputError } from "./errors.js";
+import type { HarnessMcpConfig } from "./mcp.js";
 import { withTempDir } from "./test/temp.js";
 import { createHarness } from "./create-harness.js";
 import { localHost } from "./local-host/index.js";
@@ -60,6 +61,85 @@ describe("createHarness", () => {
 
       expect(harness.config.skillMaxRisk).toBe("LOW");
       expect(harness.config.skillOidcToken).toBe(envToken);
+    });
+  });
+
+  it("applies workflow budget defaults", async () => {
+    await withTempDir(async (dir) => {
+      const harness = createHarness({
+        host: localHost({ dataDir: dir }),
+        model,
+        system: "Be useful.",
+      });
+
+      expect(harness.config.workflowBudgets).toEqual({
+        maxModelSteps: 20,
+        maxToolCallsPerTurn: 100,
+        maxConcurrentToolCalls: 10,
+        maxConcurrentWorkflowRuns: 10,
+        maxQueuedWorkflowRuns: 100,
+        maxAutonomousTurns: 10,
+      });
+      expect(harness.config.workflowBudgets).not.toHaveProperty("toolDeadlineMs");
+      expect(harness.config.workflowBudgets).not.toHaveProperty("workflowDeadlineMs");
+      expect(harness.config.workflowBudgets).not.toHaveProperty("queueDeadlineMs");
+      expect(harness.config.workflowBudgets).not.toHaveProperty("maxDynamicWorkflowTokens");
+      expect(harness.config.workflowBudgets).not.toHaveProperty("maxDynamicWorkflowOutputBytes");
+    });
+  });
+
+  it("preserves workflow budget defaults when users provide partial overrides", async () => {
+    await withTempDir(async (dir) => {
+      const harness = createHarness({
+        host: localHost({ dataDir: dir }),
+        model,
+        system: "Be useful.",
+        workflowBudgets: {
+          maxConcurrentWorkflowRuns: 2,
+          maxQueuedWorkflowRuns: 3,
+          queueDeadlineMs: 30_000,
+          maxDynamicWorkflowTokens: 8_000,
+        },
+      });
+
+      expect(harness.config.workflowBudgets).toEqual({
+        maxModelSteps: 20,
+        maxToolCallsPerTurn: 100,
+        maxConcurrentToolCalls: 10,
+        maxConcurrentWorkflowRuns: 2,
+        maxQueuedWorkflowRuns: 3,
+        maxAutonomousTurns: 10,
+        queueDeadlineMs: 30_000,
+        maxDynamicWorkflowTokens: 8_000,
+      });
+      expect(harness.config.workflowBudgets).not.toHaveProperty("toolDeadlineMs");
+      expect(harness.config.workflowBudgets).not.toHaveProperty("workflowDeadlineMs");
+      expect(harness.config.workflowBudgets).not.toHaveProperty("maxDynamicWorkflowOutputBytes");
+    });
+  });
+
+  it("preserves MCP config in the normalized harness config", async () => {
+    await withTempDir(async (dir) => {
+      const mcp: HarnessMcpConfig = {
+        servers: [
+          {
+            id: "figma",
+            description: "Figma MCP server.",
+            transport: { type: "http", url: "https://mcp.example.test/figma" },
+          },
+        ],
+      };
+      const harness = createHarness({
+        host: localHost({ dataDir: dir }),
+        model,
+        mcp,
+        memory: memory({
+          sourceDir: "memory/db-query-agent",
+        }),
+      });
+
+      expect(harness.config.mcp).toBe(mcp);
+      expect(harness.config.tools).toHaveProperty("remember");
     });
   });
 
@@ -148,6 +228,39 @@ describe("createHarness", () => {
           }),
         ).toThrow(HarnessInputError);
       }
+    });
+  });
+
+  it("resolves dynamicWorkflows and registers the authored-plans persistent dir", async () => {
+    await withTempDir(async (dir) => {
+      const factory = {
+        compile: () => ({ ok: false as const, causeCode: "plan_invalid" as const, message: "x" }),
+      };
+      const harness = createHarness({
+        host: localHost({ dataDir: dir }),
+        model,
+        dynamicWorkflows: { enabled: true, factory },
+      });
+
+      expect(harness.config.dynamicWorkflows).toBeDefined();
+      expect(harness.config.dynamicWorkflows?.factory).toBe(factory);
+      expect(
+        harness.config.persistentDirs.map((persistentDir) => persistentDir.harnessDir),
+      ).toContain("/persistent/dynamic-plans");
+    });
+  });
+
+  it("leaves dynamicWorkflows unset and adds no authored-plans dir when disabled", async () => {
+    await withTempDir(async (dir) => {
+      const harness = createHarness({
+        host: localHost({ dataDir: dir }),
+        model,
+      });
+
+      expect(harness.config.dynamicWorkflows).toBeUndefined();
+      expect(
+        harness.config.persistentDirs.map((persistentDir) => persistentDir.harnessDir),
+      ).not.toContain("/persistent/dynamic-plans");
     });
   });
 

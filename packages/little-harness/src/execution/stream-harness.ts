@@ -1,7 +1,8 @@
 import {
   createUIMessageStreamResponse,
-  stepCountIs,
+  isStepCount,
   streamText,
+  toUIMessageStream,
   type ModelMessage,
   type Output,
   type ToolSet,
@@ -9,24 +10,31 @@ import {
 } from "ai";
 import {
   findModelReplay,
+  findSingleCompletedModelReplay,
   findToolReplay,
   type DurableHarnessEvent,
   type ModelReplay,
   type ToolReplay,
 } from "../events/durability.js";
-import type { HarnessDurabilitySink, TraceHarnessEventInput } from "../events/occurrence.js";
+import {
+  applyConnectorToolPolicy,
+  resolveConnectorTools,
+  type ConnectorToolPolicy,
+} from "../connectors/tool-extensions.js";
+import type { HarnessSessionLog, TraceHarnessEventInput } from "../events/occurrence.js";
 import { emitHarnessOccurrence } from "../events/occurrence.js";
 import { HarnessInputError } from "../errors.js";
 import { createEventId, createTurnId } from "../ids.js";
+import type { ResolvedHarnessMcpGateway } from "../mcp.js";
 import { buildModelMessages, type BuildModelMessagesOptions } from "../runtime/messages.js";
 import { wrapToolsWithHarnessContext } from "../runtime/tools.js";
-import { resolveSkillsWithWarnings } from "../skills/skill.js";
 import { resolveTraceOptions } from "../trace/options.js";
 import { sanitizeTraceValue } from "../trace/redaction.js";
 import type { ResolvedHarnessTraceOptions } from "../trace/types.js";
 import { validateTraceEvent } from "../trace/validate.js";
 import type {
   Harness,
+  HarnessActiveConnector,
   HarnessAgentOptions,
   HarnessEvent,
   HarnessRuntime,
@@ -38,16 +46,21 @@ import type {
   PersistenceError,
   PreparedTurn,
 } from "../types.js";
+import { abstractToolHiddenWarning, partitionExecutableTools } from "./abstract-tools.js";
+import { assembleTurnTools, disposeTurnRuntime } from "./turn-tools.js";
+import { harnessToolExecutionEnd, harnessToolExecutionStart } from "./tool-execution-events.js";
 import { createArtifactAccessor, createEventedFileWriter } from "./evented-file-writer.js";
 import {
   durableModelRequest,
   modelCalledEventData,
   modelFailedEventData,
   modelRespondedEventData,
+  toolRefsForDurableRequest,
 } from "./model-events.js";
 import { modelRequestSettings } from "./model-request-settings.js";
 import { emitMountedFiles } from "./mount-events.js";
-import type { StreamHarnessFinished } from "./result.js";
+import type { HarnessParkedResult, StreamHarnessCompletedResult, StreamHarnessFinished } from "./result.js";
+import { parkedResultFromSteps, parkedThisStep } from "./park-resume.js";
 import { stageChatMessages, type StageChatMessagesOptions } from "./stage-message.js";
 import { toolCallEventData } from "./tool-events.js";
 
@@ -63,15 +76,26 @@ export type StreamHarnessOptions<TInput = unknown, TExtraBody = unknown, TOutput
     abortSignal?: AbortSignal;
     restage?: boolean;
     runId?: string;
-    durability?: HarnessDurabilitySink;
+    connector?: HarnessActiveConnector;
+    connectorTools?: ToolSet;
+    toolPolicy?: ConnectorToolPolicy;
+    /** The session log (durable event log) this run appends to and replays from. */
+    sessionLog?: HarnessSessionLog;
+    /** Historical alias of `sessionLog`; `sessionLog` wins when both are set. */
+    durability?: HarnessSessionLog;
     onTraceError?: (error: unknown, event: TraceHarnessEventInput) => Promise<void> | void;
     onEvent?: (event: HarnessEvent) => void | Promise<void>;
     onPersistenceError?: (error: PersistenceError) => void | Promise<void>;
+    uiMessageStream?: {
+      onError?: (error: unknown) => string;
+    };
   };
 
 export type StreamHarnessResult<TOutput = string> = {
   text: PromiseLike<string>;
   output: PromiseLike<TOutput>;
+  /** Incremental assistant text, like AI SDK `streamText`'s `.textStream` — for non-AI-SDK consumers. */
+  readonly textStream: AsyncIterable<string>;
   toUIMessageStream(): ReadableStream;
   toUIMessageStreamResponse(options?: ResponseInit): Response;
   finished: Promise<StreamHarnessFinished>;
@@ -98,10 +122,43 @@ type StartedStream<TOutput> = {
   output: Promise<TOutput>;
 };
 
+/**
+ * Decode a harness UI-message stream into a plain incremental text stream — the surface
+ * AI SDK `streamText` exposes as `.textStream`, and what any non-AI-SDK consumer (chat
+ * frameworks, CLIs, queues) needs to pipe a reply elsewhere. Lazily consumes the client
+ * stream on first iteration and yields only assistant `text-delta` content (reasoning and
+ * protocol chunks are skipped).
+ */
+function harnessTextStream(takeClientStream: () => Promise<ReadableStream>): AsyncIterable<string> {
+  return {
+    async *[Symbol.asyncIterator]() {
+      const reader = (await takeClientStream()).getReader();
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) {
+            break;
+          }
+          const chunk = value as { readonly type?: string; readonly delta?: string };
+          if (chunk?.type === "text-delta" && typeof chunk.delta === "string") {
+            yield chunk.delta;
+          }
+        }
+      } finally {
+        reader.releaseLock();
+      }
+    },
+  };
+}
+
 export function streamHarness<TOutput = string, TInput = unknown, TExtraBody = unknown>(
   options: StreamHarnessOptions<TInput, TExtraBody, TOutput>,
 ): StreamHarnessResult<TOutput> {
   const run = startStreamHarness<TOutput, TInput, TExtraBody>(options);
+  const text = run.started.then((started) => started.text);
+  const output = run.started.then((started) => started.output);
+  text.catch(() => {});
+  output.catch(() => {});
   let clientStreamUsed = false;
   const takeClientStream = async () => {
     const started = await run.started;
@@ -117,8 +174,9 @@ export function streamHarness<TOutput = string, TInput = unknown, TExtraBody = u
   };
 
   return {
-    text: run.started.then((started) => started.text),
-    output: run.started.then((started) => started.output),
+    text,
+    output,
+    textStream: harnessTextStream(takeClientStream),
     toUIMessageStream: () => proxyReadableStream(takeClientStream()),
     toUIMessageStreamResponse: (responseOptions) =>
       createUIMessageStreamResponse({
@@ -156,14 +214,25 @@ async function runStreamHarnessTurn<TOutput, TInput, TExtraBody>(
       : await getOrCreateSession(options.harness, options.session, options.extraBody);
   const turnId = createTurnId();
   const runId = options.runId ?? createEventId();
-  const durability = options.durability ?? config.durability;
+  const durability =
+    options.sessionLog ?? options.durability ?? config.sessionLog ?? config.durability;
   const onTraceError = options.onTraceError ?? config.onTraceError;
   const priorEvents = await durability?.priorEvents?.({ runId }) ?? [];
 
   return config.host.runExclusive(session, { turnId }, async () => {
     let prepared: PreparedTurn<TExtraBody> | undefined;
+    let resolvedMcp: ResolvedHarnessMcpGateway | undefined;
+    let turnRuntime: HarnessRuntime | undefined;
+    // The turn emitter is built inside the try (it needs `prepared`), but the `finally`
+    // that disposes the runtime has to report a disposal failure through it.
+    let emitTurnEventForDispose:
+      | ((event: PreparedTurnEvent) => Promise<void>)
+      | undefined;
+    let turnFailed = false;
     let callbackSequence = 0;
     let lastStartedModelStep: StartedModelStep | undefined;
+    // AI SDK 7 tool-execution events omit the step number; track the step the model is on.
+    let currentModelStepNumber: number | undefined;
     const modelSteps = new Map<number, StartedModelStep>();
     const toolOccurrences = new Map<string, string>();
     const toolReplayStates = new Map<string, ToolReplayState>();
@@ -192,6 +261,7 @@ async function runStreamHarnessTurn<TOutput, TInput, TExtraBody>(
           options,
           { runId, durability, onTraceError },
         );
+      emitTurnEventForDispose = emitTurnEvent;
       const agentFiles = createEventedFileWriter(prepared.files, emitTurnEvent, {
         defaultSource: "agent",
         traceOptions,
@@ -203,12 +273,79 @@ async function runStreamHarnessTurn<TOutput, TInput, TExtraBody>(
       });
       await prepared.loadPersistentDirs({ emit: emitTurnEvent });
 
-      const resolvedSkillsResult = await resolveSkillsWithWarnings(config.skills, {
-        skillMaxRisk: config.skillMaxRisk,
-        skillOidcToken: config.skillOidcToken,
+      const resolvedTools = options.connectorTools === undefined
+        ? config.tools as ToolSet
+        : resolveConnectorTools(config.tools as ToolSet, options.connectorTools);
+      // Narrow the structure-derived toolset by the connector's optional allow/deny policy.
+      const policyTools = applyConnectorToolPolicy(resolvedTools, options.toolPolicy);
+      // Abstract tools (declared without an execute) are structural placeholders that become live
+      // only on a connector that implements them; they must never be offered to the model on a
+      // plain run. resolveConnectorTools already drops them on connector-loaded runs, so this
+      // double-filters harmlessly there while making the documented rule hold for plain
+      // streamHarness / REPL runs too.
+      const { executable: configuredTools, hidden: hiddenAbstractTools } =
+        partitionExecutableTools(policyTools);
+      for (const hiddenTool of Object.keys(hiddenAbstractTools)) {
+        warnings.push(abstractToolHiddenWarning(hiddenTool));
+      }
+      // Durable refs for the hidden abstract tools, in the same shape `durableModelRequest` records.
+      // Threaded into `findModelReplay` so it can reconstruct a pre-abstract-filter recording's hash.
+      const hiddenAbstractToolRefs = toolRefsForDurableRequest(hiddenAbstractTools);
+
+      if (
+        config.mcp !== undefined &&
+        options.prepareStep === undefined &&
+        options.connectorTools === undefined &&
+        options.toolPolicy === undefined
+      ) {
+        const replayedOutput = replayedSimpleModelOutput<TOutput>(
+          findSingleCompletedModelReplay(priorEvents as readonly DurableHarnessEvent[]),
+          options.output,
+        );
+        if (replayedOutput !== undefined) {
+          resolveStarted({
+            clientStream: uiMessageStreamFromText(replayedOutput.text),
+            text: Promise.resolve(replayedOutput.text),
+            output: Promise.resolve(replayedOutput.output),
+          });
+
+          const persistence = await prepared.commitPersistentDirs({ emit: emitTurnEvent });
+          if (persistence.status === "failed") {
+            const error: PersistenceError = { session, failedCommits: persistence.failedCommits };
+            await config.onPersistenceError?.(error);
+            await options.onPersistenceError?.(error);
+          }
+
+          await emitTurnEvent({
+            type: "harness.session.completed",
+            turnId,
+            payload: { sessionId: session.id, turnId },
+          });
+          await setSessionState(session, "idle");
+
+          return {
+            status: "completed",
+            session,
+            artifacts: await session.artifacts.list(),
+            trace: prepared.trace,
+            persistence,
+            commitManual: createManualCommit(prepared, session, emitTurnEvent, options),
+            warnings,
+          };
+        }
+      }
+
+      const assembled = await assembleTurnTools({
+        config,
+        baseTools: configuredTools,
+        session,
+        turnId,
+        orchestration: prepared.orchestration ?? config.host.durable,
+        abortSignal: options.abortSignal,
       });
-      const resolvedSkills = resolvedSkillsResult.skills;
-      warnings.push(...resolvedSkillsResult.warnings);
+      resolvedMcp = assembled.mcp;
+      const { resolvedSkills, turnTools } = assembled;
+      warnings.push(...assembled.warnings);
       await prepared.stageSkills(resolvedSkills);
 
       const staging = options.messages
@@ -242,6 +379,9 @@ async function runStreamHarnessTurn<TOutput, TInput, TExtraBody>(
           get: (toolCallId) => toolCallId === undefined ? undefined : toolReplayStates.get(toolCallId),
         },
       };
+      if (options.connector !== undefined) {
+        toolContext.connector = options.connector;
+      }
       if (options.extraBody !== undefined) {
         toolContext.extraBody = options.extraBody;
       }
@@ -261,7 +401,7 @@ async function runStreamHarnessTurn<TOutput, TInput, TExtraBody>(
         artifacts: createArtifactAccessor(prepared.files, session.artifacts),
       };
       const runtime = await prepared.createRuntime({
-        ...runtimeOptions(config, options),
+        ...runtimeOptions(config, options, turnTools),
         toolContext: runtimeToolContext,
         runtimeToolReplay: {
           find: (candidate) => findToolReplay(priorEvents as readonly DurableHarnessEvent[], candidate),
@@ -270,8 +410,9 @@ async function runStreamHarnessTurn<TOutput, TInput, TExtraBody>(
         emitToolEvents: false,
         traceOptions,
       });
+      turnRuntime = runtime;
       const tools = wrapToolsWithHarnessContext(
-        toolsForModel(config.tools as ToolSet, runtime, config.runtime),
+        toolsForModel(turnTools, runtime, config.runtime),
         toolContext,
       );
 
@@ -300,6 +441,7 @@ async function runStreamHarnessTurn<TOutput, TInput, TExtraBody>(
               traceOptions,
               settings: modelRequestSettings(options),
             }),
+              hiddenAbstractToolRefs,
           )
           : ({ kind: "none" } as const);
       const replayedOutput = replayedSimpleModelOutput<TOutput>(firstModelReplay, outputSpec);
@@ -325,6 +467,7 @@ async function runStreamHarnessTurn<TOutput, TInput, TExtraBody>(
         await setSessionState(session, "idle");
 
         return {
+          status: "completed",
           session,
           artifacts: await session.artifacts.list(),
           trace: prepared.trace,
@@ -342,7 +485,7 @@ async function runStreamHarnessTurn<TOutput, TInput, TExtraBody>(
         output: outputSpec,
         temperature: options.temperature,
         abortSignal: options.abortSignal,
-        stopWhen: options.stopWhen ?? stepCountIs(20),
+        stopWhen: stopWhenWithPark(options.stopWhen ?? isStepCount(config.workflowBudgets?.maxModelSteps ?? 20)),
         prepareStep,
         toolChoice: options.toolChoice,
         activeTools: options.activeTools,
@@ -351,6 +494,7 @@ async function runStreamHarnessTurn<TOutput, TInput, TExtraBody>(
         maxRetries: options.maxRetries,
         onStepStart: async (event) => {
           const stepNumber = eventStepNumber(event);
+          currentModelStepNumber = stepNumber;
           const model = eventModel(event, config.model);
           const eventSystemValue = eventSystem(event, system);
           const eventMessagesValue = eventMessages(event, built.messages);
@@ -369,6 +513,7 @@ async function runStreamHarnessTurn<TOutput, TInput, TExtraBody>(
               traceOptions,
               settings,
             }),
+            hiddenAbstractToolRefs,
           );
           const inflightReplay = stepReplay.kind === "inflight" ? stepReplay : undefined;
           const callId = inflightReplay?.callId ?? createEventId();
@@ -406,7 +551,7 @@ async function runStreamHarnessTurn<TOutput, TInput, TExtraBody>(
             metadata: eventData.metadata,
           });
         },
-        onStepFinish: async (event) => {
+        onStepEnd: async (event) => {
           const stepNumber = eventStepNumber(event);
           const started = modelSteps.get(stepNumber) ?? {
             stepNumber: stepNumber + 1,
@@ -433,7 +578,8 @@ async function runStreamHarnessTurn<TOutput, TInput, TExtraBody>(
             metadata: eventData.metadata,
           });
         },
-        onToolCallStart: async (event) => {
+        onToolExecutionStart: async (toolEvent) => {
+          const event = harnessToolExecutionStart(toolEvent, currentModelStepNumber);
           const replay = toolReplayForEvent(priorEvents as readonly DurableHarnessEvent[], event);
           const callId = replay.kind === "inflight" ? replay.callId : event.toolCall.toolCallId;
           const occurrenceId =
@@ -456,7 +602,8 @@ async function runStreamHarnessTurn<TOutput, TInput, TExtraBody>(
             metadata: eventData.metadata,
           });
         },
-        onToolCallFinish: async (event) => {
+        onToolExecutionEnd: async (toolEnd) => {
+          const event = harnessToolExecutionEnd(toolEnd, currentModelStepNumber);
           const state = toolReplayStates.get(event.toolCall.toolCallId);
           if (state?.replay.kind === "completed" || state?.replay.kind === "failed") {
             return;
@@ -477,27 +624,39 @@ async function runStreamHarnessTurn<TOutput, TInput, TExtraBody>(
             metadata: eventData.metadata,
           });
         },
-        onFinish: (event) => {
+        onEnd: (event) => {
           streamWarnings = event.warnings as unknown[] | undefined;
         },
       });
 
-      const uiStream = result.toUIMessageStream({
+      let uiMessageStreamError: unknown;
+      const formatUiMessageStreamError = options.uiMessageStream?.onError;
+      const uiStream = toUIMessageStream({
+        stream: result.stream,
         originalMessages: options.messages ?? [],
+        onError: (error: unknown) => {
+          uiMessageStreamError = error;
+          return formatUiMessageStreamError?.(error) ?? "An error occurred.";
+        },
       } as any) as ReadableStream<any>;
       const [clientStream, finishStream] = uiStream.tee();
-      const collected = collectUIMessageStream(finishStream);
+      const collected = collectUIMessageStream(finishStream, () => uiMessageStreamError);
+      const textPromise = collected.then((value) => value.text);
+      const outputPromise = collected.then((value) =>
+        outputSpec === undefined
+          ? (value.text as TOutput)
+          : parseStreamOutput(outputSpec, value.text),
+      );
+      textPromise.catch(() => {});
+      outputPromise.catch(() => {});
       resolveStarted({
         clientStream,
-        text: collected.then((value) => value.text),
-        output: collected.then((value) =>
-          outputSpec === undefined
-            ? (value.text as TOutput)
-            : parseStreamOutput(outputSpec, value.text),
-        ),
+        text: textPromise,
+        output: outputPromise,
       });
 
       const collectedValue = await collected;
+      const parked = parkedResultFromSteps(await result.steps);
       warnings.push(...providerWarnings(streamWarnings));
 
       const persistence = await prepared.commitPersistentDirs({ emit: emitTurnEvent });
@@ -514,7 +673,18 @@ async function runStreamHarnessTurn<TOutput, TInput, TExtraBody>(
       });
       await setSessionState(session, "idle");
 
+      if (parked !== undefined) {
+        return {
+          ...parked,
+          session,
+          artifacts: await session.artifacts.list(),
+          trace: prepared.trace,
+          warnings: [...warnings, ...collectedValue.warnings],
+        } as unknown as StreamHarnessFinished;
+      }
+
       return {
+        status: "completed",
         session,
         artifacts: await session.artifacts.list(),
         trace: prepared.trace,
@@ -523,49 +693,65 @@ async function runStreamHarnessTurn<TOutput, TInput, TExtraBody>(
         warnings: [...warnings, ...collectedValue.warnings],
       };
     } catch (error) {
+      turnFailed = true;
       rejectStarted(error);
-      await setSessionState(session, "failed");
+      // Failure bookkeeping must never mask the root error: with a remote durability sink,
+      // the sink itself may be what failed, and these emits would fail the same way.
+      try {
+        await setSessionState(session, "failed");
+      } catch {
+        // Preserve the original turn failure.
+      }
       if (prepared) {
         const traceOptions = resolveTraceOptions(options.harness.config.trace, options.trace);
-        if (lastStartedModelStep) {
+        try {
+          if (lastStartedModelStep) {
+            await emitHarnessEvent(
+              prepared,
+              session,
+              {
+                type: "harness.model.failed",
+                occurrenceId: lastStartedModelStep.occurrenceId,
+                turnId,
+                stepId: stepIdFor(lastStartedModelStep.stepNumber - 1),
+                ...modelFailedEventData({
+                  callId: lastStartedModelStep.callId,
+                  stepNumber: lastStartedModelStep.stepNumber,
+                  model: lastStartedModelStep.model,
+                  durationMs: Date.now() - lastStartedModelStep.startedAt,
+                  error,
+                }),
+              },
+              traceOptions,
+              nextCallbackSequence,
+              options,
+              { runId, durability, onTraceError },
+            );
+          }
           await emitHarnessEvent(
             prepared,
             session,
             {
-              type: "harness.model.failed",
-              occurrenceId: lastStartedModelStep.occurrenceId,
+              type: "harness.session.failed",
               turnId,
-              stepId: stepIdFor(lastStartedModelStep.stepNumber - 1),
-              ...modelFailedEventData({
-                callId: lastStartedModelStep.callId,
-                stepNumber: lastStartedModelStep.stepNumber,
-                model: lastStartedModelStep.model,
-                durationMs: Date.now() - lastStartedModelStep.startedAt,
-                error,
-              }),
+              payload: { sessionId: session.id, turnId, error: error instanceof Error ? error.message : String(error) },
+              metadata: { error: error instanceof Error ? error.message : String(error) },
             },
             traceOptions,
             nextCallbackSequence,
             options,
             { runId, durability, onTraceError },
           );
+        } catch {
+          // Preserve the original turn failure.
         }
-        await emitHarnessEvent(
-          prepared,
-          session,
-          {
-            type: "harness.session.failed",
-            turnId,
-            payload: { sessionId: session.id, turnId, error: error instanceof Error ? error.message : String(error) },
-            metadata: { error: error instanceof Error ? error.message : String(error) },
-          },
-          traceOptions,
-          nextCallbackSequence,
-          options,
-          { runId, durability, onTraceError },
-        );
       }
       throw error;
+    } finally {
+      // Dispose the environment first: closing MCP can throw on the success path, and the
+      // sandbox child process must be reaped regardless.
+      await disposeTurnRuntime(turnRuntime, emitTurnEventForDispose);
+      await closeResolvedMcpGateway(resolvedMcp, { suppressErrors: turnFailed });
     }
 
     function toolOccurrenceId(event: { toolCall: { toolCallId: string } }): string {
@@ -578,6 +764,24 @@ async function runStreamHarnessTurn<TOutput, TInput, TExtraBody>(
       return occurrenceId;
     }
   });
+}
+
+async function closeResolvedMcpGateway(
+  resolvedMcp: ResolvedHarnessMcpGateway | undefined,
+  options: { suppressErrors: boolean },
+): Promise<void> {
+  if (resolvedMcp === undefined) {
+    return;
+  }
+  if (!options.suppressErrors) {
+    await resolvedMcp.close();
+    return;
+  }
+  try {
+    await resolvedMcp.close();
+  } catch {
+    // Preserve the original turn failure.
+  }
 }
 
 function toolReplayForEvent(
@@ -681,17 +885,21 @@ function callStreamText(options: {
   providerOptions?: Parameters<typeof streamText>[0]["providerOptions"];
   headers?: Parameters<typeof streamText>[0]["headers"];
   maxRetries?: Parameters<typeof streamText>[0]["maxRetries"];
-  onToolCallStart?: Parameters<typeof streamText>[0]["experimental_onToolCallStart"];
-  onToolCallFinish?: Parameters<typeof streamText>[0]["experimental_onToolCallFinish"];
-  onStepStart?: Parameters<typeof streamText>[0]["experimental_onStepStart"];
-  onStepFinish?: Parameters<typeof streamText>[0]["onStepFinish"];
-  onFinish?: Parameters<typeof streamText>[0]["onFinish"];
+  onToolExecutionStart?: Parameters<typeof streamText>[0]["onToolExecutionStart"];
+  onToolExecutionEnd?: Parameters<typeof streamText>[0]["onToolExecutionEnd"];
+  onStepStart?: Parameters<typeof streamText>[0]["onStepStart"];
+  onStepEnd?: Parameters<typeof streamText>[0]["onStepEnd"];
+  onEnd?: Parameters<typeof streamText>[0]["onEnd"];
 }) {
   const request: Record<string, unknown> = {
     model: options.model,
-    system: options.system,
+    instructions: options.system,
     messages: options.messages,
     tools: options.tools,
+    // streamText's default onError logs every stream error to console.error. The harness
+    // already reports them — the turn fails, `harness.model.failed` is traced, and the UI
+    // stream carries the formatted error chunk — so the default would only duplicate them.
+    onError: () => {},
   };
   if (options.output !== undefined) {
     request.output = options.output;
@@ -724,19 +932,19 @@ function callStreamText(options: {
     request.maxRetries = options.maxRetries;
   }
   if (options.onStepStart !== undefined) {
-    request.experimental_onStepStart = options.onStepStart;
+    request.onStepStart = options.onStepStart;
   }
-  if (options.onStepFinish !== undefined) {
-    request.onStepFinish = options.onStepFinish;
+  if (options.onStepEnd !== undefined) {
+    request.onStepEnd = options.onStepEnd;
   }
-  if (options.onToolCallStart !== undefined) {
-    request.experimental_onToolCallStart = options.onToolCallStart;
+  if (options.onToolExecutionStart !== undefined) {
+    request.onToolExecutionStart = options.onToolExecutionStart;
   }
-  if (options.onToolCallFinish !== undefined) {
-    request.experimental_onToolCallFinish = options.onToolCallFinish;
+  if (options.onToolExecutionEnd !== undefined) {
+    request.onToolExecutionEnd = options.onToolExecutionEnd;
   }
-  if (options.onFinish !== undefined) {
-    request.onFinish = options.onFinish;
+  if (options.onEnd !== undefined) {
+    request.onEnd = options.onEnd;
   }
   return streamText(request as Parameters<typeof streamText>[0]);
 }
@@ -814,9 +1022,10 @@ function messageInputOptions<TInput, TExtraBody, TOutput>(
 function runtimeOptions<TInput, TExtraBody, TOutput>(
   config: Harness<any, TExtraBody>["config"],
   options: StreamHarnessOptions<TInput, TExtraBody, TOutput>,
+  tools: ToolSet,
 ): Parameters<PreparedTurn<TExtraBody>["createRuntime"]>[0] {
   const out: Parameters<PreparedTurn<TExtraBody>["createRuntime"]>[0] = {
-    tools: config.tools as ToolSet,
+    tools,
   };
   const runtime = resolveRuntimeOptions(config.runtime, options.runtime);
   if (runtime !== undefined) {
@@ -879,6 +1088,11 @@ function toolsForModel(
     return { ...tools };
   }
   return { ...tools, bash: runtime.shellTool() };
+}
+
+function stopWhenWithPark(stopWhen: Parameters<typeof streamText>[0]["stopWhen"]): Parameters<typeof streamText>[0]["stopWhen"] {
+  const conditions = Array.isArray(stopWhen) ? stopWhen : [stopWhen ?? isStepCount(20)];
+  return [...conditions, parkedThisStep];
 }
 
 function runtimeSystem(
@@ -955,7 +1169,7 @@ async function emitHarnessEvent<TExtraBody>(
   },
   occurrence: {
     runId: string;
-    durability?: HarnessDurabilitySink | undefined;
+    durability?: HarnessSessionLog | undefined;
     onTraceError?: ((error: unknown, event: TraceHarnessEventInput) => Promise<void> | void) | undefined;
   },
 ): Promise<void> {
@@ -1022,6 +1236,10 @@ function eventModel(event: unknown, fallback: Parameters<typeof streamText>[0]["
   if (isObject(event) && isObject(event.model)) {
     return event.model as { provider?: string; modelId?: string };
   }
+  // AI SDK 7 step-start events flatten the model into top-level provider/modelId.
+  if (isObject(event) && typeof event.provider === "string" && typeof event.modelId === "string") {
+    return { provider: event.provider, modelId: event.modelId };
+  }
   return fallback;
 }
 
@@ -1038,10 +1256,12 @@ function modelMetadata(model: EventModel): { provider?: string; modelId?: string
 }
 
 function eventSystem(event: unknown, fallback: string): string {
-  if (!isObject(event) || event.system === undefined) {
+  // AI SDK 7 renamed the step's system prompt to `instructions`; `system` is the v6 name.
+  const value = isObject(event) ? event.instructions ?? event.system : undefined;
+  if (value === undefined) {
     return fallback;
   }
-  return typeof event.system === "string" ? event.system : stableStringify(event.system);
+  return typeof value === "string" ? value : stableStringify(value);
 }
 
 function eventMessages(
@@ -1081,8 +1301,8 @@ function createManualCommit<TExtraBody>(
     harness: Harness<any, TExtraBody>;
     onPersistenceError?: (error: PersistenceError) => void | Promise<void>;
   },
-): StreamHarnessFinished["commitManual"] {
-  let commit: ReturnType<StreamHarnessFinished["commitManual"]> | undefined;
+): StreamHarnessCompletedResult["commitManual"] {
+  let commit: ReturnType<StreamHarnessCompletedResult["commitManual"]> | undefined;
   return () => {
     commit ??= options.harness.config.host
       .runExclusive(session, { turnId: createTurnId() }, () =>
@@ -1102,6 +1322,7 @@ function createManualCommit<TExtraBody>(
 
 async function collectUIMessageStream(
   stream: ReadableStream<any>,
+  uiMessageStreamError?: () => unknown,
 ): Promise<{ text: string; warnings: HarnessWarning[] }> {
   const reader = stream.getReader();
   let text = "";
@@ -1117,12 +1338,39 @@ async function collectUIMessageStream(
       if (value?.type === "text-delta" && typeof value.delta === "string") {
         text += value.delta;
       }
+      if (value?.type === "error") {
+        throw uiMessageStreamErrorValue(uiMessageStreamError?.(), value.errorText);
+      }
       if (value?.type === "stream-start" && Array.isArray(value.warnings)) {
         warnings.push(...providerWarnings(value.warnings));
       }
     }
   } finally {
     reader.releaseLock();
+  }
+}
+
+function uiMessageStreamErrorValue(cause: unknown, errorText: unknown): Error {
+  if (cause instanceof Error) {
+    return cause;
+  }
+  if (cause !== undefined) {
+    return new Error(errorValueText(cause));
+  }
+  if (typeof errorText === "string" && errorText.length > 0) {
+    return new Error(errorText);
+  }
+  return new Error("UI message stream failed.");
+}
+
+function errorValueText(value: unknown): string {
+  if (typeof value === "string") {
+    return value;
+  }
+  try {
+    return JSON.stringify(value) ?? String(value);
+  } catch {
+    return String(value);
   }
 }
 
@@ -1197,9 +1445,7 @@ async function setSessionState(
   session: HarnessSession,
   state: "idle" | "running" | "failed",
 ): Promise<void> {
-  await (
-    session as HarnessSession & {
-      setStatus?: (patch: { state: "idle" | "running" | "failed" }) => Promise<void>;
-    }
-  ).setStatus?.({ state });
+  // Optional call: sessions written against the pre-port contract may not implement the
+  // typed mutators yet; state tracking degrades gracefully instead of failing every turn.
+  await session.setStatus?.({ state });
 }

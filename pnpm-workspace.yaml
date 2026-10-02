@@ -1,5 +1,6 @@
 packages:
   - "apps/*"
+  - "demos/*"
   - "packages/*"
 
 # Allow the native build script for the embedded WAL event store.

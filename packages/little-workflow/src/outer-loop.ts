@@ -8,14 +8,16 @@ import {
   type SuperviseOuterLoopState,
 } from "./compiler.js";
 import type { ToolRegistry } from "./tool-registry.js";
-import type { FailedRunResult, LocalWorld, RunResult } from "./authoring.js";
+import type { FailedRunResult, LocalWorld, RunResult, WorkflowRunProgressEvent } from "./authoring.js";
 import type { BashCapabilities } from "./bash-tool.js";
 import type { WorkflowVersionReuseStrategy } from "./workflow-version-reuse.js";
+import type { HarnessMcpConfig } from "little-harness";
 import {
   RunFailedError,
   runWorkflowCycle,
   type RunWorkflowCycleOptions,
 } from "./runtime.js";
+import { unknownUsageTotals } from "./pricing.js";
 import { materializeRunStateFromEvents } from "./run-state.js";
 import {
   writeOuterLoopManifest,
@@ -33,6 +35,7 @@ export type RunOuterLoopOptions = {
   readonly input: unknown;
   readonly planner: PlannerAdapter;
   readonly tools?: ToolRegistry;
+  readonly mcp?: HarnessMcpConfig;
   readonly maxAttempts?: number;
   readonly maxOuterCycles: number;
   readonly signal?: AbortSignal;
@@ -45,6 +48,7 @@ export type RunOuterLoopOptions = {
   readonly label?: string;
   /** Free-form tags stamped into each cycle's RunStarted.payload.tags. */
   readonly tags?: readonly string[];
+  readonly progress?: (event: WorkflowRunProgressEvent) => void | Promise<void>;
 };
 
 // ── Implementation ─────────────────────────────────────────────────────────────
@@ -204,6 +208,7 @@ export async function runOuterLoop(
         input: options.input,
         ...(cycleDraftPlanner === undefined ? {} : { planner: cycleDraftPlanner }),
         tools: options.tools,
+        mcp: options.mcp,
         maxAttempts: options.maxAttempts,
         runId,
         signal: options.signal,
@@ -215,6 +220,7 @@ export async function runOuterLoop(
         outerLoopId,
         label: options.label,
         tags: options.tags,
+        progress: options.progress,
       });
     } catch (err) {
       if (isRunFailedError(err)) {
@@ -334,7 +340,8 @@ export async function runOuterLoop(
     }
 
     if (isFinalCycle) {
-      throw buildOuterLoopExhaustedError(
+      throw await buildOuterLoopExhaustedError(
+        options.world,
         outerLoopId,
         cycleNumber,
         cycleSummary,
@@ -353,7 +360,8 @@ export async function runOuterLoop(
   // error from the recovered manifest instead of falling off the end.
   if (cycles.length >= options.maxOuterCycles && cycles.length > 0) {
     const lastCycle = cycles[cycles.length - 1]!;
-    throw buildOuterLoopExhaustedError(
+    throw await buildOuterLoopExhaustedError(
+      options.world,
       outerLoopId,
       lastCycle.cycleNumber,
       lastCycle,
@@ -391,7 +399,9 @@ async function buildDoneRunResult(
       workflowVersionId: lastCycle.workflowVersionId,
       status: "completed",
       output: finalOutput,
-      usage: lastRunResult?.usage ?? { inputTokens: 0, outputTokens: 0, costUsd: 0 },
+      // No event log and no in-memory result means the usage is *unknown*, not zero —
+      // `costUsd: null` rather than a $0 receipt for spend that was never read.
+      usage: lastRunResult?.usage ?? unknownUsageTotals(),
       events: lastRunResult?.events ?? [],
       artifacts: lastRunResult?.artifacts ?? [],
     };
@@ -423,19 +433,35 @@ function decodeSuperviseFromEvent(event: EventEnvelope): SuperviseDecision {
     : { kind: "continue" };
 }
 
-function buildOuterLoopExhaustedError(
+/**
+ * Builds the `outer_loop_exhausted` failure.
+ *
+ * Usage is materialized from the final cycle's durable event log, exactly as
+ * {@link buildDoneRunResult} does. It cannot be taken from `lastRunResult`: that is
+ * `undefined` whenever the final cycle *failed*, and on the crash-recovery path there is
+ * no in-memory result at all — so an outer loop that burned five paid cycles and then hit
+ * `maxOuterCycles` used to report `costUsd: 0`, an affirmative claim that nothing was
+ * spent. When the log yields nothing and there is no in-memory result either, the usage
+ * falls back to {@link unknownUsageTotals} (`costUsd: null`, unknown) rather than
+ * {@link emptyUsageTotals} (`costUsd: 0`, measured zero).
+ */
+async function buildOuterLoopExhaustedError(
+  world: LocalWorld,
   outerLoopId: string,
   finalCycleNumber: number,
   lastCycle: OuterLoopCycleSummary,
   lastRunResult: RunResult<unknown> | undefined,
-): RunFailedError {
+): Promise<RunFailedError> {
+  const events = await world.listEvents(lastCycle.runId);
+  const state =
+    events.length === 0 ? undefined : materializeRunStateFromEvents(lastCycle.runId, events);
   const failedResult: FailedRunResult = {
     runId: lastCycle.runId,
     workflowVersionId: lastCycle.workflowVersionId,
     status: "failed",
-    usage: lastRunResult?.usage ?? { inputTokens: 0, outputTokens: 0, costUsd: 0 },
-    events: lastRunResult?.events ?? [],
-    artifacts: lastRunResult?.artifacts ?? [],
+    usage: state?.usage ?? lastRunResult?.usage ?? unknownUsageTotals(),
+    events: events.length === 0 ? (lastRunResult?.events ?? []) : events,
+    artifacts: state?.artifacts ?? lastRunResult?.artifacts ?? [],
   };
   return new RunFailedError({
     runId: lastCycle.runId,

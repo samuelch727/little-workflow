@@ -20,7 +20,7 @@ The alpha runtime is intended to start local and self-hosted. A hosted control p
 
 ## Runtime Responsibilities
 
-The runtime should own:
+The runtime owns:
 
 - Local Host setup in development
 - session creation and continuation
@@ -34,7 +34,7 @@ The runtime should own:
 - trace events
 - retryable persistence failures
 
-The developer should own:
+The developer owns:
 
 - tool definitions
 - export side effects
@@ -44,4 +44,4 @@ The developer should own:
 
 ## First Runtime Target
 
-The first fully working SDK target is [Local Host](/docs/v0.1.0-alpha/runtime/local-host), backed by [just-bash](/docs/v0.1.0-alpha/runtime/just-bash). Local Host owns local sessions, traces, artifacts, and Persistent Dir sources under `.little-harness`; just-bash provides the virtual command and filesystem substrate inside each session.
+The first fully working SDK target is [Local Host](/docs/v0.1.0-alpha/runtime/local-host), backed by [just-bash](/docs/v0.1.0-alpha/runtime/just-bash). Local Host owns local sessions, traces, artifacts, and Persistent Dir sources under `.little-harness`; just-bash provides the virtual command and filesystem substrate inside each session. By default (`executionEnvironment: "auto"`), just-bash runs in a [subprocess sandbox](/docs/v0.1.0-alpha/runtime/execution-environments) for any turn that can execute code or reach the network, and [execution tiers](/docs/v0.1.0-alpha/runtime/execution-tiers) can escalate commands just-bash cannot run to an environment you provide.

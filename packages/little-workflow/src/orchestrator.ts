@@ -24,6 +24,39 @@ type PlannedWorkflowVersion = {
   readonly [key: string]: unknown;
 };
 
+/**
+ * Node warning code attached to the once-per-process orchestrator deprecation notice.
+ * Stable so callers can filter it from `process.on("warning", ...)`.
+ */
+const ORCHESTRATOR_DEPRECATION_CODE = "LWF_DEP_ORCHESTRATOR";
+
+/**
+ * Once-per-process latch. The orchestrator surface is called in hot loops (one
+ * `plan_workflow` / `run_workflow` / `start_workflow` per model turn), so the notice
+ * must fire on first use only — never per call.
+ */
+let hasWarnedOrchestratorDeprecated = false;
+
+function warnOrchestratorDeprecated(entryPoint: string): void {
+  if (hasWarnedOrchestratorDeprecated) {
+    return;
+  }
+  hasWarnedOrchestratorDeprecated = true;
+  process.emitWarning(
+    `${entryPoint} is deprecated. The orchestrator tools (plan_workflow, run_workflow, ` +
+      "start_workflow) and the runWorkflow({ workflows: [...], orchestrator }) mode are " +
+      "superseded by the Harness composition surface: defineWorkflow -> asHarnessWorkflow -> " +
+      "createHarness({ workflows }). The orchestrator still works in this release and will be " +
+      "unexported in the next minor.",
+    { type: "DeprecationWarning", code: ORCHESTRATOR_DEPRECATION_CODE },
+  );
+}
+
+/**
+ * @deprecated Part of the orchestrator composition surface, which is superseded by
+ * `defineWorkflow` -> `asHarnessWorkflow` -> `createHarness({ workflows })`. Still supported in
+ * this release; scheduled to be unexported in the next minor.
+ */
 export type PlanWorkflowDelegate = (options: {
   readonly workflow: CompilableWorkflowDefinition;
   readonly input: unknown;
@@ -33,6 +66,11 @@ export type PlanWorkflowDelegate = (options: {
   readonly workflowVersion: PlannedWorkflowVersion;
 }>;
 
+/**
+ * @deprecated Part of the orchestrator composition surface, which is superseded by
+ * `defineWorkflow` -> `asHarnessWorkflow` -> `createHarness({ workflows })`. Still supported in
+ * this release; scheduled to be unexported in the next minor.
+ */
 export type RunWorkflowVersionDelegate = (options: {
   readonly world: LocalWorld;
   readonly workflow: CompilableWorkflowDefinition;
@@ -51,6 +89,11 @@ export type RunWorkflowVersionDelegate = (options: {
   readonly error?: { readonly message: string };
 }>;
 
+/**
+ * @deprecated Options for {@link createOrchestratorTools}, which is superseded by
+ * `defineWorkflow` -> `asHarnessWorkflow` -> `createHarness({ workflows })`. Still supported in
+ * this release; scheduled to be unexported in the next minor.
+ */
 export type OrchestratorToolOptions = {
   readonly world: LocalWorld;
   readonly workflows: readonly CompilableWorkflowDefinition[];
@@ -69,7 +112,7 @@ export type OrchestratorToolOptions = {
 type WorkflowToolExecutionOptions = {
   readonly caller?: "code" | "model";
   readonly abortSignal?: AbortSignal;
-  readonly experimental_context?: {
+  readonly context?: {
     readonly signal?: AbortSignal;
   };
 };
@@ -124,18 +167,39 @@ const startWorkflowInputSchema = z.object({
   input: z.unknown(),
 });
 
+/**
+ * Builds the available-workflows list handed to an orchestrator session.
+ *
+ * @deprecated Part of the orchestrator composition surface. Use the Harness composition surface
+ * instead: author with `defineWorkflow`, adapt with `asHarnessWorkflow`, and hand the adapters to
+ * `createHarness({ workflows })` — each workflow becomes its own tool, so no separate
+ * available-workflows snapshot is needed. Still supported in this release; scheduled to be
+ * unexported in the next minor.
+ */
 export function workflowSnapshotsForOrchestrator(
   workflows: readonly CompilableWorkflowDefinition[],
   tools?: ToolRegistry,
 ): readonly WorkflowDefinitionSnapshot[] {
+  warnOrchestratorDeprecated("workflowSnapshotsForOrchestrator()");
   return [...workflows]
     .map((workflow) => workflowSnapshot(workflow, tools))
     .sort((left, right) => compareStrings(left.id, right.id));
 }
 
+/**
+ * Builds the `plan_workflow`, `run_workflow`, and `start_workflow` tools that let an orchestrator
+ * agent compose several workflows at runtime.
+ *
+ * @deprecated This is one of two composition surfaces and the one being retired. Use
+ * `defineWorkflow` -> `asHarnessWorkflow` -> `createHarness({ workflows })` instead: each workflow
+ * is exposed to the agent as its own typed tool rather than through a generic
+ * plan/run indirection. Still supported in this release; scheduled to be unexported in the next
+ * minor. Calling this emits a one-time `DeprecationWarning` with code `LWF_DEP_ORCHESTRATOR`.
+ */
 export function createOrchestratorTools(
   options: OrchestratorToolOptions,
 ): Record<"plan_workflow" | "run_workflow" | "start_workflow", AiSdkTool> {
+  warnOrchestratorDeprecated("createOrchestratorTools()");
   const maxConcurrentSubRuns = options.maxConcurrentSubRuns ?? 10;
   if (!Number.isInteger(maxConcurrentSubRuns) || maxConcurrentSubRuns < 1) {
     throw new Error("createOrchestratorTools: maxConcurrentSubRuns must be an integer >= 1.");
@@ -347,7 +411,7 @@ function abortSignalFromToolOptions(value: unknown): AbortSignal | undefined {
   if (value.abortSignal instanceof AbortSignal) {
     return value.abortSignal;
   }
-  const experimentalContext = value.experimental_context;
+  const experimentalContext = value.context;
   if (isRecord(experimentalContext) && experimentalContext.signal instanceof AbortSignal) {
     return experimentalContext.signal;
   }

@@ -1,0 +1,188 @@
+---
+title: Compose With Little Harness
+description: Hand workflows to a Little Harness agent as typed tools with asHarnessWorkflow — the supported way to compose workflows, replacing the deprecated orchestrator.
+---
+
+To compose workflows, author each one with `defineWorkflow`, adapt it with `asHarnessWorkflow`, and pass the adapters to `createHarness({ workflows })` from `little-harness`. Each workflow becomes one typed tool. The agent decides when to call which workflow and how to chain their results, so there is no static pipeline to maintain.
+
+This replaces the orchestrator: `runWorkflow({ workflows: [...], orchestrator })` and its `plan_workflow` / `run_workflow` / `start_workflow` tools. The orchestrator is deprecated (`LWF_DEP_ORCHESTRATOR`); see [Migrating from the orchestrator](#migrating-from-the-orchestrator).
+
+## Install
+
+```sh
+pnpm add little-workflow@alpha little-harness@alpha ai@^7 zod @ai-sdk/anthropic
+```
+
+Both packages need Node.js 22 or later and take `ai` as a peer dependency (`^7.0.0`). pnpm 10 projects must also allow the `better-sqlite3` build. See [Quickstart → Install](/docs/v0.1.0-alpha/getting-started/quickstart#install).
+
+## Author, Adapt, Hand To The Agent
+
+```ts
+// refund.ts — an ordinary defineWorkflow definition
+import { anthropic } from "@ai-sdk/anthropic";
+import { tool } from "ai";
+import { z } from "zod";
+import { asHarnessWorkflow, defineWorkflow } from "little-workflow";
+
+export const refundWorkflow = defineWorkflow({
+  id: "billing.refund",
+  description: "Verify an order, check the refund policy, and issue the refund.",
+  input: z.object({
+    orderId: z.string().describe("The order to refund."),
+    amountCents: z.number().int().min(1),
+    reason: z.string(),
+  }),
+  output: z.object({
+    status: z.enum(["refunded", "denied"]),
+    amountCents: z.number(),
+    summary: z.string(),
+  }),
+  model: anthropic("claude-sonnet-4-6"),
+  tools: {
+    lookupOrder: tool({
+      description: "Fetch an order by id.",
+      inputSchema: z.object({ orderId: z.string() }),
+      execute: async ({ orderId }) => db.orders.get(orderId),
+    }),
+    issueRefund: tool({
+      description: "Issue a refund.",
+      inputSchema: z.object({ orderId: z.string(), amountCents: z.number() }),
+      execute: async ({ orderId, amountCents }) => payments.refund(orderId, amountCents),
+    }),
+  },
+});
+
+// The adapter takes the defineWorkflow result directly — no cast.
+export const refundTool = asHarnessWorkflow(refundWorkflow, {
+  definitionIdentity: "billing.refund@1",
+});
+```
+
+```ts
+// route.ts — the agent. Each adapted workflow becomes one tool.
+import { anthropic } from "@ai-sdk/anthropic";
+import { createHarness, localHost, streamHarness } from "little-harness";
+import { refundTool } from "./refund";
+
+const support = createHarness({
+  host: localHost(),
+  model: anthropic("claude-sonnet-4-6"),
+  system: "You are a support agent. For refund requests, call billing_refund and report the outcome.",
+  workflows: [refundTool],
+});
+
+export async function POST(req: Request) {
+  const { messages } = await req.json();
+  return streamHarness({ harness: support, messages }).toUIMessageStreamResponse();
+}
+```
+
+The adapter wires the definition's inline `tools` into every run, the same way `runWorkflow(def, input)` does.
+
+## `asHarnessWorkflow` Options
+
+| Option | Required | Notes |
+| --- | --- | --- |
+| `definitionIdentity` | yes | `string \| { notApplicable: true; reason?: string }`. See below. |
+| `executionMode` | no | `"inline"` (default) or `"durable"`. See below. |
+| `allowUntypedInput` | no | Required to expose a workflow that has no `input` schema. The tool then accepts any JSON object. |
+| `allowLossyStandardSchema` | no | Lets an opaque Standard Schema validator be exposed to the model as an unconstrained schema. The run still validates input. |
+| any `runWorkflow` option | no | Defaults applied to every run, for example `tools`, `mcp`, `bash`, `permissions`, `timeout`, `maxAttempts`, `label`, `tags`, `progress`, or `world`. `workflows` and `input` are excluded. |
+
+**`definitionIdentity`** names the version of the definition the agent was given. The harness records it in the agent manifest and passes it to every run, which is how a host distinguishes the same workflow from an edited one. `asHarnessWorkflow` throws if it is missing. Pass one of:
+
+- a stable string that you change whenever the definition changes, such as a version tag or `getWorkflowDefinitionHash(refundWorkflow)`, which hashes the definition's identity-bearing fields;
+- `{ notApplicable: true, reason }`, to say explicitly that there is nothing to protect, for example a prototype or a workflow that only runs inline.
+
+[`loadWorkflow`](#folder-workflows-loadworkflow) derives the identity for you.
+
+**`executionMode`**: `"inline"` runs must complete or fail inside the tool call. `"durable"` also accepts the protocol's detached-start disposition, but the current workflow tool does not use it, so every workflow tool call waits for its run in either mode. `little add harness` scaffolds durable-mode shims. With `loadWorkflow`, durable mode requires `sourceIdentity` when the folder's import graph contains dynamic or unresolved local imports.
+
+## What The Calling Model Sees
+
+- **Tool name.** Built from the workflow id: each dot-separated segment has non-alphanumeric characters replaced with `_`, and the segments are joined with `_`. `billing.refund` becomes `billing_refund`, and `kb.ingest-file` becomes `kb_ingest_file`.
+- **Tool input.** The workflow's input schema, converted to JSON Schema. Annotations like `.describe()` reach the model. Input must stay inside the [LWIR schema subset](/docs/v0.1.0-alpha/reference/lwir-reference#schema-subset).
+- **Tool result.** A compact envelope, not the typed output object:
+
+```ts
+// completed
+{ status: "completed", runId: string, outputSummary?: string, outputPath?: string }
+// failed or cancelled
+{ status: "failed" | "cancelled", runId: string, causeCode: string, message: string, outputSummary?: string }
+```
+
+`outputSummary` renders the workflow's output deterministically: a string is used as-is, and anything else becomes `JSON.stringify(output)`. The rendering is capped at 4,096 characters (`MAX_WORKFLOW_OUTPUT_SUMMARY_CHARACTERS` in `harness-workflow.ts`), and a longer result is truncated with a marker that names the run that holds the full value. The typed `output` stays in the run record and is not added to the model's context. If the model needs the whole result, keep the workflow's output compact. For a run that failed at a step, `outputSummary` names the failing step path and the runtime cause code. `causeCode` values include `input_validation`, `timeout`, `cancelled`, `workflow_failed`, and `max_queued_workflow_runs`.
+
+## Bounding Fan-Out: `workflowBudgets`
+
+A model can emit several workflow tool calls in one step. All workflow tools in a session share one admission bound, and the agent's [dynamic workflow](/docs/v0.1.0-alpha/reference/api-reference#dynamicworkflows) plans count against the same pool:
+
+```ts
+createHarness({
+  host: localHost(),
+  model,
+  workflows: [refundTool],
+  workflowBudgets: {
+    maxConcurrentWorkflowRuns: 4, // runs in flight per session (default 10)
+    maxQueuedWorkflowRuns: 20,    // calls allowed to wait, FIFO (default 100)
+  },
+});
+```
+
+Calls beyond `maxConcurrentWorkflowRuns` wait for a slot instead of failing. A call that would grow the queue past `maxQueuedWorkflowRuns` returns a failed result with `causeCode: "max_queued_workflow_runs"`, and the turn continues. This replaces the orchestrator's `maxConcurrentSubRuns`.
+
+## Where Runs Are Stored
+
+Each tool call runs one Little Workflow run in a Local World under the harness session's data directory, `<dataDir>/sessions/<session>/workflows`. With `localHost()`, `dataDir` defaults to `.little-harness`. The harness reserves the run id from the tool name and tool call id, for example `run_billing_refund_<toolCallId>`, and returns it as `runId`. Inspect a run with the CLI:
+
+```bash
+little events <runId> --data-dir .little-harness/sessions/<session>/workflows
+little report <runId> --table --data-dir .little-harness/sessions/<session>/workflows
+```
+
+Each run's token usage and cost stay in its own run record. Passing `world` in the adapter options stores runs there instead. Before `0.2.0-alpha.0`, runs were stored under `<cwd>/<sessionId>/workflows`, and runs recorded there are not found on resume.
+
+## Folder Workflows: `loadWorkflow`
+
+`little init` and `little add workflow` scaffold workflows as folders listed in a `little-workflow.json` manifest:
+
+```txt
+little-workflow.json          { "workflows": { "refund": "./workflows/refund" } }
+workflows/refund/
+  workflow.ts                 default export: a defineWorkflow or createLittleWorkflow definition
+  instructions.md             optional; becomes planner.system when the definition sets none
+  tools/<name>.ts             optional; each default-exports an AI SDK tool, named after the file
+  skills/<name>/              optional; planner skills
+```
+
+`loadWorkflow(folder, options?)` merges the folder's `instructions.md`, `tools/`, and `skills/` into the definition. It returns a `LoadedWorkflow`, which is a ready `HarnessWorkflow` that you can pass straight to `createHarness({ workflows })`, plus a `run(input, options?)` method for standalone runs. It derives `definitionIdentity` itself by hashing the definition, the folder's import graph, the execution mode, and `sourceIdentity`.
+
+```ts
+import { loadWorkflow } from "little-workflow";
+
+const refund = await loadWorkflow(new URL("./workflows/refund", import.meta.url), {
+  executionMode: "inline",
+});
+// createHarness({ host, model, workflows: [refund] })
+```
+
+| Option | Notes |
+| --- | --- |
+| `workspaceRoot` | Root for module resolution and import-graph hashing. Defaults to the nearest ancestor with `little-workflow.json`, then `package.json`. |
+| `executionMode` | `"inline"` (default) or `"durable"`. |
+| `allowUntypedInput`, `allowLossyStandardSchema` | Same as on `asHarnessWorkflow`. |
+| `sourceIdentity` | A stable source identity, such as a commit SHA. Required in durable mode when the import graph has dynamic or unresolved local imports. |
+
+`little add harness` connects a folder workflow to a Little Harness agent. It writes `agents/<agent>/workflows/<name>.ts`, which default-exports `loadWorkflow(...)` for the manifest folder, and Little Harness discovers it from the agent folder. `little test <name>` runs a folder workflow on its own. See [CLI](/docs/v0.1.0-alpha/reference/cli#init-and-add).
+
+## Migrating From The Orchestrator
+
+| Orchestrator (deprecated) | Harness surface |
+| --- | --- |
+| `runWorkflow({ world, workflows: [a, b], orchestrator: { model, system, skills, tools } })` | `createHarness({ host, model, system, skills, tools, workflows: [asHarnessWorkflow(a, …), asHarnessWorkflow(b, …)] })`, then `streamHarness` / `generateHarness` |
+| `start_workflow(workflowId, input)` | The workflow's own typed tool, such as `billing_refund(input)` |
+| `maxConcurrentSubRuns` | `workflowBudgets.maxConcurrentWorkflowRuns` / `maxQueuedWorkflowRuns` |
+| Sub-run ids on `harness.tool_call.succeeded.payload.result.runId` | `runId` on the workflow tool result. Runs are stored under the session's `workflows` directory. |
+| `plan_workflow` once, then `run_workflow` × N (plan once, run many) | **Not available yet.** See [Plan once, run many](/docs/v0.1.0-alpha/cookbook/plan-once-run-many). |
+
+The orchestrator still works in this release and emits a one-time `DeprecationWarning` (code `LWF_DEP_ORCHESTRATOR`). It is scheduled to be unexported in the next minor release.

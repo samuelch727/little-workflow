@@ -921,7 +921,17 @@ Use this skill.
         workflowVersionId: expect.stringMatching(/^wfver_[0-9a-f]{16}$/),
         status: "completed",
         output: "Ada is a principal engineer.",
-        usage: { inputTokens: 0, outputTokens: 0, costUsd: 0 },
+        // No model calls in this DAG, so $0 here is a genuine zero rather than an
+        // unpriced total — unpricedCalls proves the difference.
+        usage: {
+          inputTokens: 0,
+          outputTokens: 0,
+          cachedInputTokens: 0,
+          reasoningTokens: 0,
+          costUsd: 0,
+          pricedCalls: 0,
+          unpricedCalls: 0,
+        },
       }),
     );
     expect(result.artifacts).toHaveLength(3);
@@ -2274,6 +2284,84 @@ Use this skill.
     const events = await listEvents(world, "run_runtime_step_schema");
     expect(events.some((event) => event.type === "StepOutputValidated")).toBe(false);
     expect(events.some((event) => event.type === "StepCompleted")).toBe(false);
+  });
+
+  it("enforces a record schema's propertyNames on step output at runtime", async () => {
+    // LIT-53's not-a-lie test. Accepting `propertyNames` into the LWIR subset is only
+    // honest if the runtime actually evaluates it, so this runs the real execute path
+    // twice against the schema `z.record(z.enum([...]), z.number())` emits: once with a
+    // key the record allows, once with a key it does not. Nothing but `propertyNames`
+    // separates the two payloads — both are objects of numbers with all required keys.
+    const goodWorld = await tempWorld();
+    const conforming = vi.fn(() => ({ fast: 1, cheap: 2 }));
+    const completed = await executeWorkflowVersion({
+      world: goodWorld,
+      workflowVersion: lockedWorkflowVersion("wfver_runtime_record_ok", recordSchemaWorkflow(), {
+        tools: registryFor({ score: conforming }),
+      }),
+      runId: "run_runtime_record_ok",
+      input: {},
+      tools: registryFor({ score: conforming }),
+    });
+
+    expect(completed.status).toBe("completed");
+    expect(conforming).toHaveBeenCalledTimes(1);
+
+    const badWorld = await tempWorld();
+    const strayKey = vi.fn(() => ({ fast: 1, cheap: 2, thorough: 3 }));
+    const result = await executeWorkflowVersion({
+      world: badWorld,
+      workflowVersion: lockedWorkflowVersion("wfver_runtime_record_bad", recordSchemaWorkflow(), {
+        tools: registryFor({ score: strayKey }),
+      }),
+      runId: "run_runtime_record_bad",
+      input: {},
+      tools: registryFor({ score: strayKey }),
+    });
+
+    expect(result.status).toBe("failed");
+    if (result.status !== "failed") {
+      throw new Error("Expected the stray-key record output to fail validation.");
+    }
+    // Ajv's own wording, matched loosely so an Ajv upgrade cannot make this test lie about
+    // WHY the run failed: the failure must come from the property NAME, not the value.
+    expect(result.error).toEqual(
+      expect.objectContaining({ message: expect.stringContaining("does not match schema") }),
+    );
+    expect(result.error).toEqual(
+      expect.objectContaining({ message: expect.stringMatching(/property name/u) }),
+    );
+    expect(strayKey).toHaveBeenCalledTimes(1);
+    const events = await listEvents(badWorld, "run_runtime_record_bad");
+    expect(events.some((event) => event.type === "StepOutputValidated")).toBe(false);
+    expect(events.some((event) => event.type === "StepCompleted")).toBe(false);
+  });
+
+  it("enforces a record schema's exhaustive required keys on step output at runtime", async () => {
+    // The other half of what `z.record(z.enum([...]), V)` promises: zod requires every enum
+    // key to be present, and emits that as a `required` with no `properties` beside it.
+    // The LWIR subset accepts that shape only because Ajv enforces `required` on its own —
+    // this is the proof it does.
+    const world = await tempWorld();
+    const missingKey = vi.fn(() => ({ fast: 1 }));
+    const result = await executeWorkflowVersion({
+      world,
+      workflowVersion: lockedWorkflowVersion("wfver_runtime_record_missing", recordSchemaWorkflow(), {
+        tools: registryFor({ score: missingKey }),
+      }),
+      runId: "run_runtime_record_missing",
+      input: {},
+      tools: registryFor({ score: missingKey }),
+    });
+
+    expect(result.status).toBe("failed");
+    if (result.status !== "failed") {
+      throw new Error("Expected the missing-key record output to fail validation.");
+    }
+    expect(result.error).toEqual(
+      expect.objectContaining({ message: expect.stringMatching(/required property 'cheap'/u) }),
+    );
+    expect(missingKey).toHaveBeenCalledTimes(1);
   });
 
   it("validates step output against the original contract when adapters mutate context.step", async () => {
@@ -4046,6 +4134,34 @@ function stepSchemaWorkflow(): LwirWorkflow {
       },
     ],
   };
+}
+
+/**
+ * `stepSchemaWorkflow` with the step's output contract replaced by the JSON Schema the
+ * installed zod emits for `z.record(z.enum(["fast", "cheap"]), z.number())` — a map with
+ * a constrained key schema and, per zod's exhaustive-record semantics, every key required.
+ * Built from zod rather than hand-written so the fixture cannot drift from the construct.
+ */
+function recordSchemaWorkflow(): LwirWorkflow {
+  return {
+    apiVersion: "littleworkflow.dev/v0.1",
+    kind: "Workflow",
+    metadata: { name: "runtime-record-schema" },
+    input: { schema: { type: "object" } },
+    output: { schema: { type: "object" } },
+    permissions: { tools: ["score"] },
+    steps: [
+      {
+        id: "score",
+        uses: "tool.call",
+        with: { tool: "score" },
+        output: {
+          mode: "object",
+          schema: normalizeSchema(z.record(z.enum(["fast", "cheap"]), z.number())),
+        },
+      },
+    ],
+  } as LwirWorkflow;
 }
 
 function finalSchemaWorkflow(): LwirWorkflow {

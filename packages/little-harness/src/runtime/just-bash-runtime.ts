@@ -1,4 +1,3 @@
-import { tool, type ToolSet } from "ai";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { copyFile, cp, mkdir, readdir, rm, stat } from "node:fs/promises";
 import { Bash, MountableFs, ReadWriteFs, type BashOptions, type ExecOptions, type IFileSystem } from "just-bash";
@@ -13,29 +12,20 @@ import type {
   RmOptions,
 } from "just-bash";
 import * as path from "node:path";
-import { z } from "zod";
-import { diffSnapshots, snapshotFolder, type FolderSnapshot } from "../files/diff.js";
-import { normalizeHarnessPrefix, toHarnessPath, type ManagedRoot } from "../files/path-policy.js";
-import { sha256Hex } from "../ids.js";
-import type { LocalHarnessSession } from "../local-host/session-store.js";
-import { captureTraceContent } from "../trace/content.js";
-import { createTraceDiff } from "../trace/diff.js";
-import { createTraceErrorEnvelope } from "../trace/error.js";
+import { HarnessInputError } from "../errors.js";
+import { normalizeHarnessPrefix } from "../files/path-policy.js";
 import { resolveTraceOptions } from "../trace/options.js";
-import { redactionReasonForPath } from "../trace/redaction.js";
 import type { ResolvedHarnessTraceOptions } from "../trace/types.js";
 import type {
-  FileWriter,
-  HarnessEvent,
-  HarnessEventInput,
+  CreateExecutionEnvironmentOptions,
   HarnessRuntime,
   HarnessRuntimeMount,
   HarnessRuntimeOptions,
-  HarnessRuntimeSystemHintsOptions,
-  HarnessRuntimeToolReplay,
-  HarnessToolExecutionContext,
+  HarnessWorkspaceMount,
+  HarnessWorkspaceSpec,
   JsonObject,
 } from "../types.js";
+import { createShellRuntime } from "./shell-runtime.js";
 import { createRuntimeToolBridge, type RuntimeToolBridge } from "./tool-bridge.js";
 
 type DirentEntry = Awaited<ReturnType<NonNullable<IFileSystem["readdirWithFileTypes"]>>>[number];
@@ -44,218 +34,172 @@ type WriteFileOption = Parameters<IFileSystem["writeFile"]>[2];
 type RuntimeShellInput = { command: string; cwd?: string; timeoutMs?: number };
 type RuntimeShellExecutionInput = RuntimeShellInput & { cwd: string; env: Record<string, string> };
 
-export type CreateJustBashRuntimeOptions<TExtraBody = unknown> = {
-  session: LocalHarnessSession;
-  files: FileWriter;
-  tools?: ToolSet;
-  toolContext?: HarnessToolExecutionContext<TExtraBody>;
-  runtimeToolReplay?: HarnessRuntimeToolReplay;
-  runtime?: HarnessRuntimeOptions;
-  mounts?: readonly HarnessRuntimeMount[];
-  emit?: (event: HarnessEventInput) => Promise<HarnessEvent | void>;
-  emitToolEvents?: boolean;
-  traceOptions?: ResolvedHarnessTraceOptions;
-  extraBody?: TExtraBody;
-  abortSignal?: AbortSignal;
-};
+export type CreateJustBashRuntimeOptions<TExtraBody = unknown> =
+  CreateExecutionEnvironmentOptions<TExtraBody>;
 
+/**
+ * @deprecated Identity passthrough kept for compatibility — pass the plain
+ * `runtime: { ... }` options object instead. Not to be confused with
+ * `createJustBashRuntime`, the in-process execution-environment factory.
+ */
 export function justBashRuntime(options: HarnessRuntimeOptions = {}): HarnessRuntimeOptions {
   return options;
+}
+
+/**
+ * Assembles the just-bash virtual filesystem for a workspace spec: canonical mounts (with
+ * the /.agents overlay inside /session), read-only policy wrapping, /.agents runtime-mount
+ * materialization, and runtime descriptor mounts. Shared by the in-process runtime and the
+ * subprocess sandbox worker.
+ */
+export async function buildWorkspaceFs(
+  workspace: HarnessWorkspaceSpec,
+  runtimeDescriptorMounts: readonly HarnessRuntimeMount[],
+): Promise<MountableFs> {
+  const workspaceMounts = new Map<string, HarnessWorkspaceMount>();
+  for (const mount of workspace.mounts) {
+    workspaceMounts.set(trimTrailingSlash(mount.mountPath), mount);
+  }
+  const agentsMount = workspaceMounts.get("/.agents");
+  const agentsFs = agentsMount
+    ? new PolicyFs(new ReadWriteFs({ root: agentsMount.backingPath }), {
+        mountPoint: "/.agents",
+        readOnly: true,
+      })
+    : undefined;
+
+  const fs = new MountableFs({ base: new UnmanagedRootFs() });
+  for (const [mountPath, mount] of workspaceMounts) {
+    if (mountPath === "/.agents") {
+      continue;
+    }
+    // /.agents stays visible inside /session (read-only) so relative skill paths resolve
+    // from the default working directory.
+    const base: IFileSystem =
+      mountPath === "/session" && agentsFs !== undefined
+        ? new SessionFs(new ReadWriteFs({ root: mount.backingPath }), agentsFs)
+        : new ReadWriteFs({ root: mount.backingPath });
+    if (mount.mode === "ro" || mount.getReadOnlyPrefixes !== undefined) {
+      fs.mount(
+        mountPath,
+        new PolicyFs(base, {
+          mountPoint: mountPath,
+          ...(mount.mode === "ro" ? { readOnly: true } : {}),
+          ...(mount.getReadOnlyPrefixes === undefined
+            ? {}
+            : { getReadOnlyPrefixes: mount.getReadOnlyPrefixes }),
+        }),
+      );
+      continue;
+    }
+    fs.mount(mountPath, base);
+  }
+  if (agentsFs !== undefined) {
+    fs.mount("/.agents", agentsFs);
+  }
+  const runtimeMounts = agentsMount
+    ? await materializeAgentsRuntimeMounts(agentsMount.backingPath, runtimeDescriptorMounts)
+    : runtimeDescriptorMounts;
+  await mountRuntimeDescriptors(fs, runtimeMounts);
+  return fs;
+}
+
+/**
+ * Which just-bash adapter the Bash options are being built for. The two adapters differ in
+ * exactly one hardening decision — see `defenseInDepthForAdapter`.
+ */
+export type JustBashAdapter = "in-process" | "subprocess";
+
+/**
+ * The Tier-0 hardening rule, in one place so the two adapters cannot drift apart.
+ *
+ * just-bash defaults `defenseInDepth` to ON, so the in-process `false` below is a deliberate
+ * opt-out. That layer patches PROCESS-WIDE globals for the duration of a command
+ * (`globalThis.performance`, `process.env`, `process.exit`, `Function`, `eval`, …) and gates
+ * them on an AsyncLocalStorage context. Host code that runs inside an async context inherited
+ * from the command therefore hits the patches too: a host AsyncHook touching
+ * `globalThis.performance.now()` throws a SecurityViolationError, and Node's own fatal-error
+ * path then calls the equally-blocked `process.exit`, killing the embedding process. The
+ * `freeze` strategy on `JSON`/`Math` is also irreversible — restoring the patches cannot
+ * unfreeze them. None of that can reach anyone from a dedicated worker process.
+ *
+ * The hardening a caller loses in-process is bought back by routing to the subprocess
+ * adapter instead — see the `"auto"` execution-environment mode on `localHost`.
+ */
+export function defenseInDepthForAdapter(adapter: JustBashAdapter): boolean {
+  return adapter === "subprocess";
+}
+
+/** Maps the neutral runtime toggles onto just-bash Bash options. */
+export function bashOptionsForRuntime(
+  fs: MountableFs,
+  workingDir: string,
+  runtime: HarnessRuntimeOptions | undefined,
+  extras: { javascript: NonNullable<BashOptions["javascript"]>; defenseInDepth: boolean },
+): BashOptions {
+  const bashOptions: BashOptions = {
+    fs,
+    cwd: workingDir,
+    python: runtime?.python ?? true,
+    javascript: extras.javascript,
+    defenseInDepth: extras.defenseInDepth,
+  };
+  if (runtime?.network === true) {
+    bashOptions.network = { dangerouslyAllowFullInternetAccess: true };
+  } else if (typeof runtime?.network === "object") {
+    bashOptions.network = runtime.network;
+  }
+  return bashOptions;
 }
 
 export async function createJustBashRuntime(
   options: CreateJustBashRuntimeOptions,
 ): Promise<HarnessRuntime> {
-  const fs = new MountableFs({ base: new UnmanagedRootFs() });
-  const agentsFs = new PolicyFs(new ReadWriteFs({ root: options.session.paths.agentsDir }), {
-    mountPoint: "/.agents",
-    readOnly: true,
-  });
-  fs.mount(
-    "/session",
-    new SessionFs(new ReadWriteFs({ root: options.session.paths.sessionDir }), agentsFs),
-  );
-  fs.mount("/artifacts", new ReadWriteFs({ root: options.session.paths.artifactsDir }));
-  fs.mount(
-    "/persistent",
-    new PolicyFs(new ReadWriteFs({ root: options.session.paths.persistentCheckoutDir }), {
-      mountPoint: "/persistent",
-      getReadOnlyPrefixes: () => getReadOnlyPersistentDirs(options.session),
-    }),
-  );
-  fs.mount("/.agents", agentsFs);
-  const runtimeMounts = await materializeAgentsRuntimeMounts(
-    options.session.paths.agentsDir,
-    options.mounts ?? [],
-  );
-  await mountRuntimeDescriptors(fs, runtimeMounts);
+  const workspace = options.workspace;
+  const fs = await buildWorkspaceFs(workspace, options.mounts ?? []);
 
   const traceOptions = options.traceOptions ?? resolveTraceOptions(undefined, undefined);
   const toolBridgeScope = new AsyncLocalStorage<JsonObject>();
-  const toolBridge = createToolBridge(options, traceOptions, () => toolBridgeScope.getStore());
-  const bashOptions: BashOptions = {
-    fs,
-    cwd: "/session",
-    python: options.runtime?.python ?? true,
+  const toolBridge = createEnvironmentToolBridge(options, traceOptions, () => toolBridgeScope.getStore());
+  const bash = new Bash(bashOptionsForRuntime(fs, workspace.workingDir, options.runtime, {
     javascript: javascriptConfig(options.runtime?.javascript, toolBridge),
-    // Little Harness already runs just-bash against a virtual filesystem with
-    // explicit network/runtime configuration. just-bash's extra
-    // defense-in-depth monkey patches can leak into host framework async hooks
-    // while a command is executing (for example Next.js dev/Turbopack reads
-    // performance.now/process.env from AsyncHook callbacks), crashing the host
-    // process. Keep the embedded app runtime stable by disabling that secondary
-    // patch layer.
-    defenseInDepth: false,
-  };
-  if (options.runtime?.network === true) {
-    bashOptions.network = { dangerouslyAllowFullInternetAccess: true };
-  } else if (typeof options.runtime?.network === "object") {
-    bashOptions.network = options.runtime.network;
-  }
-
-  const bash = new Bash(bashOptions);
-  let currentCwd = "/session";
+    defenseInDepth: defenseInDepthForAdapter("in-process"),
+  }));
+  let currentCwd = workspace.workingDir;
   let currentEnv = bash.getEnv();
 
-  return {
-    systemHints(hintOptions?: HarnessRuntimeSystemHintsOptions) {
-      const advertiseToolBridge =
-        toolBridge !== undefined &&
-        options.runtime?.bash !== false &&
-        (hintOptions?.activeTools === undefined || hintOptions.activeTools.includes("bash"));
-      const hints = [
-        "The harness filesystem exposes /session, /artifacts, /persistent, and /.agents.",
-        "Write intermediate working files in /session and host-visible outputs in /artifacts.",
-        "Configured /persistent directories may be read-write, manual-commit, or read-only; /.agents is read-only.",
-      ];
-      if (advertiseToolBridge) {
-        hints.push(
-          `Runtime JavaScript can call configured harness tools with js-exec. Available tools: ${
-            toolBridge.toolNames.map((name) => `tools.${name}(args)`).join(", ")
-          }.`,
-          "For complex or batched tool calls, run js-exec and call tools.<name>(args) from JavaScript.",
-        );
-      }
-      return hints;
+  return createShellRuntime({
+    workspace,
+    toolBridge,
+    runtime: options.runtime,
+    emit: options.emit,
+    emitToolEvents: options.emitToolEvents,
+    traceOptions,
+    files: options.files,
+    async execute(input, context) {
+      const executionInput: RuntimeShellExecutionInput = {
+        ...input,
+        cwd: input.cwd ?? currentCwd,
+        env: currentEnv,
+      };
+      const result = await toolBridgeScope.run(
+        { parentToolCallId: context.toolCallId },
+        () => execBashSafely(bash, executionInput, options.abortSignal),
+      );
+      currentEnv = result.env;
+      currentCwd = result.env.PWD ?? executionInput.cwd;
+      return { stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode };
     },
-    shellTool() {
-      return tool({
-        description: "Run a bash command inside the Little Harness session filesystem.",
-        inputSchema: z.object({
-          command: z.string().describe("Bash command to run inside the harness filesystem."),
-          cwd: z.string().optional().describe("Working directory for this command."),
-          timeoutMs: z.number().optional().describe("Abort the command after this many milliseconds."),
-        }),
-        execute: async ({ command, cwd, timeoutMs }, executeOptions) => {
-          const input: RuntimeShellInput = { command };
-          if (cwd !== undefined) {
-            input.cwd = cwd;
-          }
-          if (timeoutMs !== undefined) {
-            input.timeoutMs = timeoutMs;
-          }
-          const executionInput: RuntimeShellExecutionInput = {
-            ...input,
-            cwd: input.cwd ?? currentCwd,
-            env: currentEnv,
-          };
-          const startedAt = Date.now();
-          const toolCallId =
-            isObject(executeOptions) && typeof executeOptions.toolCallId === "string"
-              ? executeOptions.toolCallId
-              : "runtime_bash";
-          const before = options.emit ? await snapshotManagedRoots(options.session) : undefined;
-          await options.emit?.({
-            type: "harness.runtime.command.started",
-            metadata: input,
-          });
-          if (options.emitToolEvents !== false) {
-            await options.emit?.({
-              type: "harness.tool_call.started",
-              metadata: {
-                toolName: "bash",
-                toolCallId,
-                caller: "runtime",
-                input: await captureTraceContent({
-                  value: input,
-                  label: "tool-input/bash",
-                  files: options.files,
-                  traceOptions,
-                }),
-              },
-            });
-          }
-          const result = await toolBridgeScope.run(
-            { parentToolCallId: toolCallId },
-            () => execBashSafely(bash, executionInput, options.abortSignal),
-          );
-          currentEnv = result.env;
-          currentCwd = result.env.PWD ?? executionInput.cwd;
-          const output = runtimeShellOutput(result);
-          const durationMs = Date.now() - startedAt;
-          if (before && options.emit) {
-            await emitManagedRootChanges(
-              before,
-              await snapshotManagedRoots(options.session),
-              options.emit,
-              traceOptions,
-              options.files,
-            );
-          }
-          await options.emit?.({
-            type: result.exitCode === 0 ? "harness.runtime.command.succeeded" : "harness.runtime.command.failed",
-            metadata: {
-              command,
-              ...(cwd === undefined ? {} : { cwd }),
-              ...(timeoutMs === undefined ? {} : { timeoutMs }),
-              exitCode: result.exitCode,
-              durationMs,
-              stdout: await captureTraceContent({
-                value: result.stdout,
-                label: "runtime/stdout",
-                files: options.files,
-                traceOptions,
-                mediaType: "text/plain",
-              }),
-              stderr: await captureTraceContent({
-                value: result.stderr,
-                label: "runtime/stderr",
-                files: options.files,
-                traceOptions,
-                mediaType: "text/plain",
-              }),
-            },
-          });
-          if (options.emitToolEvents !== false) {
-            await options.emit?.({
-              type: result.exitCode === 0 ? "harness.tool_call.succeeded" : "harness.tool_call.failed",
-              metadata: {
-                toolName: "bash",
-                toolCallId,
-                caller: "runtime",
-                durationMs,
-                output: await captureTraceContent({
-                  value: output,
-                  label: "tool-output/bash",
-                  files: options.files,
-                  traceOptions,
-                }),
-                ...(result.exitCode === 0
-                  ? {}
-                  : { error: createTraceErrorEnvelope(new Error(`Command exited with ${result.exitCode}`)) }),
-              },
-            });
-          }
-
-          return output;
-        },
-      });
-    },
-  };
+  });
 }
 
-function createToolBridge<TExtraBody>(
-  options: CreateJustBashRuntimeOptions<TExtraBody>,
+/**
+ * Builds the sandbox-facing tool proxy from execution-environment options, applying the
+ * shared gating rules (no tools / javascript disabled / bridge disabled → no proxy).
+ * Shared by every execution-environment adapter so tool exposure cannot drift.
+ */
+export function createEnvironmentToolBridge<TExtraBody>(
+  options: CreateExecutionEnvironmentOptions<TExtraBody>,
   traceOptions: ResolvedHarnessTraceOptions,
   runtimeScope: () => JsonObject | undefined,
 ): RuntimeToolBridge | undefined {
@@ -266,16 +210,14 @@ function createToolBridge<TExtraBody>(
   ) {
     return undefined;
   }
-  const fallbackToolContext: HarnessToolExecutionContext<TExtraBody> = {
-    session: options.session,
-    files: options.files,
-    artifacts: options.session.artifacts,
-    ...(options.extraBody === undefined ? {} : { extraBody: options.extraBody }),
-    ...(options.abortSignal === undefined ? {} : { abortSignal: options.abortSignal }),
-  };
+  if (options.toolContext === undefined) {
+    throw new HarnessInputError(
+      "toolContext is required when tools are provided to an execution environment.",
+    );
+  }
   return createRuntimeToolBridge({
     tools: options.tools,
-    toolContext: options.toolContext ?? fallbackToolContext,
+    toolContext: options.toolContext,
     ...(options.runtimeToolReplay === undefined ? {} : { runtimeToolReplay: options.runtimeToolReplay }),
     ...(options.emit === undefined ? {} : { emit: options.emit }),
     files: options.files,
@@ -301,122 +243,7 @@ function javascriptConfig(
   };
 }
 
-function runtimeShellOutput(
-  result: Pick<BashExecResult, "stdout" | "stderr" | "exitCode">,
-): { stdout: string; stderr: string; exitCode: number } {
-  return {
-    stdout: result.stdout,
-    stderr: result.stderr,
-    exitCode: result.exitCode,
-  };
-}
-
-type ManagedRootSnapshot = Record<"session" | "artifacts" | "persistent", FolderSnapshot>;
-
-function isObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
-
-async function snapshotManagedRoots(session: LocalHarnessSession): Promise<ManagedRootSnapshot> {
-  return {
-    session: await snapshotFolder(session.paths.sessionDir),
-    artifacts: await snapshotFolder(session.paths.artifactsDir),
-    persistent: await snapshotFolder(session.paths.persistentCheckoutDir),
-  };
-}
-
-async function emitManagedRootChanges(
-  before: ManagedRootSnapshot,
-  after: ManagedRootSnapshot,
-  emit: (event: Omit<HarnessEvent, "timestamp" | "sessionId">) => Promise<HarnessEvent | void>,
-  traceOptions: ResolvedHarnessTraceOptions,
-  files: FileWriter,
-): Promise<void> {
-  for (const root of ["session", "artifacts", "persistent"] as const) {
-    const changes = diffSnapshots(before[root], after[root]);
-
-    for (const [file, content] of Object.entries(changes.created)) {
-      await emitWrittenFileEvents(root, file, undefined, content, "harness.file.created", emit, traceOptions, files);
-    }
-
-    for (const [file, content] of Object.entries(changes.updated)) {
-      await emitWrittenFileEvents(root, file, before[root][file], content, "harness.file.updated", emit, traceOptions, files);
-    }
-
-    for (const file of changes.deleted) {
-      await emit({
-        type: "harness.file.deleted",
-        metadata: {
-          path: toHarnessPath(root, file),
-          root,
-          source: "tool",
-          before: binaryMetadata(before[root][file]!),
-          diff: { available: false, reason: "content_unavailable" },
-        },
-      });
-    }
-  }
-}
-
-async function emitWrittenFileEvents(
-  root: ManagedRoot,
-  file: string,
-  before: Uint8Array | undefined,
-  content: Uint8Array,
-  type: "harness.file.created" | "harness.file.updated",
-  emit: (event: Omit<HarnessEvent, "timestamp" | "sessionId">) => Promise<HarnessEvent | void>,
-  traceOptions: ResolvedHarnessTraceOptions,
-  files: FileWriter,
-): Promise<void> {
-  const harnessPath = toHarnessPath(root, file);
-  const metadata = await runtimeFileMetadata(root, harnessPath, before, content, traceOptions, files);
-
-  await emit({ type, metadata });
-  await emit({ type: "harness.file.written_by_tool", metadata });
-
-  if (root === "artifacts") {
-    await emit({
-      type: "harness.artifact.created",
-      metadata: {
-        ...metadata,
-        artifact: {
-          id: harnessPath,
-          path: harnessPath,
-          bytes: content.byteLength,
-          sha256: sha256Hex(content),
-        },
-      },
-    });
-  }
-}
-
-async function runtimeFileMetadata(
-  root: ManagedRoot,
-  harnessPath: string,
-  before: Uint8Array | undefined,
-  content: Uint8Array,
-  traceOptions: ResolvedHarnessTraceOptions,
-  files: FileWriter,
-): Promise<JsonObject> {
-  return {
-    path: harnessPath,
-    root,
-    bytes: content.byteLength,
-    sha256: sha256Hex(content),
-    source: "tool",
-    ...(before ? { before: binaryMetadata(before) } : {}),
-    after: binaryMetadata(content),
-    diff: redactionReasonForPath(harnessPath, traceOptions)
-      ? { available: false as const, reason: "redacted" as const }
-      : await createTraceDiff(before, content, traceOptions, { files, path: harnessPath }),
-  };
-}
-
-function binaryMetadata(content: Uint8Array): { bytes: number; sha256: string } {
-  return { bytes: content.byteLength, sha256: sha256Hex(content) };
-}
-
-async function execBashSafely(
+export async function execBashSafely(
   bash: Bash,
   input: RuntimeShellExecutionInput,
   signal: AbortSignal | undefined,
@@ -1143,10 +970,6 @@ async function defaultReaddirWithFileTypes(
 function toMountedHarnessPath(mountPoint: string, pathname: string): string {
   const childPath = path.posix.normalize(pathname.startsWith("/") ? pathname : `/${pathname}`);
   return path.posix.normalize(`${mountPoint}${childPath === "/" ? "" : childPath}`);
-}
-
-function getReadOnlyPersistentDirs(session: LocalHarnessSession): readonly string[] {
-  return session.getReadOnlyPersistentDirs();
 }
 
 function directoryStat(): FsStat {

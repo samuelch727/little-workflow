@@ -15,7 +15,7 @@ import {
   normalizeBashCapabilities,
   type BashCapabilities,
 } from "./bash-tool.js";
-import type { ToolRegistry } from "./tool-registry.js";
+import { createToolRegistryOverlay, type AiSdkTool, type ToolRegistry } from "./tool-registry.js";
 import {
   fixerManifest,
   hashHarnessManifest,
@@ -55,9 +55,10 @@ import type {
   Skill,
   RunResult,
   RunWorkflowOptions,
+  WorkflowRunProgressEvent,
   WorkflowRunTarget,
 } from "./authoring.js";
-import type { LwirStep, LwirWorkflow, WorkflowVersion } from "./lwir.js";
+import type { LwirStep, LwirStepRepairConfig, LwirWorkflow, WorkflowVersion } from "./lwir.js";
 import { materializeRunStateFromEvents } from "./run-state.js";
 import { remoteSkillIdentityFromValue } from "./skills.js";
 import {
@@ -75,6 +76,12 @@ import {
   runWorkflowHarnessWithSession,
   workflowHarness,
 } from "little-harness/workflow-harness";
+import {
+  resolveHarnessMcpGateway,
+  type HarnessMcpCapabilityManifest,
+  type HarnessMcpConfig,
+  type ResolvedHarnessMcpGateway,
+} from "little-harness";
 import type {
   ExecuteStepTask,
   FixStepTask,
@@ -96,8 +103,10 @@ import {
 } from "./scratch.js";
 import {
   readSkillContents,
+  resolveHarnessSkillInputs,
   resolveSkills,
   resolveSkillsWithWarnings,
+  type ResolvedSkillDescriptor,
   type WorkflowSkillWarning,
 } from "./skills.js";
 import {
@@ -150,10 +159,17 @@ type AjvInstance = {
 };
 type AjvConstructor = new (options?: Record<string, unknown>) => AjvInstance;
 
+/**
+ * Token counts a step may report. Deliberately token-only — there is no `costUsd` field,
+ * because cost is derived in exactly one place ({@link priceModelCall}) from recorded
+ * tokens and registry pricing. Accepting a caller-supplied dollar figure here would make
+ * double-pricing representable.
+ */
 export type RuntimeUsage = {
   readonly inputTokens?: number;
   readonly outputTokens?: number;
-  readonly costUsd?: number;
+  readonly cachedInputTokens?: number;
+  readonly reasoningTokens?: number;
 };
 
 export type RuntimeStepExecutionResult = {
@@ -192,6 +208,7 @@ export type ExecuteWorkflowVersionOptions = {
   readonly signal?: AbortSignal;
   readonly models?: Record<string, unknown>;
   readonly tools?: ToolRegistry;
+  readonly mcp?: HarnessMcpConfig;
   readonly workerHarness?: Harness;
   readonly workerTools?: HarnessToolSet;
   readonly workflowId?: string;
@@ -199,11 +216,13 @@ export type ExecuteWorkflowVersionOptions = {
   readonly bashCapabilities?: BashCapabilities;
   readonly workerSkills?: HarnessContext["skills"];
   readonly workerSkillWarnings?: readonly WorkflowSkillWarning[];
+  readonly mcpCapabilities?: HarnessMcpCapabilityManifest;
   readonly parentRunId?: RunId;
   readonly pipelineWorkflowDefinitionHashes?: readonly string[];
   readonly maxAttempts?: number;
   /** Outer-loop session ID. When set, included in RunStarted.payload.outerLoopId (Spec §3.5). */
   readonly outerLoopId?: string;
+  readonly progress?: (event: WorkflowRunProgressEvent) => void | Promise<void>;
   /**
    * Runtime tool-call policy for this run's worker model. For a sub-run this is
    * the inherited policy (parent denies). Absent means unrestricted.
@@ -221,8 +240,16 @@ type ResolvedRoleSkills = {
   readonly warnings: readonly WorkflowSkillWarning[];
 };
 
+type RuntimeMcpContext = {
+  readonly gateway: ResolvedHarnessMcpGateway;
+  readonly tools: ToolRegistry;
+  readonly skills: readonly ResolvedSkillDescriptor[];
+  readonly manifest: HarnessMcpCapabilityManifest;
+};
+
 type ExecuteWorkflowVersionInternalOptions = ExecuteWorkflowVersionOptions & {
   readonly workflowVersionReuse?: WorkflowVersionReusePolicy;
+  readonly resolvedMcp?: RuntimeMcpContext;
 };
 
 export type RuntimeRunResult = RuntimeCompletedRunResult | RuntimeFailedRunResult;
@@ -609,9 +636,23 @@ async function executeWorkflowVersionWithReusePolicy(
   const executionOptions: ExecuteWorkflowVersionInternalOptions = options.workerHarness === undefined
     ? { ...options, workerHarness: workflowHarness }
     : options;
-  return withRunExecutionFence(options.world, runId, () =>
-    executeWorkflowVersionUnlocked(executionOptions, runId)
-  );
+  return withRunExecutionFence(options.world, runId, async () => {
+    const terminalReplay = await existingExecuteWorkflowVersionTerminalReplay(executionOptions, runId);
+    if (terminalReplay !== undefined) {
+      return terminalReplay;
+    }
+    return withRuntimeMcp(options.mcp, options, async (resolvedMcp) =>
+      executeWorkflowVersionUnlocked(
+        resolvedMcp === undefined
+          ? executionOptions
+          : {
+              ...applyRuntimeMcpToOptions(executionOptions, resolvedMcp),
+              workerSkills: appendMcpSkills(executionOptions.workerSkills ?? [], resolvedMcp),
+        },
+        runId,
+      )
+    );
+  });
 }
 
 type RunWorkflowLegacyPlannerOptions<TWorkflow extends WorkflowRunTarget = WorkflowRunTarget> =
@@ -670,13 +711,23 @@ async function runWorkflowInternal<TWorkflow extends WorkflowRunTarget = Workflo
       });
     }
     const runId = options.runId ?? `run_${randomUUID()}`;
-    return withRunExecutionFence(options.world, runId, async () =>
-      runOrchestratedWorkflowUnfenced(
-        workflows as readonly RunnableWorkflowDefinition[],
-        options,
+    return withRunExecutionFence(options.world, runId, async () => {
+      const terminalReplay = await existingRunWorkflowTerminalReplay(
+        options.world,
         runId,
-      )
-    ) as Promise<RunResult<InferWorkflowOutput<TWorkflow>>>;
+        options.input,
+      );
+      if (terminalReplay !== undefined) {
+        return terminalReplay;
+      }
+      return withRuntimeMcp(options.mcp, options, async (resolvedMcp) =>
+        runOrchestratedWorkflowUnfenced(
+          workflows as readonly RunnableWorkflowDefinition[],
+          applyRuntimeMcpToOptions(options, resolvedMcp),
+          runId,
+        )
+      );
+    }) as Promise<RunResult<InferWorkflowOutput<TWorkflow>>>;
   }
 
   const workflow = workflows;
@@ -716,12 +767,31 @@ async function runWorkflowInternal<TWorkflow extends WorkflowRunTarget = Workflo
       label: options.label,
       tags: options.tags,
       workflowVersionReuseStrategy: options.workflowVersionReuseStrategy,
+      mcp: options.mcp,
+      progress: options.progress,
     }) as Promise<RunResult<InferWorkflowOutput<TWorkflow>>>;
   }
 
   const runId = options.runId ?? `run_${randomUUID()}`;
   return withRunExecutionFence(options.world, runId, async () => {
-    return runWorkflowCycleUnfenced(workflow, options, runId, undefined, undefined);
+    const terminalReplay = await existingRunWorkflowTerminalReplay(
+      options.world,
+      runId,
+      options.input,
+      workflow,
+    );
+    if (terminalReplay !== undefined) {
+      return terminalReplay;
+    }
+    return withRuntimeMcp(options.mcp, options, async (resolvedMcp) =>
+      runWorkflowCycleUnfenced(
+        workflow,
+        applyRuntimeMcpToOptions(options, resolvedMcp),
+        runId,
+        undefined,
+        undefined,
+      )
+    );
   }) as Promise<RunResult<InferWorkflowOutput<TWorkflow>>>;
 }
 
@@ -806,6 +876,7 @@ export type RunWorkflowCycleOptions = {
   readonly input: unknown;
   readonly planner?: PlannerAdapter;
   readonly tools?: ToolRegistry;
+  readonly mcp?: HarnessMcpConfig;
   readonly maxAttempts?: number;
   readonly runId: RunId;
   readonly signal?: AbortSignal;
@@ -828,6 +899,7 @@ export type RunWorkflowCycleOptions = {
   readonly label?: string;
   /** Free-form tags stamped into RunStarted.payload.tags. */
   readonly tags?: readonly string[];
+  readonly progress?: (event: WorkflowRunProgressEvent) => void | Promise<void>;
 };
 
 async function runOrchestratedWorkflowUnfenced(
@@ -844,6 +916,9 @@ async function runOrchestratedWorkflowUnfenced(
     readonly label?: string;
     readonly tags?: readonly string[];
     readonly permissions?: ToolPermissions;
+    readonly mcpCapabilities?: HarnessMcpCapabilityManifest;
+    readonly resolvedMcp?: RuntimeMcpContext;
+    readonly progress?: (event: WorkflowRunProgressEvent) => void | Promise<void>;
   },
   runId: RunId,
 ): Promise<RunResult<unknown>> {
@@ -883,11 +958,13 @@ async function runOrchestratedWorkflowUnfenced(
         options.world,
         roleSkillResolveDefaults(workflow.worker, options.signal),
       );
+      const plannerSkills = appendMcpSkills(plannerResolvedSkills.skills, options.resolvedMcp);
+      const workerSkills = appendMcpSkills(workerResolvedSkills.skills, options.resolvedMcp);
       return {
-        workflow: workflowWithResolvedSkillIdentities(workflow, plannerResolvedSkills.skills, workerResolvedSkills.skills),
-        plannerSkills: plannerResolvedSkills.skills,
+        workflow: workflowWithResolvedSkillIdentities(workflow, plannerSkills, workerSkills),
+        plannerSkills,
         plannerSkillWarnings: plannerResolvedSkills.warnings,
-        workerSkills: workerResolvedSkills.skills,
+        workerSkills,
         workerSkillWarnings: workerResolvedSkills.warnings,
       };
     }),
@@ -941,7 +1018,7 @@ async function runOrchestratedWorkflowUnfenced(
     options.world,
     roleSkillResolveDefaults(orchestrator, options.signal),
   );
-  const orchestratorSkills = orchestratorResolvedSkills.skills;
+  const orchestratorSkills = appendMcpSkills(orchestratorResolvedSkills.skills, options.resolvedMcp);
   const orchestratorSkillWarnings = orchestratorResolvedSkills.warnings;
   let plannerPlanCallCount = 0;
 
@@ -993,26 +1070,28 @@ async function runOrchestratedWorkflowUnfenced(
       const plannerScratchMounts = scratchMountsForScope(plannerScope);
       await ensureScratchMounts(plannerScratchMounts);
       await ensureMemoryMounts(plannerMemoryMounts);
-        const compiled = await compileWorkflow(workflow, {
-          input,
-          tools,
-          bash: workflowBashCapabilities,
-	        plannerHarnessRuntime: {
-	          world: options.world,
-	          runId: plannerRunId,
-	          parentRunId: runId,
-	          logDir: plannerLogDir,
-	          memoryMounts: plannerMemoryMounts,
-	          scratchMounts: plannerScratchMounts,
-	          skills: plannerSkills,
-	          skillWarnings: plannerSkillWarnings,
-	          bashCapabilities: workflowBashCapabilities,
-	          abortSignal: combinedSignal,
-	        },
-		      });
-        await registerStoredWorkflowVersion(options.world, compiled.workflowVersion);
-        return compiled;
-		    },
+      const compiled = await compileWorkflow(workflow, {
+        input,
+        tools,
+        mcpCapabilities: options.mcpCapabilities,
+        bash: workflowBashCapabilities,
+        plannerHarnessRuntime: {
+          world: options.world,
+          runId: plannerRunId,
+          parentRunId: runId,
+          logDir: plannerLogDir,
+          memoryMounts: plannerMemoryMounts,
+          scratchMounts: plannerScratchMounts,
+          skills: plannerSkills,
+          skillWarnings: plannerSkillWarnings,
+          mcpCapabilities: options.mcpCapabilities,
+          bashCapabilities: workflowBashCapabilities,
+          abortSignal: combinedSignal,
+        },
+      });
+      await registerStoredWorkflowVersion(options.world, compiled.workflowVersion);
+      return compiled;
+    },
     readWorkflowVersion: async (workflowVersionId) => {
       try {
         return await readStoredWorkflowVersion(options.world, workflowVersionId);
@@ -1068,8 +1147,10 @@ async function runOrchestratedWorkflowUnfenced(
           pipelineWorkflowDefinitionHashes,
           workerSkills,
           workerSkillWarnings,
+          mcpCapabilities: options.mcpCapabilities,
           bashCapabilities: workflowBashCapabilities,
           ...(inheritedPermissions === undefined ? {} : { permissions: inheritedPermissions }),
+          ...(options.progress === undefined ? {} : { progress: options.progress }),
         });
         if (runtimeResult.status === "failed") {
           return {
@@ -1185,6 +1266,7 @@ async function runOrchestratedWorkflowUnfenced(
     orchestratorModelSlotId,
     ...(orchestratorSystem === undefined ? {} : { systemPrompt: orchestratorSystem }),
     skills: orchestratorSkills.map(skillManifestIdentity),
+    mcpCapabilities: options.mcpCapabilities,
     availableWorkflows: available.map((entry) => ({
       id: entry.id,
       definitionHash: entry.workflowDefinitionHash,
@@ -1474,6 +1556,115 @@ function roleSkillResolveDefaults(
   };
 }
 
+async function resolveRuntimeMcp(
+  config: HarnessMcpConfig | undefined,
+  options: {
+    readonly world: LocalWorld;
+    readonly tools?: ToolRegistry;
+    readonly signal?: AbortSignal;
+  },
+): Promise<RuntimeMcpContext | undefined> {
+  if (config === undefined) {
+    return undefined;
+  }
+  const gateway = await resolveHarnessMcpGateway(config);
+  try {
+    const skills = await resolveHarnessSkillInputs(gateway.skills, {
+      baseDir: process.cwd(),
+      orgSkillDir: resolvePath(options.world.dataDir, "memory", "org", "skills"),
+      skillsCacheDir: resolvePath(options.world.dataDir, "skills-cache"),
+      signal: options.signal,
+    });
+    return {
+      gateway,
+      tools: createToolRegistryOverlay(
+        options.tools,
+        gateway.tools as Record<string, AiSdkTool>,
+      ),
+      skills,
+      manifest: gateway.manifest,
+    };
+  } catch (error) {
+    try {
+      await gateway.close();
+    } catch {
+      // Preserve the setup failure that made the MCP gateway unusable.
+    }
+    throw error;
+  }
+}
+
+async function withRuntimeMcp<T>(
+  config: HarnessMcpConfig | undefined,
+  options: {
+    readonly world: LocalWorld;
+    readonly tools?: ToolRegistry;
+    readonly signal?: AbortSignal;
+  },
+  callback: (mcp: RuntimeMcpContext | undefined) => Promise<T>,
+): Promise<T> {
+  const resolved = await resolveRuntimeMcp(config, options);
+  let failed = false;
+  try {
+    return await callback(resolved);
+  } catch (error) {
+    failed = true;
+    throw error;
+  } finally {
+    if (resolved !== undefined) {
+      await closeRuntimeMcp(resolved, { suppressErrors: failed });
+    }
+  }
+}
+
+async function closeRuntimeMcp(
+  resolved: RuntimeMcpContext,
+  options: { readonly suppressErrors: boolean },
+): Promise<void> {
+  if (!options.suppressErrors) {
+    await resolved.gateway.close();
+    return;
+  }
+  try {
+    await resolved.gateway.close();
+  } catch {
+    // Preserve the original run failure.
+  }
+}
+
+function appendMcpSkills(
+  skills: HarnessContext["skills"],
+  mcp: RuntimeMcpContext | undefined,
+): HarnessContext["skills"] {
+  if (mcp === undefined || mcp.skills.length === 0) {
+    return skills;
+  }
+  const existing = new Set(skills.map((entry) => entry.name));
+  for (const skill of mcp.skills) {
+    if (existing.has(skill.name)) {
+      throw new RuntimeConfigError(`runtime_config_error: MCP guide skill '${skill.name}' is already configured.`);
+    }
+  }
+  return [...skills, ...mcp.skills];
+}
+
+function applyRuntimeMcpToOptions<TOptions extends { readonly tools?: ToolRegistry }>(
+  options: TOptions,
+  mcp: RuntimeMcpContext | undefined,
+): TOptions & {
+  readonly mcpCapabilities?: HarnessMcpCapabilityManifest;
+  readonly resolvedMcp?: RuntimeMcpContext;
+} {
+  return mcp === undefined
+    ? options
+    : {
+        ...options,
+        tools: mcp.tools,
+        mcpCapabilities: mcp.manifest,
+        resolvedMcp: mcp,
+      };
+}
+
 function isSkillRiskLevel(value: unknown): value is "NONE" | "LOW" | "MEDIUM" | "HIGH" | "CRITICAL" {
   return value === "NONE" || value === "LOW" || value === "MEDIUM" || value === "HIGH" || value === "CRITICAL";
 }
@@ -1540,6 +1731,8 @@ function createRuntimeHarnessContext(options: {
   readonly abortSignal: AbortSignal;
   readonly bashCapabilities?: BashCapabilities;
   readonly permissions?: ToolPermissions;
+  /** Workflow step this harness session serves; stamped onto every event it emits. */
+  readonly stepPath?: string;
 }): RuntimeHarnessContext {
   return {
     scope: options.scope,
@@ -1570,7 +1763,7 @@ function createRuntimeHarnessContext(options: {
         await options.recorder.append({
           type: eventWithWarnings.type,
           ...(eventWithWarnings.occurrenceId === undefined ? {} : { occurrenceId: eventWithWarnings.occurrenceId }),
-          payload: eventWithWarnings.payload,
+          payload: payloadWithStepPath(eventWithWarnings.payload, options.stepPath),
         });
       },
       priorEvents: async (query) => {
@@ -1597,6 +1790,25 @@ function createRuntimeHarnessContext(options: {
     ),
     recorder: options.recorder,
   };
+}
+
+/**
+ * Stamps the executing workflow step onto every harness event payload.
+ *
+ * The harness has no notion of workflow step paths — one harness session serves one step
+ * task, and only the runtime knows which step that is. Injecting the join here, at the
+ * bridge, keeps per-step usage attribution explicit rather than positional: parallel
+ * branches interleave their events in a single run log, so "attribute to the most recent
+ * StepAttemptStarted" would mis-assign cost. An existing `stepPath` is never overwritten.
+ */
+function payloadWithStepPath(
+  payload: Record<string, unknown>,
+  stepPath: string | undefined,
+): Record<string, unknown> {
+  if (stepPath === undefined || Object.hasOwn(payload, "stepPath")) {
+    return payload;
+  }
+  return { ...payload, stepPath };
 }
 
 function eventWithSessionWarnings<TEvent extends { readonly type: string; readonly payload: Record<string, unknown> }>(
@@ -1803,16 +2015,27 @@ function rootPathForMount(backingPath: string): string {
 export async function runWorkflowCycle(
   options: RunWorkflowCycleOptions,
 ): Promise<RunResult<unknown>> {
-  return withRunExecutionFence(options.world, options.runId, () =>
-    runWorkflowCycleUnfenced(
-      options.workflow,
-      options,
+  return withRunExecutionFence(options.world, options.runId, async () => {
+    const terminalReplay = await existingRunWorkflowTerminalReplay(
+      options.world,
       options.runId,
-      options.outerLoop,
-      options.promptNote,
-      options.outerLoopId,
-    )
-  );
+      options.input,
+      options.workflow,
+    );
+    if (terminalReplay !== undefined) {
+      return terminalReplay;
+    }
+    return withRuntimeMcp(options.mcp, options, async (resolvedMcp) =>
+      runWorkflowCycleUnfenced(
+        options.workflow,
+        applyRuntimeMcpToOptions(options, resolvedMcp),
+        options.runId,
+        options.outerLoop,
+        options.promptNote,
+        options.outerLoopId,
+      )
+    );
+  });
 }
 
 function plannerReuseDecisionBlocks(
@@ -1861,6 +2084,7 @@ type PlannerReuseCapabilityContext = {
   readonly models: Record<string, unknown>;
   readonly workerHarness?: Harness;
   readonly bashCapabilities?: BashCapabilities;
+  readonly mcpCapabilities?: HarnessMcpCapabilityManifest;
 };
 
 function plannerReuseCapabilityBlocks(
@@ -1880,6 +2104,13 @@ function plannerReuseCapabilityBlocks(
     propertyValue(capabilityManifest, "workerHarness"),
     "harnessId",
   );
+  const priorMcpCapabilitiesHash = stringProperty(capabilityManifest, "mcpCapabilitiesHash");
+  const currentMcpCapabilitiesHash = currentCapabilities.mcpCapabilities === undefined
+    ? undefined
+    : sha256Digest(currentCapabilities.mcpCapabilities);
+  if (priorMcpCapabilitiesHash !== currentMcpCapabilitiesHash) {
+    blocks.push("MCP capability changed");
+  }
   const currentWorkerHarnessId = currentCapabilities.workerHarness === undefined
     ? undefined
     : harnessIdFor(currentCapabilities.workerHarness);
@@ -2103,8 +2334,11 @@ async function executePartialPlannerReuseReplay(options: {
   readonly pipelineWorkflowDefinitionHashes?: readonly string[];
   readonly preResolvedWorkerSkills?: HarnessContext["skills"];
   readonly preResolvedWorkerSkillWarnings?: readonly WorkflowSkillWarning[];
+  readonly mcpCapabilities?: HarnessMcpCapabilityManifest;
+  readonly resolvedMcp?: RuntimeMcpContext;
   readonly bash?: BashCapabilities;
   readonly workflowVersionId: string;
+  readonly progress?: (event: WorkflowRunProgressEvent) => void | Promise<void>;
 }): Promise<RunResult<unknown>> {
   const workerResolvedSkills = options.preResolvedWorkerSkills === undefined
     ? await resolveRoleSkillsWithWarnings(
@@ -2116,7 +2350,7 @@ async function executePartialPlannerReuseReplay(options: {
         skills: options.preResolvedWorkerSkills,
         warnings: options.preResolvedWorkerSkillWarnings ?? [],
       };
-  const workerSkills = workerResolvedSkills.skills;
+  const workerSkills = appendMcpSkills(workerResolvedSkills.skills, options.resolvedMcp);
   const workerSkillWarnings = workerResolvedSkills.warnings;
   const workflowForExecution = workflowWithResolvedSkillIdentities(
     options.workflow,
@@ -2169,6 +2403,7 @@ async function executePartialPlannerReuseReplay(options: {
     bashCapabilities: bashCapabilitiesForWorkflow(workflowForExecution, options.bash),
     workerSkills,
     workerSkillWarnings,
+    mcpCapabilities: options.mcpCapabilities,
     ...(options.parentRunId === undefined ? {} : { parentRunId: options.parentRunId }),
     ...(options.pipelineWorkflowDefinitionHashes === undefined
       ? {}
@@ -2176,6 +2411,7 @@ async function executePartialPlannerReuseReplay(options: {
     maxAttempts: options.maxAttempts,
     signal: executionCancellation.signal,
     outerLoopId: options.outerLoopId,
+    ...(options.progress === undefined ? {} : { progress: options.progress }),
   }, options.runId).finally(() => executionCancellation.dispose());
 
   if (runtimeResult.status === "failed") {
@@ -2225,6 +2461,8 @@ async function runWorkflowCycleUnfenced(
     readonly input: unknown;
     readonly planner?: PlannerAdapter;
     readonly tools?: ToolRegistry;
+    readonly mcpCapabilities?: HarnessMcpCapabilityManifest;
+    readonly resolvedMcp?: RuntimeMcpContext;
     readonly maxAttempts?: number;
     readonly signal?: AbortSignal;
     readonly timeout?: string | number;
@@ -2237,6 +2475,7 @@ async function runWorkflowCycleUnfenced(
     readonly label?: string;
     readonly tags?: readonly string[];
     readonly permissions?: ToolPermissions;
+    readonly progress?: (event: WorkflowRunProgressEvent) => void | Promise<void>;
   },
   runId: RunId,
   outerLoop: import("./compiler.js").WorkflowCompileOptions["outerLoop"] | undefined,
@@ -2303,8 +2542,11 @@ async function runWorkflowCycleUnfenced(
         pipelineWorkflowDefinitionHashes: options.pipelineWorkflowDefinitionHashes,
         preResolvedWorkerSkills: options.preResolvedWorkerSkills,
         preResolvedWorkerSkillWarnings: options.preResolvedWorkerSkillWarnings,
+        mcpCapabilities: options.mcpCapabilities,
+        resolvedMcp: options.resolvedMcp,
         bash: options.bash,
         workflowVersionId: partialReuseWorkflowVersionId,
+        progress: options.progress,
       });
     }
     if (options.planner === undefined && workflow.planner === undefined) {
@@ -2329,11 +2571,12 @@ async function runWorkflowCycleUnfenced(
         };
     const plannerSkills = plannerResolvedSkills.skills;
     const plannerSkillWarnings = plannerResolvedSkills.warnings;
-    const workerSkills = workerResolvedSkills.skills;
+    const plannerSkillsWithMcp = appendMcpSkills(plannerSkills, options.resolvedMcp);
+    const workerSkills = appendMcpSkills(workerResolvedSkills.skills, options.resolvedMcp);
     const workerSkillWarnings = workerResolvedSkills.warnings;
     const workflowForCompile = workflowWithResolvedSkillIdentities(
       workflow,
-      plannerSkills,
+      plannerSkillsWithMcp,
       workerSkills,
     );
     const bashCapabilities = bashCapabilitiesForWorkflow(workflowForCompile, options.bash);
@@ -2423,6 +2666,7 @@ async function runWorkflowCycleUnfenced(
             input: options.input,
             ...(options.planner === undefined ? {} : { planner: options.planner }),
             tools: options.tools,
+            mcpCapabilities: options.mcpCapabilities,
             bash: bashCapabilities,
             outerLoop,
             promptNote: promptNoteForCompile,
@@ -2433,8 +2677,9 @@ async function runWorkflowCycleUnfenced(
               logDir,
               memoryMounts: plannerMemoryMounts,
               scratchMounts: plannerScratchMounts,
-              skills: plannerSkills,
+              skills: plannerSkillsWithMcp,
               skillWarnings: plannerSkillWarnings,
+              mcpCapabilities: options.mcpCapabilities,
               bashCapabilities,
               abortSignal: cancellation.signal,
             },
@@ -2469,6 +2714,7 @@ async function runWorkflowCycleUnfenced(
                 models: runtimeModelsForWorkflow(workflowForCompile),
                 workerHarness: runtimeWorkerConfigForWorkflow(workflowForCompile).workerHarness,
                 bashCapabilities,
+                mcpCapabilities: options.mcpCapabilities,
               },
             ),
           },
@@ -2582,6 +2828,7 @@ async function runWorkflowCycleUnfenced(
         bashCapabilities,
         workerSkills,
         workerSkillWarnings,
+        mcpCapabilities: options.mcpCapabilities,
         ...(options.parentRunId === undefined ? {} : { parentRunId: options.parentRunId }),
         ...(options.pipelineWorkflowDefinitionHashes === undefined
           ? {}
@@ -2590,6 +2837,7 @@ async function runWorkflowCycleUnfenced(
         signal: executionCancellation.signal,
         outerLoopId,
         ...(options.permissions === undefined ? {} : { permissions: options.permissions }),
+        ...(options.progress === undefined ? {} : { progress: options.progress }),
       }, runId).finally(() => executionCancellation.dispose());
 
       if (runtimeResult.status === "failed") {
@@ -2689,6 +2937,7 @@ async function runWorkflowCycleUnfenced(
       bashCapabilities,
       workerSkills,
       workerSkillWarnings,
+      mcpCapabilities: options.mcpCapabilities,
       ...(options.parentRunId === undefined ? {} : { parentRunId: options.parentRunId }),
       ...(options.pipelineWorkflowDefinitionHashes === undefined
         ? {}
@@ -2697,6 +2946,7 @@ async function runWorkflowCycleUnfenced(
       signal: executionCancellation.signal,
       outerLoopId,
       ...(options.permissions === undefined ? {} : { permissions: options.permissions }),
+      ...(options.progress === undefined ? {} : { progress: options.progress }),
     }, runId).finally(() => executionCancellation.dispose());
 
     if (runtimeResult.status === "failed") {
@@ -2797,8 +3047,10 @@ class RuntimeConfigError extends RuntimeCauseError {
 }
 
 class RuntimeStepSchemaError extends RuntimeCauseError {
-  constructor(message: string) {
+  readonly findings: readonly string[];
+  constructor(message: string, findings: readonly string[] = []) {
     super("StepSchemaError", "step_schema_error", message);
+    this.findings = findings;
   }
 }
 
@@ -3002,6 +3254,27 @@ async function existingRunWorkflowTerminalFailure(
   );
 }
 
+async function existingRunWorkflowTerminalReplay(
+  world: LocalWorld,
+  runId: RunId,
+  input: unknown,
+  workflow?: CompilableWorkflowDefinition,
+): Promise<RunResult | undefined> {
+  const existingTerminalFailure = await existingRunWorkflowTerminalFailure(
+    world,
+    runId,
+    input,
+    true,
+  );
+  if (existingTerminalFailure !== undefined) {
+    throw existingTerminalFailure;
+  }
+  if (workflow !== undefined) {
+    return existingRunWorkflowTerminalCompletion(world, runId, input, workflow);
+  }
+  return existingGenericRunWorkflowTerminalCompletion(world, runId, input);
+}
+
 async function existingRunWorkflowTerminalCompletion(
   world: LocalWorld,
   runId: RunId,
@@ -3020,6 +3293,23 @@ async function existingRunWorkflowTerminalCompletion(
   const result = await completedRunResultFromState(world, runId, state, events);
   validateJsonSchema(authoredWorkflowOutputSchema(workflow), result.output, "Workflow output");
   return result;
+}
+
+async function existingGenericRunWorkflowTerminalCompletion(
+  world: LocalWorld,
+  runId: RunId,
+  input: unknown,
+): Promise<RunResult | undefined> {
+  const events = await world.listEvents(runId);
+  if (events.length === 0) {
+    return undefined;
+  }
+  const state = materializeRunStateFromEvents(runId, events);
+  if (state.status !== "completed") {
+    return undefined;
+  }
+  assertRunInputPersistedAndMatches(events, input);
+  return completedRunResultFromState(world, runId, state, events);
 }
 
 function terminalRunWorkflowCauseCode(
@@ -3533,6 +3823,58 @@ function isSignalAborted(signal: AbortSignal | undefined): boolean {
   return signal?.aborted === true;
 }
 
+async function existingExecuteWorkflowVersionTerminalReplay(
+  options: ExecuteWorkflowVersionInternalOptions,
+  runId: RunId,
+): Promise<RuntimeRunResult | undefined> {
+  const events = await options.world.listEvents(runId);
+  if (events.length === 0) {
+    return undefined;
+  }
+
+  const lockedWorkflowVersion = options.workflowVersion;
+  assertLockedWorkflowVersion(lockedWorkflowVersion);
+  assertNoNestedParallelSteps(lockedWorkflowVersion.lwir.steps);
+  const workflowVersionId = lockedWorkflowVersion.id;
+  const state = materializeRunStateFromEvents(runId, events);
+  assertWorkflowVersionMatches(state, workflowVersionId, lockedWorkflowVersion.hash, events);
+
+  if (
+    state.status !== "completed" &&
+    !(state.status === "failed" && isTerminalCancellationEnvelope(state.error))
+  ) {
+    return undefined;
+  }
+
+  await registerStoredWorkflowVersion(options.world, lockedWorkflowVersion);
+  assertRunInputMatches(events, options.input);
+  assertParallelBranchFactsScheduledForWorkflow(lockedWorkflowVersion.lwir, events);
+  await assertCompletedStepArtifactsValid(
+    options.world,
+    lockedWorkflowVersion.lwir,
+    runId,
+    state,
+    events,
+  );
+  await assertCompletedParallelReplayMatchesInput(options, runId, workflowVersionId, state, events);
+
+  if (state.status === "completed") {
+    assertWorkflowStepIdsSafe(lockedWorkflowVersion.lwir.steps);
+    const completedFinalStep = finalOutputStep(lockedWorkflowVersion.lwir.steps);
+    await assertRunOutputArtifactValid(options.world, runId, completedFinalStep?.id, state);
+    return completedRunResult(
+      options.world,
+      lockedWorkflowVersion.lwir,
+      runId,
+      workflowVersionId,
+      state,
+      events,
+    );
+  }
+
+  return runResult(runId, workflowVersionId, state, events);
+}
+
 async function executeWorkflowVersionUnlocked(
   options: ExecuteWorkflowVersionInternalOptions,
   runId: RunId,
@@ -3856,11 +4198,21 @@ function assertWorkflowVersionExecutionCapabilitiesCompatible(
   context: { readonly strictWorkerHarnessPresence?: boolean } = {},
 ): void {
   const strictWorkerHarnessPresence = context.strictWorkerHarnessPresence === true;
+  const capabilityManifest = propertyValue(options.workflowVersion.lock, "capabilityManifest");
+  const priorMcpCapabilitiesHash = stringProperty(capabilityManifest, "mcpCapabilitiesHash");
+  const currentMcpCapabilitiesHash = options.mcpCapabilities === undefined
+    ? undefined
+    : sha256Digest(options.mcpCapabilities);
+  if (priorMcpCapabilitiesHash !== currentMcpCapabilitiesHash) {
+    throw new RuntimeCapabilityDriftError(
+      "capability_drift: MCP capability changed for locked WorkflowVersion. Re-run runWorkflow() to compile a fresh WorkflowVersion against the current capability set.",
+    );
+  }
+
   if (!strictWorkerHarnessPresence) {
     return;
   }
   const lwir = options.workflowVersion.lwir;
-  const capabilityManifest = propertyValue(options.workflowVersion.lock, "capabilityManifest");
   const priorWorkerHarnessId = stringProperty(
     propertyValue(capabilityManifest, "workerHarness"),
     "harnessId",
@@ -4613,6 +4965,7 @@ function compilerLifecycleEventInput(event: CompilerLifecycleEvent): EventInput 
   }
 }
 
+
 async function appendRunStartedEvent(
   options: ExecuteWorkflowVersionOptions,
   runId: RunId,
@@ -5100,10 +5453,12 @@ async function executeStep(
   const stepPath = scope.stepPath ?? stepPathFor(step, parentPath, visitIndex);
 
   if (!Object.hasOwn(currentState.materialized.steps, stepPath)) {
-    currentState = await record(currentState, options.world, runId, {
+    const event = {
       type: "StepScheduled",
       payload: { stepPath, stepId: step.id, uses: step.uses },
-    });
+    } satisfies EventInput;
+    currentState = await record(currentState, options.world, runId, event);
+    await reportStepProgress(options, step.id, event);
   }
 
   const maxAttempts = maxAttemptsFor(step, options);
@@ -5129,10 +5484,12 @@ async function executeStep(
     assertNotCancelled(options.signal);
     const isResumingCurrentAttempt = resumingAttempt && attempt === firstAttempt;
     if (!isResumingCurrentAttempt) {
-      currentState = await record(currentState, options.world, runId, {
+      const event = {
         type: "StepAttemptStarted",
         payload: { stepPath, stepId: step.id, attempt, attemptId: `attempt_${attempt}` },
-      });
+      } satisfies EventInput;
+      currentState = await record(currentState, options.world, runId, event);
+      await reportStepProgress(options, step.id, event);
     }
 
     const input = await resolveStepInput(
@@ -5198,7 +5555,7 @@ async function executeStep(
       }
       currentState = await loadRuntimeState(options.world, runId);
       const retriable = !isTerminalRuntimeCause(error) && attempt < maxAttempts;
-      currentState = await record(currentState, options.world, runId, {
+      const event = {
         type: "StepFailed",
         payload: {
           stepPath,
@@ -5207,7 +5564,9 @@ async function executeStep(
           attemptId: `attempt_${attempt}`,
           error: errorEnvelope(error, retriable),
         },
-      });
+      } satisfies EventInput;
+      currentState = await record(currentState, options.world, runId, event);
+      await reportStepProgress(options, step.id, event);
       const fixed = shouldAttemptFixerForError(error)
         ? await maybeRecoverCodeStepWithFixer({
             options,
@@ -5225,6 +5584,22 @@ async function executeStep(
         : undefined;
       if (fixed !== undefined) {
         return fixed;
+      }
+      const repaired = await maybeRepairAiStep({
+        options,
+        runId,
+        workflowVersionId,
+        step,
+        stepPath,
+        attempt,
+        context,
+        outputContract,
+        finalStepPath,
+        runtimeState: currentState,
+        originalError: error,
+      });
+      if (repaired !== undefined) {
+        return repaired;
       }
       if (!retriable) {
         throw error;
@@ -5291,7 +5666,7 @@ async function finalizeStepSuccess(
     attempt,
     scheduledBranchPathsFor(currentState.events, stepPath, attempt),
   );
-  currentState = await record(currentState, options.world, runId, {
+  const completedEvent = {
     type: "StepCompleted",
     payload: stripUndefined({
       stepPath,
@@ -5307,8 +5682,18 @@ async function finalizeStepSuccess(
         schemaHash: stepOutputSchemaHash(outputContract),
       }),
     }),
-  });
+  } satisfies EventInput;
+  currentState = await record(currentState, options.world, runId, completedEvent);
+  await reportStepProgress(options, step.id, completedEvent);
   return currentState;
+}
+
+async function reportStepProgress(
+  options: Pick<ExecuteWorkflowVersionOptions, "progress">,
+  currentStep: string,
+  lastEvent: EventInput,
+): Promise<void> {
+  await options.progress?.({ currentStep, lastEvent });
 }
 
 function normalizeStepOutputForContract(output: unknown, contract: LwirStep["output"]): unknown {
@@ -5394,6 +5779,7 @@ async function maybeRecoverCodeStepWithFixer(input: {
     systemPrompt: fixer.system,
     allowedTools: Object.keys(mergedTools).sort(),
     skills: harnessEnvironment.skills.map(skillManifestIdentity),
+    mcpCapabilities: options.mcpCapabilities,
     memoryStoreIds: harnessEnvironment.memoryMounts.map((mount) => mount.storeId),
     bashCapabilities: options.bashCapabilities,
     fixerModelSlotId: fixer.modelSlot,
@@ -5405,6 +5791,7 @@ async function maybeRecoverCodeStepWithFixer(input: {
     runId: context.runId,
     scope: fixerScope,
     taskKind: "fix_step",
+    stepPath: context.stepPath,
     manifest,
     model: {
       slotId: fixer.modelSlot,
@@ -5458,6 +5845,7 @@ async function maybeRecoverCodeStepWithFixer(input: {
       systemPrompt: fixer.system,
       allowedTools: Object.keys(mergedTools).sort(),
       skills: harnessEnvironment.skills.map(skillManifestIdentity),
+      mcpCapabilities: options.mcpCapabilities,
       memoryStoreIds: harnessEnvironment.memoryMounts.map((mount) => mount.storeId),
       bashCapabilities: options.bashCapabilities,
       fixerModelSlotId: fixer.modelSlot,
@@ -5469,6 +5857,7 @@ async function maybeRecoverCodeStepWithFixer(input: {
       runId: context.runId,
       scope: fixerScope,
       taskKind: "fix_step",
+      stepPath: context.stepPath,
       manifest: defaultManifest,
       model: harnessContext.model,
       system: fixer.system,
@@ -5526,6 +5915,175 @@ async function maybeRecoverCodeStepWithFixer(input: {
   );
 }
 
+/**
+ * Self-repair loop for `ai.generate` steps whose output fails schema validation.
+ *
+ * When the worker's output is rejected by {@link finalizeStepSuccess}
+ * (a `RuntimeStepSchemaError`), re-invoke the worker — up to the policy's
+ * `maxAttempts` — feeding the exact validator findings (and the rejected output)
+ * back through an augmented prompt, until the output validates. Returns the new
+ * `RuntimeState` on success, or `undefined` once attempts are exhausted (the
+ * caller then rethrows the original error, preserving terminal behavior).
+ *
+ * Each repair re-runs through the normal worker execute path so it is a distinct
+ * manifested session (not a replay of the failed attempt). Because the augmented
+ * prompt changes the step config — and therefore the manifest hash — for the same
+ * `stepPath`, the worker session must bypass the manifest-drift check.
+ */
+async function maybeRepairAiStep(input: {
+  readonly options: ExecuteWorkflowVersionOptions;
+  readonly runId: RunId;
+  readonly workflowVersionId: string;
+  readonly step: LwirStep;
+  readonly stepPath: string;
+  readonly attempt: number;
+  readonly context: RuntimeStepContext;
+  readonly outputContract: LwirStep["output"];
+  readonly finalStepPath: string | undefined;
+  readonly runtimeState: RuntimeState;
+  readonly originalError: unknown;
+}): Promise<RuntimeState | undefined> {
+  const { options, runId, step, stepPath, attempt, context } = input;
+  if (step.uses !== "ai.generate") {
+    return undefined;
+  }
+  if (!(input.originalError instanceof RuntimeStepSchemaError)) {
+    return undefined;
+  }
+  if (options.workerHarness === undefined) {
+    return undefined;
+  }
+  const policy = resolveRepairPolicy(step);
+  // Only "self" is implemented. This used to be where a declared
+  // `mode: "escalate"` silently became no repair at all; `validateLwir` now
+  // rejects escalate outright (UNIMPLEMENTED_FIELDS), and a WorkflowVersion can
+  // only be minted through `assertValidLwir`, so this branch is unreachable for
+  // any registered workflow. It stays as defence in depth for hand-built steps.
+  if (policy?.mode !== "self") {
+    return undefined;
+  }
+
+  // Resolve the model binding the same way executeAiStep does.
+  const rawConfig = configFor(step);
+  const modelSlot = stringConfig(rawConfig, "model", step.id);
+  assertAllowedModel(options.workflowVersion.lwir, modelSlot);
+  if (!Object.hasOwn(options.models ?? {}, modelSlot)) {
+    return undefined;
+  }
+  const modelBinding = options.models?.[modelSlot];
+  assertModelCapabilityLock(options.workflowVersion, modelSlot, modelBinding);
+  const model = isModelSlot(modelBinding) ? modelBinding.aiSdkModel : modelBinding;
+
+  let currentState = input.runtimeState;
+  let error: RuntimeStepSchemaError = input.originalError;
+  let previousOutput: unknown = undefined;
+
+  while (repairAttemptsForStep(currentState.events, stepPath) < policy.maxAttempts) {
+    const repairAttempt = repairAttemptsForStep(currentState.events, stepPath) + 1;
+    const findings = error.findings;
+
+    currentState = await record(currentState, options.world, runId, {
+      type: "StepRepairAttempted",
+      payload: stripUndefined({
+        stepPath,
+        stepId: step.id,
+        attempt: repairAttempt,
+        model: modelSlot,
+        findings: [...findings],
+      }),
+    });
+
+    const repairStep = augmentAiStepForRepair(step, findings, previousOutput);
+    const adapterResult = await maybeExecuteAiStepWithWorkerHarness(
+      options,
+      repairStep,
+      context,
+      currentState,
+      modelSlot,
+      model,
+      true,
+    );
+    if (adapterResult === undefined) {
+      return undefined;
+    }
+    currentState = adapterResult.runtimeState;
+
+    try {
+      return await finalizeStepSuccess(
+        options,
+        runId,
+        step,
+        stepPath,
+        attempt,
+        input.finalStepPath,
+        input.outputContract,
+        adapterResult.result,
+        currentState,
+      );
+    } catch (repairError) {
+      if (!(repairError instanceof RuntimeStepSchemaError)) {
+        throw repairError;
+      }
+      error = repairError;
+      previousOutput = adapterResult.result.output;
+      currentState = await loadRuntimeState(options.world, runId);
+    }
+  }
+
+  return undefined;
+}
+
+/**
+ * Build a copy of an `ai.generate` step whose prompt is augmented with the schema
+ * validation findings (and, on the second and later repair attempts, the rejected
+ * output) so the worker can correct itself. Only `with.prompt` is changed.
+ */
+function augmentAiStepForRepair(
+  step: LwirStep,
+  findings: readonly string[],
+  previousOutput: unknown,
+): LwirStep {
+  const joinedFindings = findings.length > 0 ? findings.join("; ") : "the output did not match the required schema";
+  const outputSchema = step.output?.schema;
+  const schemaNote =
+    outputSchema !== undefined && outputSchema !== true && outputSchema !== false
+      ? `\nThe required output is a ${step.output?.mode ?? "json"} value that EXACTLY matches this JSON Schema:\n${JSON.stringify(outputSchema)}`
+      : "";
+  const previousOutputNote = previousOutput === undefined
+    ? ""
+    : `\nYour previous (invalid) output was: ${JSON.stringify(previousOutput)}`;
+  // Carry the feedback in a dedicated `with.outputRepairNote` (NOT `with.prompt`, which the worker
+  // does not read) — the workflow harness surfaces this as a trailing user turn to the model.
+  const outputRepairNote =
+    `[OUTPUT REPAIR] Your previous output was REJECTED by schema validation: ` +
+    `${joinedFindings}. Return ONLY a corrected value that exactly matches the required schema.` +
+    schemaNote +
+    previousOutputNote;
+  return {
+    ...step,
+    with: {
+      ...(step.with ?? {}),
+      outputRepairNote,
+    },
+  } as LwirStep;
+}
+
+/**
+ * The effective output-repair policy for a step. An `ai.generate` step with no explicit
+ * `onFailure.repair` defaults to self-repair with 3 attempts (closes near-miss structured
+ * outputs with zero config). Steps without an `ai.generate` role and no config repair nothing.
+ */
+export function resolveRepairPolicy(step: LwirStep): LwirStepRepairConfig | undefined {
+  const repair = step.onFailure?.repair;
+  if (repair !== undefined) {
+    return repair;
+  }
+  if (step.uses === "ai.generate") {
+    return { mode: "self", maxAttempts: 3 };
+  }
+  return undefined;
+}
+
 function fixerConfigForStep(step: LwirStep): FixerConfig | undefined {
   const fixer = (step as StepWithFixer).onFailure?.fixer;
   if (fixer === undefined) {
@@ -5570,6 +6128,20 @@ function fixerAttemptsForStep(
     const manifest = propertyValue(event.payload, "manifest");
     return isRecord(manifest) && stringProperty(manifest, "stepPath") === stepPath;
   }).length;
+}
+
+/**
+ * Count durable `StepRepairAttempted` events already committed for a step. Unlike
+ * {@link fixerAttemptsForStep} (which counts harness sessions), this counts the
+ * repair markers, so attempt budgeting stays correct across crash-and-replay.
+ */
+function repairAttemptsForStep(
+  events: readonly EventEnvelope[],
+  stepPath: string,
+): number {
+  return events.filter(
+    (event) => event.type === "StepRepairAttempted" && stringProperty(event.payload, "stepPath") === stepPath,
+  ).length;
 }
 
 async function executeStepAdapter(
@@ -5664,6 +6236,7 @@ async function maybeExecuteDirectStepWithWorkerHarness(
     stepConfig: step,
     allowedTools,
     skills: harnessEnvironment.skills.map(skillManifestIdentity),
+    mcpCapabilities: options.mcpCapabilities,
     memoryStoreIds: harnessEnvironment.memoryMounts.map((mount) => mount.storeId),
     bashCapabilities: options.bashCapabilities,
   });
@@ -5672,6 +6245,7 @@ async function maybeExecuteDirectStepWithWorkerHarness(
     runId: context.runId,
     scope: workerScope,
     taskKind: "execute_step",
+    stepPath: context.stepPath,
     manifest,
     model: {
       slotId: "worker.direct",
@@ -5728,6 +6302,7 @@ async function maybeExecuteDirectStepWithWorkerHarness(
       stepConfig: step,
       allowedTools,
       skills: harnessEnvironment.skills.map(skillManifestIdentity),
+      mcpCapabilities: options.mcpCapabilities,
       memoryStoreIds: harnessEnvironment.memoryMounts.map((mount) => mount.storeId),
       bashCapabilities: options.bashCapabilities,
     });
@@ -5736,6 +6311,7 @@ async function maybeExecuteDirectStepWithWorkerHarness(
       runId: context.runId,
       scope: workerScope,
       taskKind: "execute_step",
+      stepPath: context.stepPath,
       manifest: defaultManifest,
       model: harnessContext.model,
       tools: scopedTools,
@@ -5805,6 +6381,11 @@ async function maybeExecuteAiStepWithWorkerHarness(
   runtimeState: RuntimeState,
   modelSlot: string,
   model: unknown,
+  // When true, the worker session for this step bypasses the manifest-drift check.
+  // The output self-repair loop re-runs an `ai.generate` step with an augmented prompt
+  // (a deliberately different stepConfig), which would otherwise trip drift detection
+  // against the original failed session for the same stepPath.
+  skipManifestDriftCheck = false,
 ): Promise<StepAdapterResult | undefined> {
   const harness = options.workerHarness;
   if (harness === undefined) {
@@ -5823,7 +6404,11 @@ async function maybeExecuteAiStepWithWorkerHarness(
       lwirHash: sha256Digest(options.workflowVersion.lwir),
     });
   const logDir = runLogDir(options.world, context.runId, options.parentRunId);
-  const recorder = createHarnessEventRecorder({ world: options.world, runId: context.runId });
+  const recorder = createHarnessEventRecorder({
+    world: options.world,
+    runId: context.runId,
+    skipManifestDriftCheck,
+  });
   const workerScope: HarnessContext["scope"] = {
     runId: context.runId,
     ...(options.parentRunId === undefined ? {} : { parentRunId: options.parentRunId }),
@@ -5841,6 +6426,7 @@ async function maybeExecuteAiStepWithWorkerHarness(
     modelSlotId: modelSlot,
     allowedTools: Object.keys(scopedTools).sort(),
     skills: harnessEnvironment.skills.map(skillManifestIdentity),
+    mcpCapabilities: options.mcpCapabilities,
     memoryStoreIds: harnessEnvironment.memoryMounts.map((mount) => mount.storeId),
     bashCapabilities: options.bashCapabilities,
   });
@@ -5849,6 +6435,7 @@ async function maybeExecuteAiStepWithWorkerHarness(
     runId: context.runId,
     scope: workerScope,
     taskKind: "execute_step",
+    stepPath: context.stepPath,
     manifest,
     model: {
       slotId: modelSlot,
@@ -5909,6 +6496,7 @@ async function maybeExecuteAiStepWithWorkerHarness(
       modelSlotId: modelSlot,
       allowedTools: Object.keys(scopedTools).sort(),
       skills: harnessEnvironment.skills.map(skillManifestIdentity),
+      mcpCapabilities: options.mcpCapabilities,
       memoryStoreIds: harnessEnvironment.memoryMounts.map((mount) => mount.storeId),
       bashCapabilities: options.bashCapabilities,
     });
@@ -5917,6 +6505,7 @@ async function maybeExecuteAiStepWithWorkerHarness(
       runId: context.runId,
       scope: workerScope,
       taskKind: "execute_step",
+      stepPath: context.stepPath,
       manifest: defaultManifest,
       model: harnessContext.model,
       tools: scopedTools,
@@ -5987,18 +6576,40 @@ async function runWorkerHarnessTaskWithSessionEvents(
       ...(skillContents === undefined ? {} : { skillContents }),
     },
   };
+  const cancellableRunContext = suppressDurabilityAfterAbort(runContext, signal);
   try {
     return await raceSignal(
       () => runWorkflowHarnessWithSession(
         harness as never,
         task as never,
-        runContext as never,
+        cancellableRunContext as never,
       ) as Promise<HarnessResult>,
       signal,
     );
   } catch (error) {
     throw classifyHarnessRuntimeError(error);
   }
+}
+
+function suppressDurabilityAfterAbort(
+  context: RuntimeHarnessContext,
+  signal: AbortSignal | undefined,
+): RuntimeHarnessContext {
+  if (signal === undefined) {
+    return context;
+  }
+  return {
+    ...context,
+    durability: {
+      ...context.durability,
+      append(event: Parameters<RuntimeHarnessContext["durability"]["append"]>[0]) {
+        if (signal.aborted) {
+          return;
+        }
+        return context.durability.append(event);
+      },
+    },
+  };
 }
 
 function classifyHarnessRuntimeError(error: unknown): unknown {
@@ -7116,23 +7727,27 @@ function validateStepOutput(
   switch (contract.mode) {
     case "text":
       if (typeof output !== "string") {
-        throw new RuntimeStepSchemaError(`${label} does not match text output mode.`);
+        const finding = `${label} does not match text output mode.`;
+        throw new RuntimeStepSchemaError(finding, [finding]);
       }
       return;
     case "choice":
       if (typeof output !== "string" || !(contract.values ?? []).includes(output)) {
-        throw new RuntimeStepSchemaError(`${label} does not match choice output mode.`);
+        const finding = `${label} does not match choice output mode.`;
+        throw new RuntimeStepSchemaError(finding, [finding]);
       }
       return;
     case "object":
       if (!isRecord(output)) {
-        throw new RuntimeStepSchemaError(`${label} does not match object output mode.`);
+        const finding = `${label} does not match object output mode.`;
+        throw new RuntimeStepSchemaError(finding, [finding]);
       }
       validateJsonSchema(contract.schema, output, label);
       return;
     case "array":
       if (!Array.isArray(output)) {
-        throw new RuntimeStepSchemaError(`${label} does not match array output mode.`);
+        const finding = `${label} does not match array output mode.`;
+        throw new RuntimeStepSchemaError(finding, [finding]);
       }
       validateJsonSchema(contract.schema, output, label);
       return;
@@ -7282,15 +7897,23 @@ function validateJsonSchema(
     return;
   }
   if (schema === false) {
-    throw new RuntimeStepSchemaError(`${label} schema rejects all values.`);
+    const finding = `${label} schema rejects all values.`;
+    throw new RuntimeStepSchemaError(finding, [finding]);
   }
   const ajv = getAjv();
   const valid = ajv.validate(schema, value);
   if (valid !== true) {
+    const errors = ajv.errors ?? undefined;
+    const findings = Array.isArray(errors) && errors.length > 0
+      ? errors.map((error) => {
+        const path = stringProperty(error, "instancePath");
+        const errorMessage = stringProperty(error, "message") ?? "schema validation failed";
+        return path !== undefined && path.length > 0 ? `${path} ${errorMessage}` : errorMessage;
+      })
+      : [ajv.errorsText?.(errors) ?? "schema validation failed"];
     throw new RuntimeStepSchemaError(
-      `${label} does not match schema: ${
-        ajv.errorsText?.(ajv.errors) ?? "schema validation failed"
-      }`,
+      `${label} does not match schema: ${ajv.errorsText?.(errors) ?? "schema validation failed"}`,
+      findings,
     );
   }
 }
@@ -7431,7 +8054,7 @@ function toolHandlerFromRegistry(
       toolCallId: `${context.runId}:${context.stepPath}:attempt-${context.attempt}`,
       messages: [],
       abortSignal,
-      experimental_context: context,
+      context: context,
     };
     return tool.execute?.(input, options);
   };
@@ -8594,17 +9217,6 @@ function isReplayIntegrityError(error: unknown): boolean {
     error instanceof ArtifactHashMismatchError ||
     error instanceof ArtifactManifestCorruptError ||
     error instanceof RuntimeIntegrityError;
-}
-
-function usagePayload(usage: RuntimeUsage | undefined): JsonRecord | undefined {
-  if (usage === undefined) {
-    return undefined;
-  }
-  return stripUndefined({
-    inputTokens: usage.inputTokens,
-    outputTokens: usage.outputTokens,
-    costUsd: usage.costUsd,
-  });
 }
 
 function workflowVersionLock(

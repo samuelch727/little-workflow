@@ -1,0 +1,46 @@
+---
+title: Roadmap
+description: Where Little Workflow is headed after the alpha — framed as direction, not shipped versions.
+---
+
+The alpha (currently `0.2.0-alpha.0`) is the minimum implementation that proves the thesis: a developer-supplied control plane compiles to validated LWIR and executes durably enough for a local development loop. Everything below is **direction**, not a shipped release. Dates and version numbers are deliberately omitted — the shape of the work is what matters.
+
+## Composition on the Harness surface
+
+The orchestrator is deprecated in favour of [`asHarnessWorkflow` + `createHarness({ workflows })`](/docs/v0.1.0-alpha/authoring/compose-with-harness), and is scheduled to be unexported in the next minor:
+
+- **Plan once, run many on the Harness surface.** Prepared runs would let an agent plan a workflow once and run the compiled version across many inputs. The protocol already reserves `prepareForHarness` / `runPreparedForHarness`, but neither side implements them yet. Until they do, this pattern stays on the orchestrator; see [Plan once, run many](/docs/v0.1.0-alpha/cookbook/plan-once-run-many).
+- Bridging a workflow run's events into the calling agent's trace as a nested span. Today they stay in the workflow's own run record.
+
+## Beta polish
+
+A hardened SDK and governance surface built on the same primitives:
+
+- Approval workflows and structured memory query tools.
+- Cost and budget **enforcement** at sub-workflow boundaries, plus pre-run cost estimation. Alpha ships cost observability (`usage.costUsd`, `little report`).
+- Memory versioning and an audit log — alpha uses plain files plus mtime; explicit version objects and `content_sha256` preconditions come later.
+- Run-time skill injection via `RunWorkflowOptions.skills` — alpha supports workflow-declared and org-mounted skills only.
+- An inspection CLI beyond `events` / `replay` / `report`: run listing, timelines, user-invoked retry-from-step, and fork.
+
+## Production durability
+
+Moving beyond the single-process Local World:
+
+- Postgres / Redis / S3-backed durability for the event log, run locks, and artifacts.
+- The full capability firewall across model, tool, skill, code, shell, network, and side-effect access, including a secret broker and an egress allowlist (LWIR rejects `permissions.secrets` / `permissions.network` until then).
+- A built-in sandboxed `code.run` executor. Today the default worker harness refuses to execute `code.run`.
+- OpenTelemetry-based observability.
+
+## High-throughput fan-out and ecosystem
+
+- Sharded fan-out and tree reducers for large parallel workloads (alpha caps a parallel step at 100 branches).
+- Live OpenRouter model-registry sync (alpha ships a bundled registry).
+- **Dreaming** — consolidating memory and outcomes across many sessions into proposed improvements. It is not part of the `little-workflow` package. It exists today only in the littleDB service and the [`demos/`](https://github.com/samuelch727/little-workflow/tree/main/demos) that use it (`dreamer`, `kb-chatbot`), and littleDB is not public yet.
+- Streaming harness-session events to `runWorkflow` callers (alpha sessions stream internally; the caller receives final output and an optional `progress` callback).
+
+## Enterprise authoring and inspection
+
+- Custom step types and recursive pipelines.
+- Visual workflow authoring and inspection.
+
+See the [Changelog](/docs/v0.1.0-alpha/reference/changelog) for what has actually shipped, and [Comparisons](/docs/comparisons) for where Little Workflow sits next to other tools.

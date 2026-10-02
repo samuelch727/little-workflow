@@ -583,9 +583,15 @@ describe("authoring helpers", () => {
     expectTypeOf<MemoryConfig["attach"]>().toEqualTypeOf<
       readonly { readonly id: string; readonly mode: "ro" }[] | undefined
     >();
-    expectTypeOf(runWorkflow<typeof ticketWorkflow>).toEqualTypeOf<
-      (options: RunWorkflowOptions<typeof ticketWorkflow>) => Promise<RunResult<TicketOutput>>
-    >();
+    // runWorkflow accepts the power-user options object and returns the typed result
+    // (it is now overloaded to also accept the ergonomic `runWorkflow(def, input)` form).
+    expectTypeOf(
+      runWorkflow({
+        world: localWorld(),
+        workflows: ticketWorkflow,
+        input: { ticketId: "TIN-1", body: "Billing question." },
+      }),
+    ).toEqualTypeOf<Promise<RunResult<TicketOutput>>>();
 
     const validOptions: RunWorkflowOptions<typeof ticketWorkflow> = {
       world: localWorld(),

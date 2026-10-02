@@ -14,11 +14,11 @@ const contextPath = resolve(
 );
 const demoRealPlannerPath = resolve(
   dirname(fileURLToPath(import.meta.url)),
-  "../../../apps/demo-real-planner/run.mjs",
+  "../../../demos/real-planner/run.mjs",
 );
 const demoOrchestratorFanoutPath = resolve(
   dirname(fileURLToPath(import.meta.url)),
-  "../../../apps/demo-orchestrator-fanout/run.mjs",
+  "../../../demos/orchestrator-fanout/run.mjs",
 );
 const toolRegistryPath = resolve(
   dirname(fileURLToPath(import.meta.url)),

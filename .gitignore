@@ -12,6 +12,9 @@ apps/*/build
 # generated framework/content files
 apps/*/.source
 apps/*/next-env.d.ts
+demos/*/.next
+demos/*/.source
+demos/*/next-env.d.ts
 *.tsbuildinfo
 
 # environment and local files
@@ -52,3 +55,6 @@ spec-review.md
 **/.little-workflow-*/
 **/.little-harness/
 **/.little-harness-*/
+
+# generated little-workflow test session artifacts (see PR #8 notes)
+packages/little-workflow/session_*/

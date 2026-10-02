@@ -1,0 +1,139 @@
+---
+title: Getting Started
+description: Scaffold a Little Harness agent workspace and chat with it from the CLI in minutes.
+---
+
+import { Files, File, Folder } from 'fumadocs-ui/components/files';
+
+The fastest way to start is a **dedicated agent workspace** — a folder that holds one or more agents,
+each scaffolded and runnable from the CLI. You write an agent's behavior in `agent.ts`, drop tools and
+skills beside it as files, and `little-harness test` loads the folder and lets you chat with it.
+
+You don't have to wire it into an existing app to try it — a standalone workspace is the simplest place
+to build, iterate, and test. (You can still embed Little Harness in your own app later; see the
+[Embedding in Your App](/docs/v0.1.0-alpha/quickstart).)
+
+## 1. Create a workspace
+
+You need Node.js 22 or newer. While Little Harness is in alpha, run the CLI from the `alpha` dist-tag:
+
+```bash
+npx little-harness@alpha init
+```
+
+The guided wizard asks for a project name, lets you search AI SDK language providers and model ids,
+accepts a custom provider model id if your model is not listed, and asks before installing
+dependencies. It currently offers 24 provider choices: the official AI SDK language-model providers
+plus a custom OpenAI-compatible API scaffold. It then scaffolds a workspace with a starter `support`
+agent:
+
+After it finishes, `cd` into the generated project folder before running the remaining commands.
+The generated `package.json` pins `little-harness` to the CLI's version, `ai` to `^7.0.0` (AI SDK 7),
+and the provider package to a compatible range, so a later `latest` release cannot break the project.
+
+<Files>
+  <File name="little-harness.json" />
+  <File name="package.json" />
+  <File name="tsconfig.json" />
+  <File name=".gitignore" />
+  <Folder name="agents" defaultOpen>
+    <Folder name="support" defaultOpen>
+      <File name="agent.ts" />
+      <File name="instructions.md" />
+      <Folder name="tools" defaultOpen>
+        <File name="echo.ts" />
+      </Folder>
+    </Folder>
+  </Folder>
+</Files>
+
+## 2. Review the selected model
+
+Open `agents/support/agent.ts`. It default-exports a plain `createHarness(...)`; the provider import
+and model call match the provider and model you selected in the wizard:
+
+```ts
+import { createHarness, localHost } from "little-harness";
+import { anthropic } from "@ai-sdk/anthropic";
+
+export default createHarness({
+  model: anthropic("claude-opus-4-6"),
+  system: "You are a helpful agent.",
+  host: localHost(),
+});
+```
+
+The scaffold defaults to the `anthropic` provider; if you selected a different
+provider in the wizard, the import and model call match your choice instead. Then
+set the selected provider's required environment variables — for the default:
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
+```
+
+Provider packages and model ids come from AI SDK providers. For providers such as OpenAI-compatible
+APIs or Open Responses, the generated `agent.ts` also includes the required URL environment variable.
+If the wizard does not list the exact model you want, type the provider's model id directly.
+
+## 3. Chat with it
+
+```bash
+pnpm little-harness test support
+```
+
+This loads the agent and opens an interactive REPL — type a message and the agent streams its reply.
+Reasoning and tool calls are printed as labeled blocks, including tool input and output when
+available. Type `:reset` to clear the conversation or `:exit` to quit.
+
+```txt
+Chatting with 'support'. Type :exit to quit, :reset to clear the conversation.
+
+you> what can you do?
+[assistant]
+I help with support questions — I keep answers short and to the point.
+```
+
+## 4. Add tools and skills
+
+Anything you drop into the agent's folder is auto-discovered:
+
+- **Tools** — a file in `tools/` that default-exports an AI SDK `tool()`. The tool name is the
+  filename (`tools/lookup_order.ts` → `lookup_order`).
+- **Skills** — a folder under `skills/` with a `SKILL.md` (local), or a `skill.ts` that default-exports
+  a `skill(...)` (for remote/GitHub skills).
+- **Workflows** — a file in `workflows/` that default-exports a Little Workflow adapted with
+  `asHarnessWorkflow(...)` from `little-workflow`. Each one becomes a tool; see
+  [Triggering a workflow from an agent](/docs/v0.1.0-alpha/build-agents/workflows).
+
+<Files>
+  <Folder name="support" defaultOpen>
+    <File name="agent.ts" />
+    <Folder name="tools" defaultOpen>
+      <File name="lookup_order.ts" />
+      <File name="issue_refund.ts" />
+    </Folder>
+    <Folder name="skills" defaultOpen>
+      <Folder name="refund-policy">
+        <File name="SKILL.md" />
+      </Folder>
+    </Folder>
+  </Folder>
+</Files>
+
+See [Agent Folders](/docs/v0.1.0-alpha/build-agents/agent-folders) for the full discovery rules.
+
+## 5. Add more agents
+
+```bash
+pnpm little-harness new triage
+pnpm little-harness test triage
+```
+
+`little-harness new <name>` adds another agent to an existing workspace. Each agent is its own folder
+under `agents/`; run any of them by name.
+
+## Where to next
+
+- [Agent Folders](/docs/v0.1.0-alpha/build-agents/agent-folders) — the folder layout and discovery rules in depth.
+- [Embedding in Your App](/docs/v0.1.0-alpha/quickstart) — tools, skills, streaming, persistence, and embedding `createHarness` in your own app.
+- [Core Mental Model](/docs/v0.1.0-alpha/foundations) — sessions, files, tools, persistence, and traces.

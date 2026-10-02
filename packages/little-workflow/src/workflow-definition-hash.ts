@@ -418,17 +418,17 @@ function globalToolSnapshot(
     ...(tool.outputSchema === undefined
       ? {}
       : { outputSchemaHash: sha256Digest(normalizeSchema(tool.outputSchema)) }),
-    approvalPolicy: approvalPolicyFor(tool.needsApproval),
+    approvalPolicy: approvalPolicyFor(tool.needsApproval, name),
   };
 }
 
-function approvalPolicyFor(needsApproval: AiSdkTool["needsApproval"]): string {
+function approvalPolicyFor(needsApproval: AiSdkTool["needsApproval"], name: string): string {
   if (needsApproval === undefined) {
     return "none";
   }
   if (typeof needsApproval === "function") {
     throw new Error(
-      "workflow definition hash: function-valued tool approval predicates are not hashable; use a boolean approval policy.",
+      `workflow definition hash: function-valued tool approval predicates are not hashable for tool '${name}'; use a boolean approval policy.`,
     );
   }
   return needsApproval ? "required" : "not_required";

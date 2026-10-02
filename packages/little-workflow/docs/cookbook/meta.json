@@ -1,0 +1,8 @@
+{
+  "title": "Cookbook",
+  "pages": [
+    "index",
+    "plan-once-run-many",
+    "resume-after-a-crash"
+  ]
+}

@@ -153,7 +153,7 @@ function baseRequest(options: GenerateWithAdapterOptions): JsonRecord {
   return stripUndefined({
     model: options.model,
     prompt: options.prompt,
-    system: options.system,
+    instructions: options.system,
     messages: options.messages,
     tools: options.tools,
     providerOptions: options.providerOptions,
@@ -198,16 +198,15 @@ async function resolveStreamResult(stream: unknown, mode: LwirOutputMode): Promi
   record.text = await settleValue((stream as JsonRecord).text);
   record.reasoningText = await settleValue((stream as JsonRecord).reasoningText);
   record.toolCalls = await settleValue((stream as JsonRecord).toolCalls);
-  const usage = (await settleValue((stream as JsonRecord).totalUsage)) ??
-    (await settleValue((stream as JsonRecord).usage));
+  // AI SDK 7: `usage` totals every step (the deprecated `totalUsage` is its alias).
+  const usage = await settleValue((stream as JsonRecord).usage);
   if (usage !== undefined) {
-    record.totalUsage = usage;
+    record.usage = usage;
   }
   record.finishReason = await settleValue((stream as JsonRecord).finishReason);
   record.providerMetadata = await settleValue((stream as JsonRecord).providerMetadata);
   if (mode !== "text") {
-    const outputPromise = (stream as JsonRecord).output ?? (stream as JsonRecord).experimental_output;
-    record.output = await settleValue(outputPromise);
+    record.output = await settleValue((stream as JsonRecord).output);
   }
   return record;
 }
@@ -332,7 +331,8 @@ function resultFieldFromResult(
 }
 
 function normalizeUsage(result: JsonRecord): AiSdkUsage | undefined {
-  const usage = isRecord(result.totalUsage) ? result.totalUsage : result.usage;
+  // AI SDK 7: `usage` totals every step; `totalUsage` only appears on v6-shaped results.
+  const usage = isRecord(result.usage) ? result.usage : result.totalUsage;
   if (!isRecord(usage)) {
     return undefined;
   }
@@ -342,6 +342,7 @@ function normalizeUsage(result: JsonRecord): AiSdkUsage | undefined {
     outputTokens: numberValue(usage.outputTokens, usage.completionTokens),
     totalTokens: numberValue(usage.totalTokens),
     cachedInputTokens: numberValue(
+      nestedNumber(usage, "inputTokenDetails", "cacheReadTokens"),
       usage.cachedInputTokens,
       nestedNumber(usage, "inputTokenDetails", "cachedTokens"),
       nestedNumber(usage, "promptTokensDetails", "cachedTokens"),

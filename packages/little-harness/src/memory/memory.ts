@@ -250,10 +250,10 @@ function createRememberTool(options: {
       .optional(),
   });
 
-  return tool<RememberInput, RememberOutput>({
+  return tool({
     description: options.description,
     inputSchema: zodSchema(inputSchema),
-    execute: async (input, executeOptions): Promise<RememberOutput> => {
+    execute: async (input: RememberInput, executeOptions): Promise<RememberOutput> => {
       const files = (executeOptions as MemoryToolExecutionOptions).files;
       if (!files) {
         throw new HarnessInputError("Memory tool requires Little Harness file context.");

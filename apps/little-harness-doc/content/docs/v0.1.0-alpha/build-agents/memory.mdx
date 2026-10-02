@@ -7,6 +7,15 @@ Harness memory is the opt-in path for model-authored durable context. It is usef
 
 Memory is not a background dreaming loop. Dreaming can be added later as a consolidation job, but hot-path memory lets the model save a narrow lesson during the turn where it discovers it.
 
+<Callout title="Related but distinct">
+  Harness `memory()` is model-authored durable context on a `/persistent/memory`
+  Persistent Dir. It is **not** the same feature as Little Workflow's role-scoped
+  memory mounts (`/mnt/memory/...`), which give planner and worker roles their own
+  three-scope mounts inside a workflow run. See the
+  [Little Workflow docs](https://github.com/samuelch727/little-workflow/tree/main/packages/little-workflow#readme)
+  for that model. Both are called "memory"; neither is the other.
+</Callout>
+
 ## Add Memory
 
 Use `memory(...)` on `createHarness()` when the model should be allowed to save durable lessons.
@@ -34,8 +43,9 @@ await generateHarness({
   harness,
   messages: [
     {
+      id: "1",
       role: "user",
-      content: "Which open invoices belong to Acme?",
+      parts: [{ type: "text", text: "Which open invoices belong to Acme?" }],
     },
   ],
   session: "db-agent",
@@ -160,4 +170,4 @@ Keep these boundaries explicit:
 - explicit write: the default model-authored write path is the `remember` tool
 - no automatic dreaming yet: consolidation jobs can read and rewrite the same files later
 
-For lower-level storage behavior, read [Persistent Dirs](/docs/v0.1.0-alpha/mental-model/persistent-dirs) and [Persistent Dir Reference](/docs/v0.1.0-alpha/reference/persistent-dir-reference).
+For lower-level storage behavior, read [Persistent Dirs](/docs/v0.1.0-alpha/foundations/persistent-dirs) and [Persistent Dir Reference](/docs/v0.1.0-alpha/reference/persistent-dir-reference).

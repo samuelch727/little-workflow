@@ -2,7 +2,8 @@ import { sha256Digest } from "./canonical.js";
 import { normalizeSchema } from "./schema.js";
 
 export type AiSdkTool = {
-  readonly description?: string;
+  /** AI SDK 7 tools may derive their description from context; registries read only static strings. */
+  readonly description?: string | ((...args: any[]) => string);
   readonly inputSchema?: unknown;
   readonly outputSchema?: unknown;
   readonly needsApproval?: boolean | ((args: any, options?: any) => boolean | PromiseLike<boolean>);
@@ -121,4 +122,13 @@ export function createToolRegistry(initial: Record<string, AiSdkTool> = {}): Too
       return tools.has(name);
     },
   };
+}
+
+export function createToolRegistryOverlay(
+  base: ToolRegistry | undefined,
+  overlay: Record<string, AiSdkTool>,
+): ToolRegistry {
+  const derived = createToolRegistry(base?.toRecord() ?? {});
+  derived.attachMcpTools(overlay);
+  return derived;
 }

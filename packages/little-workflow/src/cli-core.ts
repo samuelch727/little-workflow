@@ -10,9 +10,14 @@ import {
 import type { LwirWorkflow, WorkflowVersion } from "./lwir.js";
 import { registerWorkflowVersion, validateLwir } from "./lwir.js";
 import { replayRun } from "./replay.js";
+import { formatRunReport, runReport } from "./run-report.js";
+import { materializeRunState } from "./world.js";
 import { executeWorkflowVersion, type RuntimeRunResult } from "./runtime.js";
-import { localWorld } from "./authoring.js";
+import { localWorld, type RunResult } from "./authoring.js";
 import { concreteInputStructure } from "./workflow-version-reuse.js";
+import { loadWorkflow } from "./workspace/load-workflow.js";
+import { resolveWorkflowReference } from "./workspace/resolve-workflow-reference.js";
+import { addCommand, initCommand } from "./cli/workflow-commands.js";
 
 type CliIo = {
   readonly stdout?: (text: string) => void | Promise<void>;
@@ -48,14 +53,22 @@ export async function runCli(
     }
 
     switch (command) {
+      case "init":
+        return await initCommand(args, io);
+      case "add":
+        return await addCommand(args, io);
       case "validate":
         return await validateCommand(args, io);
       case "events":
         return await eventsCommand(args, parsed.dataDir, io);
       case "replay":
         return await replayCommand(args, parsed.dataDir, io);
+      case "report":
+        return await reportCommand(args, parsed.dataDir, io);
       case "run":
         return await runCommand(args, parsed.dataDir, io);
+      case "test":
+        return await testCommand(args, parsed.dataDir, io);
       case "orchestrate":
         throw new CliUsageError(
           "little orchestrate requires a harness-backed planner, which is only exposed through the SDK in alpha.",
@@ -65,6 +78,35 @@ export async function runCli(
     }
   } catch (error) {
     await writeStderr(io, `${errorMessage(error)}\n`);
+    return 1;
+  }
+}
+
+async function testCommand(
+  args: readonly string[],
+  dataDir: string,
+  io: CliIo,
+): Promise<number> {
+  const options = parseTestArgs(args);
+  const input = await readJsonFile(options.inputPath, io);
+  const resolved = await resolveWorkflowReference(options.workflow, { cwd: io.cwd });
+  const loaded = await loadWorkflow(resolved.folder, resolved.loadOptions);
+  try {
+    const result = await loaded.run(input, {
+      world: localWorld({ dataDir: resolvePath(dataDir, io) }),
+      ...(options.timeout === undefined ? {} : { timeout: options.timeout }),
+    });
+    await writeJsonLine(io, {
+      workflowId: loaded.id,
+      ...runSummary(result),
+    });
+    return result.status === "completed" ? 0 : 1;
+  } catch (error) {
+    await writeJsonLine(io, {
+      workflowId: loaded.id,
+      status: "failed",
+      error: errorMessage(error),
+    });
     return 1;
   }
 }
@@ -105,6 +147,47 @@ async function replayCommand(
   const replay = await replayRun(world, args[0] as string);
   await writeJsonLine(io, replay.state);
   return 0;
+}
+
+/**
+ * Per-step tokens, cache-hit share, and real dollars for a recorded run.
+ *
+ * JSON is the CLI's default output convention, so `--table` opts into the human-readable
+ * fixed-width rendering rather than the other way round.
+ */
+async function reportCommand(
+  args: readonly string[],
+  dataDir: string,
+  io: CliIo,
+): Promise<number> {
+  const options = parseReportArgs(args);
+  const world = localWorld({ dataDir: resolvePath(dataDir, io) });
+  const report = runReport(await materializeRunState(world, options.runId));
+  if (options.table) {
+    await writeStdout(io, formatRunReport(report));
+    return 0;
+  }
+  await writeJsonLine(io, report);
+  return 0;
+}
+
+function parseReportArgs(args: readonly string[]): {
+  readonly runId: string;
+  readonly table: boolean;
+} {
+  const positional: string[] = [];
+  let table = false;
+  for (const arg of args) {
+    if (arg === "--table") {
+      table = true;
+      continue;
+    }
+    positional.push(arg as string);
+  }
+  if (positional.length !== 1) {
+    throw new CliUsageError("Usage: little report <run-id> [--table] [--data-dir <dir>]");
+  }
+  return { runId: positional[0] as string, table };
 }
 
 async function runCommand(
@@ -186,6 +269,46 @@ function parseRunArgs(args: readonly string[]): {
     throw new CliUsageError("Usage: little run <workflow.json> --input <input.json>");
   }
   return { workflowPath: positional[0] as string, inputPath, runId };
+}
+
+function parseTestArgs(args: readonly string[]): {
+  readonly workflow: string;
+  readonly inputPath: string;
+  readonly timeout?: string | number;
+} {
+  const positional: string[] = [];
+  let inputPath: string | undefined;
+  let timeout: string | undefined;
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === "--input") {
+      inputPath = requiredOptionValue(args, index, "--input");
+      index += 1;
+      continue;
+    }
+    if (arg?.startsWith("--input=")) {
+      inputPath = arg.slice("--input=".length);
+      continue;
+    }
+    if (arg === "--timeout") {
+      timeout = requiredOptionValue(args, index, "--timeout");
+      index += 1;
+      continue;
+    }
+    if (arg?.startsWith("--timeout=")) {
+      timeout = arg.slice("--timeout=".length);
+      continue;
+    }
+    positional.push(arg as string);
+  }
+  if (positional.length !== 1 || inputPath === undefined) {
+    throw new CliUsageError("Usage: little test <workflow-folder-or-name> --input <input.json> [--timeout <ms>]");
+  }
+  return {
+    workflow: positional[0] as string,
+    inputPath,
+    ...(timeout === undefined ? {} : { timeout }),
+  };
 }
 
 function parseEventsArgs(args: readonly string[]): {
@@ -425,7 +548,7 @@ function isLockedWorkflowVersion(
   );
 }
 
-function runSummary(result: RuntimeRunResult): JsonRecord {
+function runSummary(result: RuntimeRunResult | RunResult<unknown>): JsonRecord {
   return stripUndefined({
     runId: result.runId,
     workflowVersionId: result.workflowVersionId,
@@ -471,14 +594,19 @@ function errorMessage(error: unknown): string {
 function usage(): string {
   return [
     "Usage:",
+    "  little init [name] [--with-harness] [--provider <id>] [--model <id>]",
+    "  little add workflow <name> | little add harness",
     "  little validate <workflow.json>",
     "  little run <workflow.json> --input <input.json>",
+    "  little test <workflow-folder-or-name> --input <input.json>",
     "  little events <run-id>",
     "  little replay <run-id>",
+    "  little report <run-id> [--table]",
     "",
     "Options:",
     "  --data-dir <dir>  Local World directory (default: .little-workflow)",
     "  --json            Accepted for forward compatibility; JSON is the default",
+    "  --table           Render `little report` as a table instead of JSON",
     "",
   ].join("\n");
 }

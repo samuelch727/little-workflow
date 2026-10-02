@@ -4,13 +4,15 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { localWorld } from "./authoring.js";
 import {
+  buildPlannerRepairNote,
   buildPlanningContext,
   compileWorkflow,
+  synthesizeReferenceLwir,
   synthesizeSimpleLwir,
   toOrchestrationRequest,
   type PlannerAdapter,
 } from "./compiler.js";
-import { createLittleWorkflow, createToolRegistry, model, output, resolveSkills, skill, type Harness, type JsonValue } from "./index.js";
+import { createLittleWorkflow, createToolRegistry, model, output, resolveSkills, skill, validateLwir, type Harness, type JsonValue, type LwirWorkflow } from "./index.js";
 import { hashHarnessManifest, plannerManifest } from "./manifests.js";
 
 // A planner that never returns valid LWIR — forces the deterministic fallback so
@@ -179,6 +181,124 @@ describe("less-guidance compilation: the equipped planner", () => {
     expect(planner.calls[0].systemMessage).toContain("reference LWIR");
   });
 
+  it("synthesizeReferenceLwir gives a tool-registering workflow a VALID tool.call -> ai.generate skeleton", () => {
+    const outSchema = objSchema({ status: { type: "string" }, summary: { type: "string" } }, ["status", "summary"]);
+    const tools = createToolRegistry({
+      lookupOrder: { description: "look up an order", inputSchema: { type: "object", additionalProperties: true }, execute: async () => ({}) },
+      issueRefund: { description: "issue a refund", inputSchema: { type: "object", additionalProperties: true }, execute: async () => ({}) },
+    });
+    const wf = createLittleWorkflow({
+      id: "billing.refund",
+      description: "process a customer refund",
+      output: output.object({ schema: outSchema }),
+      models: [workerSlot],
+      globalTools: ["lookupOrder", "issueRefund"],
+      planner: dummyPlanner,
+    } as unknown as Parameters<typeof createLittleWorkflow>[0]);
+    const request = toOrchestrationRequest(wf, { input: {}, tools, requestId: "orq_ref_skeleton" });
+
+    // The deterministic single-step synthesis stays gated for tool workflows (it would be a wrong fallback)...
+    expect(synthesizeSimpleLwir(request)).toBeUndefined();
+    // ...but the planner now gets a VALID reference skeleton showing the format + how to call a tool.
+    const skeleton = synthesizeReferenceLwir(request);
+    expect(skeleton).toBeDefined();
+    expect(validateLwir(skeleton).findings).toEqual([]);
+    const steps = (skeleton as LwirWorkflow).steps;
+    expect(steps.some((s) => s.uses === "tool.call")).toBe(true);
+    expect(steps.some((s) => s.uses === "ai.generate")).toBe(true);
+  });
+
+  it("buildPlanningContext shows each tool's input schema + description so the planner builds correct args", () => {
+    const tools = createToolRegistry({
+      lookupOrder: { description: "look up an order by id", inputSchema: objSchema({ orderId: { type: "string" } }, ["orderId"]), execute: async () => ({}) },
+    });
+    const wf = createLittleWorkflow({
+      id: "billing.refund",
+      description: "refund",
+      output: output.object({ schema: objSchema({ ok: { type: "boolean" } }, ["ok"]) }),
+      models: [workerSlot],
+      globalTools: ["lookupOrder"],
+      planner: dummyPlanner,
+    } as unknown as Parameters<typeof createLittleWorkflow>[0]);
+    const ctx = buildPlanningContext(toOrchestrationRequest(wf, { input: {}, tools, requestId: "orq_sig" }));
+    expect(ctx).toContain("lookupOrder");
+    expect(ctx).toContain("orderId"); // the tool's input schema is shown, not just the name
+    expect(ctx).toContain("look up an order by id"); // and its description
+  });
+
+  it("synthesizeReferenceLwir maps tool args from the tool's input schema, not the whole input", () => {
+    const tools = createToolRegistry({
+      lookupOrder: { description: "look up", inputSchema: objSchema({ orderId: { type: "string" } }, ["orderId"]), execute: async () => ({}) },
+    });
+    const wf = createLittleWorkflow({
+      id: "billing.refund",
+      description: "refund",
+      output: output.object({ schema: objSchema({ ok: { type: "boolean" } }, ["ok"]) }),
+      models: [workerSlot],
+      globalTools: ["lookupOrder"],
+      planner: dummyPlanner,
+    } as unknown as Parameters<typeof createLittleWorkflow>[0]);
+    const skeleton = synthesizeReferenceLwir(toOrchestrationRequest(wf, { input: {}, tools, requestId: "orq_args" }));
+    expect(validateLwir(skeleton).findings).toEqual([]);
+    const toolStep = (skeleton as LwirWorkflow).steps.find((s) => s.uses === "tool.call");
+    // Per-field args matching the tool's schema — NOT the strict-schema-breaking whole input.
+    expect(toolStep?.with?.args).toEqual({ orderId: "{{ input.orderId }}" });
+  });
+
+  it("buildPlannerRepairNote surfaces each validation error + the rejected draft for the model to fix", () => {
+    const note = buildPlannerRepairNote({
+      previousLwir: { apiVersion: "WRONG/v0", kind: "NotAWorkflow", steps: "nope" },
+      findings: [
+        { severity: "error", code: "apiVersion", path: "$.apiVersion", message: "apiVersion must be littleworkflow.dev/v0.1" },
+        { severity: "error", code: "steps", path: "$.steps", message: "steps must be an array" },
+      ],
+    });
+    expect(note).toContain("REJECTED");
+    expect(note).toContain("$.apiVersion: apiVersion must be littleworkflow.dev/v0.1");
+    expect(note).toContain("$.steps: steps must be an array");
+    expect(note).toContain("WRONG/v0"); // includes the rejected draft to anchor the fix
+  });
+
+  it("feeds a rejected draft's findings into the planner's NEXT revision (repair loop actually repairs)", async () => {
+    const outSchema = objSchema({ ok: { type: "boolean" } }, ["ok"]);
+    const validLwir = {
+      apiVersion: "littleworkflow.dev/v0.1",
+      kind: "Workflow",
+      metadata: { name: "repair.test" },
+      input: { schema: true },
+      output: { schema: outSchema },
+      permissions: { tools: [], models: ["model.worker"], secrets: [], network: [] },
+      steps: [{ id: "gen", uses: "ai.generate", input: "{{ input }}", with: { model: "model.worker" }, output: { mode: "object", schema: outSchema } }],
+    };
+    const invalidLwir = { apiVersion: "WRONG/v0", kind: "NotAWorkflow", steps: "not-an-array" };
+    const systemMessages: string[] = [];
+    const capturingHarness = {
+      harnessId: "capture@1.0.0",
+      async run(task: { readonly systemMessage?: string }) {
+        systemMessages.push(String(task.systemMessage ?? ""));
+        return { kind: "plan" as const, lwir: systemMessages.length === 1 ? invalidLwir : validLwir };
+      },
+    };
+    const wf = createLittleWorkflow({
+      id: "repair.test",
+      description: "test repair feedback",
+      output: output.object({ schema: outSchema }),
+      models: [workerSlot],
+      planner: { model: { provider: "test", modelId: "p" }, harness: capturingHarness },
+    } as unknown as Parameters<typeof createLittleWorkflow>[0]);
+
+    const result = await compileWorkflow(wf, { input: {}, requestId: "orq_repair", maxWorkflowRevisions: 3 });
+
+    // The planner was re-invoked for revision 2 (not replayed), and that prompt carried
+    // the revision-1 findings so the model could correct them.
+    expect(systemMessages.length).toBeGreaterThanOrEqual(2);
+    expect(systemMessages[1]).toContain("REJECTED");
+    expect(systemMessages[1]).toMatch(/apiVersion|steps/);
+    // Compiled on the corrected revision 2 — not the deterministic fallback.
+    expect(result.revisions).toHaveLength(2);
+    expect(result.revisions[1].valid).toBe(true);
+  });
+
   it("compiles a tool-registering workflow via the planner (synthesis is gated out; capabilities still wired)", async () => {
     const outSchema = objSchema({ ok: { type: "boolean" } }, ["ok"]);
     const plannerLwir = {
@@ -209,10 +329,13 @@ describe("less-guidance compilation: the equipped planner", () => {
     const result = await compileWorkflow(wf, { input: {}, tools, requestId: "orq_planner_tool" });
     expect(result.workflowVersion).toBeDefined();
     expect(result.revisions).toHaveLength(1); // planner succeeded; nothing to fall back to
-    // capability context lists the tool + model; no reference LWIR (synthesis is gated for tool workflows)
+    // capability context lists the tool + model AND now includes a valid LWIR skeleton
+    // (tool.call -> ai.generate) so the planner is never left to author the format blind.
     expect(planner.calls[0].systemMessage).toContain("lookup");
     expect(planner.calls[0].systemMessage).toContain("model.worker");
-    expect(planner.calls[0].systemMessage).not.toContain("reference LWIR");
+    expect(planner.calls[0].systemMessage).toContain("LWIR skeleton");
+    expect(planner.calls[0].systemMessage).toContain("littleworkflow.dev/v0.1");
+    expect(planner.calls[0].systemMessage).toContain("tool.call");
   });
 
   it("defaults a missing planner harness to workflowHarness identity in the planner manifest", async () => {

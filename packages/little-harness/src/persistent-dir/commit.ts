@@ -10,7 +10,6 @@ import { createTraceErrorEnvelope } from "../trace/error.js";
 import type {
   FileChangeSet,
   FileContent,
-  HarnessSession,
   PersistentDir,
   PersistentDirCommitOptions,
   PersistentDirCommitResult,
@@ -20,7 +19,7 @@ import type {
 
 export type PreparePersistentDirsOptions<TExtraBody = unknown> = {
   hostPaths: LocalHostPaths;
-  session: HarnessSession;
+  session: LocalHarnessSession;
   persistentDirs: PersistentDir<TExtraBody>[];
   extraBody?: TExtraBody | undefined;
 };
@@ -41,7 +40,7 @@ export async function preparePersistentDirs<TExtraBody>(
   options: PreparePersistentDirsOptions<TExtraBody>,
 ): Promise<PreparedPersistentDirs> {
   const loaded: LoadedDir<TExtraBody>[] = [];
-  const session = options.session as LocalHarnessSession;
+  const session = options.session;
 
   return {
     async load(loadOptions = {}) {

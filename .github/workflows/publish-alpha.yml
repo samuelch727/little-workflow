@@ -42,12 +42,13 @@ jobs:
 
       - name: Verify packages
         run: |
-          pnpm --filter little-harness build
+          # Build every workspace first: little-workflow's integration tests import its
+          # built dist, and the kb-chatbot demo typechecks against littledb-client's dist.
+          pnpm build
           pnpm --filter little-harness test
           pnpm --filter little-workflow test
           pnpm typecheck
           pnpm lint
-          pnpm build
 
   publish-alpha:
     name: Publish alpha packages

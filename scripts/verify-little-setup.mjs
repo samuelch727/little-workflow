@@ -9,7 +9,7 @@ const repo = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const args = process.argv.slice(2);
 const value = name => args.includes(name) ? args[args.indexOf(name) + 1] : undefined;
 const tarball = resolve(value("--tarball") || join(tmpdir(), "little-setup-packs/little-workflow-0.2.0-alpha.1.tgz"));
-const managers = args.includes("--managers") ? value("--managers").split(",") : ["npm", "pnpm"];
+const managers = args.includes("--existing-only") ? [] : args.includes("--managers") ? value("--managers").split(",") : ["npm", "pnpm"];
 const root = await mkdtemp(join(tmpdir(), "little-install-matrix-"));
 console.log(`Qualification fixtures and logs: ${root}`);
 function run(command, argv, cwd, name) {
@@ -87,7 +87,7 @@ for (const src of [false, true]) {
   const preserved = {
     "package.json": JSON.stringify({ name, private: true, type: "module", scripts: { dev: "custom-dev", build: "custom-build" }, dependencies: { next: "^16.3.8", react: "^19.2.7", "react-dom": "^19.2.7" }, devDependencies: { "@types/react": "^19.2.0", "@types/react-dom": "^19.2.0" } }, null, 2),
     "tsconfig.json": '{ // custom alias\n"compilerOptions":{"paths":{"~/*":["./src/*"]},"jsx":"react-jsx"}}',
-    "next.config.mjs": 'export default { serverExternalPackages: ["little-harness", "little-workflow"] };\n',
+    "next.config.mjs": 'export default { poweredByHeader: false };\n',
     ".env.local": "CUSTOM_VALUE=unchanged\n",
     [`${app}/layout.tsx`]: 'import type {ReactNode} from "react"; export default function Layout({children}:{children:ReactNode}) {return <html><body>{children}</body></html>}',
     [`${app}/api/chat/route.ts`]: 'export function POST() {return new Response("existing route");}',
@@ -108,6 +108,22 @@ for (const src of [false, true]) {
   run(process.execPath, [...flags, "--verify"], dir, `${name}-verify`);
   run(process.execPath, [join(dir, "node_modules/next/dist/bin/next"), "build"], dir, `${name}-build`);
   assert.deepEqual(JSON.parse(run(process.execPath, [...flags, "--plan"], dir)).files, []);
+  const port = src ? 43902 : 43901;
+  const server = spawn(process.execPath, [join(dir, "node_modules/next/dist/bin/next"), "start", "--port", String(port)], { cwd: dir, stdio: "ignore", env: { ...process.env, LITTLE_DEMO: "1" } });
+  try {
+    const url = `http://localhost:${port}`;
+    let ready = false;
+    for (let i = 0; i < 100; i++) {
+      try { if ((await fetch(`${url}/little`)).ok) { ready = true; break; } } catch {}
+      await new Promise(accept => setTimeout(accept, 100));
+    }
+    assert(ready);
+    const response = await fetch(`${url}/api/little/chat`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ messages: [{ id: "test", role: "user", parts: [{ type: "text", text: "hello" }] }] }) });
+    assert.equal(response.status, 200);
+    const stream = await response.text();
+    assert.match(stream, /Hello from Little/); assert.match(stream, /starter_echo/);
+  } finally { server.kill("SIGTERM"); await new Promise(accept => server.once("exit", accept)); }
+
   evidence.push({ template: name, manager: "npm", workflow: true, install: "passed", typecheck: "passed", keyless: "passed", build: "passed", customScripts: "preserved", existingChat: "preserved", rerun: "no-op" });
   console.log(`Passed ${name}`);
 }

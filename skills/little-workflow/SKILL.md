@@ -9,7 +9,7 @@ description: "Use when working with the little-workflow package, Little Workflow
 
 Use this skill to build, debug, or explain Little Workflow apps. Treat local docs and source as authoritative; the package is still moving and model memory is likely stale.
 
-Current release: `0.2.0-alpha.0`. It requires Node.js 22+ and **AI SDK 7**, and `ai` is a peer dependency (`^7.0.0`). Install with `pnpm add little-workflow@alpha ai@^7 zod @ai-sdk/<provider>`. pnpm 10 apps must allow the `better-sqlite3` build (`"pnpm": { "onlyBuiltDependencies": ["better-sqlite3"] }`); `little init` writes this setting.
+Current release: `0.2.0-alpha.1`. It requires Node.js 22+ and **AI SDK 7**, and `ai` is a peer dependency (`^7.0.0`). Install with `pnpm add little-workflow@alpha ai@^7 zod @ai-sdk/<provider>`. pnpm 10 apps must allow the `better-sqlite3` build (`"pnpm": { "onlyBuiltDependencies": ["better-sqlite3"] }`); `little init` writes this setting.
 
 ## Required Checks
 

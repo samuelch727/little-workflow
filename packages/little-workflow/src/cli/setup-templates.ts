@@ -141,18 +141,35 @@ export function nextFiles(app: string, agents: string, route: string, page: stri
   const upRoute = "../".repeat(route.split("/").length + 1);
   return {
     [`${agents}/server.ts`]: `import "server-only";
-import agent from "./support/agent.ts";
+import { createRequire } from "node:module";
+import { join } from "node:path";
+import type { Harness } from "little-harness";
+import type { StreamHarnessOptions } from "little-harness/execution";
 
-// A single-process LOCAL development store. Production needs authenticated users,
-// durable storage, rate limits, and an appropriate execution host.
-export function getAgent() {
-  return agent;
+// Native Node loading keeps filesystem/native runtime packages out of Next's bundle
+// without rewriting the application's config. Run from the project root.
+const requirePackage = createRequire(join(process.cwd(), "package.json"));
+const { loadHarness } = requirePackage("little-harness/workspace") as typeof import("little-harness/workspace");
+const { streamHarness } = requirePackage("little-harness/execution") as typeof import("little-harness/execution");
+let ready: Promise<Harness> | undefined;
+
+export function getAgent(): Promise<Harness> {
+  ready ??= loadHarness(join(process.cwd(), ${JSON.stringify(agents)}, "support")).catch((error: unknown) => {
+    ready = undefined;
+    throw error;
+  });
+  return ready;
+}
+
+// Single-process LOCAL filesystem persistence. Production needs authenticated
+// users, rate limits, durable storage and an appropriate execution host.
+export async function streamAgent(options: Omit<StreamHarnessOptions, "harness">) {
+  return streamHarness({ ...options, harness: await getAgent() });
 }
 `,
     [`${app}/${route}/route.ts`]: `import { randomUUID } from "node:crypto";
 import { z } from "zod";
-import { streamHarness } from "little-harness/execution";
-import { getAgent } from "${upRoute}agents/server";
+import { streamAgent } from "${upRoute}agents/server";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -180,8 +197,7 @@ export async function POST(request: Request) {
   } catch { return Response.json({ error: "Invalid JSON" }, { status: 400 }); }
   const body = bodySchema.safeParse(raw);
   if (!body.success) return Response.json({ error: "Expected text messages" }, { status: 400 });
-  const result = streamHarness({
-    harness: getAgent(),
+  const result = await streamAgent({
     messages: body.data.messages,
     // Every unauthenticated request gets a fresh server-chosen session.
     session: randomUUID(),

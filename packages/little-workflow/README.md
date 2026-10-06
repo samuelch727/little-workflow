@@ -1,6 +1,6 @@
 # little-workflow
 
-For a guided Next.js or standalone setup, including additive existing Next.js integration, use `npx little-workflow@alpha setup`. See [unified setup](../little-workflow/docs/setup.md).
+For a guided Next.js or standalone setup, including additive existing Next.js integration, use `npx little-workflow@alpha setup`. See [unified setup](docs/setup.md).
 
 Local-first TypeScript workflows that an AI planner designs for itself. You describe the goal, schemas, a model, and tools. The planner compiles a bounded workflow graph (LWIR), and Little Workflow validates it, runs it durably in a local event store, and lets you replay and inspect every step.
 

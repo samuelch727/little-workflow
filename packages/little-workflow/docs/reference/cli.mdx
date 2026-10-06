@@ -6,6 +6,7 @@ description: The minimal command surface that ships with v0.1.0-alpha.
 The `little` binary ships with the `little-workflow` package (`npx little-workflow@alpha <command>` without installing). Alpha ships the local commands needed for the SDK loop: scaffold workflow projects, validate compiled LWIR, run compiled LWIR in Local World, run folder-authored workflows, dump events, replay state, and report what a run cost. There is no `runs list`, `runs inspect`, timeline, retry-from-step, or fork command yet; a fuller inspection surface is planned (see the [Roadmap](/docs/v0.1.0-alpha/roadmap)).
 
 ```txt
+little setup [directory] [--here] [--template next|node] [--workflow]
 little init [name] [--with-harness] [--provider <id>] [--model <id>]
 little add workflow <name> | little add harness
 little validate <workflow.json>
@@ -19,6 +20,24 @@ little report <run-id> [--table]
 `little --help` prints this list and exits `0`; `little` with no command prints it and exits `1`. `little init --help` and `little add --help` print the full option lists. Unknown commands are rejected, and so are unknown options to `init` and `add`.
 
 Successful command output is JSON by default (`--json` is accepted and changes nothing). `events` emits newline-delimited JSON, one event per line. `report` accepts `--table` to render human-readable output instead. Usage and parse errors are plain text on stderr, with exit code `1`. Use `--data-dir <dir>` to point `run`, `test`, `events`, `replay`, and `report` at a Local World directory; otherwise the CLI uses `.little-workflow`.
+
+## Setup
+
+```bash
+# Interactive Next.js or standalone Node agent wizard
+npx little-workflow@0.2.0-alpha.1 setup
+
+# Preview additive changes in an existing TypeScript App Router project
+npx little-workflow@0.2.0-alpha.1 setup --here --workflow --plan
+
+# Apply, explicitly allow the SQLite native build, and run keyless verification
+npx little-workflow@0.2.0-alpha.1 setup --here --workflow --yes --install --allow-native-build --verify
+
+# Recover CLI-owned files after an interrupted transaction
+npx little-workflow@0.2.0-alpha.1 setup --here --rollback --yes
+```
+
+`setup` includes Harness and optionally a working durable Workflow echo example. It detects `app/` or `src/app/`, places agent definitions beside the app, preserves routes, scripts, configuration and environment files, and rejects conflicts before writing. Rerunning the same choices is a no-op. The default demo uses no keys or model calls. Live production chat requires application authentication; filesystem and SQLite persistence are for local development. Compute is unavailable in this release. Run `setup --help` for provider, model, package manager, route, page, installation and verification options.
 
 ## Validate
 
@@ -40,7 +59,7 @@ little add harness [--agent <name>] [--workflow <existing-name> | --new-workflow
 
 `init` creates a workflow-first TypeScript project in `./<name>` (default `little-workflow-project`; `--here` uses the current directory, which need not be empty). It writes `little-workflow.json`, a starter `workflows/<name>/workflow.ts` (default name `candidate-review`), `instructions.md`, `tools/echo.ts`, `tsconfig.json`, `input.example.json`, and a `package.json` with `test:workflow` and `typecheck` scripts. The default provider is `deepseek`; `--provider` accepts any provider the Little Harness scaffolder knows, and `--model` overrides its default model. `--yes` and `--no-install` are accepted for parity; `init` never installs packages. An existing non-empty target is refused unless you pass `--force`.
 
-The generated `package.json` pins versions instead of using `latest`. `little-workflow` is pinned to the CLI's own version (`^0.2.0-alpha.0`), `ai` to `^7.0.0`, and the provider package to its AI SDK 7-era range. It also sets `"pnpm": { "onlyBuiltDependencies": ["better-sqlite3"] }` so pnpm 10 builds the event store's native binding.
+The generated `package.json` pins versions instead of using `latest`. `little-workflow` is pinned to the CLI's own version (`^0.2.0-alpha.1`), `ai` to `^7.0.0`, and the provider package to its AI SDK 7-era range. It also sets `"pnpm": { "onlyBuiltDependencies": ["better-sqlite3"] }` so pnpm 10 builds the event store's native binding.
 
 `--with-harness` also creates `little-harness.json`, an agent folder (`agents/<agent>/`, default `support`), a `test:agent` script, and an agent workflow shim, `agents/<agent>/workflows/<name>.ts`. The shim default-exports `loadWorkflow(...)` for the manifest folder, so the agent gets the workflow as a tool. See [Compose With Little Harness](/docs/v0.1.0-alpha/authoring/compose-with-harness#folder-workflows-loadworkflow).
 

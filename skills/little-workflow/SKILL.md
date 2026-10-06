@@ -9,7 +9,7 @@ description: "Use when working with the little-workflow package, Little Workflow
 
 Use this skill to build, debug, or explain Little Workflow apps. Treat local docs and source as authoritative; the package is still moving and model memory is likely stale.
 
-Current release: `0.2.0-alpha.0`. It requires Node.js 22+ and **AI SDK 7**, and `ai` is a peer dependency (`^7.0.0`). Install with `pnpm add little-workflow@alpha ai@^7 zod @ai-sdk/<provider>`. pnpm 10 apps must allow the `better-sqlite3` build (`"pnpm": { "onlyBuiltDependencies": ["better-sqlite3"] }`); `little init` writes this setting.
+Current release: `0.2.0-alpha.1`. It requires Node.js 22+ and **AI SDK 7**, and `ai` is a peer dependency (`^7.0.0`). Install with `pnpm add little-workflow@alpha ai@^7 zod @ai-sdk/<provider>`. pnpm 10 apps must allow the `better-sqlite3` build (`"pnpm": { "onlyBuiltDependencies": ["better-sqlite3"] }`); `little init` writes this setting.
 
 ## Required Checks
 
@@ -17,6 +17,10 @@ Current release: `0.2.0-alpha.0`. It requires Node.js 22+ and **AI SDK 7**, and 
 2. Verify active APIs against source when editing code: see [source-map.md](references/source-map.md).
 3. Use `pnpm` for package scripts in this repo.
 4. Run the narrowest relevant check after edits, usually `pnpm --filter little-workflow test`, `pnpm --filter little-workflow typecheck`, or a targeted Vitest file.
+
+## Unified setup
+
+Prefer `npx little-workflow@alpha setup` for new standalone/Next projects and additive existing Next (`--here --plan`). Harness is mandatory; `--workflow` wires a durable keyless example. Install requires `--install`; Workflow native build requires `--allow-native-build`. `--verify` forces keyless smoke. Preserve conflicts and user edits; no blanket force, major upgrades, browser userId auth, paid provisioning or deployment. Compute is unqualified and LittleDB unpublished. See `packages/little-workflow/docs/setup.md`.
 
 ## Quick Reference
 

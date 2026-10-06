@@ -39,4 +39,17 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Verify
-        run: pnpm verify
+        run: |
+          # Build first, then keep the full lint/typecheck/test graph. Hosted runners
+          # otherwise run Next builds alongside several Vitest worker pools, which
+          # can time out a support-desk episode and leak its script into the next test.
+          pnpm build
+          pnpm exec turbo run lint typecheck test --concurrency=1
+
+      - name: Qualify packed setup CLI in clean projects
+        run: |
+          pack_dir="${RUNNER_TEMP}/little-setup-packs"
+          mkdir -p "${pack_dir}"
+          pnpm --filter little-workflow pack --pack-destination "${pack_dir}"
+          package_version="$(node -p "require('./packages/little-workflow/package.json').version")"
+          node scripts/verify-little-setup.mjs --tarball "${pack_dir}/little-workflow-${package_version}.tgz" --managers npm,pnpm

@@ -3,6 +3,9 @@ title: Quickstart
 description: Define a workflow with the ergonomic front door, run it in one call, and inspect the result.
 ---
 
+For new Node/Next projects or additive existing Next.js integration, use `npx little-workflow@alpha setup`. Preview an existing app with `npx little-workflow@alpha setup --here --workflow --plan`; apply with `--yes --install --allow-native-build --verify`. Examples default to a keyless demo; enabling real calls is explicit. Local filesystem persistence and the sample authentication assumptions must be replaced for production.
+
+
 `defineWorkflow` is the eve-style front door: a single model, inline tools keyed by name, and plain `input`/`output` schemas. It normalizes into the engine's full shape — a `models` tuple plus a synthesized planner — so you describe the job, not the plumbing. This covers a single workflow. To compose several workflows, see [Compose With Little Harness](/docs/v0.1.0-alpha/authoring/compose-with-harness). For the lower-level `createLittleWorkflow` surface, see [Create A Workflow](/docs/v0.1.0-alpha/authoring/advanced-createlittleworkflow).
 
 ## Install

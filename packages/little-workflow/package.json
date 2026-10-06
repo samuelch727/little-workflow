@@ -1,6 +1,6 @@
 {
   "name": "little-workflow",
-  "version": "0.2.0-alpha.0",
+  "version": "0.2.0-alpha.1",
   "description": "Local-first TypeScript workflow orchestration with validated LWIR, durable Local World execution, replay, and an alpha CLI.",
   "license": "Apache-2.0",
   "repository": {
@@ -30,7 +30,11 @@
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
     },
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./scaffold": {
+      "types": "./dist/scaffold.d.ts",
+      "default": "./dist/scaffold.js"
+    }
   },
   "files": [
     "dist",
@@ -55,7 +59,8 @@
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^25.8.0",
     "typescript": "^6.0.3",
-    "vitest": "^4.1.6"
+    "vitest": "^4.1.6",
+    "@types/semver": "^7.7.1"
   },
   "dependencies": {
     "ajv": "^8.20.0",
@@ -64,7 +69,9 @@
     "just-bash": "^3.0.1",
     "jiti": "^2.7.0",
     "little-harness": "workspace:*",
-    "zod": "^4.4.3"
+    "zod": "^4.4.3",
+    "jsonc-parser": "^3.3.1",
+    "semver": "^7.7.3"
   },
   "peerDependencies": {
     "ai": "^7.0.0"

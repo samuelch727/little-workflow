@@ -1,3 +1,4 @@
+import { setupCommand } from "./cli/setup-command.js";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { sha256Digest } from "./canonical.js";
@@ -45,6 +46,7 @@ export async function runCli(
   io: CliIo = {},
 ): Promise<number> {
   try {
+    if (argv[0] === "setup") return await setupCommand(argv.slice(1), io);
     const parsed = parseSharedArgs(argv);
     const [command, ...args] = parsed.args;
     if (command === undefined || command === "--help" || command === "-h") {
@@ -594,6 +596,7 @@ function errorMessage(error: unknown): string {
 function usage(): string {
   return [
     "Usage:",
+    "  little setup [directory] [--template node|next|existing-next] [--here] [--workflow]",
     "  little init [name] [--with-harness] [--provider <id>] [--model <id>]",
     "  little add workflow <name> | little add harness",
     "  little validate <workflow.json>",

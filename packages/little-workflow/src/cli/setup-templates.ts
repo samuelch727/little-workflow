@@ -141,14 +141,15 @@ export function nextFiles(app: string, agents: string, route: string, page: stri
   const upRoute = "../".repeat(route.split("/").length + 1);
   return {
     [`${agents}/server.ts`]: `import "server-only";
-import { createRequire } from "node:module";
+import * as nodeModule from "node:module";
 import { join } from "node:path";
 import type { Harness } from "little-harness";
 import type { StreamHarnessOptions } from "little-harness/execution";
 
 // Native Node loading keeps filesystem/native runtime packages out of Next's bundle
 // without rewriting the application's config. Run from the project root.
-const requirePackage = createRequire(join(process.cwd(), "package.json"));
+// Binding first prevents webpack from replacing this native runtime loader.
+const requirePackage = nodeModule.createRequire.bind(nodeModule)(join(process.cwd(), "package.json"));
 const { loadHarness } = requirePackage("little-harness/workspace") as typeof import("little-harness/workspace");
 const { streamHarness } = requirePackage("little-harness/execution") as typeof import("little-harness/execution");
 let ready: Promise<Harness> | undefined;

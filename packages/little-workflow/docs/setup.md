@@ -1,6 +1,6 @@
 # Unified Little setup (alpha)
 
-Use the owned `little-workflow` CLI on Node.js 22+. `little setup` creates one repository with Little Harness and an optional, runnable Little Workflow example. It also adds Little to existing TypeScript Next.js 15/16 App Router projects.
+Use the owned `little-workflow` CLI on Node.js 22+. `little setup` creates one repository with Little Harness and an optional, runnable Little Workflow example. It also adds Little to existing TypeScript Next.js 15/16 App Router projects with explicit `compilerOptions.moduleResolution: "bundler"` (the standard Next configuration). Inherited or legacy resolution must be reviewed explicitly before this alpha will apply changes.
 
 ```sh
 # Guided wizard: template, Workflow, provider/model, package manager, preview, install, verify

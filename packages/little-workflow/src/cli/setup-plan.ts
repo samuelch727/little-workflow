@@ -100,6 +100,9 @@ export async function planSetup(rootInput: string, input: SetupOptions): Promise
       agents = src ? "src/agents" : "agents";
       if (!await readText(root, "tsconfig.json")) throw new Error("Existing mode requires a TypeScript Next.js app (tsconfig.json).");
       const tsconfig = await readObject(root, "tsconfig.json", true);
+      if (String(tsconfig?.compilerOptions?.moduleResolution ?? "").toLowerCase() !== "bundler") {
+        plan.conflicts.push('tsconfig.json: this alpha requires explicit compilerOptions.moduleResolution "bundler" for Next and AI SDK package exports. Review your TypeScript configuration first; setup never rewrites it.');
+      }
       plan.warnings.push(`App Router: ${app}; aliases: ${Object.keys(tsconfig?.compilerOptions?.paths ?? {}).join(", ") || "none"}. Generated imports are relative.`);
       const react = pkg.dependencies?.react ?? pkg.devDependencies?.react;
       if (!react || !semver.subset(react, ">=18 <20")) throw new Error("Existing Next app needs a compatible React 18/19 range.");

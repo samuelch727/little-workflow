@@ -27,6 +27,7 @@ Templates: --template node | next | existing-next
   --help                    Show this help
 
 Node >=22 and AI SDK 7. No major upgrades, keys, paid provisioning or deployment.
+Existing Next: TypeScript App Router with explicit moduleResolution "bundler".
 New templates: one repo, agent definitions shared by the CLI and web entrypoint.
 Compute is unqualified; LittleDB is unpublished. Neither is installed.
 Examples:

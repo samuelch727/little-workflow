@@ -14,7 +14,7 @@ async function next(src = false, changes: Record<string, unknown> = {}) {
   const root = await temp();
   await mkdir(join(root, src ? "src/app" : "app"), { recursive: true });
   await writeFile(join(root, "package.json"), JSON.stringify({ name: "existing", private: true, scripts: { dev: "custom-dev", build: "custom-build" }, dependencies: { next: "^16.2.9", react: "^19.2.7", ai: "^7.0.126" }, ...changes }));
-  await writeFile(join(root, "tsconfig.json"), '{ // JSONC aliases\n "compilerOptions": { "paths": { "~/*": ["./src/*"] } },\n}');
+  await writeFile(join(root, "tsconfig.json"), '{ // JSONC aliases\n "compilerOptions": { "moduleResolution": "bundler", "paths": { "~/*": ["./src/*"] } },\n}');
   return root;
 }
 
@@ -103,6 +103,17 @@ describe("unified setup planner", () => {
     await writeFile(join(root, "package.json"), "{broken");
     await expect(planSetup(root, options({ template: "existing-next" }))).rejects.toThrow(/Invalid JSON/);
     expect(await readFile(join(root, "package.json"), "utf8")).toBe("{broken");
+  });
+  it("reports legacy or implicit TypeScript resolution without rewriting config", async () => {
+    for (const moduleResolution of ["node", undefined]) {
+      const root = await next();
+      const config = JSON.stringify({ compilerOptions: { moduleResolution } });
+      await writeFile(join(root, "tsconfig.json"), config);
+      const plan = await planSetup(root, options({ template: "existing-next" }));
+      expect(plan.conflicts.join(" ")).toMatch(/moduleResolution "bundler"/);
+      await expect(applySetupPlan(plan)).rejects.toThrow(/conflicts/);
+      expect(await readFile(join(root, "tsconfig.json"), "utf8")).toBe(config);
+    }
   });
   it("refuses AI SDK 6 rather than upgrading", async () => {
     const root = await next(false, { dependencies: { next: "^16", react: "^19", ai: "^6" } });

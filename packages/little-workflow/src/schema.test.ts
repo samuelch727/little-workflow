@@ -193,6 +193,17 @@ describe("schema normalization", () => {
     ).toThrow(UnsupportedSchemaError);
   });
 
+  it("normalizes real Zod instances whose internal state has a prototype", async () => {
+    const { normalizeSchema } = await loadSchemaApi();
+    const schema = z.object({ value: z.string() });
+    const state = Object.getOwnPropertyDescriptor(schema, "_zod")!.value;
+    const prior = Object.getPrototypeOf(state);
+    try {
+      Object.setPrototypeOf(state, {});
+      expect(normalizeSchema?.(schema)).toMatchObject({ type: "object", required: ["value"] });
+    } finally { Object.setPrototypeOf(state, prior); }
+  });
+
   it("rejects fake Zod-like objects without invoking their properties", async () => {
     const { normalizeSchema, UnsupportedSchemaError } = await loadSchemaApi();
     let getterCalls = 0;

@@ -456,12 +456,18 @@ importers:
       jiti:
         specifier: ^2.7.0
         version: 2.7.0
+      jsonc-parser:
+        specifier: ^3.3.1
+        version: 3.3.1
       just-bash:
         specifier: ^3.0.1
         version: 3.0.1
       little-harness:
         specifier: workspace:*
         version: link:../little-harness
+      semver:
+        specifier: ^7.7.3
+        version: 7.8.0
       zod:
         specifier: ^4.4.3
         version: 4.4.3
@@ -472,6 +478,9 @@ importers:
       '@types/node':
         specifier: ^25.8.0
         version: 25.8.0
+      '@types/semver':
+        specifier: ^7.7.1
+        version: 7.8.0
       ai:
         specifier: ^7.0.126
         version: 7.0.126(zod@4.4.3)
@@ -2309,6 +2318,9 @@ packages:
   '@types/retry@0.12.0':
     resolution: {integrity: sha512-wWKOClTTiizcZhXnPY4wikVAwmdYHp8q6DmC+EJUzAMsycb7HB32Kh9RN4+0gExjmPmZSAQjgURXIGATPegAvA==}
 
+  '@types/semver@7.8.0':
+    resolution: {integrity: sha512-1mAINjtQCXXeLkJ9ehXkwOcBpqtLxiVtKhpUf83DdRNdQKV0iXZpaHYqRr7nj+wvxuJzoAmAwXI+sCNMv1CzLQ==}
+
   '@types/trusted-types@2.0.7':
     resolution: {integrity: sha512-ScaPdn1dQczgbl0QFTeTOmVHFULt394XJgOQNoyVhZ6r2vLnMLJfBPd53SB52T/3G36VI1/g2MZaX0cwDuXsfw==}
 
@@ -3942,6 +3954,9 @@ packages:
     resolution: {integrity: sha512-XmOWe7eyHYH14cLdVPoyg+GOH3rYX++KpzrylJwSW98t3Nk+U8XOl8FWKOgwtzdb8lXGf6zYwDUzeHMWfxasyg==}
     engines: {node: '>=6'}
     hasBin: true
+
+  jsonc-parser@3.3.1:
+    resolution: {integrity: sha512-HUgH65KyejrUFPvHFPbqOY0rsFip3Bo5wb4ngvdi1EpCYWUQDC5V+Y7mZws+DLkr4M//zQJoanu1SP+87Dv1oQ==}
 
   jsx-ast-utils@3.3.5:
     resolution: {integrity: sha512-ZZow9HBI5O6EPgSJLUb8n2NKgmVWTwCvHGwFuJlMjvLFqlGG6pjirPhtdsseaLZjSibD8eegzmYpUZwoIlj2cQ==}
@@ -7504,6 +7519,8 @@ snapshots:
 
   '@types/retry@0.12.0': {}
 
+  '@types/semver@7.8.0': {}
+
   '@types/trusted-types@2.0.7':
     optional: true
 
@@ -9594,6 +9611,8 @@ snapshots:
       minimist: 1.2.8
 
   json5@2.2.3: {}
+
+  jsonc-parser@3.3.1: {}
 
   jsx-ast-utils@3.3.5:
     dependencies:

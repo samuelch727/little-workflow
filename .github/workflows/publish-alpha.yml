@@ -50,6 +50,15 @@ jobs:
           pnpm typecheck
           pnpm lint
 
+
+      - name: Qualify packed setup CLI in clean projects
+        run: |
+          pack_dir="${RUNNER_TEMP}/little-setup-packs"
+          mkdir -p "${pack_dir}"
+          pnpm --filter little-workflow pack --pack-destination "${pack_dir}"
+          package_version="$(node -p "require('./packages/little-workflow/package.json').version")"
+          node scripts/verify-little-setup.mjs --tarball "${pack_dir}/little-workflow-${package_version}.tgz" --managers npm,pnpm
+
   publish-alpha:
     name: Publish alpha packages
     runs-on: ubuntu-latest
@@ -134,6 +143,7 @@ jobs:
             npm publish "${tarball}" \
               --registry https://registry.npmjs.org \
               --tag alpha \
+              --provenance \
               --access public
           }
 

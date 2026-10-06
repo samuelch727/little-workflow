@@ -264,7 +264,9 @@ function hasZodDataBrand(value: object): boolean {
     return false;
   }
   const zodState = descriptor.value;
-  if (!isPlainRecord(zodState)) {
+  // Zod 4.6 uses an internal-state prototype. Own data descriptors plus the
+  // real ZodType instance check above preserve the fake-schema rejection.
+  if (zodState === null || typeof zodState !== "object") {
     return false;
   }
   const traits = Object.getOwnPropertyDescriptor(zodState, "traits");

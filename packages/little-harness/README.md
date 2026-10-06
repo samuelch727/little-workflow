@@ -1,5 +1,7 @@
 # Little Harness
 
+For a guided Next.js or standalone setup, including additive existing Next.js integration, use `npx little-workflow@alpha setup`. See [unified setup](../little-workflow/docs/setup.md).
+
 Little Harness is the agent runtime package underneath Little Workflow. It provides local sessions, file/artifact handling, model/tool loop helpers, execution environments, durability events, chat connectors, and a workflow-specific harness adapter.
 
 ## Install

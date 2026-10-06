@@ -3,6 +3,9 @@ title: Embedding in Your App
 description: Configure and run a Little Harness agent inside your own app — createHarness, streaming, non-chat runs, and sessions.
 ---
 
+Create a new Next.js/Node project with `npx little-workflow@alpha setup`, or preview additive existing Next integration with `npx little-workflow@alpha setup --here --workflow --plan`. Use `--yes --install --allow-native-build --verify` to apply, install and run the keyless smoke. The shared agent definitions support both CLI and web; authentication and local persistence assumptions are described in generated `LITTLE.md`.
+
+
 Little Harness is a local-first agent runtime for teams that want useful sessions before choosing managed hosting, sandboxes, artifact plumbing, or workflow orchestration. Give it a Local Host, model, system prompt, tools, skills, and optional persistent directories; it creates or resumes the session, exposes the right harness directories, captures traces, and keeps each execution isolated by default.
 
 <Callout title="New here?">

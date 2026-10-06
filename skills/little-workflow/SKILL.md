@@ -18,6 +18,10 @@ Current release: `0.2.0-alpha.0`. It requires Node.js 22+ and **AI SDK 7**, and 
 3. Use `pnpm` for package scripts in this repo.
 4. Run the narrowest relevant check after edits, usually `pnpm --filter little-workflow test`, `pnpm --filter little-workflow typecheck`, or a targeted Vitest file.
 
+## Unified setup
+
+Prefer `npx little-workflow@alpha setup` for new standalone/Next projects and additive existing Next (`--here --plan`). Harness is mandatory; `--workflow` wires a durable keyless example. Install requires `--install`; Workflow native build requires `--allow-native-build`. `--verify` forces keyless smoke. Preserve conflicts and user edits; no blanket force, major upgrades, browser userId auth, paid provisioning or deployment. Compute is unqualified and LittleDB unpublished. See `packages/little-workflow/docs/setup.md`.
+
 ## Quick Reference
 
 | Need | Use |

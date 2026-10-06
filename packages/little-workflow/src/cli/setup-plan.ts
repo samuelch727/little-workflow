@@ -149,7 +149,7 @@ export async function planSetup(rootInput: string, input: SetupOptions): Promise
     if (!pkg.dependencies?.[name] && !pkg.devDependencies?.[name]) pkg.devDependencies = { ...pkg.devDependencies, [name]: range };
   }
   pkg.scripts = { ...pkg.scripts };
-  for (const [name, command] of Object.entries({ "little:smoke": "tsx scripts/little-smoke.ts", "little:agent": "little-harness test support", "little:typecheck": "tsc --noEmit -p tsconfig.little.json" })) {
+  for (const [name, command] of Object.entries({ "little:smoke": "tsx scripts/little-smoke.mts", "little:agent": "little-harness test support", "little:typecheck": "tsc --noEmit -p tsconfig.little.json" })) {
     if (pkg.scripts[name] !== undefined && pkg.scripts[name] !== command) plan.conflicts.push(`Script ${name} already exists. Rename it or integrate the generated command manually.`);
     else pkg.scripts[name] = command;
   }
@@ -169,13 +169,13 @@ export async function planSetup(rootInput: string, input: SetupOptions): Promise
     desired[`${agents}/support/tools/echo.ts`] = (await readText(staging, "support/tools/echo.ts"))!;
   } finally { await rm(staging, { recursive: true, force: true }); }
   for (const [path, text] of Object.entries(agentSource(options.provider, options.model!, options.workflow))) desired[`${agents}/support/${path}`] = text;
-  desired["scripts/little-smoke.ts"] = smokeSource(agents, options.workflow);
+  desired["scripts/little-smoke.mts"] = smokeSource(agents, options.workflow);
   desired["tsconfig.little.json"] = json({
     ...(existing ? { extends: "./tsconfig.json" } : {}),
     compilerOptions: { target: "ES2022", module: input.template === "node" ? "NodeNext" : "ESNext", moduleResolution: input.template === "node" ? "NodeNext" : "Bundler", strict: true, allowImportingTsExtensions: true, types: ["node"], skipLibCheck: true, esModuleInterop: true, noEmit: true, ...(input.template === "node" ? {} : { jsx: "react-jsx" }) },
-    include: [`${agents}/**/*.ts`, "scripts/little-smoke.ts", ...(input.template === "node" ? [] : [`${app}/${options.route}/route.ts`, `${app}/${options.page}/**/*`, "next-env.d.ts"])], exclude: ["node_modules"],
+    include: [`${agents}/**/*.ts`, "scripts/little-smoke.mts", ...(input.template === "node" ? [] : [`${app}/${options.route}/route.ts`, `${app}/${options.page}/**/*`, "next-env.d.ts"])], exclude: ["node_modules"],
   });
-  if (!existing) desired["tsconfig.json"] = json({ extends: "./tsconfig.little.json", compilerOptions: { ...(input.template === "node" ? {} : { plugins: [{ name: "next" }], isolatedModules: true, resolveJsonModule: true }) }, include: ["**/*.ts", "**/*.tsx", ".next/types/**/*.ts"], exclude: ["node_modules"] });
+  if (!existing) desired["tsconfig.json"] = json({ extends: "./tsconfig.little.json", compilerOptions: { ...(input.template === "node" ? {} : { plugins: [{ name: "next" }], isolatedModules: true, resolveJsonModule: true }) }, include: ["**/*.ts", "**/*.tsx", "**/*.mts", ".next/types/**/*.ts"], exclude: ["node_modules"] });
   const ignore = await readText(root, ".gitignore") ?? "";
   const ignores = ["node_modules/", ".next/", ".little-harness/", ".little-workflow/", ".little/setup-transaction.json", ".env", ".env.local"];
   desired[".gitignore"] = ignore + (ignore && !ignore.endsWith("\n") ? "\n" : "") + ignores.filter(x => !ignore.split(/\r?\n/).includes(x)).map(x => `${x}\n`).join("");

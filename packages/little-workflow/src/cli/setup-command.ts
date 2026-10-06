@@ -134,7 +134,7 @@ export async function setupCommand(args: readonly string[], io: Io = {}): Promis
       }
       if (parsed.verify) {
         await run(process.execPath, [join(root, "node_modules/typescript/bin/tsc"), "--noEmit", "-p", "tsconfig.little.json"], root);
-        await run(process.execPath, [join(root, "node_modules/tsx/dist/cli.mjs"), "scripts/little-smoke.ts"], root, { LITTLE_DEMO: "1" });
+        await run(process.execPath, [join(root, "node_modules/tsx/dist/cli.mjs"), "scripts/little-smoke.mts"], root, { LITTLE_DEMO: "1" });
       }
     } });
     await out(`${plan.files.length ? "Little setup complete" : "Already configured (no file changes)"}. ${parsed.install ? "Dependencies installed. " : "Install dependencies before running. "}${parsed.verify ? "Typecheck and keyless smoke passed. " : ""}See LITTLE.md.\n`);

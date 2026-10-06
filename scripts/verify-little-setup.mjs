@@ -85,7 +85,7 @@ for (const src of [false, true]) {
   const dir = join(root, name), app = src ? "src/app" : "app";
   await mkdir(join(dir, app, "api/chat"), { recursive: true });
   const preserved = {
-    "package.json": JSON.stringify({ name, private: true, type: "module", scripts: { dev: "custom-dev", build: "custom-build" }, dependencies: { next: src ? "^16.3.8" : "^15.5.27", react: src ? "^19.2.7" : "^18.3.1", "react-dom": src ? "^19.2.7" : "^18.3.1" }, devDependencies: { "@types/react": src ? "^19.2.0" : "^18.3.0", "@types/react-dom": src ? "^19.2.0" : "^18.3.0" } }, null, 2),
+    "package.json": JSON.stringify({ name, private: true, ...(src ? { type: "module" } : {}), scripts: { dev: "custom-dev", build: "custom-build" }, dependencies: { next: src ? "^16.3.8" : "^15.5.27", react: src ? "^19.2.7" : "^18.3.1", "react-dom": src ? "^19.2.7" : "^18.3.1" }, devDependencies: { "@types/react": src ? "^19.2.0" : "^18.3.0", "@types/react-dom": src ? "^19.2.0" : "^18.3.0" } }, null, 2),
     "tsconfig.json": '{ // custom alias\n"compilerOptions":{"moduleResolution":"bundler","paths":{"~/*":["./src/*"]},"jsx":"react-jsx"}}',
     "next.config.mjs": 'export default { poweredByHeader: false };\n',
     ".env.local": "CUSTOM_VALUE=unchanged\n",

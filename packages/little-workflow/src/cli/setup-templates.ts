@@ -110,21 +110,21 @@ export function smokeSource(agents: string, workflow: boolean): string {
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createHarness, localHost, streamHarness } from "little-harness";
+import { localHost, streamHarness, loadHarness } from "little-harness";
 
 // Set BEFORE importing definitions, even if the developer enabled a live provider.
 process.env.LITTLE_DEMO = "1";
 const dir = await mkdtemp(join(tmpdir(), "little-smoke-"));
 try {
-  const { default: agent } = await import("../${agents}/support/agent.ts");
+  const agent = await loadHarness(join(process.cwd(), "${agents}/support"));
   const host = localHost({ dataDir: join(dir, "harness") });
   const harness = { ...agent, sessions: host.sessions, config: { ...agent.config, host } };
   const result = streamHarness({ harness, messages: [{ id: "smoke", role: "user", parts: [{ type: "text", text: "hello" }] }] });
   const body = await result.toUIMessageStreamResponse().text();
   await result.finished;
   assert.match(body, /Hello from Little/);
-${workflow ? `  const { localWorld } = await import("little-workflow");
-  const { default: workflow } = await import("../${agents}/support/workflows/echo/workflow.ts");
+${workflow ? `  const { localWorld, loadWorkflow } = await import("little-workflow");
+  const workflow = await loadWorkflow(join(process.cwd(), "${agents}/support/workflows/echo"));
   const run = await workflow.run({ value: "hello" }, { world: localWorld({ dataDir: join(dir, "workflow") }) });
   assert.equal(run.status, "completed");
   assert.deepEqual(run.output, { ok: true, message: "Workflow completed without a model call." });

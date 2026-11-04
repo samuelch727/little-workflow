@@ -10,9 +10,10 @@
     "test": "turbo run test",
     "typecheck": "turbo run typecheck",
     "verify": "turbo run build lint typecheck test",
-    "publish:alpha": "pnpm run publish:alpha:little-harness && pnpm run publish:alpha:little-workflow",
-    "publish:alpha:little-harness": "pnpm --filter little-harness publish --tag alpha --access public --publish-branch main",
-    "publish:alpha:little-workflow": "pnpm --filter little-workflow publish --tag alpha --access public --publish-branch main"
+    "publish:alpha": "node scripts/check-unpublished-versions.mjs && pnpm run publish:alpha:little-harness && pnpm run publish:alpha:little-workflow",
+    "publish:alpha:little-harness": "pnpm --filter @little-stack/harness publish --tag alpha --access public --publish-branch main",
+    "publish:alpha:little-workflow": "pnpm --filter @little-stack/workflow publish --tag alpha --access public --publish-branch main",
+    "check:unpublished-versions": "node scripts/check-unpublished-versions.mjs"
   },
   "devDependencies": {
     "turbo": "latest"

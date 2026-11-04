@@ -35,22 +35,30 @@ vi.mock("node:fs/promises", async () => {
 });
 
 import {
-  createLittleWorkflow,
   createToolRegistry,
   localWorld,
   model,
   output,
-  sha256Digest,
 } from "./index.js";
 import type {
-  HarnessTask,
   InferWorkflowOutput,
-  LwirWorkflow,
   RunResult,
-  RunWorkflowOptions,
+} from "./index.js";
+import type {
+  RunWorkflowRequest,
+} from "./entries/internals.js";
+import type {
+  LwirWorkflow,
+} from "./entries/lwir.js";
+import {
+  createLittleWorkflow,
+  sha256Digest,
+} from "./entries/internals.js";
+import type {
+  HarnessTask,
   RuntimeToolHandler,
   WorkflowRunTarget,
-} from "./index.js";
+} from "./entries/internals.js";
 import type { PlannerAdapter } from "./compiler.js";
 import { runWorkflowWithLegacyPlannerAdapter } from "./runtime.js";
 
@@ -157,7 +165,7 @@ function plannerFor(lwir: LwirWorkflow): PlannerAdapter {
 }
 
 type RunWorkflowLegacyPlannerOptions<TWorkflow extends WorkflowRunTarget> =
-  RunWorkflowOptions<TWorkflow> & {
+  RunWorkflowRequest<TWorkflow> & {
     readonly planner?: PlannerAdapter;
   };
 

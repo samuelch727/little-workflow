@@ -1,0 +1,45 @@
+---
+title: Guides and API
+description: The Little Harness alpha developer API and local runtime.
+---
+
+These docs cover the Little Harness alpha line — currently `0.2.0-alpha.0` on npm as `little-harness@alpha` (the next release moves to `@little-stack/harness`). The URL path keeps the historical `v0.1.0-alpha` segment so old links stay stable; it is not the package version. Little Harness is a local-first agent runtime where the developer provides a host, model, system prompt, tools, skills, and optional Persistent Dirs. It requires Node.js 22+ and AI SDK 7 (`ai` is a peer dependency).
+
+> **UNRELEASED review preview.** This documentation snapshot also covers changes
+> that exist only in the current source and are not in any npm version yet; no
+> version number has been assigned to them. Those sections are labeled
+> **UNRELEASED**, and [Alpha Migrations](/docs/harness/v0.1.0-alpha/reference/alpha-migrations)
+> lists them with their migrations. The site is not an exact catalog of the npm
+> `0.2.0-alpha.0` API.
+
+## What This Version Proves
+
+- Auto-created sessions with isolated workspaces.
+- Message file staging for raw AI SDK chat input.
+- Tools that can return large artifact-backed outputs instead of flooding model context.
+- Skills exposed read-only and disclosed progressively.
+- Opt-in harness memory for model-authored durable lessons.
+- Local Host with `.little-harness` session folders, traces, and artifacts.
+- Persistent Dirs with `harnessDir` plus developer-owned source logic.
+- After-turn commits for Persistent Dirs.
+- No parallel turns inside one session; same-session calls queue by default.
+- Persistence errors surfaced to the host app and trace, not injected into normal agent context.
+- A local runtime path powered by just-bash, run in a subprocess sandbox by default for any turn that can execute code or reach the network.
+- Opt-in execution tiers that escalate commands just-bash cannot run to an environment you provide.
+- Little Workflow workflows exposed as typed tools, with per-session fan-out budgets.
+- Chat SDK and web-rich connectors, with inbound file attachments and reactions captured as run outcomes.
+- Outcome capture (`outcome.reported`) and success rates per prompt from the CLI.
+
+## Start Here
+
+- [Getting Started](/docs/harness/v0.1.0-alpha/getting-started) — scaffold an agent workspace and chat with it from the CLI in minutes.
+- [Embedding in Your App](/docs/harness/v0.1.0-alpha/quickstart) — the API in depth: tools, skills, streaming, persistence, and embedding in your own app.
+- [Foundations](/docs/harness/v0.1.0-alpha/foundations) — sessions, files, tools, persistence, and traces.
+- [Build Agents](/docs/harness/v0.1.0-alpha/build-agents/basic-agent) — primitives for defining harness-backed agents.
+- [Memory](/docs/harness/v0.1.0-alpha/build-agents/memory) — opt-in model-authored memory backed by Persistent Dirs.
+- [Generating And Streaming](/docs/harness/v0.1.0-alpha/build-agents/generating-and-streaming) — detailed examples for routes, jobs, callbacks, files, and structured outputs.
+- [Cookbook](/docs/harness/v0.1.0-alpha/cookbook/document-research-agent) — example recipes for common agent use cases.
+- [Runtime Overview](/docs/harness/v0.1.0-alpha/runtime) — Local Host, just-bash, execution environments and tiers, commits, and isolation.
+- [Outcome Capture](/docs/harness/v0.1.0-alpha/build-agents/outcomes) — record whether runs worked and read success rates.
+- [User Feedback](/docs/harness/v0.1.0-alpha/build-agents/user-feedback) — preview: send your users' thumbs, ratings and surveys to LittleDB.
+- [API Reference](/docs/harness/v0.1.0-alpha/reference/api-reference) — alpha package API shapes.

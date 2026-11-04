@@ -1,10 +1,10 @@
 /**
- * The mechanism that keeps a gate run out of littleDB's trace plane.
+ * The mechanism that keeps a gate run out of LittleDB.
  *
  * `agents/librarian/littledb.ts` builds its handle ONLY when `LITTLEDB_URL` is set, and every
  * consumer goes through that one function: `connectors/slack/connector.ts` calls it at module
  * scope (that is where `reactions.sinks` comes from) and `load.ts` calls it in the stream
- * seam (that is where the event reporter comes from). Remove the variables before any agent
+ * seam (that is where the tracer comes from). Remove the variables before any agent
  * module loads and the telemetry half of the demo is structurally absent — not disabled by a
  * flag a later edit could forget, and not dependent on remembering to pass an option.
  *
@@ -16,7 +16,7 @@
 export const TELEMETRY_ENV_PREFIX = "LITTLEDB_";
 
 /**
- * `LIBRARIAN_PROMPT_FILE` is not a `LITTLEDB_` variable but exists only to seed a littleDB
+ * `LIBRARIAN_PROMPT_FILE` is not a `LITTLEDB_` variable but exists only to seed a LittleDB
  * bootstrap, so a gate run has no business carrying it either.
  */
 export const TELEMETRY_ENV_EXTRA = ["LIBRARIAN_PROMPT_FILE"];

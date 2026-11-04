@@ -1,9 +1,9 @@
 ---
 title: Execution Tiers
-description: Classify shell scripts before they run, and escalate the commands just-bash cannot run to a real execution environment.
+description: Classify shell scripts before they run, and escalate the commands just-bash cannot run to a real sandbox.
 ---
 
-Every built-in execution environment runs **Tier-0**: just-bash, bash emulated in
+Every built-in sandbox runs **Tier-0**: just-bash, bash emulated in
 JavaScript over the session's virtual filesystem. Tier-0 covers file and text work
 (`ls`, `rg`, `jq`, `sqlite3`, optional Python and JavaScript), but it has no git,
 containers, compilers, package managers, or real network clients. Little Harness
@@ -11,8 +11,8 @@ ships two opt-in pieces for those commands:
 
 - **Command classification** — `classifyCommand`, `detectEmulationGap`, and the
   versioned `tier0CapabilityMatrix()` decide whether a script can run on Tier-0.
-- **Tiered execution** — `tieredExecutionEnvironment({ nextTier })` is an
-  execution-environment factory that runs Tier-0 and switches to a higher tier
+- **Tiered execution** — `tieredSandbox({ nextTier })` is a sandbox factory
+  that runs Tier-0 and switches to a higher tier
   you provide when a command needs it.
 
 Nothing here is on by default. `localHost()`'s default `"auto"` mode chooses
@@ -25,7 +25,7 @@ happens to a command Tier-0 cannot run at all.
 **without executing anything**:
 
 ```ts
-import { classifyCommand } from "little-harness";
+import { classifyCommand } from "@little-stack/harness/sandbox";
 
 classifyCommand("rm -rf build && cargo build");
 // {
@@ -73,14 +73,14 @@ import {
   createHarness,
   localHost,
   subprocessSandbox,
-  tieredExecutionEnvironment,
-} from "little-harness";
+  tieredSandbox,
+} from "@little-stack/harness";
 
 const harness = createHarness({
   host: localHost({
-    executionEnvironment: tieredExecutionEnvironment({
-      tier0: subprocessSandbox(),   // defaults to in-process just-bash
-      nextTier: myContainerSandbox(), // any HarnessExecutionEnvironmentFactory you provide
+    sandbox: tieredSandbox({
+      tier0: subprocessSandbox(),   // defaults to justBashSandbox() (in-process)
+      nextTier: myContainerSandbox(), // any HarnessSandboxFactory you provide
       policy: { denyCommands: ["docker"] },
     }),
   }),
@@ -122,7 +122,16 @@ the prompt.
 | `harness.runtime.tier.escalated` | The turn switched to `nextTier`. | `from`, `to`, `trigger` (`"classification"` or `"emulation-gap"`), `command`, `decision`/`reasons` or `gap` |
 | `harness.runtime.tier.unavailable` | Escalation was needed but the higher tier could not be used. | the same, plus `detail` |
 | `harness.runtime.command.denied` | `policy.denyCommands` blocked a command. | `command`, `reasons` |
-| `harness.runtime.dispose.failed` | Any execution environment's teardown threw (not tier-specific). | `error` envelope |
+| `harness.runtime.usage` | Once per turn, when the sandbox is disposed and before the turn's terminal session event (not tier-specific). | `tier` (the highest tier reached), `commands` (`tier0`, `nextTier`, `denied`), `escalations`, `sandbox` (the active tier's `HarnessSandboxUsage`: `provider`, `instanceType`, `vcpu`, `memoryGiB`, `diskGB`, `activeMs`, `awakeMs`, `costUsd`) |
+| `harness.runtime.dispose.failed` | Any sandbox's teardown threw (not tier-specific). | `error` envelope |
+
+The usage event is how LittleDB measures the Tier 0 share (turns that never
+left the session folder) and the infrastructure cost per turn. Under
+`tieredSandbox` the `sandbox` block is the higher tier's own `usage()` once the
+turn escalated, and Tier-0's before; a tier that reports no usage of its own is
+measured from its command durations and named `provider: "unknown"`. A command
+retried on the higher tier after a Tier-0 emulation gap counts once on each
+tier.
 
 `little-harness doctor` counts `harness.runtime.dispose.failed` as a failure.
 

@@ -1,6 +1,6 @@
 import { createDiscordAdapter } from "@chat-adapter/discord";
 import { createMemoryState } from "@chat-adapter/state-memory";
-import { chatSdkConnector } from "little-harness/connectors/runtime";
+import { chatSdkConnector } from "@little-stack/harness/connectors/runtime";
 import { recordSupportMirrorDelivery } from "../shared/mirror-delivery";
 import { supportSessionIdFromRecord } from "../shared/session-id";
 

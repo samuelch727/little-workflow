@@ -4,7 +4,22 @@ export type WorkflowVersionReusePolicy = "never" | "exact" | "structure" | "any"
 
 export const DEFAULT_WORKFLOW_VERSION_REUSE_POLICY: WorkflowVersionReusePolicy = "never";
 
-export type WorkflowVersionReuseStrategy = "planner_reviewed" | "always_fresh";
+/**
+ * How a run reuses the plan of an earlier run of the same workflow.
+ *
+ * - `"planner_reviewed"` (default): keep the newest plan without a planner call when nothing the
+ *   planner reads changed (only input values differ); otherwise the planner keeps, adapts or
+ *   replaces it.
+ * - `"planner_reviews_each_run"`: the planner reviews the newest plan on every run. Use it when
+ *   input values change what the plan should be, such as an input that carries instructions.
+ * - `"always_fresh"`: the planner writes a new plan on every run.
+ */
+export type WorkflowVersionReuseStrategy = "planner_reviewed" | "planner_reviews_each_run" | "always_fresh";
+
+/** True when the strategy shows the planner an earlier plan to review. */
+export function plannerReviewsEarlierPlans(strategy: WorkflowVersionReuseStrategy): boolean {
+  return strategy === "planner_reviewed" || strategy === "planner_reviews_each_run";
+}
 
 export const DEFAULT_WORKFLOW_VERSION_REUSE_STRATEGY: WorkflowVersionReuseStrategy =
   "planner_reviewed";

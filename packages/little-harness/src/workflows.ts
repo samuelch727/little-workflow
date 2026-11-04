@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import type { IFileSystem } from "just-bash";
 import { jsonSchema, tool, type FlexibleSchema, type ToolExecutionOptions, type ToolSet } from "ai";
 import { HarnessInputError } from "./errors.js";
 import {
@@ -89,8 +90,6 @@ export type HarnessWorkflowInheritancePolicy = {
   };
 };
 
-export type HarnessWorkflowInheritance = HarnessWorkflowInheritancePolicy;
-
 export const DEFAULT_WORKFLOW_INHERITANCE_POLICY = {
   tools: { mode: "none" },
   mcpTools: { mode: "none" },
@@ -150,10 +149,11 @@ export type HarnessWorkflowRunContext = {
   readonly reservedRunId: string;
   readonly persistence: {
     readonly dataDir: string;
+    readonly fs?: IFileSystem;
   };
   readonly abortSignal?: AbortSignal | undefined;
   readonly executionBudget?: unknown;
-  readonly inheritance: HarnessWorkflowInheritance;
+  readonly inheritance: HarnessWorkflowInheritancePolicy;
   readonly capabilities?: HarnessChildCapabilities;
   readonly observation: {
     recordProgress(progress: unknown): Promise<void>;
@@ -248,6 +248,7 @@ export type ResolveHarnessWorkflowToolsOptions = {
   readonly turnId: string;
   readonly originTurnId: string;
   readonly dataDir: string;
+  readonly fs?: IFileSystem;
   readonly abortSignal?: AbortSignal | undefined;
   readonly parentSnapshot?: HarnessWorkflowParentSnapshot | undefined;
   /**
@@ -482,7 +483,7 @@ function workflowRunContext(
   workflowHandle: string,
   options: ResolveHarnessWorkflowToolsOptions,
   executeOptions: ToolExecutionOptions<unknown>,
-  inheritance: HarnessWorkflowInheritance,
+  inheritance: HarnessWorkflowInheritancePolicy,
   capabilities: HarnessChildCapabilities,
 ): HarnessWorkflowRunContext {
   const toolCallId = executeOptions.toolCallId ?? `${workflowHandle}_manual`;
@@ -497,7 +498,7 @@ function workflowRunContext(
     parentTurnId: options.turnId,
     originTurnId: options.originTurnId,
     reservedRunId: reservedWorkflowRunId(workflowHandle, toolCallId),
-    persistence: { dataDir: options.dataDir },
+    persistence: { dataDir: options.dataDir, ...(options.fs === undefined ? {} : { fs: options.fs }) },
     abortSignal: executeOptions.abortSignal ?? options.abortSignal,
     inheritance,
     capabilities,

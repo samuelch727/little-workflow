@@ -1,0 +1,356 @@
+---
+title: Letting an agent author its own workflow
+description: Enable one-shot, model-authored plans a Little Harness agent runs when no configured workflow fits.
+---
+
+Listing a workflow in `workflows` gives the agent a pre-authored tool to call. But
+some requests fit no workflow you shipped. `dynamicWorkflows` lets the agent
+**author a one-shot plan for the request in front of it**, run it once, and recall
+it on a later run — without a developer adding a new workflow first.
+
+A one-shot plan is not a new reusable workflow. It runs once, is never added to
+`list_workflows`, and is never promoted to your workflow library. It is a durable,
+inspectable, replay-proof plan the agent composed from **its own** capabilities.
+
+For work that will come again, the agent can instead **define a workflow** with
+`define_workflow`: it describes the job, a planner writes the steps once, and the
+workflow becomes one of the agent's tools in every later session. See
+[Workflows The Agent Defines](#workflows-the-agent-defines).
+
+## Enable It
+
+Opt in with the `dynamicWorkflows()` helper from `@little-stack/workflow`. It is off by
+default; when absent, none of the tools below appear and nothing changes.
+
+```ts
+import { anthropic } from "@ai-sdk/anthropic";
+import { createHarness, localHost } from "@little-stack/harness";
+import { dynamicWorkflows } from "@little-stack/workflow";
+
+const agent = createHarness({
+  host: localHost({ dataDir: ".little-harness" }),
+  model: anthropic("claude-sonnet-4-6"),
+  system: "Help the user. If no configured workflow fits, author a one-shot plan.",
+  tools: { docsSearch, docsRead },
+  dynamicWorkflows: dynamicWorkflows(),
+});
+```
+
+> **Why `dynamicWorkflows()` and not `true`?** The helper injects the plan-lowering
+> factory. A bare `true` cannot pull it in: `@little-stack/workflow` depends on
+> `@little-stack/harness`, so importing it back from the harness would be a circular
+> dependency. `dynamicWorkflows()` reads almost like a boolean and carries no
+> global state.
+
+## What The Agent Can Do
+
+Enabling `dynamicWorkflows` adds three tools:
+
+- **`run_ad_hoc_plan`** — the agent authors a plan (a step-DAG over its own tools
+  and `ai.generate` steps) and runs it once. It provides a `purpose`, the `plan`
+  (steps plus which step's output is the result), the `input`, and an
+  `outputSchema`. The plan's result is returned to the agent inline.
+- **`search_authored_plans`** — the agent searches plans it authored on prior runs
+  (by purpose) and re-submits one, verbatim or adapted for the new input. It returns
+  up to five plans whose last run completed, newest first, one per distinct plan.
+- **`define_workflow`** — the agent turns recurring work into a named workflow
+  that is one of its tools from then on. See
+  [Workflows The Agent Defines](#workflows-the-agent-defines).
+
+A plan step is either a `tool.call` (a specific tool, with its arguments in `with`) or an
+`ai.generate` (one model call on a model slot, with its whole instruction in `prompt`
+and no tools or bash). Steps wire together with the runtime's `{{ input.x }}` and
+`{{ steps.<id>.output }}` template expressions. The tool's input schema spells out
+this shape for the model.
+
+```ts
+// A plan the agent might author for "validate these imported records":
+{
+  steps: [
+    { id: "fetch", uses: "tool.call", tool: "docsSearch", with: { q: "{{ input.query }}" } },
+    { id: "check", uses: "ai.generate", model: "default", needs: ["fetch"],
+      prompt: "Validate each record in: {{ steps.fetch.output }}", output: { mode: "json" } },
+  ],
+  output: { from: "check" },
+}
+```
+
+> **Note:** In v1 a plan uses `tool.call` and `ai.generate` steps. `code.run`,
+> `parallel`, and `decision` steps are rejected at submission with a clear
+> message. `output.from` must name the plan's terminal step (the step no other
+> step needs).
+
+A submission is also rejected, with a message that names the right field, when a
+step has a field its type does not take (arguments under `input` instead of `with`,
+a prompt under `with`), when an `ai.generate` step has no prompt, or when a value
+refers to data as `$input.x` instead of `{{ input.x }}`. A step that reads
+`{{ steps.<id>.output }}` without listing `<id>` in `needs` gets the entry added.
+
+## Model Slots
+
+An `ai.generate` step names a model slot. `default` is the agent's own model. Give
+plan steps a cheaper or different model with `models`:
+
+```ts
+dynamicWorkflows: dynamicWorkflows({
+  models: { fast: anthropic("claude-haiku-5-5") },
+})
+```
+
+The agent sees the slot names in the `run_ad_hoc_plan` description and picks one per
+step. Workflows the agent defines get the same slots.
+
+## Workflows The Agent Defines
+
+A one-shot plan is written again, or searched for and re-sent, for every request.
+For work the agent expects to repeat, such as one loan application after another,
+`define_workflow` turns it into a named workflow instead. The agent describes the
+job the way a developer would in `defineWorkflow`, not the steps:
+
+```ts
+// What the agent sends to define_workflow:
+const defineWorkflowInput = {
+  id: "lending.preapproval",
+  description: "Pre-approve one mortgage application and record the decision.",
+  inputSchema: {
+    type: "object",
+    properties: { applicationId: { type: "string" } },
+    required: ["applicationId"],
+  },
+  outputSchema: {
+    type: "object",
+    properties: { decision: { enum: ["approve", "refer", "decline"] } },
+  },
+  tools: ["lookup_application", "fetch_credit_report", "record_decision"],
+  policy: "Approve only when every rule below holds. Refer anything it does not cover. ...",
+  models: ["fast"], // optional: the model slots its steps may use; default all
+  runWith: { applicationId: "APP-1001" }, // optional: run it now as well
+};
+```
+
+From there it is an ordinary `defineWorkflow` workflow:
+
+- **Planned once.** The agent's own model plans the steps on the first run. Later
+  runs keep that plan without calling the planner, until the input's shape, the
+  definition or the agent's tools change.
+- **Policy in every step.** `policy` goes word for word into every model step, and a
+  changed policy sends the plan back to the planner.
+- **Model slots.** Steps may use `default` or any `models` slot, so
+  `models: { fast: anthropic("claude-haiku-5-5") }` lets a cheaper model run the
+  steps while the agent's model plans them. Left to choose, the planner may pick
+  `default`; a definition's own `models` list (`["fast"]`) limits its steps to those
+  slots.
+- **A tool from the next message on.** In this session and every later one on the
+  same host `dataDir`, the workflow is a tool named after its id
+  (`lending_preapproval`), with `inputSchema` as its input schema. Pass `runWith` to
+  run it in the same call that defines it.
+- **Revisions.** Calling `define_workflow` again with the same id replaces the
+  definition and counts a new revision. Updates may change anything but the id. An
+  id whose tool name is reserved (`bash`) or already belongs to another of its
+  workflows (`lending_preapproval` once `lending.preapproval` exists) is refused.
+
+The tools a definition names must be among the agent's own, after `exclude`. A
+stored workflow whose tools the agent no longer has, whose tool name another tool
+now uses, or that no longer passes `define_workflow`'s checks is left out of that
+turn with a warning, and a stored file that is not a definition is skipped. `limits`
+apply to one-shot plans only.
+
+Turn the tool off with `dynamicWorkflows({ define: false })`.
+
+### Deciding What Each Turn Offers
+
+Without a registry, a definition is a tool from the next turn on, in every session on the
+host. Pass `registry` to put definitions under your own control, for example behind a review:
+
+```ts
+const approved = new Set<string>(); // "<handle>@<revision>" a reviewer accepted
+
+dynamicWorkflows: dynamicWorkflows({
+  registry: {
+    // After define_workflow stored a revision.
+    defined: (record) => ({
+      note: `Saved as revision ${record.revision}; it becomes a tool for everyone once it is reviewed.`,
+    }),
+    // When a turn starts, with every stored definition.
+    resolve: (records, { sessionId }) =>
+      records.filter(
+        (record) => approved.has(`${record.handle}@${record.revision}`) || record.sessionId === sessionId,
+      ),
+  },
+})
+```
+
+- **`defined(record, ctx)`** runs after `define_workflow` stored a revision. `record` is the
+  definition with its `handle`, `revision`, `definedAt` and the `sessionId` that wrote it. Return
+  a `note` to replace the default note in the tool's result, and `metadata` to attach to the
+  revision for the run `runWith` starts. If it throws, the definition stays stored and the agent
+  is told it could not be registered.
+- **`resolve(records, ctx)`** runs when a turn starts and returns the workflows the turn offers:
+  a subset of the records, other revisions of them, or definitions the registry holds itself,
+  each with a `handle`, a `revision` and optional `metadata`. A workflow left out is not a tool
+  this turn. If it throws, the turn offers no agent-defined workflow and carries a warning.
+- `ctx` is `{ sessionId, turnId }`. `metadata` never reaches the model; it travels with the
+  workflow to the run (see `world` below).
+
+LittleDB's client ships a registry that makes each definition a draft version with a proposal a
+person approves; see [Agent-made workflows behind review](/docs/littledb/harness#agent-made-workflows-behind-review).
+
+### Where Their Runs Are Stored
+
+Runs of agent-defined workflows and one-shot plans are stored with `localWorld`: defined
+workflows in the host's agent-workflow store, one-shot plans in the session's store. Pass
+`world` to use another World, or a function that picks one per run, for example to trace them:
+
+```ts
+dynamicWorkflows: dynamicWorkflows({
+  world: (run) => myTracingWorld(localWorld({ dataDir: run.dataDir }), run),
+})
+```
+
+The function is told the run's `kind` (`defined` or `ad_hoc`), `workflowId`, `handle`, `runId`,
+`dataDir` (the store the default would use), `sessionId` and `turnId`, and for a defined
+workflow its `definition`, the offered `revision` and the registry's `metadata`.
+
+## The Capability Invariant
+
+> A one-shot plan, or a workflow the agent defines, can never exceed what the agent
+> could already do directly.
+
+The plan's ceiling is **the agent's own capability snapshot** — its tools, MCP
+tools, and (if it has them) agentic bash. The agent composes a plan from a
+*subset* of what it already has; it cannot name a tool the harness did not grant.
+Approval-required tools (`needsApproval`) are **not supported inside dynamic
+plans yet** — the alpha workflow runtime rejects them with a clear error rather
+than prompting. Enabling dynamic workflows is a repackaging of existing
+authority, never an escalation.
+
+A plan that references anything outside the snapshot fails validation **before it
+runs** with `capability_not_allowed`. Because the check runs on every submission,
+a recalled plan is re-validated against the *current* snapshot — if you removed a
+tool since the plan was authored, resubmission fails cleanly instead of running
+stale authority.
+
+> **The agent decides the plan's tools, by design.** Within its snapshot, the
+> agent chooses which capabilities a plan uses simply by authoring the steps — that
+> authoring *is* the access decision. Per-call `activeTools` narrowing (which tools
+> the model may call *directly* this turn) is a routing concern and does not
+> constrain what the agent may compose into a plan. To impose a hard ceiling the
+> *developer* controls, use `exclude` below or give the agent a harness with fewer
+> configured tools — do not rely on `activeTools`.
+
+To narrow the ceiling below the agent's full set, pass options to the helper:
+
+```ts
+dynamicWorkflows: dynamicWorkflows({
+  exclude: ["dangerousTool"],           // remove capabilities from what plans may use
+  limits: { maxSteps: 6, maxRuntimeMs: 60_000 },
+})
+```
+
+## How A Plan Runs
+
+1. **Frozen.** The agent's plan is lowered deterministically to the alpha LWIR and
+   frozen by canonical hash. That hash is the plan's identity.
+2. **Replay-proof.** The frozen plan runs with no re-planning — the model never
+   re-decides the step graph. Replaying the same plan against the same
+   capabilities reproduces the run. A guard refuses to run if a substituted plan
+   is ever produced.
+3. **Inline.** In v1 the plan runs to completion inside the `run_ad_hoc_plan` call
+   and returns its result. Runtime and step-count caps bound it (`maxRuntimeMs`
+   defaults to 120s; `maxSteps` to 8).
+4. **Every submission runs every step.** A plan re-submitted after a failure, or
+   recalled for a new input, runs its tools again. Mark tools that write or send
+   something with `once`, so they don't run twice (see below), or keep them out of
+   plans with `exclude`.
+
+An `ai.generate` step is one model call. The workflow runtime offers it no tools
+and no bash, even when the agent has bash, so a plan reaches a tool only through a
+`tool.call` step.
+
+## Tools That Write
+
+Wrap a tool that writes or sends something with `once`. When a workflow step calls
+it again in the same session with the same input, it gets the recorded result back
+and the tool does not run. That covers every workflow that calls the harness's
+tools: ad-hoc plans, workflows the agent defined, and workflows you pass in
+`createHarness({ workflows })`:
+
+```ts
+import { createHarness, localHost, once } from "@little-stack/harness";
+import { dynamicWorkflows } from "@little-stack/workflow";
+
+const harness = createHarness({
+  host: localHost({ dataDir: ".little-harness" }),
+  model,
+  tools: {
+    lookup_application, // reads: runs every time
+    record_decision: once(recordDecision, {
+      key: (input) => input.applicationId,
+    }),
+  },
+  dynamicWorkflows: dynamicWorkflows(),
+});
+```
+
+- **`key`** says what counts as the same call. Leave it out to use the whole input.
+  Set it when the input carries text a model wrote, such as a decision letter: a
+  resubmitted plan writes that text differently, so the input differs even though
+  it is the same decision.
+- **A failed call is not recorded**, so the next attempt runs the tool.
+- **A result that cannot be saved is not run again.** When the result is not JSON
+  (a `BigInt`, a cycle) or the disk write fails, the call still returns it, and a
+  repeat in the session fails with a `HarnessPersistenceError` instead of running
+  the tool again. Return plain JSON from a `once` tool.
+- **Only step calls are recorded.** When the agent calls the tool itself, it runs
+  every time, because the agent may mean to repeat it. Another session runs it
+  again too.
+- Results are kept as JSON under the session's data dir (`once/`).
+
+Every call a step makes, with or without `once`, gets the harness context of the
+agent's call (so `harnessToolContext(options)` works in a step) and an
+`idempotencyKey`: the same for the same tool and input (or `key`) in the same
+session. Pass it on to a system that takes one:
+
+```ts
+execute: async (input, options) => {
+  const { idempotencyKey } = harnessToolContext(options);
+  return loanSystem.recordDecision(input, {
+    headers: idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {},
+  });
+},
+```
+
+## Recall Across Runs
+
+On success, a plan is written to a durable store (`/persistent/dynamic-plans`)
+keyed by its purpose. A later run — even a fresh `createHarness` over the same
+host `dataDir` — can call `search_authored_plans` to find it and re-submit it.
+Records persist across harness instances the same way `memory` and
+`persistentDirs` do; recall round-trips through disk and always re-validates. A
+recalled plan is a remembered suggestion, never a privileged callable.
+
+Workflows the agent defines are stored in the same place, as
+`/persistent/dynamic-plans/workflows/<tool name>.json`, with every earlier revision
+under `workflows/history/`. Their runs, plans and grades live in one workflow store
+for the whole host, `<dataDir>/agent-workflows`, so a plan written in one session is
+kept in the next. Open it with `localWorld({ dataDir: "<dataDir>/agent-workflows" })`
+to read a run's plan or to call `gradeRun`; a `fail` grade sends the plan back to the
+planner.
+
+> **Scoping:** the store lives under the host `dataDir`, so recall is shared by
+> every session on that `dataDir` — exactly like `memory`. That is what makes
+> cross-run recall work. In a multi-user deployment, **give each user their own
+> `dataDir`** — that is the supported isolation method today. The store's
+> harness path (`/persistent/dynamic-plans`) is fixed: `dynamicWorkflows()` does
+> not expose a per-user store override, and supplying your own `persistentDirs`
+> entry at that path is rejected as a duplicate. Sessions sharing one `dataDir`
+> can see each other's authored plans.
+
+## Next Steps
+
+- Read [Triggering a workflow from an agent](/docs/harness/v0.1.0-alpha/build-agents/workflows) for the
+  static counterpart — pre-authored workflows handed to an agent as tools.
+- Read [Tools](/docs/harness/v0.1.0-alpha/build-agents/tools) to compare `run_ad_hoc_plan`
+  with ordinary app tools.
+- See [`createHarness()`](/docs/harness/v0.1.0-alpha/reference/create-harness) for the
+  `dynamicWorkflows` parameter reference.

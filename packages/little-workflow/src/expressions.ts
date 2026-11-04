@@ -37,6 +37,16 @@ export function resolveExpressionValue(value: unknown, context: ExpressionContex
   return value;
 }
 
+/**
+ * Resolve a value that must reach its consumer as text, such as an `ai.generate` prompt. A
+ * template-only value keeps its type under `resolveExpressionValue`; here it is stringified with
+ * the same rule as an embedded expression, so `"{{ steps.a.output }}"` yields JSON, not an object.
+ */
+export function resolveExpressionText(value: unknown, context: ExpressionContext): string {
+  const resolved = resolveExpressionValue(value, context);
+  return resolved === undefined ? "" : stringifyEmbeddedValue(resolved);
+}
+
 function resolveString(value: string, context: ExpressionContext): unknown {
   const onlyMatch = TEMPLATE_ONLY_PATTERN.exec(value);
   if (onlyMatch !== null) {
@@ -133,6 +143,14 @@ function resolvePathExpression(expression: string, context: ExpressionContext): 
       }
       const step = context.steps[stepId];
       if (step === undefined) {
+        // A loop step may read a later step through a back-edge (`lastOutput` / `allVisits`)
+        // before that step has run once. On that first pass there is no value yet, not an error.
+        if (property === "lastOutput") {
+          return undefined;
+        }
+        if (property === "allVisits") {
+          return readPath([], rest, expression);
+        }
         throw new Error(`Expression references incomplete step '${stepId}'.`);
       }
       if (property === "lastOutput") {
@@ -579,6 +597,9 @@ function assertSafePathSegment(segment: string): void {
 function stringifyEmbeddedValue(value: unknown): string {
   if (typeof value === "string") {
     return value;
+  }
+  if (value === undefined) {
+    return "";
   }
   if (value === null || typeof value === "number" || typeof value === "boolean") {
     return String(value);

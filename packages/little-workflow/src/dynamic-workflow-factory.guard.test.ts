@@ -2,7 +2,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
-import type { HarnessWorkflowRunContext } from "little-harness";
+import type { HarnessWorkflowRunContext } from "@little-stack/harness";
 
 // Mock compileWorkflow to simulate the silent-substitution case: the compiler
 // falls through to synthesizeSimpleLwir and returns a VALID but DIFFERENT LWIR,

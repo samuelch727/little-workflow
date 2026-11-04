@@ -19,6 +19,15 @@ const contentRef = {
 };
 
 describe("validateTraceEvent", () => {
+  it("accepts honest storage-limit omissions and rejects contradictory content evidence", () => {
+    const unavailable = { ...contentRef, captured: false, truncated: true, bytes: 20, unavailableReason: "storage_limit", storageLimitBytes: 10 };
+    const event = (text: object) => ({ ...baseEvent, type: "harness.model.responded", metadata: { stepNumber: 1, model: { provider: "test", modelId: "test" }, text } });
+    expect(validateTraceEvent(event(unavailable)).metadata?.text).toEqual(unavailable);
+    for (const changed of [{ captured: true }, { contentRef: "/artifacts/trace/phantom.txt" }, { truncated: false }, { bytes: 10 }, { storageLimitBytes: undefined }]) {
+      expect(() => validateTraceEvent(event({ ...unavailable, ...changed }))).toThrow(/Unavailable trace content/u);
+    }
+  });
+
   it("accepts a versioned Little Harness trace event", () => {
     expect(
       validateTraceEvent({
@@ -564,5 +573,43 @@ describe("validateTraceEvent", () => {
         metadata: { command: "docker ps" },
       }),
     ).toThrow(/reasons/);
+  });
+
+  it("accepts the turn's usage event, and requires the tier and the sandbox's active time", () => {
+    expect(
+      validateTraceEvent({
+        ...baseEvent,
+        type: "harness.runtime.usage",
+        metadata: {
+          tier: "next-tier",
+          commands: { tier0: 2, nextTier: 1, denied: 0 },
+          escalations: 1,
+          sandbox: { provider: "cloudflare-sandbox", instanceType: "standard-1", vcpu: 0.5, memoryGiB: 4, activeMs: 300000, awakeMs: 900000, costUsd: 0.0125 },
+        },
+      }),
+    ).toMatchObject({ metadata: { tier: "next-tier", sandbox: { provider: "cloudflare-sandbox" } } });
+
+    expect(
+      validateTraceEvent({
+        ...baseEvent,
+        type: "harness.runtime.usage",
+        metadata: { tier: "tier-0", commands: { tier0: 4, nextTier: 0, denied: 0 }, escalations: 0, sandbox: { provider: "just-bash", activeMs: 31 } },
+      }).metadata,
+    ).toMatchObject({ tier: "tier-0" });
+
+    expect(() =>
+      validateTraceEvent({
+        ...baseEvent,
+        type: "harness.runtime.usage",
+        metadata: { tier: "tier-1", commands: { tier0: 0, nextTier: 0, denied: 0 }, escalations: 0, sandbox: { provider: "x", activeMs: 1 } },
+      }),
+    ).toThrow(/tier/);
+    expect(() =>
+      validateTraceEvent({
+        ...baseEvent,
+        type: "harness.runtime.usage",
+        metadata: { tier: "tier-0", commands: { tier0: 0, nextTier: 0, denied: 0 }, escalations: 0, sandbox: { provider: "x" } },
+      }),
+    ).toThrow(/activeMs/);
   });
 });

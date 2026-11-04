@@ -8,13 +8,15 @@ import {
   type SuperviseOuterLoopState,
 } from "./compiler.js";
 import type { ToolRegistry } from "./tool-registry.js";
-import type { FailedRunResult, LocalWorld, RunResult, WorkflowRunProgressEvent } from "./authoring.js";
+import type { FailedRunResult, LocalWorld, UnplannedRunResult, WorkflowRunProgressEvent } from "./authoring.js";
 import type { BashCapabilities } from "./bash-tool.js";
 import type { WorkflowVersionReuseStrategy } from "./workflow-version-reuse.js";
-import type { HarnessMcpConfig } from "little-harness";
+import type { HarnessMcpConfig } from "@little-stack/harness";
 import {
+  isRunFailedError,
   RunFailedError,
   runWorkflowCycle,
+  tryAcquireOuterLoopExecutionLock,
   type RunWorkflowCycleOptions,
 } from "./runtime.js";
 import { unknownUsageTotals } from "./pricing.js";
@@ -67,6 +69,10 @@ export type RunOuterLoopOptions = {
  * workflowVersionId, and events. The `finalOutput` from the supervise `done`
  * decision is used as the `output`.
  *
+ * One caller at a time drives a given `outerLoopId` in a data directory. A
+ * concurrent caller with the same ID waits for the lock, then resumes from what
+ * the first caller committed (a finished loop replays its decision).
+ *
  * Throws `RunFailedError` with causeCode:
  * - `"runtime_config_error"` — if `maxOuterCycles > 1` but `planner.supervise`
  *   is missing.
@@ -75,11 +81,33 @@ export type RunOuterLoopOptions = {
  */
 export async function runOuterLoop(
   options: RunOuterLoopOptions,
-): Promise<RunResult<unknown>> {
+): Promise<UnplannedRunResult<unknown>> {
   const outerLoopId = options.outerLoopId ?? `ol_${randomUUID().replace(/-/g, "")}`;
   const startedAt = Date.now();
   const outerLoopTimeoutMs = timeoutMsFor(options.timeout);
 
+  // Fence the whole read/run/supervise/commit sequence. Without it a second
+  // caller could replay a finished cycle and supervise it again.
+  const releaseLock = await acquireOuterLoopLock(
+    options.world,
+    outerLoopId,
+    options.signal,
+    outerLoopTimeoutMs,
+    startedAt,
+  );
+  try {
+    return await runOuterLoopLocked(options, outerLoopId, startedAt, outerLoopTimeoutMs);
+  } finally {
+    await releaseLock();
+  }
+}
+
+async function runOuterLoopLocked(
+  options: RunOuterLoopOptions,
+  outerLoopId: string,
+  startedAt: number,
+  outerLoopTimeoutMs: number | undefined,
+): Promise<UnplannedRunResult<unknown>> {
   // Resume: if a manifest exists and the loop is already done, return early.
   const existing = await readOuterLoopManifest(options.world, outerLoopId);
   const cycles: OuterLoopCycleSummary[] = existing ? [...existing.cycles] : [];
@@ -107,6 +135,33 @@ export async function runOuterLoop(
         `'${outerLoopId}' was started with workflowDefinitionHash=` +
         `${existing.goal.workflowDefinitionHash}, caller now passed ${expectedGoalHash}.`,
     });
+  }
+
+  // Check the input before any fast return or new cycle, so a reused loop ID
+  // never answers, or continues, with another input's evidence.
+  const expectedInputHash = sha256Digest(options.input);
+  if (existing !== undefined) {
+    const recordedInputHash = existing.inputHash ??
+      await cycleRecordedInputHash(options.world, existing);
+    if (recordedInputHash !== undefined && recordedInputHash !== expectedInputHash) {
+      throw new RunFailedError({
+        runId: "uncompiled",
+        workflowVersionId: "uncompiled",
+        causeCode: "runtime_config_error",
+        message:
+          "runtime_config_error: outer_loop_input_mismatch — existing outer loop " +
+          `'${outerLoopId}' was started with inputHash=${recordedInputHash}, ` +
+          `caller now passed ${expectedInputHash}.`,
+      });
+    }
+    if (existing.inputHash === undefined) {
+      // An older manifest: record the identity just checked, or accepted when no
+      // cycle run recorded its input.
+      await writeOuterLoopManifest(options.world, outerLoopId, {
+        ...existing,
+        inputHash: expectedInputHash,
+      });
+    }
   }
 
   if (existing?.result?.kind === "done") {
@@ -175,6 +230,7 @@ export async function runOuterLoop(
           description: options.workflow.description ?? options.workflow.id,
         },
         maxCycles: options.maxOuterCycles,
+        inputHash: expectedInputHash,
         cycles,
         pendingCycleRunId: runId,
       });
@@ -195,7 +251,7 @@ export async function runOuterLoop(
     };
 
     // Run one cycle via runWorkflowCycle (handles compile, lifecycle events, execution).
-    let cycleRunResult: RunResult<unknown> | undefined;
+    let cycleRunResult: UnplannedRunResult<unknown> | undefined;
     let cycleError: RunFailedError | undefined;
 
     try {
@@ -268,15 +324,9 @@ export async function runOuterLoop(
     // reuse the persisted supervise payload instead of calling planner.supervise again.
     // Skips because LLM-based planners are non-deterministic and the durable event log
     // is the source of truth.
-    const eventsBeforeSupervise = await options.world.listEvents(runId);
-    const committedSuperviseEvent = eventsBeforeSupervise.find(
-      (e) =>
-        e.type === "OuterLoopCycleCompleted" &&
-        (e.payload as { cycleNumber?: number }).cycleNumber === cycleNumber,
-    );
-    const decision: SuperviseDecision = committedSuperviseEvent !== undefined
-      ? decodeSuperviseFromEvent(committedSuperviseEvent)
-      : await superviseWithCancellation({
+    let decision = await committedSuperviseDecision(options.world, runId, cycleNumber);
+    if (decision === undefined) {
+      const supervised = await superviseWithCancellation({
         supervise: options.planner.supervise!,
         state: superviseState,
         signal: options.signal,
@@ -285,41 +335,41 @@ export async function runOuterLoop(
         workflowVersionId: cycleSummary.workflowVersionId,
       });
 
+      // Normalise decision for canonical JSON: strip undefined values (e.g.
+      // finalOutput may legitimately be undefined from a buggy planner).
+      const supervisePayload: Record<string, unknown> =
+        supervised.kind === "done"
+          ? { kind: "done", finalOutput: supervised.finalOutput ?? null }
+          : supervised.promptNote !== undefined
+          ? { kind: "continue", promptNote: supervised.promptNote }
+          : { kind: "continue" };
+
+      // Append OuterLoopCycleCompleted to this cycle's run event log, unless
+      // another writer committed this cycle's decision while supervise ran.
+      if ((await committedSuperviseDecision(options.world, runId, cycleNumber)) === undefined) {
+        await options.world.appendEvent(runId, {
+          type: "OuterLoopCycleCompleted",
+          payload: {
+            outerLoopId,
+            cycleNumber,
+            supervise: supervisePayload,
+          },
+        });
+      }
+
+      // The first committed decision is authoritative. A local decision that lost
+      // the race to commit is dropped, so the event log, the manifest and the
+      // returned result always agree.
+      decision = await committedSuperviseDecision(options.world, runId, cycleNumber);
+      if (decision === undefined) {
+        throw new Error("outer-loop: OuterLoopCycleCompleted was appended but cannot be read back");
+      }
+    }
+
     // Attach the promptNote from a continue decision as the summary of the cycle
     // that supervise just commented on. Next cycle will see it in priorCycles.
     if (decision.kind === "continue" && decision.promptNote !== undefined) {
       cycles[cycles.length - 1] = { ...cycles[cycles.length - 1]!, summary: decision.promptNote };
-    }
-
-    // Normalise decision for canonical JSON: strip undefined values (e.g.
-    // finalOutput may legitimately be undefined from a buggy planner).
-    const supervisePayload: Record<string, unknown> =
-      decision.kind === "done"
-        ? { kind: "done", finalOutput: decision.finalOutput ?? null }
-        : decision.promptNote !== undefined
-        ? { kind: "continue", promptNote: decision.promptNote }
-        : { kind: "continue" };
-
-    // Append OuterLoopCycleCompleted to this cycle's run event log, unless a
-    // crash already committed this event (crash between appendEvent and
-    // writeOuterLoopManifest). When the committed event short-circuits supervise
-    // above, the decision is decoded from that event and this dedup check will
-    // detect it — the append is skipped. This dedup remains as a backup guard.
-    const existingEvents = await options.world.listEvents(runId);
-    const alreadyRecorded = existingEvents.some(
-      (e) =>
-        e.type === "OuterLoopCycleCompleted" &&
-        (e.payload as { cycleNumber?: number }).cycleNumber === cycleNumber,
-    );
-    if (!alreadyRecorded) {
-      await options.world.appendEvent(runId, {
-        type: "OuterLoopCycleCompleted",
-        payload: {
-          outerLoopId,
-          cycleNumber,
-          supervise: supervisePayload,
-        },
-      });
     }
 
     // Persist the outer-loop manifest transactionally.
@@ -330,6 +380,7 @@ export async function runOuterLoop(
         description: options.workflow.description ?? options.workflow.id,
       },
       maxCycles: options.maxOuterCycles,
+      inputHash: expectedInputHash,
       cycles,
       ...(decision.kind === "done" ? { result: decision } : {}),
     };
@@ -382,16 +433,39 @@ function workflowDefinitionHash(
   return sha256Digest(snapshotWorkflowDefinition(workflow, tools));
 }
 
-function isRunFailedError(err: unknown): err is RunFailedError {
-  return err instanceof Error && err.name === "RunFailedError" && "causeCode" in err;
+/**
+ * The input identity of a manifest written before `inputHash` existed, read from
+ * the first cycle run that recorded its input. Undefined when no cycle run has
+ * events to read it from.
+ */
+async function cycleRecordedInputHash(
+  world: LocalWorld,
+  manifest: OuterLoopManifest,
+): Promise<string | undefined> {
+  const runIds = [
+    ...manifest.cycles.map((cycle) => cycle.runId),
+    ...(manifest.pendingCycleRunId === undefined ? [] : [manifest.pendingCycleRunId]),
+  ];
+  for (const runId of runIds) {
+    const events = await world.listEvents(runId);
+    const started = events.find((e) => e.type === "RunStarted");
+    if (started !== undefined && Object.hasOwn(started.payload, "input")) {
+      return sha256Digest(started.payload.input);
+    }
+    const requested = events.find((e) => e.type === "OrchestrationRequested");
+    if (typeof requested?.payload.inputHash === "string") {
+      return requested.payload.inputHash;
+    }
+  }
+  return undefined;
 }
 
 async function buildDoneRunResult(
   world: LocalWorld,
   finalOutput: unknown,
   lastCycle: OuterLoopCycleSummary,
-  lastRunResult: RunResult<unknown> | undefined,
-): Promise<RunResult<unknown>> {
+  lastRunResult: UnplannedRunResult<unknown> | undefined,
+): Promise<UnplannedRunResult<unknown>> {
   const events = await world.listEvents(lastCycle.runId);
   if (events.length === 0) {
     return {
@@ -416,6 +490,25 @@ async function buildDoneRunResult(
     events,
     artifacts: state.artifacts,
   };
+}
+
+/**
+ * The decision committed for `cycleNumber` in the cycle's event log, if any. The
+ * first OuterLoopCycleCompleted for a cycle wins (a crash between append and
+ * manifest write leaves it there for the resumed call to reuse).
+ */
+async function committedSuperviseDecision(
+  world: LocalWorld,
+  runId: string,
+  cycleNumber: number,
+): Promise<SuperviseDecision | undefined> {
+  const events = await world.listEvents(runId);
+  const committed = events.find(
+    (e) =>
+      e.type === "OuterLoopCycleCompleted" &&
+      (e.payload as { cycleNumber?: number }).cycleNumber === cycleNumber,
+  );
+  return committed === undefined ? undefined : decodeSuperviseFromEvent(committed);
 }
 
 function decodeSuperviseFromEvent(event: EventEnvelope): SuperviseDecision {
@@ -450,7 +543,7 @@ async function buildOuterLoopExhaustedError(
   outerLoopId: string,
   finalCycleNumber: number,
   lastCycle: OuterLoopCycleSummary,
-  lastRunResult: RunResult<unknown> | undefined,
+  lastRunResult: UnplannedRunResult<unknown> | undefined,
 ): Promise<RunFailedError> {
   const events = await world.listEvents(lastCycle.runId);
   const state =
@@ -471,6 +564,52 @@ async function buildOuterLoopExhaustedError(
     result: failedResult,
     outerLoopId,
     lastCycleOutput: lastCycle.output ?? lastRunResult?.output,
+  });
+}
+
+const OUTER_LOOP_LOCK_POLL_MS = 50;
+
+/**
+ * Waits for the outer-loop lock. Another live caller holding it means this call
+ * waits (honouring the signal and the outer-loop timeout); a lock left by a
+ * dead process is recovered.
+ */
+async function acquireOuterLoopLock(
+  world: LocalWorld,
+  outerLoopId: string,
+  signal: AbortSignal | undefined,
+  timeoutMs: number | undefined,
+  startedAt: number,
+): Promise<() => Promise<void>> {
+  for (;;) {
+    const release = await tryAcquireOuterLoopExecutionLock(world, outerLoopId);
+    if (release !== undefined) {
+      return release;
+    }
+    await pauseForOuterLoopLock(signal, remainingTimeoutMs(timeoutMs, startedAt));
+  }
+}
+
+async function pauseForOuterLoopLock(
+  signal: AbortSignal | undefined,
+  remainingMs: number | undefined,
+): Promise<void> {
+  if (signal?.aborted === true) {
+    throw cancelledRunError("uncompiled", "uncompiled");
+  }
+  if (remainingMs !== undefined && remainingMs <= 0) {
+    throw timedOutRunError("uncompiled", "uncompiled");
+  }
+  await new Promise<void>((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(cancelledRunError("uncompiled", "uncompiled"));
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, Math.min(OUTER_LOOP_LOCK_POLL_MS, remainingMs ?? OUTER_LOOP_LOCK_POLL_MS));
+    signal?.addEventListener("abort", onAbort, { once: true });
   });
 }
 

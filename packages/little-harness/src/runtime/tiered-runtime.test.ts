@@ -14,15 +14,15 @@ import { LocalSessionStore } from "../local-host/session-store.js";
 import { subprocessSandbox } from "../sandbox/subprocess/subprocess-sandbox.js";
 import { withTempDir } from "../test/temp.js";
 import type {
-  CreateExecutionEnvironmentOptions,
+  CreateSandboxOptions,
   HarnessEventInput,
-  HarnessExecutionEnvironmentFactory,
-  HarnessRuntime,
+  HarnessSandboxFactory,
+  HarnessSandbox,
 } from "../types.js";
-import { createJustBashRuntime } from "./just-bash-runtime.js";
+import { justBashSandbox } from "./just-bash-runtime.js";
 import { createShellRuntime, type ShellCommandResult } from "./shell-runtime.js";
 import {
-  tieredExecutionEnvironment,
+  tieredSandbox,
   TIER_CARRY_OVER_TOOL_CALL_ID,
   TIER_REFUSED_EXIT_CODE,
   TIER_STATE_PROBE_TOOL_CALL_ID,
@@ -33,7 +33,7 @@ const packageRoot = path.resolve(fileURLToPath(new URL(".", import.meta.url)), "
 type TierCall = { command: string; toolCallId: string };
 
 type FakeTier = {
-  readonly factory: HarnessExecutionEnvironmentFactory;
+  readonly factory: HarnessSandboxFactory;
   readonly calls: TierCall[];
   /** Commands the model asked for, without the tier's own probe/carry-over bookkeeping. */
   modelCommands(): string[];
@@ -47,9 +47,9 @@ function justBashTier(): FakeTier {
   const calls: TierCall[] = [];
   let created = 0;
   let disposed = 0;
-  const factory: HarnessExecutionEnvironmentFactory = async (options) => {
+  const factory: HarnessSandboxFactory = async (options) => {
     created += 1;
-    const runtime = await createJustBashRuntime(options);
+    const runtime = await justBashSandbox()(options);
     const shell = runtime.shellTool() as { execute: (input: any, options: any) => Promise<any> };
     const inner = shell.execute.bind(shell);
     return {
@@ -80,7 +80,7 @@ function scriptedTier(respond: (command: string) => ShellCommandResult): FakeTie
   const bookkeeping = new Set([TIER_CARRY_OVER_TOOL_CALL_ID, TIER_STATE_PROBE_TOOL_CALL_ID]);
   let created = 0;
   let disposed = 0;
-  const factory: HarnessExecutionEnvironmentFactory = async (options) => {
+  const factory: HarnessSandboxFactory = async (options) => {
     created += 1;
     return createShellRuntime({
       workspace: options.workspace,
@@ -114,7 +114,7 @@ async function sessionFor(dir: string, id = "chat") {
 
 let callCounter = 0;
 
-async function run(runtime: HarnessRuntime, command: string): Promise<ShellCommandResult> {
+async function run(runtime: HarnessSandbox, command: string): Promise<ShellCommandResult> {
   callCounter += 1;
   const shell = runtime.shellTool() as { execute: (input: any, options: any) => Promise<ShellCommandResult> };
   return shell.execute({ command }, { toolCallId: `call_${callCounter}`, messages: [] });
@@ -126,12 +126,12 @@ beforeAll(() => {
   }
 }, 120_000);
 
-describe("tieredExecutionEnvironment", () => {
+describe("tieredSandbox", () => {
   it("escalates before running an unsupported command, then keeps the turn on the higher tier", async () => {
     await withTempDir(async (dir) => {
       const session = await sessionFor(dir);
       const next = justBashTier();
-      const runtime = await tieredExecutionEnvironment({ nextTier: next.factory })({
+      const runtime = await tieredSandbox({ nextTier: next.factory })({
         workspace: localSessionWorkspace(session),
         files: session.files,
       });
@@ -158,7 +158,7 @@ describe("tieredExecutionEnvironment", () => {
         command === "sh /session/build.sh" ? { stdout: "built\n", stderr: "", exitCode: 0 } : OK,
       );
       const events: HarnessEventInput[] = [];
-      const runtime = await tieredExecutionEnvironment({ nextTier: next.factory })({
+      const runtime = await tieredSandbox({ nextTier: next.factory })({
         workspace: localSessionWorkspace(session),
         files: session.files,
         emit: async (event) => {
@@ -196,7 +196,7 @@ describe("tieredExecutionEnvironment", () => {
         exitCode: 127,
       }));
       const events: HarnessEventInput[] = [];
-      const runtime = await tieredExecutionEnvironment({ nextTier: next.factory })({
+      const runtime = await tieredSandbox({ nextTier: next.factory })({
         workspace: localSessionWorkspace(session),
         files: session.files,
         emit: async (event) => {
@@ -220,7 +220,7 @@ describe("tieredExecutionEnvironment", () => {
     await withTempDir(async (dir) => {
       const session = await sessionFor(dir);
       const events: HarnessEventInput[] = [];
-      const runtime = await tieredExecutionEnvironment({})({
+      const runtime = await tieredSandbox({})({
         workspace: localSessionWorkspace(session),
         files: session.files,
         emit: async (event) => {
@@ -248,7 +248,7 @@ describe("tieredExecutionEnvironment", () => {
     await withTempDir(async (dir) => {
       const session = await sessionFor(dir);
       let attempts = 0;
-      const runtime = await tieredExecutionEnvironment({
+      const runtime = await tieredSandbox({
         nextTier: async () => {
           attempts += 1;
           throw new Error("no capacity");
@@ -275,7 +275,7 @@ describe("tieredExecutionEnvironment", () => {
       const provisioning = new Promise<void>((resolve) => {
         release = resolve;
       });
-      const runtime = await tieredExecutionEnvironment({
+      const runtime = await tieredSandbox({
         nextTier: async (environmentOptions) => {
           await provisioning;
           return next.factory(environmentOptions);
@@ -308,7 +308,7 @@ describe("tieredExecutionEnvironment", () => {
       const session = await sessionFor(dir);
       await session.files.writeText("/session/build.sh", "cargo build\n");
       const events: HarnessEventInput[] = [];
-      const runtime = await tieredExecutionEnvironment({})({
+      const runtime = await tieredSandbox({})({
         workspace: localSessionWorkspace(session),
         files: session.files,
         emit: async (event) => {
@@ -331,7 +331,7 @@ describe("tieredExecutionEnvironment", () => {
     await withTempDir(async (dir) => {
       const session = await sessionFor(dir);
       const next = justBashTier();
-      const runtime = await tieredExecutionEnvironment({ nextTier: next.factory })({
+      const runtime = await tieredSandbox({ nextTier: next.factory })({
         workspace: localSessionWorkspace(session),
         files: session.files,
       });
@@ -359,7 +359,7 @@ describe("tieredExecutionEnvironment", () => {
       const session = await sessionFor(dir);
       const next = justBashTier();
       const events: HarnessEventInput[] = [];
-      const runtime = await tieredExecutionEnvironment({
+      const runtime = await tieredSandbox({
         nextTier: next.factory,
         policy: { denyCommands: ["docker"], rule: "denyCommands" },
       })({
@@ -386,7 +386,7 @@ describe("tieredExecutionEnvironment", () => {
   it("keeps the prompt-visible surface byte-identical to a pure Tier-0 turn", async () => {
     await withTempDir(async (dir) => {
       const session = await sessionFor(dir);
-      const environmentOptions: CreateExecutionEnvironmentOptions = {
+      const environmentOptions: CreateSandboxOptions = {
         workspace: localSessionWorkspace(session),
         files: session.files,
         tools: {
@@ -400,14 +400,14 @@ describe("tieredExecutionEnvironment", () => {
       };
       const scripts = ["echo one", "cargo build", "echo two"];
 
-      const tier0Only = await createJustBashRuntime(environmentOptions);
+      const tier0Only = await justBashSandbox()(environmentOptions);
       const tier0Results = [];
       for (const script of scripts) {
         tier0Results.push(await run(tier0Only, script));
       }
 
       const next = justBashTier();
-      const mixed = await tieredExecutionEnvironment({ nextTier: next.factory })(environmentOptions);
+      const mixed = await tieredSandbox({ nextTier: next.factory })(environmentOptions);
       const mixedResults = [];
       for (const script of scripts) {
         mixedResults.push(await run(mixed, script));
@@ -437,7 +437,7 @@ describe("tieredExecutionEnvironment", () => {
       const session = await sessionFor(dir);
       const next = justBashTier();
       const events: HarnessEventInput[] = [];
-      const runtime = await tieredExecutionEnvironment({ nextTier: next.factory })({
+      const runtime = await tieredSandbox({ nextTier: next.factory })({
         workspace: localSessionWorkspace(session),
         files: session.files,
         emit: async (event) => {
@@ -499,7 +499,7 @@ describe("tieredExecutionEnvironment", () => {
     await withTempDir(async (dir) => {
       const session = await sessionFor(dir, "subprocess-tier");
       await session.files.writeText("/session/build.sh", "cargo build\n");
-      const environmentOptions: CreateExecutionEnvironmentOptions = {
+      const environmentOptions: CreateSandboxOptions = {
         workspace: localSessionWorkspace(session),
         files: session.files,
       };
@@ -507,7 +507,7 @@ describe("tieredExecutionEnvironment", () => {
       // The detector matches just-bash's exact strings; the worker relays stderr over a
       // JSON protocol, so byte-equality with the in-process adapter is what makes the
       // detector valid for both.
-      const inProcess = await createJustBashRuntime(environmentOptions);
+      const inProcess = await justBashSandbox()(environmentOptions);
       const subprocess = await subprocessSandbox()(environmentOptions);
       const inProcessGap = await run(inProcess, "sh /session/build.sh");
       const subprocessGap = await run(subprocess, "sh /session/build.sh");
@@ -516,7 +516,7 @@ describe("tieredExecutionEnvironment", () => {
       await subprocess.dispose?.();
 
       const next = scriptedTier(() => ({ stdout: "built\n", stderr: "", exitCode: 0 }));
-      const runtime = await tieredExecutionEnvironment({
+      const runtime = await tieredSandbox({
         tier0: subprocessSandbox(),
         nextTier: next.factory,
       })(environmentOptions);
@@ -536,7 +536,7 @@ describe("tieredExecutionEnvironment", () => {
       const session = await sessionFor(dir);
       const tier0 = scriptedTier(() => OK);
       const next = scriptedTier(() => OK);
-      const runtime = await tieredExecutionEnvironment({
+      const runtime = await tieredSandbox({
         tier0: tier0.factory,
         nextTier: next.factory,
       })({ workspace: localSessionWorkspace(session), files: session.files });
@@ -554,12 +554,12 @@ describe("tieredExecutionEnvironment", () => {
       const next = justBashTier();
       const host = localHost({
         dataDir: dir,
-        executionEnvironment: tieredExecutionEnvironment({ nextTier: next.factory }),
+        sandbox: tieredSandbox({ nextTier: next.factory }),
       });
       const session = await host.sessions.getOrCreate({ id: "tiered-tools" });
       const events: HarnessEventInput[] = [];
       const prepared = await host.prepareTurn({ session, turnId: "turn_1", persistentDirs: [] });
-      const runtime = await prepared.createRuntime({
+      const runtime = await prepared.createSandbox({
         tools: {
           add: tool({
             description: "Add two numbers.",
@@ -612,7 +612,7 @@ describe("tiered execution: disposal-time workspace writes", () => {
     const events: HarnessEventInput[] = [];
     let sawTrackChanges: boolean | undefined;
 
-    const runtime = await tieredExecutionEnvironment({
+    const runtime = await tieredSandbox({
       nextTier: async (inner) => {
         // What a sub-tier is handed: the same mounts, without the tracking flag.
         sawTrackChanges = (inner.workspace.mounts[0] as { trackChanges?: boolean })
@@ -668,7 +668,7 @@ describe("tiered execution: disposal-time workspace writes", () => {
       await fsp.writeFile(nodePath.join(root, "big.txt"), "x".repeat(1024));
       const events: HarnessEventInput[] = [];
       let nextTierBuilt = false;
-      const runtime = await tieredExecutionEnvironment({
+      const runtime = await tieredSandbox({
         nextTier: async () => {
           nextTierBuilt = true;
           throw new Error("never provisioned");
@@ -700,7 +700,7 @@ describe("tiered execution: disposal-time workspace writes", () => {
     async () => {
       const root = await trackedRoot();
       let nextDisposed = false;
-      const runtime = await tieredExecutionEnvironment({
+      const runtime = await tieredSandbox({
         nextTier: async (inner) => createShellRuntime({
           workspace: inner.workspace,
           files: inner.files,
@@ -737,7 +737,7 @@ describe("tiered execution: disposal-time workspace writes", () => {
     async () => {
       const root = await trackedRoot();
       const events: HarnessEventInput[] = [];
-      const runtime = await tieredExecutionEnvironment({
+      const runtime = await tieredSandbox({
         nextTier: async (inner) => createShellRuntime({
           workspace: inner.workspace,
           files: inner.files,
@@ -771,4 +771,96 @@ describe("tiered execution: disposal-time workspace writes", () => {
       expect(events.filter(({ type }) => type === "harness.file.created")
         .map((event) => event.metadata?.path)).toEqual(["/session/half.txt"]);
     });
+});
+
+// --- Refocus decision 5: the usage the turn's `harness.runtime.usage` event is built from ---
+
+describe("tieredSandbox() usage accounting", () => {
+  it("reports Tier 0 and just-bash's own usage for a turn that never escalated", async () => {
+    await withTempDir(async (dir) => {
+      const session = await sessionFor(dir);
+      const next = justBashTier();
+      const runtime = await tieredSandbox({ nextTier: next.factory })({
+        workspace: localSessionWorkspace(session),
+        files: session.files,
+      });
+
+      await run(runtime, "echo one");
+      await run(runtime, "echo two");
+      await runtime.dispose?.();
+
+      expect(runtime.tiering?.()).toEqual({
+        tier: "tier-0",
+        commands: { tier0: 2, nextTier: 0, denied: 0 },
+        escalations: 0,
+      });
+      expect(runtime.usage?.()).toEqual({ provider: "just-bash", activeMs: expect.any(Number) });
+      expect(next.created()).toBe(0);
+    });
+  });
+
+  it("reports the higher tier once escalated, measured when that tier reports no usage of its own", async () => {
+    await withTempDir(async (dir) => {
+      const session = await sessionFor(dir);
+      const next = scriptedTier(() => OK);
+      const runtime = await tieredSandbox({
+        nextTier: next.factory,
+        policy: { denyCommands: ["docker"], rule: "denyCommands" },
+      })({
+        workspace: localSessionWorkspace(session),
+        files: session.files,
+      });
+
+      await run(runtime, "echo on tier zero");
+      await run(runtime, "docker ps");
+      await run(runtime, "cargo build");
+      await run(runtime, "cargo test");
+      await runtime.dispose?.();
+
+      expect(runtime.tiering?.()).toEqual({
+        tier: "next-tier",
+        commands: { tier0: 1, nextTier: 2, denied: 1 },
+        escalations: 1,
+      });
+      // scriptedTier builds a plain shell runtime around its script: a real execution
+      // environment that never said where it ran, measured around its commands.
+      expect(runtime.usage?.()).toEqual({ provider: "unknown", activeMs: expect.any(Number) });
+    });
+  });
+
+  it("passes a higher tier's own usage through, as the Cloudflare tier will report it", async () => {
+    await withTempDir(async (dir) => {
+      const session = await sessionFor(dir);
+      const reported = { provider: "cloudflare-sandbox", instanceType: "standard-1", vcpu: 0.5, memoryGiB: 4, activeMs: 1200, awakeMs: 600_000, costUsd: 0.009 };
+      const inner = scriptedTier(() => OK);
+      const factory: HarnessSandboxFactory = async (options) => ({ ...(await inner.factory(options)), usage: () => reported });
+      const runtime = await tieredSandbox({ nextTier: factory })({
+        workspace: localSessionWorkspace(session),
+        files: session.files,
+      });
+
+      await run(runtime, "cargo build");
+      await runtime.dispose?.();
+
+      expect(runtime.usage?.()).toEqual(reported);
+      expect(runtime.tiering?.()).toMatchObject({ tier: "next-tier", escalations: 1 });
+    });
+  });
+
+  it("counts a command retried after an emulation gap on both tiers", async () => {
+    await withTempDir(async (dir) => {
+      const session = await sessionFor(dir);
+      await session.files.writeText("/session/build.sh", "cargo build\n");
+      const next = scriptedTier(() => OK);
+      const runtime = await tieredSandbox({ nextTier: next.factory })({
+        workspace: localSessionWorkspace(session),
+        files: session.files,
+      });
+
+      await run(runtime, "sh /session/build.sh");
+
+      expect(runtime.tiering?.()?.commands).toEqual({ tier0: 1, nextTier: 1, denied: 0 });
+      await runtime.dispose?.();
+    });
+  });
 });

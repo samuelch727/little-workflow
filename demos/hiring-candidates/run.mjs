@@ -24,13 +24,12 @@ import * as ai from "ai";
 import { tool } from "ai";
 import { createDeepSeek } from "@ai-sdk/deepseek";
 import {
-  createWorkflowHarness,
-  createLittleWorkflow,
   createToolRegistry,
-  listEvents,
+  defineWorkflow,
   model,
-  runWorkflow,
-} from "little-workflow";
+  runOrchestration,
+} from "@little-stack/workflow";
+import { createWorkflowHarness } from "@little-stack/workflow/internals";
 
 import {
   candidateItemSchema,
@@ -139,7 +138,7 @@ async function main() {
   const postSetup = buildPostSetup({ useStub, liveModels });
   const postRunId = `run_hiring_post_${useStub ? "stub" : "live"}_${Date.now()}`;
   console.log("-- Phase 1: hiring post --");
-  const postResult = await runWorkflow({
+  const postResult = await runOrchestration({
     world,
     workflows: [postSetup.workflow],
     orchestrator: { ...postSetup.orchestrator, maxConcurrentSubRuns: 1 },
@@ -150,7 +149,7 @@ async function main() {
     label: "hiring-post",
     tags,
   });
-  const postEvents = postResult.events ?? (await listEvents(world, postRunId).catch(() => []));
+  const postEvents = postResult.events ?? (await world.listEvents(postRunId).catch(() => []));
   const postSubRuns = await hydrateRunWorkflowResults(world, harvestRunWorkflowResults(postEvents));
   const postSubRun = postSubRuns.find((r) => isPostOutput(r.output));
   if (!isPostOutput(postSubRun?.output)) {
@@ -193,7 +192,7 @@ async function main() {
       attemptRunIds.push(candidateRunId);
       candidateRootRunIds.push(candidateRunId);
       try {
-        candidateResult = await runWorkflow({
+        candidateResult = await runOrchestration({
           world,
           workflows: [candidateSetup.workflow],
           orchestrator: { ...candidateSetup.orchestrator, maxConcurrentSubRuns },
@@ -231,7 +230,7 @@ async function main() {
     }
     for (const runId of attemptRunIds) {
       const attemptEvents =
-        eventsByRunId.get(runId) ?? (await listEvents(world, runId).catch(() => []));
+        eventsByRunId.get(runId) ?? (await world.listEvents(runId).catch(() => []));
       candidateEvents.push(...attemptEvents);
       harvestedRunResults.push(...harvestRunWorkflowResults(attemptEvents));
     }
@@ -246,7 +245,7 @@ async function main() {
   for (const runResult of runResults) {
     if (typeof runResult.runId !== "string") continue;
     try {
-      const usage = sumUsageFromEvents(await listEvents(world, runResult.runId));
+      const usage = sumUsageFromEvents(await world.listEvents(runResult.runId));
       workerUsage.inputTokens += usage.inputTokens;
       workerUsage.outputTokens += usage.outputTokens;
     } catch {
@@ -258,7 +257,7 @@ async function main() {
   orchestratorUsage.outputTokens += postUsage.outputTokens;
   if (typeof postSubRun?.runId === "string") {
     try {
-      const subUsage = sumUsageFromEvents(await listEvents(world, postSubRun.runId));
+      const subUsage = sumUsageFromEvents(await world.listEvents(postSubRun.runId));
       orchestratorUsage.inputTokens += subUsage.inputTokens;
       orchestratorUsage.outputTokens += subUsage.outputTokens;
     } catch {
@@ -369,10 +368,10 @@ function buildPostSetup({ useStub, liveModels }) {
       description: "DeepSeek v4 pro that invents a role and writes a marketing hiring post.",
     });
     return {
-      workflow: createLittleWorkflow({
+      workflow: defineWorkflow({
         id: POST_WORKFLOW_ID,
         description: "Invent a role and write a marketing hiring post as a structured object.",
-        inputSchema: { type: "object", additionalProperties: true },
+        input: { type: "object", additionalProperties: true },
         output: { kind: "object", schema: postSchema },
         models: [postSlot],
         planner: {
@@ -402,14 +401,14 @@ function buildPostSetup({ useStub, liveModels }) {
     { id: "model.post", description: "Unused stub model slot (tool.call path)." },
   );
   return {
-    workflow: createLittleWorkflow({
+    workflow: defineWorkflow({
       id: POST_WORKFLOW_ID,
       description: "Deterministic keyless hiring post.",
-      inputSchema: { type: "object", additionalProperties: true },
+      input: { type: "object", additionalProperties: true },
       output: { kind: "object", schema: postSchema },
       models: [stubSlot],
       planner: { model: { provider: "stub", modelId: "stub-post-planner" }, harness: stubPostPlannerHarness() },
-      globalTools: ["generate_post"],
+      tools: ["generate_post"],
       worker: { harness: createWorkflowHarness() },
     }),
     tools: createToolRegistry({ generate_post: generatePost }),
@@ -427,10 +426,10 @@ function buildCandidateSetup({ useStub, liveModels, role, candidateCount, batchS
       description: "DeepSeek v4 flash worker (thinking off) that generates candidate batches.",
     });
     return {
-      workflow: createLittleWorkflow({
+      workflow: defineWorkflow({
         id: CANDIDATE_BATCH_WORKFLOW_ID,
         description: "Generate one batch of realistic fake candidates as a JSON array.",
-        inputSchema: batchInputSchema,
+        input: batchInputSchema,
         output: { kind: "array", element: candidateItemSchema },
         models: [workerSlot],
         planner: {
@@ -465,14 +464,14 @@ function buildCandidateSetup({ useStub, liveModels, role, candidateCount, batchS
     { id: "model.worker", description: "Unused stub model slot (tool.call path)." },
   );
   return {
-    workflow: createLittleWorkflow({
+    workflow: defineWorkflow({
       id: CANDIDATE_BATCH_WORKFLOW_ID,
       description: "Deterministic keyless candidate batch generator.",
-      inputSchema: batchInputSchema,
+      input: batchInputSchema,
       output: { kind: "array", element: candidateItemSchema },
       models: [stubSlot],
       planner: { model: { provider: "stub", modelId: "stub-cand-planner" }, harness: stubCandidatePlannerHarness() },
-      globalTools: ["generate_batch"],
+      tools: ["generate_batch"],
       worker: { harness: createWorkflowHarness() },
     }),
     tools: createToolRegistry({ generate_batch: generateBatch }),

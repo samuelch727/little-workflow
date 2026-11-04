@@ -1,72 +1,60 @@
 ---
-title: Using littledb
-description: Preview — durable trace storage and a viewer via the littledb Tracing World. Not yet available on npm.
+title: Using LittleDB
+description: Preview — send each workflow run to LittleDB as a trace with the client's tracing World. Not yet available on npm.
 ---
 
-> **Preview — not yet available.** `@little-workflow/littledb` is **not published to npm**, and it needs a littleDB trace engine that is not public. This page describes the adapter as it exists in the repository (`packages/littledb-client`) so you can see the API ahead of release. You cannot install it or point it at an engine today, so use the default [Local World](/docs/v0.1.0-alpha/running/local-world).
+> **Preview — not yet available.** `@little-stack/littledb` is **not published to npm**, and it needs a LittleDB server that is not public. This page describes the client as it exists in the repository (`packages/littledb-client`) so you can see the API ahead of release. You cannot install it today, so use the default [Local World](/docs/v0.1.0-alpha/running/local-world).
 
-littledb is an optional drop-in `World` for Little Workflow that tees every committed event to the littledb trace engine. The runtime stores events locally first (same durability guarantee as [Local World](/docs/v0.1.0-alpha/running/local-world)), then forwards them to the engine for indexed storage, query, and the littledb viewer.
-
-The embedded Local World is the default. littledb wraps it — swap one line and you get durable remote traces without changing anything else.
+LittleDB is an optional service that stores traces and their scores, holds the versions of your agents and workflows, and runs experiments on them. Its client connects with one URL and one API key, and wraps any Little Workflow `World` so each run is also sent to LittleDB as a trace.
 
 ## Install
 
-Not available yet. The package is private to the repository until the littleDB service is public; there is no npm package to install.
+Not available yet. The package is private to the repository until LittleDB is public; there is no npm package to install.
 
 ## Use (preview)
 
 ```ts
-import { runWorkflow } from "little-workflow";
-import { littleDB } from "@little-workflow/littledb";
+import { localWorld, runWorkflow } from "@little-stack/workflow";
+import { createLittleDB } from "@little-stack/littledb";
 
-const world = littleDB({
-  dataDir: ".little-workflow",
-  engineUrl: "http://localhost:4200",
+const db = createLittleDB({ url: process.env.LITTLEDB_URL!, apiKey: process.env.LITTLEDB_API_KEY! });
+
+const world = db.tracingWorld(localWorld({ dataDir: ".little-workflow" }), {
+  workflow: "lending.preapproval",
 });
 
-const result = await runWorkflow({
-  world,
-  workflows: myWorkflow,
-  input: myInput,
-  tools,
+const result = await runWorkflow(myWorkflow, myInput, { world, tools });
+await db.shutdown(); // in a script: send what is queued before the process exits
+```
+
+The wrapper is still the inner World: reads, artifacts, recovery and replay go to it, and it stays the source of truth. It watches the events the runtime appends and sends each run as one trace (`lw_<runId>` by default): the run is the root span, each step attempt a child, and model and tool calls sit under the step that made them, with token usage so LittleDB can price them. Traces are queued and sent in the background; a LittleDB that is down never fails a run.
+
+## Options
+
+- **`workflow`** — the workflow's slug in LittleDB. Required.
+- **`origin`** — `code` (default), `agent` (`define_workflow`) or `planner` (a one-shot plan).
+- **`resolution`** / **`versionId`** — the LittleDB version the run uses, from `db.resolve({ kind: "workflow", ... })` or as an id.
+- **`harness`**, **`userId`**, **`environment`**, **`tags`**, **`metadata`** — added to the trace.
+- **`sessionId`** — the session the run belongs to. A run started by a harness tool call already carries it in its `trigger`, so set this only to override it.
+- **`traceId`** — a fixed trace id, or a function of the run id.
+- **`captureContent`** — `false` sends structure and numbers only.
+
+## Agent-made workflows
+
+`dynamicWorkflows({ world })` takes a World, or a function that picks one per run, for the runs of workflows an agent defines and of one-shot plans. Wrap the default store to trace them:
+
+```ts
+dynamicWorkflows({
+  world: (run) =>
+    db.tracingWorld(localWorld({ dataDir: run.dataDir }), {
+      workflow: run.handle,
+      origin: run.kind === "defined" ? "agent" : "planner",
+    }),
 });
 ```
 
-### Options
+Each such run records how it started (`trigger: { kind: "harness", sessionId, turnId, toolCallId }`), so its trace carries the session and points at the turn's trace and the tool call that started it. Pass `runWorkflow(..., { trigger })` to record your own (a webhook, a cron job); a sub-run points at its parent run.
 
-```ts
-interface LittleDbOptions {
-  dataDir: string;
-  engineUrl: string;
-  fetchImpl?: typeof fetch;
-}
-```
+LittleDB's `db.agentWorkflowRegistry({ harness })`, passed as `dynamicWorkflows({ registry })`, makes each definition a draft version in LittleDB with a proposal a person approves; a turn then offers approved versions, plus the session's own drafts.
 
-- **`dataDir`** — root directory for local event storage. Passed through to the embedded Local World. Required.
-- **`engineUrl`** — base URL of the littledb trace engine (e.g. `http://localhost:4200` for a local instance). Required.
-- **`fetchImpl`** — optional custom `fetch` implementation. Defaults to the global `fetch`. Useful in environments that require custom TLS configuration or proxying.
-
-## What you get
-
-Every `appendEvent` call commits the event to the local SQLite store first, then tees a copy to the engine asynchronously. The tee is best-effort on each write; the engine is rebuildable from local storage via backfill, so a failed push never fails the run.
-
-With events in the engine you can:
-
-- **Query runs** — filter by time range, label, tags, status, and model via `world.listRuns()`.
-- **Load a trace** — retrieve all events for a run with `world.loadRun(runId)`, or load the full nested trace tree starting from a root run with `world.loadTraceTree(rootRunId)`.
-- **Search** — full-text and structured JSON search across event payloads via `world.search({ q, jsonKey, jsonValue })`.
-- **Viewer** — open the littledb viewer (served by the engine) to browse runs, inspect events, and compare traces visually.
-
-## Flushing the tee
-
-The tee drains asynchronously in the background. For scripts and tests where you want to ensure all events have been delivered to the engine before the process exits, call `flushTee()`:
-
-```ts
-await world.flushTee();
-```
-
-## Relation to Local World
-
-littledb wraps `localWorld()` internally. All Local World guarantees apply: events are committed durably to SQLite before the tee runs, replay works from local state if the engine is unreachable, and the `dataDir` layout is identical to a plain Local World. See [Local World](/docs/v0.1.0-alpha/running/local-world) for the full directory layout and durability semantics.
-
-littledb is optional. The open-source runtime works with the default Local World without it, and every feature on the other pages works without littledb.
+LittleDB is optional. Little Workflow works with the default Local World without it.

@@ -2,13 +2,13 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { tool } from "ai";
 import {
-  createWorkflowHarness,
-  createLittleWorkflow,
   createToolRegistry,
+  defineWorkflow,
   localWorld,
   model,
   runWorkflow,
-} from "little-workflow";
+} from "@little-stack/workflow";
+import { createWorkflowHarness } from "@little-stack/workflow/internals";
 
 const dataDir = process.env.DEMO_DATA_DIR;
 const runId = process.env.DEMO_RUN_ID;
@@ -39,7 +39,7 @@ const fixedLwir = {
     description: "Parallel branch group for the alpha kill-and-resume demo.",
   },
   input: { schema: inputSchema },
-  output: { schema: { type: "array" } },
+  output: { schema: { type: "array", items: true } },
   permissions: { tools: ["demo.score"], models: [], secrets: [], network: [] },
   steps: [
     {
@@ -99,17 +99,17 @@ const plannerHarness = {
   },
 };
 
-const workflow = createLittleWorkflow({
+const workflow = defineWorkflow({
   id: "demo.kill-and-resume",
   description: "Parallel branch group for the alpha kill-and-resume demo.",
-  inputSchema,
-  outputSchema: { type: "array" },
+  input: inputSchema,
+  output: { type: "array" },
   models: [plannerModel],
   planner: {
     model: plannerModel,
     harness: plannerHarness,
   },
-  globalTools: ["demo.score"],
+  tools: ["demo.score"],
   worker: { harness: createWorkflowHarness() },
 });
 
@@ -171,18 +171,13 @@ const tools = createToolRegistry({
 });
 
 try {
-  const result = await runWorkflow({
-    world: localWorld({ dataDir }),
-    workflows: workflow,
-    input: {
-      candidates: [
-        { id: "fast-a", score: 1, stall: false },
-        { id: "slow-b", score: 2, stall: true },
-      ],
-    },
-    runId,
-    tools,
-  });
+  const input = {
+    candidates: [
+      { id: "fast-a", score: 1, stall: false },
+      { id: "slow-b", score: 2, stall: true },
+    ],
+  };
+  const result = await runWorkflow(workflow, input, { world: localWorld({ dataDir }), runId, tools });
   console.error(
     `[child] phase=${phase} status=${result.status} events=${result.events.length}`,
   );

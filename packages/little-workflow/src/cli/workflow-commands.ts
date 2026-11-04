@@ -15,22 +15,25 @@ const INIT_USAGE = [
   "Usage: little init [name] [options]",
   "",
   "Scaffold a Little Workflow project: a starter workflow, package.json, and tsconfig.",
+  "It writes files only; it never prompts or installs. For a Harness-first project",
+  "(Node or Next.js), use little setup.",
   "",
   "Options:",
-  "  --here              Scaffold into the current directory",
-  "  --workflow <name>   Starter workflow name (default: candidate-review)",
-  "  --with-harness      Also scaffold a Little Harness agent that calls the workflow",
-  "  --agent <name>      Agent name for --with-harness (default: support)",
-  "  --provider <id>     AI SDK provider (default: deepseek)",
-  "  --model <id>        Model id for the provider",
-  "  --force             Overwrite existing files",
+  "  --here                  Scaffold into the current directory",
+  "  --workflow              Include the starter workflow (always on for init)",
+  "  --workflow-name <name>  Starter workflow name (default: candidate-review)",
+  "  --with-harness          Also scaffold a Little Harness agent that calls the workflow",
+  "  --agent <name>          Agent name for --with-harness (default: support)",
+  "  --provider <id>         Harness catalog provider for the model (default: openai)",
+  "  --model <id>            Model id for the provider",
+  "  --force                 Overwrite existing files",
   "",
 ].join("\n");
 
 const ADD_USAGE = [
   "Usage:",
   "  little add workflow <name> [--dir <dir>] [--provider <id>] [--model <id>] [--force]",
-  "  little add harness [--agent <name>] [--workflow <name>] [--provider <id>] [--model <id>] [--force]",
+  "  little add harness [--agent <name>] [--workflow-name <name> | --new-workflow <name>] [--provider <id>] [--model <id>] [--force]",
   "",
 ].join("\n");
 
@@ -121,10 +124,14 @@ function parseInitArgs(args: readonly string[]): {
     if (arg === "--here") {
       here = true;
     } else if (arg === "--workflow") {
-      workflowName = required(args, index, "--workflow");
-      index += 1;
+      // A boolean, as in little setup. init always scaffolds the starter workflow.
     } else if (arg?.startsWith("--workflow=")) {
-      workflowName = arg.slice("--workflow=".length);
+      throw new Error(`--workflow takes no value; name the workflow with --workflow-name <name>.\n${INIT_USAGE}`);
+    } else if (arg === "--workflow-name") {
+      workflowName = required(args, index, "--workflow-name");
+      index += 1;
+    } else if (arg?.startsWith("--workflow-name=")) {
+      workflowName = arg.slice("--workflow-name=".length);
     } else if (arg === "--with-harness") {
       withHarness = true;
     } else if (arg === "--agent") {
@@ -144,8 +151,8 @@ function parseInitArgs(args: readonly string[]): {
       model = arg.slice("--model=".length);
     } else if (arg === "--force") {
       force = true;
-    } else if (arg === "--yes" || arg === "--no-install") {
-      // Accepted for non-interactive CLI parity. This scaffold does not install packages.
+    } else if (arg === "--yes" || arg === "-y" || arg === "--no-install" || arg === "--install") {
+      throw new Error(`little init never prompts or installs, so it does not take ${arg}. Run your package manager's install afterwards.\n${INIT_USAGE}`);
     } else if (arg?.startsWith("-")) {
       throw new Error(`Unknown option '${arg}' for little init.\n${INIT_USAGE}`);
     } else {
@@ -232,11 +239,13 @@ function parseAddHarnessArgs(args: readonly string[]): {
       index += 1;
     } else if (arg?.startsWith("--agent=")) {
       agentName = arg.slice("--agent=".length);
-    } else if (arg === "--workflow") {
-      workflowName = required(args, index, "--workflow");
+    } else if (arg === "--workflow-name") {
+      workflowName = required(args, index, "--workflow-name");
       index += 1;
-    } else if (arg?.startsWith("--workflow=")) {
-      workflowName = arg.slice("--workflow=".length);
+    } else if (arg?.startsWith("--workflow-name=")) {
+      workflowName = arg.slice("--workflow-name=".length);
+    } else if (arg === "--workflow" || arg?.startsWith("--workflow=")) {
+      throw new Error("Name the workflow to wire with --workflow-name <name>, or create one with --new-workflow <name>.");
     } else if (arg === "--new-workflow") {
       newWorkflowName = required(args, index, "--new-workflow");
       index += 1;
@@ -259,7 +268,7 @@ function parseAddHarnessArgs(args: readonly string[]): {
     }
   }
   if (workflowName !== undefined && newWorkflowName !== undefined) {
-    throw new Error("Choose either --workflow or --new-workflow, not both.");
+    throw new Error("Choose either --workflow-name or --new-workflow, not both.");
   }
   return {
     ...(agentName === undefined ? {} : { agentName }),
@@ -279,7 +288,7 @@ function required(args: readonly string[], index: number, option: string): strin
 
 function successMessage(target: string, withHarness: boolean): string {
   return [
-    `Created ${target}.`,
+    target === "." ? "Created the project in the current directory." : `Created ${target}.`,
     target === "." ? "" : `cd ${target}`,
     "pnpm install",
     "pnpm test:workflow",

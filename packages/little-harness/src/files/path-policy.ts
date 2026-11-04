@@ -11,6 +11,17 @@ export type ResolvedHarnessPath = {
   realPath: string;
 };
 
+/** Where a session's four managed roots are: directories on disk, or folders of its filesystem. */
+export type HarnessRootDirs = Pick<LocalSessionPaths, "sessionDir" | "artifactsDir" | "persistentCheckoutDir" | "agentsDir">;
+
+/** The roots of a workspace kept in one just-bash filesystem, whose root is the workspace root. */
+export const FILESYSTEM_ROOT_DIRS: HarnessRootDirs = {
+  sessionDir: "/session",
+  artifactsDir: "/artifacts",
+  persistentCheckoutDir: "/persistent",
+  agentsDir: "/.agents",
+};
+
 export type HarnessPathPolicy = {
   readOnlyPersistentDirs?: readonly string[];
   bypassReadOnly?: boolean | undefined;
@@ -24,7 +35,7 @@ const ROOTS: Record<ManagedRoot, string> = {
 };
 
 export function resolveHarnessPath(
-  paths: LocalSessionPaths,
+  paths: HarnessRootDirs,
   harnessPath: string,
   operation: "read" | "write" | "delete" | "list",
   policy: HarnessPathPolicy = {},

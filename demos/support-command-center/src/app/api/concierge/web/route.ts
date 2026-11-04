@@ -3,7 +3,7 @@ import {
   loadWebRichConnector,
   type LoadWebRichConnectorOptions,
   type LoadedWebRichConnector,
-} from "little-harness/connectors/runtime";
+} from "@little-stack/harness/connectors/runtime";
 import conciergeWebConnector, {
   type ConciergeWebExtraBody,
   type ConciergeWebUser,

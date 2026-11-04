@@ -1,0 +1,88 @@
+---
+title: Skills
+description: How skills teach an agent procedures without bloating every prompt.
+---
+
+import { Files, File, Folder } from 'fumadocs-ui/components/files';
+
+Skills are procedural knowledge. They tell the model how to handle a situation, when to use tools, and what quality bar to apply.
+
+They are different from tools. Tools do things. Skills teach the agent how to work.
+
+MCP guide skills follow the same rule. When `createHarness({ mcp })` includes a
+server guide, Little Harness stages a guide under
+`.agents/skills/<server-id>-mcp/SKILL.md`; that file explains when and how to
+use the server, but it does not grant access. MCP access comes from the
+configured gateway tools, usually `mcp_list_tools` and `mcp_call_tool`.
+
+## Skill Shape
+
+A skill can be a directory with a `SKILL.md` file:
+
+<Files>
+  <Folder name="skills" defaultOpen>
+    <Folder name="customer-briefs" defaultOpen>
+      <File name="SKILL.md" />
+      <Folder name="examples" defaultOpen>
+        <File name="renewal-brief.md" />
+      </Folder>
+    </Folder>
+  </Folder>
+</Files>
+
+`SKILL.md` should contain frontmatter and instructions:
+
+```md
+---
+name: customer-briefs
+description: Use when preparing renewal, expansion, or risk briefs for account teams.
+---
+
+Before writing the brief, inspect recent support incidents, product usage,
+contract dates, and open account notes. Prefer evidence-backed bullets.
+```
+
+## Using Skills
+
+```ts
+const harness = createHarness({
+  host: localHost(),
+  model,
+  system: "Help account teams prepare high-signal customer work.",
+  tools: { searchDocs, queryCustomers, searchIncidents },
+  skills: [
+    skill("./skills/customer-briefs"),
+    skill("https://github.com/anthropics/skills", {
+      skills: ["frontend-design"],
+    }),
+  ],
+});
+```
+
+The runtime puts skill names and descriptions in the prompt, then stages full skill bodies under `.agents/skills/<name>/` from the harness working directory for on-demand reading:
+
+```bash
+cat .agents/skills/frontend-design/SKILL.md
+```
+
+With `runtime: { bash: false }` the agent has no shell to read them with, so the
+harness adds a `load_skill` tool instead. It takes a skill's name and returns its
+`SKILL.md`, or another file of the skill when asked, and the skill list in the prompt
+says to open skills with it.
+
+Harness [memory](/docs/harness/v0.1.0-alpha/build-agents/memory) adds a built-in `memory`
+skill. A skill of your own named `memory` replaces it.
+
+The helper that registers a skill is documented in [skill()](/docs/harness/v0.1.0-alpha/reference/skill-helper).
+
+## What Belongs In A Skill
+
+Use skills for:
+
+- domain vocabulary
+- decision procedures
+- report formats
+- tool usage rules
+- review checklists
+
+Do not use skills for secrets, user-specific memory, or large raw datasets. Put persistent app data behind tools or Persistent Dirs, and what the agent learns in [memory](/docs/harness/v0.1.0-alpha/build-agents/memory).

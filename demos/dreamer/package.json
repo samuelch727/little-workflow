@@ -13,8 +13,8 @@
     "@ai-sdk/deepseek": "^3.0.58",
     "ai": "^7.0.126",
     "jiti": "^2.7.0",
-    "little-harness": "workspace:*",
-    "little-workflow": "workspace:*",
+    "@little-stack/harness": "workspace:*",
+    "@little-stack/workflow": "workspace:*",
     "zod": "^4.4.3"
   },
   "devDependencies": {

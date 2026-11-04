@@ -1,0 +1,146 @@
+---
+title: HarnessSession
+description: Session handles, continuation, and out-of-band file staging.
+---
+
+A `HarnessSession` is the durable isolated boundary for one conversation or job.
+It owns the private workspace, artifacts, Persistent Dir checkouts, trace, and
+continuation handle.
+
+Most apps can pass a string session key directly to `streamHarness()` or
+`generateHarness()`. Use an explicit session handle when the host app needs to
+stage files or inspect state outside a model turn.
+
+## Basic Usage
+
+```ts
+const session = await harness.sessions.getOrCreate({
+  id: chatId,
+  extraBody,
+});
+
+await session.files.write("/session/app-context/customer-history.csv", stream, {
+  mediaType: "text/csv",
+  source: "app-context",
+});
+
+const result = streamHarness({
+  harness,
+  messages,
+  session,
+});
+```
+
+## API Shape
+
+```ts
+type HarnessSession = {
+  id: string;
+  dataDir?: string;
+  files: FileWriter;
+  artifacts: HarnessArtifactAccessor;
+  trace: TraceRef;
+  status(): Promise<HarnessSessionStatus>;
+  setStatus(patch: Partial<HarnessSessionStatus>): Promise<void>;
+  markMessageStaged(messageId: string): Promise<void>;
+  setReadOnlyPersistentDirs(harnessDirs: readonly string[]): void;
+  getReadOnlyPersistentDirs(): readonly string[];
+};
+```
+
+`dataDir` is an optional absolute directory for host-managed data the session
+owns, such as the event stores of workflow runs its workflow tools start
+(`<dataDir>/workflows`). `localHost()` sets it to the session folder; a custom
+host that omits it gets stores relative to the process working directory
+(`<sessionId>/workflows`).
+
+The typed mutators (`setStatus`, `markMessageStaged`) and the read-only
+Persistent-Dir accessors are part of the session port — the loops record turn
+state through them instead of duck-typing host internals. Session handles
+should be stable enough to pass between host setup code and execution calls.
+The loops call the mutators as optional (`session.setStatus?.(...)`), so a
+session written against the older five-member shape still runs — it just loses
+status tracking and staging dedupe until the mutators are implemented.
+
+## Session Manager
+
+```ts
+type HarnessSessionManager<TExtraBody = unknown> = {
+  getOrCreate(options: GetOrCreateSessionOptions<TExtraBody>): Promise<HarnessSession>;
+  get(id: string): Promise<HarnessSession | undefined>;
+};
+```
+
+### `getOrCreate`
+
+Creates a new isolated workspace or resumes an existing one.
+
+```ts
+const session = await harness.sessions.getOrCreate({
+  id: "chat_123",
+  extraBody: { userId: "user_123" },
+});
+```
+
+### `get`
+
+Looks up an existing session without creating one.
+
+```ts
+const session = await harness.sessions.get("chat_123");
+```
+
+## `GetOrCreateSessionOptions`
+
+### `id`
+
+`string`
+
+App-defined session key.
+
+### `extraBody`
+
+`TExtraBody`
+
+App-defined context used by storage, policy, events, and traces.
+
+### `metadata`
+
+Host metadata object.
+
+Optional host metadata for trace and debugging.
+
+## Out-Of-Band File Staging
+
+Use `session.files` when data arrives between chat messages.
+
+```ts
+await session.files.write("/session/uploads/report.pdf", reportStream, {
+  mediaType: "application/pdf",
+  source: "background-upload",
+});
+```
+
+The next agent turn can see the file in the same private workspace.
+
+## Persistent Dir Writes
+
+If the staged path is inside a Persistent Dir, the write still lands in the
+session checkout only.
+
+```ts
+await session.files.write("/persistent/user/uploads/report.pdf", reportStream);
+```
+
+Nothing is committed at write time, and the next turn **resets** every
+`/persistent/...` checkout from backing storage before executing — discarding
+uncommitted host writes. To persist a host-staged write, stage it in a
+`commit: "manual"` dir and call `result.commitManual()` before starting another
+turn. See [Persistent Dirs](/docs/harness/v0.1.0-alpha/foundations/persistent-dirs) for
+the full commit model.
+
+## Isolation Rule
+
+Two sessions must not see each other's files unless the developer configured a
+shared Persistent Dir or exposed an app tool that deliberately reads shared
+data.

@@ -22,14 +22,14 @@ When installed from the package, the binary is exposed as `little-harness`. Whil
 alpha, install or run it from the `alpha` dist-tag (Node.js 22+):
 
 ```bash
-pnpm add -D little-harness@alpha
+pnpm add -D @little-stack/harness@alpha
 pnpm little-harness --help
 ```
 
 In a workspace, you can run it through pnpm:
 
 ```bash
-pnpm --filter little-harness exec little-harness --help
+pnpm --filter @little-stack/harness exec little-harness --help
 ```
 
 ## Shared Options
@@ -67,7 +67,7 @@ searchable AI SDK language-provider and model selection, accepts a custom provid
 before installing dependencies.
 
 ```bash
-npx little-harness@alpha init
+npx @little-stack/harness@alpha init
 ```
 
 For scripted setup, pass the project name, provider, model, and confirmation flags:
@@ -85,10 +85,10 @@ little-harness init --here --provider anthropic --model claude-sonnet-4-6
 `init` writes `little-harness.json` (`{ "agents": "agents" }`), creates `agents/`, and scaffolds a
 starter `support` agent. Pass `--force` to overwrite an existing workspace.
 
-The generated `package.json` pins versions instead of using `latest`: `little-harness` at the CLI's own
+The generated `package.json` pins versions instead of using `latest`: `@little-stack/harness` at the CLI's own
 version (`^0.2.0-alpha.0` for this release), `ai` at `^7.0.0`, the selected provider package at an AI SDK
 7-compatible range, and a TypeScript 6 / `tsx` toolchain. The same table is exported as
-`scaffoldDependencyVersions()` from `little-harness/scaffold`.
+`scaffoldDependencyVersions()` from `@little-stack/harness/scaffold`.
 
 Provider packages and model ids come from AI SDK providers. If the listed models do not include the one
 you need, type the provider's model id directly. The catalog currently offers 24 provider choices: the
@@ -108,6 +108,11 @@ Add another agent to an existing workspace at `agents/<name>` — an `agent.ts` 
 template), an example `tools/echo.ts`, and `instructions.md`. Pass `--provider <provider>` and
 `--model <model>` to choose the provider and model written into the new `agent.ts` (defaults to the
 `anthropic` provider); pass `--force` to overwrite an existing folder.
+
+> **UNRELEASED:** in the current source, the default provider is `openai` (`gpt-5.2`) for
+> `little-harness init` and `little-harness new`, matching `little setup` and `little init`.
+> No npm version includes this yet. `init` and `new` also reject unknown options, print usage for
+> `--help`, and `init --workflow` points to `little setup --workflow`, which scaffolds a Workflow.
 
 ```bash
 little-harness new support
@@ -163,6 +168,55 @@ Skipped connector candidates:
 Each connector line is `id  kind  path`. A flat `connectors/<id>.ts` helper that is not a connector
 descriptor is skipped and reported with its reason; a broken nested `connectors/<id>/connector.*`
 folder is a hard error that exits non-zero.
+
+## `start <name>`
+
+Serve an agent folder: its connectors at `/connectors/<id>`, an HTTP API for
+messages, Input Type jobs, questions and schedules, its schedules on time, and
+turns that continue once their wait is over. Runs until stopped (Ctrl-C or
+`SIGTERM`).
+
+```bash
+little-harness start support
+little-harness start support --port 8080 --host 0.0.0.0 --token "$TOKEN"
+```
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--port <n>` | `3000` | The port; `0` picks a free one. |
+| `--host <address>` | `127.0.0.1` | The address to listen on. |
+| `--token <token>` | `LITTLE_HARNESS_TOKEN` | Required by the API routes as `Authorization: Bearer <token>`. Without one, the server listens only on a loopback address, and the API answers only JSON requests to `localhost`, `127.0.0.1` or `[::1]` without an `Origin` header. Set one behind a tunnel (ngrok, cloudflared): tunneled requests arrive from loopback. Connectors are served either way. |
+| `--resume <timer\|caller>` | `timer` | Who continues a parked turn once its wait is over: this server on its timer, or only your app through `POST /sessions/<session>/resume`. See [Continuing Turns From Your App](/docs/v0.1.0-alpha/build-agents/serving-agents#continuing-turns-from-your-app). |
+
+Schedule state goes to the agent host's data dir, or `--data-dir` when the host
+has none. See [Serving An Agent](/docs/v0.1.0-alpha/build-agents/serving-agents)
+for the routes.
+
+## `dev <name>`
+
+`start` in a child process that restarts when a file in the agent folder
+changes, with a terminal chat against it. In the chat, `:questions` lists the
+questions the agent asked, `:answer <n> <option or text>` answers one, `:reset`
+starts a new session, and `:exit` quits. Takes `--port`. When
+`LITTLE_HARNESS_TOKEN` is set, the server requires it and the chat sends it.
+
+```bash
+little-harness dev support
+```
+
+## `schedules <name>`
+
+List an agent's schedules with their next and last run, or run one now in this
+process with `schedules run <name> <id>`.
+
+```bash
+little-harness schedules support
+little-harness schedules run support morning-backlog
+```
+
+```txt
+morning-backlog  0 9 * * 1-5 (Asia/Hong_Kong)  next 2026-10-15T01:00:00.000Z  last never
+```
 
 ## `sessions`
 

@@ -1,0 +1,81 @@
+---
+title: What Little Workflow Is
+description: The control plane and runtime for AI-generated, durable, inspectable workflows.
+---
+
+Little Workflow is a TypeScript library for AI-generated work that must be bounded, durable, inspectable, and replayable.
+
+The developer describes a goal, inputs, schemas, model slots, tools, skills, and safety rules. An AI agent running in a structured **Harness** designs the workflow graph (Planner) and executes the resulting steps (Worker). A Fixer can repair a failed `code.run` step, but only with a custom worker harness: the default worker does not run `code.run` steps. Every run is observable through a unified event log and durable through per-step memoization, and filesystem **Memory Stores** accumulate across runs. To compose several workflows, hand them to a [Little Harness](/docs/harness) agent as typed tools.
+
+Little Workflow is optional. Most projects start with Little Harness and add a workflow when a job must be bounded, durable and replayable; see [How they fit](/docs/how-they-fit). To create a project with an agent and an optional sample workflow, use [Setup](/docs/get-started/setup).
+
+```sh
+pnpm add @little-stack/workflow@alpha ai@^7 zod @ai-sdk/anthropic   # or any AI SDK 7 provider
+```
+
+The current release is `0.2.0-alpha.1`. It requires Node.js 22+ and AI SDK 7, which is a peer dependency. pnpm 10 projects must allow the `better-sqlite3` build; see the [Quickstart](/docs/workflow/v0.1.0-alpha/getting-started/quickstart#install).
+
+> **UNRELEASED review preview.** This documentation snapshot also covers changes that exist only in the current source and are not in any npm version yet; no version number has been assigned to them. Those sections are labeled **UNRELEASED** and listed in the [Changelog](/docs/workflow/v0.1.0-alpha/reference/changelog#unreleased-review-preview). The site is not an exact catalog of the npm `0.2.0-alpha.1` API.
+
+```txt
+WorkflowDefinition
+-> Harness session (Planner)
+-> planner draft LWIR
+-> deterministic validation and repair
+-> immutable WorkflowVersion
+-> durable Run (workers execute each step via Harness)
+-> artifacts, events, streams, replay, retry, fork
+```
+
+## Key Primitives in v0.1.0-alpha
+
+**Harness** is the agent runtime each role lives in — model + bash environment + scoped storage + tools + persistent agent loop. Think Claude Code or OpenCode. The SDK ships a default `workflowHarness`; devs can substitute by implementing the single `run(task, ctx)` interface. Every model call and tool call inside a harness session is event-logged for deterministic crash recovery.
+
+**Composition** happens on the Little Harness side. `asHarnessWorkflow` turns each workflow into a typed tool for a `createHarness` agent, which decides when to call which workflow and how to chain their outputs. There is no static pipeline IR. See [Compose With Little Harness](/docs/workflow/v0.1.0-alpha/authoring/compose-with-harness). The older **Orchestrator** role (`runWorkflow` with an array of definitions and the `plan_workflow` / `run_workflow` / `start_workflow` tools) is deprecated.
+
+**Memory Stores** are persistent, filesystem-shaped collections of text documents mounted into each harness session at `/mnt/memory/workflow/`, `/mnt/memory/pipeline/`, and `/mnt/memory/org/`. Planners write lessons learned; future planners read them. Agents self-improve across runs without model fine-tuning.
+
+## Product Boundaries
+
+Little Workflow is:
+
+- an AI workflow compiler
+- a durable execution runtime with harness-level crash recovery
+- an artifact-first audit system
+- a capability allowlist over model, tool, skill, and code access (the full firewall is post-alpha)
+- a local development experience through Local World
+
+Little Workflow is not:
+
+- a chat UI
+- a generic multi-agent framework
+- an n8n clone
+- a Temporal replacement
+- a low-code automation builder first
+
+## Where It Sits In The Stack
+
+Little Workflow is the SDK half of the Little stack, with Little Harness. A
+workflow's planner, worker and fixer roles run in a harness, so a workflow run
+lives in the same [workspace](/docs/how-they-fit#workspaces) as the agent that
+started it. [LittleDB](/docs/littledb), the product, records each run as a
+trace, scores it, and improves the workflow's step prompts and models the same
+way it improves an agent; `db.tracingWorld()` and `db.managedWorkflow()` are the
+two hooks. Workflow needs nothing from LittleDB or from a workspace engine to
+run. See [How they fit](/docs/how-they-fit).
+
+## Start Here
+
+- [Setup](/docs/get-started/setup) — create a project with `little setup` (shared guide for all products)
+- [How they fit](/docs/how-they-fit) — Workflow next to Harness, LittleDB and workspaces
+- [Releases](/docs/releases) — what `0.2.0-alpha.1` contains and what is UNRELEASED
+
+The **Guides and API** section keeps the `v0.1.0-alpha` segment in its URLs so old links stay stable. That segment is a historical URL, not the package version. The section covers the current alpha line, including the Harness, Memory Stores, Run Scratch, and Skills primitives, plus composition with Little Harness. See the [Roadmap](/docs/workflow/v0.1.0-alpha/roadmap) for post-alpha direction, and [Comparisons](/docs/workflow/comparisons) for where Little Workflow fits next to other tools.
+
+For authoring, use `defineWorkflow`: one model, inline tools, and plain input/output schemas, with the full config (several model slots, a planner config, a fixed plan) available on the same call. Start with the [Quickstart](/docs/workflow/v0.1.0-alpha/getting-started/quickstart).
+
+- [Overview](/docs/workflow/v0.1.0-alpha/getting-started) — Harness-based agent runtime, Memory, Skills
+- [Quickstart](/docs/workflow/v0.1.0-alpha/getting-started/quickstart) — define a workflow and run it in one call
+- [Define a Workflow](/docs/workflow/v0.1.0-alpha/authoring/define-a-workflow) — the ergonomic `defineWorkflow` front door
+- [Compose With Little Harness](/docs/workflow/v0.1.0-alpha/authoring/compose-with-harness) — hand workflows to an agent as typed tools
+- [Roadmap](/docs/workflow/v0.1.0-alpha/roadmap) — where Little Workflow is headed after the alpha

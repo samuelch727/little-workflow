@@ -8,10 +8,10 @@ Local World is the alpha development backend for Little Workflow.
 It lets developers compile, run, inspect, and replay workflows without Postgres, Redis, S3, or cloud accounts.
 
 ```ts
-await runWorkflow({
-  world: localWorld({ dataDir: ".little-workflow" }),
-  workflows: myWorkflow,
-  input: myInput,
+await runWorkflow(myWorkflow, myInput); // world defaults to localWorld()
+
+await runWorkflow(myWorkflow, myInput, {
+  world: localWorld({ dataDir: ".little-workflow-tests" }),
 });
 ```
 
@@ -29,7 +29,7 @@ type LocalWorldOptions = {
 
 ```ts
 import os from "node:os";
-import { localWorld } from "little-workflow";
+import { localWorld } from "@little-stack/workflow";
 
 const world = localWorld({
   dataDir: ".little-workflow",
@@ -115,11 +115,11 @@ The manifest is written via atomic rename (write to `*.tmp`, rename into place) 
 
 ## API Shape
 
-The `LocalWorld` API is unchanged. Code should depend on runtime APIs, not the on-disk layout:
+Code should depend on runtime APIs, not the on-disk layout:
 
 - `runWorkflow()`
 - `localWorld()`
-- `listEvents()`
+- the World methods: `world.listEvents(runId)`, `world.appendEvent(...)`, `world.readArtifact(ref)`
 - `replayRun()`
 
 The on-disk layout described above is an implementation detail. It grew to support memory stores and nested sub-runs, but the API surface is stable. Store interfaces, `SkillStore`, and `PluginStore` arrive in later versions when production adapters, skills, and plugins exist.

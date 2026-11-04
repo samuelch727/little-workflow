@@ -1,0 +1,207 @@
+---
+title: Runtime I/O and Lease admission
+description: Canonical-first execution capacity, workspace attachment, files, endpoints, and metrics.
+---
+
+Little Compute keeps the trusted agent loop independent from disposable
+sandbox capacity. A running Attempt acquires execution capacity only when it
+first needs an untrusted command, file mutation, browser, PTY, or declared
+service. Model calls, planning, Publications, and durable waits do not create a
+Reservation or Sandbox Lease.
+
+Baseline Session Files are admitted against a deterministic guest-storage
+requirement: page-rounded immutable bytes, a second copy of mutable workspace
+bytes, bounded directories, manifests, markers, and inode/dentry overhead.
+A manifest-only preflight runs before dispatch claim or provider mutation and
+produces one immutable envelope over the derived baseline authority, source
+and manifest identities, file/byte/storage totals, runtime/network profiles,
+and resource limits. PostgreSQL recomputes it on registration; the supervisor
+recomputes it before staging and ready evidence carries the same digest.
+The provider bridge opens the immutable source lazily for each exact attempt
+and streams it directly to the supervisor through a 64 KiB backpressured pipe.
+It retains neither a full host frame nor a second readback copy. A bounded
+in-guest inspect verifies the durable generation, visible projection, and
+exported files before ready commit. Path depth and total segments are bounded.
+M3's charged content-addressed snapshot store remains a reuse and cold-start
+optimization rather than a prerequisite for bounding this bridge.
+
+```txt
+first sandbox operation
+  -> hold conserved Reservation and create the requested Lease/provider intent
+  -> admit and bind the exact baseline manifest with zero provider I/O
+  -> claim dispatch and register the immutable envelope atomically
+  -> cross send_started, mark Reservation active, and mark Lease provisioning
+  -> issue one provider call outside the authority transaction
+  -> provider stages the baseline and returns exact workspace evidence
+  -> commit that evidence and the sole writable attachment atomically
+  -> admit fenced exec, file, and private-endpoint operations
+```
+
+The split around provider dispatch is deliberate. A held Reservation cannot
+pretend a provider mutation occurred. Conversely, once a provider send may
+have occurred, the Reservation remains charged while reconciliation proves the
+exact resource present or absent. Provider I/O never runs inside an Operation
+authority transaction.
+
+## Writable attachment
+
+A Lease reaches `in_use` only from `ready`, using signed, short-lived provider
+evidence for the exact tenant, Lease generation and fence, provider cluster,
+resource UID and epoch, provider authority epoch, workspace generation, and
+workspace-head authority digest. Little commits the evidence receipt and the
+attachment in one Task-stripe transaction.
+
+There is at most one writable attachment for an Attempt. A stale workspace
+generation, different provider incarnation, expired verifier key, or replay
+with changed evidence fails before a command is admitted. Detach uses the
+separate quiesce and final-workspace-CAS path; a live writer is never treated
+as a durable snapshot.
+
+## Binary file transfer
+
+The application file boundary accepts only canonical children of the mounted
+`/session` root. It rejects traversal, non-normal paths, stale workspace
+generation authority, unsafe ranges, oversized files, and chunks above the
+negotiated provider limit.
+
+Writes are streamed with backpressure and without buffering an entire file.
+Every producer-owned chunk is copied before it crosses the provider boundary;
+the exact declared size and SHA-256 digest must verify at end of stream. A
+provider that returns without consuming and verifying the complete source is a
+contract violation. Reads require both an exact path-digest authority and the
+immutable SHA-256 content identity, including the first range, so reconnecting
+ranges cannot splice two file versions. Returned chunks are copied and checked
+against per-chunk and total byte bounds.
+
+Admission reserves both a transfer slot and its maximum bytes before provider
+I/O. The registry is finite and fail-fast: it retains no hidden waiter queue,
+and callers can share one registry across provider instances for an
+installation-wide bound. Cancellation, early iterator return, and failures
+release the reservation in `finally` paths.
+
+Providers must install a verified write atomically. Partial bytes from a
+failed producer are not a new canonical workspace generation; the subsequent
+workspace outcome protocol decides whether the mutation is committed,
+proven unchanged, or unknown.
+
+Direct Podman deliberately advertises binary file transfer as unavailable.
+`podman cp` extracts onto the visible final path without a guest-side fsync and
+same-filesystem atomic-rename receipt. File support remains off until a pinned,
+qualified guest transport can stage privately, verify size/digest, fsync, and
+rename; capability discovery never turns that unsafe fallback on silently.
+
+## Fenced exec settlement
+
+Exec acceptance is canonical before provider I/O. The provider receives one
+stable `execId`; an ambiguous begin response is inspected by that identity and
+is never blindly reissued. A known start rejection uses a separate typed path:
+the provider first persists `start_failed`, then exposes a signed observation
+bound to the exact exec request digest, provider resource incarnation, Lease
+authority, a bounded credential-free failure code, zero child processes, and
+the exact last-output sequence. Native stderr or error messages are not
+terminal evidence.
+
+Little durably spools any known diagnostic prefix and seals an immutable
+Artifact-backed output manifest even when the exact cut is empty. Only that
+sealed spool receipt can be committed. A never-started command must also carry
+a provider-backed `proven_unchanged` workspace result at the same generation;
+changed or unknown workspace evidence cannot be relabeled as a safe start
+failure. Replays inspect and verify the same evidence without running begin a
+second time.
+
+Migration v15 adds a separate durable provider-gateway ledger for that native
+boundary. One database-safe-time owner generation holds the exact canonical
+Exec, Lease attachment, provider resource incarnation, runtime/workspace cut,
+and supervisor request digests. Every claim, heartbeat, send-start, raw
+observation, output page, output ACK, cancellation, recovery, and release is a
+compare-and-set transition with an immutable receipt. Takeover requires expiry
+of the previous owner and the same immutable subject; a newer workspace
+attachment cannot rewrite the historical Exec or make it eligible for resend.
+
+Output acknowledgment is deliberately split. The gateway first records the
+exact supervisor page metadata and sink cut, then records an ACK intent, then
+asks the supervisor to advance its spool cut, and finally records the ACK
+result. Release of a provider-observed terminal Exec requires the latest
+receipt-linked terminal page, an exact durable sink binding, and a supervisor
+ACK through the terminal sequence. A claimed command proven never sent uses a
+separate deterministic no-op cleanup receipt. PostgreSQL stores metadata and
+digests, not stdout/stderr bytes.
+
+The provider-gateway LOGIN can call only the sealed v15 functions. Direct
+ledger/receipt mutation and helper execution are revoked. Owner tokens are
+stored only as domain-separated hashes, stale-owner replay is denied, recovery
+scans are bounded, and nullable authority or compare-and-set inputs fail
+closed.
+
+## Private endpoints
+
+Little chooses and commits the endpoint-grant ID, one-time capability
+redemption, port, protocol, bearer fingerprint, authority digest, and expiry
+before asking a provider to expose a route. The provider receives that exact
+request and must make it idempotent. It cannot invent a second grant or bearer
+after an ambiguous response.
+
+The returned route must repeat the exact grant, bearer, and expiry. Preview
+URLs allow HTTPS, or cleartext HTTP only on loopback, and reject URL userinfo,
+query-carried secrets, and fragments. A mismatched response triggers exact
+cleanup and fails closed. Normal revocation commits canonical revocation or
+Lease closure first, then removes the provider route under current positive or
+newer-epoch cleanup authority.
+
+Bearer bytes are returned only to the trusted caller that requested the route.
+Receipts and request digests bind a domain-separated fingerprint instead of
+the bearer itself.
+
+## Resource metrics
+
+Metrics reads use an exact resource-generation and metadata-read authority.
+Concurrent readers with the same tenant, principal, authority digest, and
+provider resource share one in-flight provider request and one short-lived
+cache entry. Different authorities never share a cached result, and canonical
+authority is revalidated before completed or in-flight cache reuse so
+revocation takes effect immediately.
+
+Samples reject invalid, stale, future, out-of-order, or regressing cumulative
+counters. CPU and network counters are monotonic for one exact provider
+generation; a supported counter cannot disappear to `null` and later reset.
+Memory and PID counts remain gauges. Completed cache entries and counter heads
+use bounded least-recently-used retention. In-flight observations live in a
+separate non-evictable registry with capacity reserved before provider I/O, so
+eviction cannot start duplicate work and fleet cardinality cannot grow
+control-plane memory without limit. Cancelling one waiter does not cancel an
+observation still needed by another waiter.
+
+## First-instruction security gate
+
+Every runtime profile is immutable and digest-bound to one exact provider
+kind/version/cluster, runtime digest, isolation tier, conformance interval, and
+provider-versioned network-surface manifest. The manifest explicitly lists
+metadata, workload-identity, cluster-service, node-local, provider, and
+control-plane surfaces across canonical IPv4/IPv6 CIDRs and DNS names. Missing
+or unknown surface coverage blocks promotion.
+
+The v1 profile admits deny-all networking only. It also fixes non-root UID/GID,
+read-only rootfs, no privilege escalation, no host namespaces, no service
+account token, no host paths/devices/provider sockets, `ALL` capabilities
+dropped, pinned seccomp evidence, bounded writable `/session`/`/tmp` mounts,
+digest-only images, finite CPU/memory/disk/PID/inode/output/time limits, no
+parent environment, and broker-reference-only credential grants.
+
+Before any untrusted instruction, a trusted out-of-sandbox attester signs the
+exact Lease/provider incarnation, runtime/profile digest, network-policy
+generation and binding, placement/runtime epochs, admission window, and
+attester key version. Direct IPv4/IPv6, integer/octal/hex IPv4, mapped IPv6,
+redirect, DNS-rebinding, and CONNECT probes must all report blocked before
+zero response or token bytes reach the sandbox. The same evidence shape is
+reserved for initial launch, checkpoint restore, and IP reuse; stale, replayed,
+misbound, incomplete, or incorrectly signed evidence keeps the first
+instruction closed.
+
+## Provider conformance
+
+The in-memory conformance provider now verifies control-plane-selected endpoint
+identity and exact idempotency in addition to binary file and metrics behavior.
+Selected providers advertise only capabilities they implement. Direct Podman,
+for example, reports both private endpoints and binary file installation as
+unavailable until the corresponding Little gateways are installed and
+qualified.

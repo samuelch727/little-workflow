@@ -67,9 +67,8 @@ const nativeConstructorSources = {
 } as const;
 const finalizationRegistryProbeToken = {};
 const processObject = nodeProcess as unknown;
+const wasmCompileErrorCapture = captureWasmCompileError();
 const platformBrandRegistry = createPlatformBrandChecks();
-const platformBrandChecks = platformBrandRegistry.checks;
-const platformBrandProbesCompromised = platformBrandRegistry.compromised;
 const platformSingletons = createPlatformSingletons();
 
 type NonHashableErrorOptions = {
@@ -115,7 +114,12 @@ export function sha256Digest(value: unknown): string {
   return `sha256:${sha256Hex(value)}`;
 }
 
-function serialize(value: unknown, path: string, seen: WeakSet<object>): string {
+function serialize(
+  value: unknown,
+  path: string,
+  seen: WeakSet<object>,
+  registry: PlatformBrandRegistry = platformBrandRegistry,
+): string {
   if (value === null) {
     return "null";
   }
@@ -161,7 +165,7 @@ function serialize(value: unknown, path: string, seen: WeakSet<object>): string 
     throw nonHashable("Proxy objects are not hashable.", value, path);
   }
 
-  if (isBrandedExoticObject(object)) {
+  if (isBrandedExoticObject(object, registry)) {
     throw nonHashable("Built-in exotic objects are not hashable.", value, path);
   }
 
@@ -195,7 +199,7 @@ function serialize(value: unknown, path: string, seen: WeakSet<object>): string 
       if (index > 0) {
         result += ",";
       }
-      result += serialize(descriptor.value, itemPath, seen);
+      result += serialize(descriptor.value, itemPath, seen, registry);
     }
     reflectApply(weakSetDelete, seen, [object]);
     return `${result}]`;
@@ -250,7 +254,7 @@ function serialize(value: unknown, path: string, seen: WeakSet<object>): string 
     if (resultParts > 0) {
       result += ",";
     }
-    result += `${jsonStringify(key)}:${serialize(descriptor.value, propertyPath, seen)}`;
+    result += `${jsonStringify(key)}:${serialize(descriptor.value, propertyPath, seen, registry)}`;
     resultParts += 1;
   }
 
@@ -288,9 +292,9 @@ function validateArrayShape(value: readonly unknown[], path: string): void {
   }
 }
 
-function isBrandedExoticObject(value: object): boolean {
+function isBrandedExoticObject(value: object, registry: PlatformBrandRegistry): boolean {
   return (
-    platformBrandProbesCompromised ||
+    registry.compromised ||
     reflectApply(arrayIncludes, platformSingletons, [value]) ||
     isCurrentProcessEnv(value) ||
     utilIsDate(value) ||
@@ -312,15 +316,60 @@ function isBrandedExoticObject(value: object): boolean {
     utilIsAnyArrayBuffer(value) ||
     utilIsBoxedPrimitive(value) ||
     arrayBufferIsView(value) ||
-    matchesPlatformBrand(value)
+    matchesPlatformBrand(value, registry.checks)
   );
 }
 
 type BrandCheck = (value: object) => unknown;
+type WasmSampleState = "sample" | "refused" | "failed";
+type WasmSampleResult =
+  | { readonly state: "sample"; readonly module: object }
+  | { readonly state: "refused" | "failed" };
 type PlatformBrandRegistry = {
   readonly checks: readonly BrandCheck[];
   readonly compromised: boolean;
+  readonly wasmSampleState: WasmSampleState;
+  readonly wasmInstanceGetterRegistered: boolean;
 };
+
+/** Internal diagnostics for the one-off workerd acceptance witness; not a root API. */
+export function canonicalBrandProbeDiagnostics(): {
+  readonly compromised: boolean;
+  readonly wasmSampleState: WasmSampleState;
+  readonly wasmInstanceGetterRegistered: boolean;
+} {
+  return {
+    compromised: platformBrandRegistry.compromised,
+    wasmSampleState: platformBrandRegistry.wasmSampleState,
+    wasmInstanceGetterRegistered: platformBrandRegistry.wasmInstanceGetterRegistered,
+  };
+}
+
+/** Internal test seam. It creates a separate registry and never replaces the real registry. */
+export function canonicalWithWasmSampleForTest(
+  state: "refused" | "failed" | undefined,
+  webAssemblyScopeForTest?: Record<string, unknown>,
+): {
+  readonly diagnostics: ReturnType<typeof canonicalBrandProbeDiagnostics>;
+  readonly canonicalJson: (value: unknown) => string;
+  readonly sha256Hex: (value: unknown) => string;
+} {
+  const registry = createPlatformBrandChecks(state, webAssemblyScopeForTest);
+  const stringify = (value: unknown) => serialize(value, "$", new weakSetCtor<object>(), registry);
+  return {
+    diagnostics: {
+      compromised: registry.compromised,
+      wasmSampleState: registry.wasmSampleState,
+      wasmInstanceGetterRegistered: registry.wasmInstanceGetterRegistered,
+    },
+    canonicalJson: stringify,
+    sha256Hex(value) {
+      const hash = createHashFn("sha256");
+      reflectApply(hashUpdate, hash, [stringify(value), "utf8"]);
+      return reflectApply(hashDigest, hash, ["hex"]);
+    },
+  };
+}
 
 function createPlatformSingletons(): readonly object[] {
   const singletons: object[] = [];
@@ -388,7 +437,10 @@ function isCurrentProcessEnv(value: object): boolean {
   );
 }
 
-function createPlatformBrandChecks(): PlatformBrandRegistry {
+function createPlatformBrandChecks(
+  wasmSampleForTest?: "refused" | "failed",
+  webAssemblyScopeForTest?: Record<string, unknown>,
+): PlatformBrandRegistry {
   const checks: BrandCheck[] = [];
   let compromised = false;
   const markCompromised = () => {
@@ -410,14 +462,14 @@ function createPlatformBrandChecks(): PlatformBrandRegistry {
   ) {
     markCompromised();
   }
-  const webAssemblyScope =
+  const webAssemblyScope = webAssemblyScopeForTest ?? (
     typeof webAssemblyValue === "object" && webAssemblyValue !== null
       ? (webAssemblyValue as Record<string, unknown>)
-      : {};
-  const wasmSampleModule = createWasmSampleModule(webAssemblyScope);
+      : {});
+  const wasmSample = createWasmSampleModule(webAssemblyScope, wasmSampleForTest);
   if (
     hasOwnProperty(webAssemblyScope, "Module") &&
-    wasmSampleModule === undefined
+    wasmSample.state === "failed"
   ) {
     markCompromised();
   }
@@ -644,16 +696,24 @@ function createPlatformBrandChecks(): PlatformBrandRegistry {
     "Module",
     "exports",
   );
-  if (wasmSampleModule !== undefined) {
+  const beforeInstanceGetter = checks.length;
+  if (wasmSample.state === "sample") {
     addPrototypeGetter(
       checks,
       markCompromised,
       webAssemblyScope,
       "Instance",
       "exports",
-      [wasmSampleModule],
+      [wasmSample.module],
+      "required",
+      "wasm-instance",
+    );
+  } else if (wasmSample.state === "refused") {
+    addPrototypeGetter(
+      checks, markCompromised, webAssemblyScope, "Instance", "exports", undefined, "required", "wasm-instance",
     );
   }
+  const wasmInstanceGetterRegistered = checks.length > beforeInstanceGetter;
   addPrototypeGetter(
     checks,
     markCompromised,
@@ -681,16 +741,38 @@ function createPlatformBrandChecks(): PlatformBrandRegistry {
 
   // Iterator exotics are intentionally omitted: their native `next` brand checks
   // mutate caller-provided iterators, which would make rejection observable.
-  return { checks, compromised };
+  return { checks, compromised, wasmSampleState: wasmSample.state, wasmInstanceGetterRegistered };
+}
+
+function captureWasmCompileError(): { readonly constructor: Function; readonly prototype: object } | undefined {
+  const wasm = ownDataPropertyValue(globalThis as unknown as Record<string, unknown>, "WebAssembly");
+  if (typeof wasm !== "object" || wasm === null) return undefined;
+  const constructor = ownDataPropertyValue(wasm as Record<string, unknown>, "CompileError");
+  if (!isTrustedBrandProbe(constructor, "CompileError")) return undefined;
+  const prototype = ownDataPropertyValue(constructor as unknown as Record<string, unknown>, "prototype");
+  if (typeof prototype !== "object" || prototype === null) return undefined;
+  const prototypeConstructor = ownDataPropertyValue(prototype as Record<string, unknown>, "constructor");
+  if (prototypeConstructor !== constructor || !isTrustedBrandProbe(prototypeConstructor, "CompileError")) return undefined;
+  return { constructor, prototype };
 }
 
 function createWasmSampleModule(
   webAssemblyScope: Record<string, unknown>,
-): object | undefined {
+  outcomeForTest?: "refused" | "failed",
+): WasmSampleResult {
   const moduleConstructor = ownDataPropertyValue(webAssemblyScope, "Module");
-  if (!isTrustedBrandProbe(moduleConstructor, "Module")) {
-    return undefined;
+  const compileError = wasmCompileErrorCapture;
+  if (
+    !isTrustedBrandProbe(moduleConstructor, "Module") ||
+    compileError === undefined ||
+    ownDataPropertyValue(webAssemblyScope, "CompileError") !== compileError.constructor ||
+    !isTrustedBrandProbe(compileError.constructor, "CompileError") ||
+    ownDataPropertyValue(compileError.constructor as unknown as Record<string, unknown>, "prototype") !== compileError.prototype ||
+    ownDataPropertyValue(compileError.prototype as Record<string, unknown>, "constructor") !== compileError.constructor
+  ) {
+    return { state: "failed" };
   }
+  if (outcomeForTest !== undefined) return { state: outcomeForTest };
 
   try {
     const bytes = reflectApply(reflectConstruct, Reflect, [
@@ -701,9 +783,14 @@ function createWasmSampleModule(
       moduleConstructor,
       [bytes],
     ]);
-    return typeof module === "object" && module !== null ? module : undefined;
-  } catch {
-    return undefined;
+    return typeof module === "object" && module !== null
+      ? { state: "sample", module }
+      : { state: "failed" };
+  } catch (error) {
+    return typeof error === "object" && error !== null && !utilIsProxy(error) &&
+      objectGetPrototypeOf(error) === compileError.prototype
+      ? { state: "refused" }
+      : { state: "failed" };
   }
 }
 
@@ -771,8 +858,9 @@ function acceptsSamplePrototypeReceiver(
   method: Function,
   args: readonly unknown[],
   sampleConstructorArgs: readonly unknown[],
+  constructorMode: "native" | "wasm-instance" = "native",
 ): boolean {
-  const sample = constructSample(scope, constructorName, sampleConstructorArgs);
+  const sample = constructSample(scope, constructorName, sampleConstructorArgs, constructorMode);
   if (sample === undefined) {
     return false;
   }
@@ -789,9 +877,10 @@ function constructSample(
   scope: Record<string, unknown>,
   constructorName: string,
   args: readonly unknown[],
+  constructorMode: "native" | "wasm-instance" = "native",
 ): object | undefined {
   const constructor = ownDataPropertyValue(scope, constructorName);
-  if (!isTrustedBrandProbe(constructor, constructorName)) {
+  if (!isTrustedBrandConstructor(constructor, constructorName, constructorMode)) {
     return undefined;
   }
 
@@ -879,12 +968,19 @@ function addPrototypeGetter(
   constructorName: string,
   propertyName: string,
   sampleConstructorArgs?: readonly unknown[],
+  mode: "optional" | "required" = "optional",
+  constructorMode: "native" | "wasm-instance" = "native",
 ): void {
-  const prototype = prototypeFor(scope, constructorName);
+  const required = sampleConstructorArgs !== undefined || mode === "required";
+  // Only the Wasm Instance exports brand check may use a JavaScript constructor.
+  const brandConstructorMode = constructorName === "Instance" && propertyName === "exports"
+    ? constructorMode
+    : "native";
+  const prototype = prototypeFor(scope, constructorName, brandConstructorMode);
   if (prototype === undefined) {
     if (
-      sampleConstructorArgs !== undefined &&
-      hasOwnProperty(scope, constructorName)
+      mode === "required" ||
+      (sampleConstructorArgs !== undefined && hasOwnProperty(scope, constructorName))
     ) {
       markCompromised();
     }
@@ -897,7 +993,7 @@ function addPrototypeGetter(
     !objectHasOwn(descriptor, "get") ||
     typeof descriptor.get !== "function"
   ) {
-    if (sampleConstructorArgs !== undefined) {
+    if (required) {
       markCompromised();
     }
     return;
@@ -908,7 +1004,7 @@ function addPrototypeGetter(
     !isTrustedBrandProbe(getter, `get ${propertyName}`) ||
     !rejectsPoisonedPrototypeReceiver(getter, [])
   ) {
-    if (sampleConstructorArgs !== undefined) {
+    if (required) {
       markCompromised();
     }
     return;
@@ -922,6 +1018,7 @@ function addPrototypeGetter(
       getter,
       [],
       sampleConstructorArgs,
+      brandConstructorMode,
     )
   ) {
     markCompromised();
@@ -958,9 +1055,10 @@ function prependArgument(value: object, args: readonly unknown[]): unknown[] {
 function prototypeFor(
   scope: Record<string, unknown>,
   constructorName: string,
+  constructorMode: "native" | "wasm-instance" = "native",
 ): object | undefined {
   const constructor = ownDataPropertyValue(scope, constructorName);
-  if (!isTrustedBrandProbe(constructor, constructorName)) {
+  if (!isTrustedBrandConstructor(constructor, constructorName, constructorMode)) {
     return undefined;
   }
 
@@ -972,6 +1070,17 @@ function prototypeFor(
   return typeof descriptor.value === "object" && descriptor.value !== null
     ? descriptor.value
     : undefined;
+}
+
+function isTrustedBrandConstructor(
+  value: unknown,
+  expectedName: string,
+  mode: "native" | "wasm-instance",
+): value is Function {
+  return isTrustedBrandProbe(value, expectedName) || (
+    mode === "wasm-instance" && expectedName === "Instance" &&
+    typeof value === "function" && !utilIsProxy(value)
+  );
 }
 
 function ownDataPropertyValue(
@@ -1126,9 +1235,9 @@ function createPoisonedBrandProbeSentinel(): {
   };
 }
 
-function matchesPlatformBrand(value: object): boolean {
-  for (let index = 0; index < platformBrandChecks.length; index += 1) {
-    const check = platformBrandChecks[index];
+function matchesPlatformBrand(value: object, checks: readonly BrandCheck[]): boolean {
+  for (let index = 0; index < checks.length; index += 1) {
+    const check = checks[index];
     if (check === undefined) {
       continue;
     }

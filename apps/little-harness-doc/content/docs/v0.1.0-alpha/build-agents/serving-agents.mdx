@@ -1,0 +1,302 @@
+---
+title: Serving An Agent
+description: Run an agent folder as a server with little-harness start, develop it with little-harness dev, and run it on a timer with schedules.
+---
+
+`little-harness start` serves one agent folder. It mounts every connector the
+folder has, answers an HTTP API for messages and jobs, starts the folder's
+schedules on time, and continues turns that paused waiting for background tasks
+or [a person's answer](/docs/v0.1.0-alpha/build-agents/asking-a-person). You
+write no route files or loaders, and no timer.
+
+```bash
+little-harness start loan-officer             # http://127.0.0.1:3000
+little-harness start loan-officer --port 8080 --host 0.0.0.0 --token "$TOKEN"
+little-harness dev loan-officer               # restarts on change, chat in the terminal
+```
+
+## What It Serves
+
+| Route | What it does |
+| --- | --- |
+| `POST /connectors/<id>` | Each connector in `connectors/`. A web-rich connector gets its chat route; a Chat SDK connector gets its webhook (point Slack's request URL here). |
+| `GET /` | The agent's connectors, Input Types, schedules (with their next run), and whether `humanInput` is on. |
+| `POST /sessions/<session>/messages` | `{ "prompt": "..." }` or `{ "messages": [...] }`, with optional `extraBody`, `trigger` and `events`. Runs a turn and returns `{ status, sessionId, text }`, or `{ status: "parked", continuationId, pending }`, or `{ status: "failed", reason, error }` for a turn stopped by its limits or by `stop`. Each also has the turn's `turnId`, and its `metadata` when the harness's [`turnOptions`](/docs/v0.1.0-alpha/reference/create-harness#turnoptions) returned some. With `Accept: text/event-stream` (or `?stream=1`) it streams the turn as AI SDK's UI message stream instead. |
+| `POST /sessions/<session>/staged` | `{ "text": "..." }`. Hands a message to the session's running turn, which reads it before its next model step (202). With no turn running it answers 409: send it as a new turn. A message staged after the turn's last step comes back as `unread` in the reply (and as a `turn.unread` event). |
+| `POST /sessions/<session>/stop` | Stops the session's running turn, and any waiting behind it, with reason `Interrupted`. A parked turn ends instead, and the questions it waited on are cancelled. Returns `{ stopped }`, false when there was nothing to stop. |
+| `POST /sessions/<session>/resume` | `{ "resumeId": "...", "extraBody"?, "events"? }`. Continues the session's parked turn now, if its wait is over. See [Continuing Turns From Your App](#continuing-turns-from-your-app). |
+| `GET /sessions/<session>/turn` | Where the session's latest turn is: `{ state: "idle" \| "running" \| "parked", continuationId?, resumeId?, resumeStatus?, turnId?, metadata? }`. `turnId` and `metadata` are those of the latest turn that started, kept in the data dir, so they hold after a restart. |
+| `POST /sessions/<session>/outcomes` | `{ "turnId": "...", "status": "success" \| "failure" \| "partial", "detail"?, "reporter"?, "reportKey"?, "revision"?, "retracted"?, "score"?, "source"? }`. How a turn went, as your app saw it (a person's thumb on a reply). Only with `startAgentServer({ outcomes: { sinks } })`; otherwise 404. See [Reporting How A Turn Went](#reporting-how-a-turn-went). |
+| `POST /jobs/<type>` | `{ "input": {...}, "session"?: "..." }`. Runs an Input Type, as `generateHarness({ type, input })` does. |
+| `GET /questions` | The questions waiting for a person (`?session=`, `?status=all`). |
+| `POST /sessions/<session>/questions/<requestId>/answer` | `{ "option"?, "text"?, "value"?, "answeredBy"? }`. Records the answer; the turn that waited for it continues. The same answer again succeeds and changes nothing; a different one is refused. |
+| `POST /sessions/<session>/questions/answer` | The same, with the question named in the body: `{ "key": "..." }` (the key a tool asked it with) or `{ "requestId": "..." }`. |
+| `POST /schedules/<id>/run` | Runs a schedule now. |
+
+```bash
+curl -s localhost:3000/sessions/APP-1001/messages \
+  -H 'content-type: application/json' \
+  -d '{"prompt":"Pre-approve APP-1001."}'
+```
+
+A message request's `extraBody` reaches the turn as `generateHarness`'s
+`extraBody` does: the `turnOptions` hook and every tool read it (tools through
+`harnessToolContext(options).extraBody`). Its `trigger` (`{ kind, source?,
+from?, label? }`) goes on the turn's trace; without one, the turn is marked
+`{ kind: "api", source: "POST /sessions/<session>/messages" }`. When the server
+is started from code, `startAgentServer({ parseExtraBody })` checks `extraBody`
+first, on the messages and resume routes, and refuses the request with 400 when
+it throws. It gets `undefined` when a request sends none, so it can require
+one.
+
+### Starting The Server From Code
+
+`startAgentServer` from `@little-stack/harness/server` (Node only) is what
+`little-harness start` runs. Use it when your app builds the harness itself, say
+from configuration it fetches at start, or needs an option the CLI has no flag
+for:
+
+```ts
+import { startAgentServer } from "@little-stack/harness/server";
+
+const server = await startAgentServer({
+  agentDir: "./agent",
+  agentName: "support",
+  dataDir: "./.little-harness",
+  port: 8080,
+  token: process.env.LITTLE_HARNESS_TOKEN,
+  loadHarness: async () => buildSupportHarness(await fetchToolSpecs()),
+  parseExtraBody: (value) => TurnContext.parse(value),
+  resume: "caller",
+});
+```
+
+`loadHarness` replaces loading `agent.ts` from `agentDir`; the server still
+serves `agentDir`'s connectors and schedules. `server.close()` stops it.
+
+### Sending A Turn's Events To Your App
+
+A message request can name `events: { "url": "...", "headers"?: {...} }`. The
+server then POSTs the turn's events there as it runs, as JSON batches
+`{ sessionId, deliveryId, events }`, about every 250 ms:
+
+| Event | When |
+| --- | --- |
+| `{ type: "text-delta", text }` | The reply's text as it streams (several deltas joined). |
+| `{ type: "harness", event }` | The turn's Harness events: `harness.session.*`, `harness.model.responded` (with usage) and `.failed`, `harness.tool_call.*`. |
+| `{ type: "turn.parked", continuationId, pending, turnId, metadata? }` | The turn paused, waiting for tasks or a person. |
+| `{ type: "turn.resumed", continuationId, resumeId? }` | A paused turn continued. Its events go to the same URL, as a new delivery. `resumeId` when your app continued it. |
+| `{ type: "turn.unread", messages }` | Messages staged for the turn that it ended before reading. Send them as a new turn. |
+| `{ type: "turn.finished", text, turnId, metadata? }` | The turn ended with this reply. |
+| `{ type: "turn.failed", error, reason?, turnId?, metadata? }` | The turn failed; `reason` when a limit or `stop` ended it. `turnId` unless it failed before it started. |
+
+`turnId` is the Harness turn the event ends: every Harness event of that turn
+carries it too, and a continued turn has a new one. `metadata` is what the
+harness's `turnOptions` hook returned as `metadata` for that turn, such as the
+version of the agent that ran it. A continued turn keeps the metadata of the
+turn it continues unless its hook returns some.
+
+Every event has a `seq`, counted from 1 within its `deliveryId`. A batch is
+tried until the URL answers 2xx, up to six times with a growing wait, so a
+batch can arrive twice: drop events whose `seq` you already have. A paused
+turn's URL and headers are kept in the data dir (readable by the server's user
+only) until it continues.
+
+The API routes run the agent, so they are guarded:
+
+- With `--token` (or `LITTLE_HARNESS_TOKEN`), they need `Authorization: Bearer <token>`.
+- Without a token, the server listens only on a loopback address: the default
+  `127.0.0.1` works, and `--host 0.0.0.0` refuses to start. The API then answers
+  only programs on this machine: requests addressed to `localhost`, `127.0.0.1`
+  or `[::1]`, with `content-type: application/json` when they have a body, and
+  without an `Origin` header. A web page open in your browser cannot call it.
+- A tunnel such as ngrok or cloudflared forwards requests from the internet
+  through loopback, so the server cannot tell them from your own. Start the
+  server with `--token` before you open a tunnel to it; connectors keep working
+  without the token.
+- Connectors are served either way, and check their own requests: a Chat SDK
+  adapter checks the platform's signature, and a web-rich connector runs its
+  `authenticate`.
+
+Every 15 seconds, the server starts the schedules that are due and continues
+the turns whose wait is over. An answer posted to the API continues its turn at
+once. A continued turn's reply goes to the log. It is not posted back to the
+chat the turn came from yet, so a connector conversation that paused for an
+answer continues without its reply reaching the chat.
+
+### Reporting How A Turn Went
+
+Your app can tell the server how a turn went: a person's thumbs-down on a
+reply, say. Start the server with sinks for those outcomes, such as a LittleDB
+client's `outcomeSink`:
+
+```ts
+const server = await startAgentServer({
+  // ...
+  outcomes: { sinks: [db.outcomeSink({ tracer: support.tracer })] },
+});
+```
+
+Then `POST /sessions/<session>/outcomes` with the `turnId` the turn's ending
+event or reply named:
+
+```bash
+curl -s localhost:3000/sessions/APP-1001/outcomes \
+  -H 'content-type: application/json' \
+  -d '{"turnId":"turn_...","status":"failure","detail":"Wrong refund limit.","reporter":"anon_3f2a","reportKey":"msg_42"}'
+```
+
+The server records it in the session's trace as `reportHarnessOutcome` does,
+then hands it to each sink, and answers `{ recorded, delivered, stale, failed,
+eventId }`. Send the same `reportKey` again to replace an answer (a thumb
+changed from down to up), and `retracted: true` to withdraw it. When a sink
+fails, the reply is 502: try again, since a repeat of the same `reportKey` is
+the same report. `reporter` is a pseudonym you choose, never a name. An unknown
+session is 404.
+
+A retry can arrive after a newer report, when an answer was lost on the way. To
+keep the newer one, number each change to a report with a `revision` (a whole
+number from 0 that only grows, say the time of the change in milliseconds) and
+send it on every try. Under one `reportKey` the highest revision is the one that
+counts, whichever arrives last. At one revision the first report stands, so send
+a changed report with a higher revision, and a retraction wins whichever comes
+first. A report without a revision ranks below every revision. LittleDB keeps
+the highest revision it has applied, a retraction's included, and answers an
+older one without changing anything: the reply's `stale` counts the sinks that
+answered so. That is a definite answer, but not a sign your report became the
+current one: something newer is already there.
+
+### Continuing Turns From Your App
+
+When your app holds the conversation and gives each turn its own context, a
+short-lived credential in `extraBody` for example, a turn should continue only
+with the context the app sends at that moment. Start the server with
+`little-harness start <name> --resume caller`, or from code with
+`startAgentServer({ resume: "caller" })`: the timer and answers then never
+continue a turn, and your app does, once its questions are answered:
+
+```bash
+curl -s localhost:3000/sessions/APP-1001/resume \
+  -H 'content-type: application/json' \
+  -d '{"resumeId":"turn_8:2","extraBody":{"turnKey":"..."},"events":{"url":"https://app.example/agent-events"}}'
+```
+
+The reply comes as soon as the server has claimed the turn, before it runs:
+`{ resumed: true, resumeId, status: "running" }`. Pick a new `resumeId` for each
+time you continue a turn, and send the same one again when you retry: it gets
+the same answer (with the status it has reached) and never starts the turn
+twice. Another `resumeId` while a resume is running gets
+`{ resumed: false, reason: "already-resumed", resumeId }` with the one that
+won, and with nothing to continue the reply is `reason: "waiting"` (questions
+still open) or `"not-parked"`. The `resumeId` is kept in the data dir before
+the turn is claimed, so a resume that a restart cut off at any point continues
+when you send its `resumeId` again; `GET /sessions/<session>/turn` reports it as
+`resumeStatus: "interrupted"`. A continued turn records what it does under the
+data dir as it goes, so the retry replays the tool calls and steps it finished
+instead of running them again. It matches each call by its `toolCallId`, so two
+calls with the same arguments keep their own results. A call that started and
+never finished runs again, with the same `toolCallId`: key its writes on it.
+
+A continued turn runs the system prompt it saved when it parked, so if your
+`turnOptions` hook decides something per turn, such as a version, it should
+decide the same for a continued turn: return a `pin` and read it back from
+`turn.resumed.pin`. See [`turnOptions`](/docs/v0.1.0-alpha/reference/create-harness#turnoptions).
+
+Your app may not hear back: the reply or the `turn.resumed` event can be lost.
+That doesn't mean the turn never started, so check
+`GET /sessions/<session>/turn` before you retry, and retry with the same
+`resumeId` and the same context.
+
+## Develop With `dev`
+
+`little-harness dev <name>` runs `start` in a child process and restarts it when
+a file in the agent folder changes. It also opens a chat in the terminal against
+that server:
+
+```txt
+you> Review APP-1008.
+agent> (waiting; type :questions to see what it asked)
+
+you> :questions
+1. [dev-20261014T091200] APP-1008 has a 47% debt-to-income ratio. Approve?  (approve = Approve, decline = Decline)
+
+you> :answer 1 approve
+(answered; the agent continues, and its reply appears in the log)
+```
+
+`:reset` starts a new session and `:exit` quits. In `dev`, the log shows a
+continued turn's whole reply; `start` logs its first 120 characters.
+
+## Schedules — `schedules/*.ts`
+
+A schedule runs the agent on a timer. Each file in `schedules/` default-exports
+one; the file name is its id:
+
+```ts
+// agents/loan-officer/schedules/morning-backlog.ts
+import { defineSchedule } from "@little-stack/harness";
+
+export default defineSchedule({
+  cron: "0 9 * * 1-5",
+  timezone: "Asia/Hong_Kong",
+  prompt: "Pre-approve every application received since yesterday.",
+});
+```
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `cron` | required | Five fields: minute, hour, day of month, month, day of week. Supports `*`, ranges, steps, lists, and names such as `MON-FRI`. Sunday is 0 or 7. |
+| `timezone` | the server's | The IANA time zone the cron is read in. |
+| `prompt` | | What to ask the agent. Give this, or `type`. |
+| `type`, `input` | | An Input Type and its input, run as a job instead of a message. |
+| `session` | `"new"` | `"new"` starts a session per run, named `schedule-<id>-<time>`. A fixed id keeps one running conversation. |
+| `catchUp` | `true` | Whether a run missed while the server was down runs once when it starts again. |
+| `description` | | Shown by `little-harness schedules`. |
+
+The last run of each schedule is recorded in the host's data dir, under
+`schedules/<agent>/`, before the run starts:
+
+- **A restart does not repeat a run.** That includes a run that was still going
+  when the process stopped.
+- **A missed run is not dropped silently.** Several missed runs become one run,
+  marked as missed in the log. With `catchUp: false`, they are skipped.
+- **A new schedule starts counting when the server first sees it.** Times
+  before that do not run.
+
+```bash
+little-harness schedules loan-officer
+# morning-backlog  0 9 * * 1-5 (Asia/Hong_Kong)  next 2026-10-15T01:00:00.000Z  last never
+little-harness schedules run loan-officer morning-backlog   # run it now, in this process
+```
+
+## Good To Know
+
+- `start` and `dev` run the agent in one process. Run one server per data dir;
+  two servers sharing one would both start the same schedules.
+- Without a durable host (`localHost` has one), nothing continues parked turns.
+  Schedules and the API still work.
+- The timer's resume is not tried again when the process stops while it runs.
+  A resume your app started with `resumeId` is: send the `resumeId` again.
+  When the timer tries a turn again after a failure, it replays what the turn
+  finished on the try before, as above.
+- The terminal chat in `dev` sends whole messages and prints the final reply. To
+  see the agent's tool calls as they stream, use `little-harness test`.
+
+## See Also
+
+- [Agent Folders](/docs/v0.1.0-alpha/build-agents/agent-folders): the folder layout.
+- [Chat Connectors](/docs/v0.1.0-alpha/build-agents/chat-connectors): connector descriptors.
+- [CLI](/docs/v0.1.0-alpha/reference/cli#start-name): flags.
+
+### Identified caller delivery
+
+With `resume: "caller"`, a dedicated API-owned session may opt into durable dispatch identities.
+Use `/sessions/:s/dispatches/:d/messages`, `/resume`, `/stop`, `/turn`, and `/staged/:messageId`.
+The path is authoritative;404 means unsupported/unknown and must never trigger a legacy fallback.
+Opt-in pins the session mode, including a pre-start Stop. Legacy-only sessions remain compatible;
+use a new session to opt in. Identified calls require a readable durable session log and concrete
+model handles. A new dispatch is409 while a previous logical dispatch is running, parked or
+interrupted; cancel its exact target first. Caller resume/message identities are immutable across
+restarts. Staged acceptance is separate from read proof: claimed requests stay uncertain until a
+durable model response. A stale Stop or delayed prior-run completion cannot affect a successor.
+See the package `docs/contracts/dispatch-delivery.md` for crash and storage boundaries.

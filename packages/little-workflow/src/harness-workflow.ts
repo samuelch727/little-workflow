@@ -3,16 +3,17 @@ import type {
   HarnessWorkflowExecution,
   HarnessWorkflowInputSchema,
   HarnessWorkflowRunContext,
-} from "little-harness";
+} from "@little-stack/harness";
 import {
   buildRunWorkflowOptions,
-  localWorld,
-  type ErgonomicRunWorkflowOptions,
+  type RunTrigger,
+  type RunWorkflowOptions,
   type WorkflowDefinition,
   type WorkflowRunProgressEvent,
 } from "./authoring.js";
 import { normalizeSchema } from "./schema.js";
 import { RunFailedError, runWorkflow as runWorkflowCore } from "./runtime.js";
+import { defaultWorldForHarness } from "./harness-default-world.js";
 
 export type HarnessWorkflowSchemaMarkerOptions = {
   readonly allowUntypedInput?: boolean;
@@ -20,7 +21,8 @@ export type HarnessWorkflowSchemaMarkerOptions = {
 };
 
 export type HarnessWorkflowAdapterOptions =
-  ErgonomicRunWorkflowOptions &
+  // Each run's trigger is the harness tool call that started it.
+  Omit<RunWorkflowOptions, "trigger"> &
   HarnessWorkflowSchemaMarkerOptions & {
     readonly executionMode?: "inline" | "durable";
     readonly definitionIdentity: HarnessWorkflow["definitionIdentity"];
@@ -65,10 +67,11 @@ export function asHarnessWorkflow(
         );
         const result = await runWorkflowCore({
           ...runOptions,
-          world: runDefaults.world ?? localWorld({ dataDir: ctx.persistence.dataDir }),
+          world: runDefaults.world ?? defaultWorldForHarness(ctx),
           runId: ctx.reservedRunId as never,
           signal: ctx.abortSignal,
           progress: withHarnessProgress(runOptions.progress, ctx),
+          trigger: harnessRunTrigger(ctx),
         });
         if (result.status === "completed") {
           return {
@@ -321,8 +324,18 @@ function unsupportedProtocol(runId: string, message: string): HarnessWorkflowExe
   };
 }
 
+/** The harness session, turn and tool call that started this run, so its trace nests under that call. */
+export function harnessRunTrigger(ctx: HarnessWorkflowRunContext): RunTrigger {
+  return {
+    kind: "harness",
+    ...(ctx.parentSessionId === undefined ? {} : { sessionId: ctx.parentSessionId }),
+    ...(ctx.parentTurnId === undefined ? {} : { turnId: ctx.parentTurnId }),
+    ...(ctx.toolCallId === undefined ? {} : { toolCallId: ctx.toolCallId }),
+  };
+}
+
 function withHarnessProgress(
-  previous: ErgonomicRunWorkflowOptions["progress"],
+  previous: RunWorkflowOptions["progress"],
   ctx: HarnessWorkflowRunContext,
 ): (event: WorkflowRunProgressEvent) => Promise<void> {
   return async (event) => {
@@ -331,13 +344,13 @@ function withHarnessProgress(
   };
 }
 
-function workflowRunDefaults(options: HarnessWorkflowAdapterOptions): ErgonomicRunWorkflowOptions {
+function workflowRunDefaults(options: HarnessWorkflowAdapterOptions): RunWorkflowOptions {
   const runDefaults = { ...(options as unknown as Record<string, unknown>) };
   delete runDefaults.allowUntypedInput;
   delete runDefaults.allowLossyStandardSchema;
   delete runDefaults.executionMode;
   delete runDefaults.definitionIdentity;
-  return runDefaults as ErgonomicRunWorkflowOptions;
+  return runDefaults as RunWorkflowOptions;
 }
 
 function isStandardSchema(schema: unknown): boolean {

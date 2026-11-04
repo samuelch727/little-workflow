@@ -28,17 +28,10 @@ export class LocalTrace {
   async append<TEventType extends HarnessTraceEventType>(
     event: HarnessEvent<TEventType>,
   ): Promise<HarnessEvent<TEventType>> {
-    const sequence = await this.nextSequence();
-    const enriched = validateTraceEvent({
-      ...event,
-      schemaVersion: event.schemaVersion ?? this.traceOptions.schemaVersion,
-      eventId: event.eventId ?? createEventId(),
-      sequence: event.sequence ?? sequence,
-      metadata: sanitizeTraceValue(event.metadata ?? {}, this.traceOptions).value,
-    });
+    const enriched = enrichTraceEvent(event, await this.nextSequence(), this.traceOptions);
     await mkdir(dirname(this.traceFile), { recursive: true });
     await appendFile(this.traceFile, `${JSON.stringify(enriched)}\n`, "utf8");
-    return enriched as HarnessEvent<TEventType>;
+    return enriched;
   }
 
   private async nextSequence(): Promise<number> {
@@ -48,6 +41,24 @@ export class LocalTrace {
     this.sequence += 1;
     return this.sequence;
   }
+}
+
+/**
+ * A trace event as a host records it: schema version, event id, the host's next sequence
+ * (unless the event brings its own) and redacted metadata, then validated.
+ */
+export function enrichTraceEvent<TEventType extends HarnessTraceEventType>(
+  event: HarnessEvent<TEventType>,
+  sequence: number,
+  traceOptions: ResolvedHarnessTraceOptions,
+): HarnessEvent<TEventType> {
+  return validateTraceEvent({
+    ...event,
+    schemaVersion: event.schemaVersion ?? traceOptions.schemaVersion,
+    eventId: event.eventId ?? createEventId(),
+    sequence: event.sequence ?? sequence,
+    metadata: sanitizeTraceValue(event.metadata ?? {}, traceOptions).value,
+  }) as HarnessEvent<TEventType>;
 }
 
 async function readLastSequence(traceFile: string): Promise<number> {

@@ -1,5 +1,6 @@
-import { mkdir } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import * as nodePath from "node:path";
+import { runFilesFor } from "./run-files.js";
+import type { World } from "./world-port.js";
 import type { HarnessScope } from "./harness/types.js";
 
 export type ScratchMount = {
@@ -8,74 +9,81 @@ export type ScratchMount = {
   readonly mode: "rw" | "ro";
 };
 
-export function scratchMountsForScope(scope: HarnessScope): readonly ScratchMount[] {
+export function scratchMountsForScope(
+  scope: HarnessScope,
+  world: Pick<World, "dataDir" | "files"> = { dataDir: "/" },
+): readonly ScratchMount[] {
+  const path = runFilesFor(world).path;
   if (scope.role === "orchestrator" || scope.role === "planner") {
-    return plannerOrOrchestratorScratchMounts(scope);
+    return plannerOrOrchestratorScratchMounts(scope, path);
   }
-  return workerScratchMounts(scope);
+  return workerScratchMounts(scope, path);
 }
 
-export async function ensureScratchMounts(mounts: readonly ScratchMount[]): Promise<void> {
+export async function ensureScratchMounts(
+  mounts: readonly ScratchMount[],
+  world: Pick<World, "dataDir" | "files"> = { dataDir: "/" },
+): Promise<void> {
   await Promise.all(
     mounts
       .filter((mount) => !isPatternPath(mount.backingPath))
-      .map((mount) => mkdir(mount.backingPath, { recursive: true })),
+      .map((mount) => runFilesFor(world).mkdir(mount.backingPath, { recursive: true })),
   );
 }
 
-function plannerOrOrchestratorScratchMounts(scope: HarnessScope): readonly ScratchMount[] {
+function plannerOrOrchestratorScratchMounts(scope: HarnessScope, path: typeof nodePath.posix): readonly ScratchMount[] {
   const mounts: ScratchMount[] = [
     {
       mountPath: "/mnt/scratch/own/",
-      backingPath: ownRunScratchPath(scope),
+      backingPath: ownRunScratchPath(scope, path),
       mode: "rw",
     },
   ];
   if (scope.role === "planner" && scope.parentRunId !== undefined) {
     mounts.push({
       mountPath: "/mnt/scratch/from-orchestrator/",
-      backingPath: join(parentRunLogDir(scope), "scratch"),
+      backingPath: path.join(parentRunLogDir(scope, path), "scratch"),
       mode: "ro",
     });
   }
   return mounts;
 }
 
-function workerScratchMounts(scope: HarnessScope): readonly ScratchMount[] {
+function workerScratchMounts(scope: HarnessScope, path: typeof nodePath.posix): readonly ScratchMount[] {
   const stepPath = stepPathForScope(scope);
   const mounts: ScratchMount[] = [
     {
       mountPath: "/mnt/scratch/own/",
-      backingPath: join(scope.logDir, "steps", stepPath, "scratch"),
+      backingPath: path.join(scope.logDir, "steps", stepPath, "scratch"),
       mode: "rw",
     },
     {
       mountPath: "/mnt/scratch/from-planner/",
-      backingPath: ownRunScratchPath(scope),
+      backingPath: ownRunScratchPath(scope, path),
       mode: "ro",
     },
   ];
   if (scope.parentRunId !== undefined) {
     mounts.push({
       mountPath: "/mnt/scratch/from-orchestrator/",
-      backingPath: join(parentRunLogDir(scope), "scratch"),
+      backingPath: path.join(parentRunLogDir(scope, path), "scratch"),
       mode: "ro",
     });
   }
   mounts.push({
     mountPath: "/mnt/scratch/peer-steps/",
-    backingPath: join(scope.logDir, "steps", "*", "scratch"),
+    backingPath: path.join(scope.logDir, "steps", "*", "scratch"),
     mode: "ro",
   });
   return mounts;
 }
 
-function ownRunScratchPath(scope: HarnessScope): string {
-  return join(scope.logDir, "scratch");
+function ownRunScratchPath(scope: HarnessScope, path: typeof nodePath.posix): string {
+  return path.join(scope.logDir, "scratch");
 }
 
-function parentRunLogDir(scope: HarnessScope): string {
-  return dirname(dirname(scope.logDir));
+function parentRunLogDir(scope: HarnessScope, path: typeof nodePath.posix): string {
+  return path.dirname(path.dirname(scope.logDir));
 }
 
 function stepPathForScope(scope: HarnessScope): string {

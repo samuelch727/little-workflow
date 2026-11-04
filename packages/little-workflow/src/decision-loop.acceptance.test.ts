@@ -25,18 +25,26 @@ import {
   type WorkflowVersionLockSeed,
 } from "./compiler-lock.js";
 import {
-  type LwirWorkflow,
-  type RuntimeToolHandler,
+  createToolRegistry,
+  localWorld,
+} from "./index.js";
+import {
+  validateLwir,
+} from "./entries/lwir.js";
+import type {
+  LwirWorkflow,
+} from "./entries/lwir.js";
+import {
   appendEvent,
   canonicalJson,
-  createToolRegistry,
   executeWorkflowVersion,
   listEvents,
-  localWorld,
   sha256Digest,
-  validateLwir,
   writeArtifact,
-} from "./index.js";
+} from "./entries/internals.js";
+import type {
+  RuntimeToolHandler,
+} from "./entries/internals.js";
 import { cleanupTempDirs, workerScopedTempPrefix } from "./test-temp.js";
 import { concreteInputStructure } from "./workflow-version-reuse.js";
 

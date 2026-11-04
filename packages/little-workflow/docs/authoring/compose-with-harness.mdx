@@ -3,14 +3,14 @@ title: Compose With Little Harness
 description: Hand workflows to a Little Harness agent as typed tools with asHarnessWorkflow — the supported way to compose workflows, replacing the deprecated orchestrator.
 ---
 
-To compose workflows, author each one with `defineWorkflow`, adapt it with `asHarnessWorkflow`, and pass the adapters to `createHarness({ workflows })` from `little-harness`. Each workflow becomes one typed tool. The agent decides when to call which workflow and how to chain their results, so there is no static pipeline to maintain.
+To compose workflows, author each one with `defineWorkflow`, adapt it with `asHarnessWorkflow`, and pass the adapters to `createHarness({ workflows })` from `@little-stack/harness`. Each workflow becomes one typed tool. The agent decides when to call which workflow and how to chain their results, so there is no static pipeline to maintain.
 
-This replaces the orchestrator: `runWorkflow({ workflows: [...], orchestrator })` and its `plan_workflow` / `run_workflow` / `start_workflow` tools. The orchestrator is deprecated (`LWF_DEP_ORCHESTRATOR`); see [Migrating from the orchestrator](#migrating-from-the-orchestrator).
+This replaces the orchestrator: `runOrchestration({ workflows: [...], orchestrator })` and its `plan_workflow` / `run_workflow` / `start_workflow` tools. The orchestrator is deprecated (`LWF_DEP_ORCHESTRATOR`); see [Migrating from the orchestrator](#migrating-from-the-orchestrator).
 
 ## Install
 
 ```sh
-pnpm add little-workflow@alpha little-harness@alpha ai@^7 zod @ai-sdk/anthropic
+pnpm add @little-stack/workflow@alpha @little-stack/harness@alpha ai@^7 zod @ai-sdk/anthropic
 ```
 
 Both packages need Node.js 22 or later and take `ai` as a peer dependency (`^7.0.0`). pnpm 10 projects must also allow the `better-sqlite3` build. See [Quickstart → Install](/docs/v0.1.0-alpha/getting-started/quickstart#install).
@@ -22,7 +22,7 @@ Both packages need Node.js 22 or later and take `ai` as a peer dependency (`^7.0
 import { anthropic } from "@ai-sdk/anthropic";
 import { tool } from "ai";
 import { z } from "zod";
-import { asHarnessWorkflow, defineWorkflow } from "little-workflow";
+import { asHarnessWorkflow, defineWorkflow } from "@little-stack/workflow";
 
 export const refundWorkflow = defineWorkflow({
   id: "billing.refund",
@@ -61,7 +61,7 @@ export const refundTool = asHarnessWorkflow(refundWorkflow, {
 ```ts
 // route.ts — the agent. Each adapted workflow becomes one tool.
 import { anthropic } from "@ai-sdk/anthropic";
-import { createHarness, localHost, streamHarness } from "little-harness";
+import { createHarness, localHost, streamHarness } from "@little-stack/harness";
 import { refundTool } from "./refund";
 
 const support = createHarness({
@@ -77,7 +77,7 @@ export async function POST(req: Request) {
 }
 ```
 
-The adapter wires the definition's inline `tools` into every run, the same way `runWorkflow(def, input)` does.
+The adapter wires the definition's inline `tools` into every run, the same way `runWorkflow(workflow, input)` does.
 
 ## `asHarnessWorkflow` Options
 
@@ -87,7 +87,7 @@ The adapter wires the definition's inline `tools` into every run, the same way `
 | `executionMode` | no | `"inline"` (default) or `"durable"`. See below. |
 | `allowUntypedInput` | no | Required to expose a workflow that has no `input` schema. The tool then accepts any JSON object. |
 | `allowLossyStandardSchema` | no | Lets an opaque Standard Schema validator be exposed to the model as an unconstrained schema. The run still validates input. |
-| any `runWorkflow` option | no | Defaults applied to every run, for example `tools`, `mcp`, `bash`, `permissions`, `timeout`, `maxAttempts`, `label`, `tags`, `progress`, or `world`. `workflows` and `input` are excluded. |
+| any `runWorkflow` option | no | Defaults applied to every run, for example `tools`, `mcp`, `bash`, `permissions`, `timeout`, `maxAttempts`, `label`, `tags`, `progress`, or `world`. `workflows`, `input` and `trigger` are excluded: each run records the harness session, turn and tool call that started it as its `trigger`. |
 
 **`definitionIdentity`** names the version of the definition the agent was given. The harness records it in the agent manifest and passes it to every run, which is how a host distinguishes the same workflow from an edited one. `asHarnessWorkflow` throws if it is missing. Pass one of:
 
@@ -149,7 +149,7 @@ Each run's token usage and cost stay in its own run record. Passing `world` in t
 ```txt
 little-workflow.json          { "workflows": { "refund": "./workflows/refund" } }
 workflows/refund/
-  workflow.ts                 default export: a defineWorkflow or createLittleWorkflow definition
+  workflow.ts                 default export: a defineWorkflow definition
   instructions.md             optional; becomes planner.system when the definition sets none
   tools/<name>.ts             optional; each default-exports an AI SDK tool, named after the file
   skills/<name>/              optional; planner skills
@@ -158,7 +158,7 @@ workflows/refund/
 `loadWorkflow(folder, options?)` merges the folder's `instructions.md`, `tools/`, and `skills/` into the definition. It returns a `LoadedWorkflow`, which is a ready `HarnessWorkflow` that you can pass straight to `createHarness({ workflows })`, plus a `run(input, options?)` method for standalone runs. It derives `definitionIdentity` itself by hashing the definition, the folder's import graph, the execution mode, and `sourceIdentity`.
 
 ```ts
-import { loadWorkflow } from "little-workflow";
+import { loadWorkflow } from "@little-stack/workflow";
 
 const refund = await loadWorkflow(new URL("./workflows/refund", import.meta.url), {
   executionMode: "inline",
@@ -179,7 +179,7 @@ const refund = await loadWorkflow(new URL("./workflows/refund", import.meta.url)
 
 | Orchestrator (deprecated) | Harness surface |
 | --- | --- |
-| `runWorkflow({ world, workflows: [a, b], orchestrator: { model, system, skills, tools } })` | `createHarness({ host, model, system, skills, tools, workflows: [asHarnessWorkflow(a, …), asHarnessWorkflow(b, …)] })`, then `streamHarness` / `generateHarness` |
+| `runOrchestration({ world, workflows: [a, b], orchestrator: { model, system, skills, tools } })` | `createHarness({ host, model, system, skills, tools, workflows: [asHarnessWorkflow(a, …), asHarnessWorkflow(b, …)] })`, then `streamHarness` / `generateHarness` |
 | `start_workflow(workflowId, input)` | The workflow's own typed tool, such as `billing_refund(input)` |
 | `maxConcurrentSubRuns` | `workflowBudgets.maxConcurrentWorkflowRuns` / `maxQueuedWorkflowRuns` |
 | Sub-run ids on `harness.tool_call.succeeded.payload.result.runId` | `runId` on the workflow tool result. Runs are stored under the session's `workflows` directory. |

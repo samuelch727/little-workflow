@@ -2,7 +2,7 @@ import { join } from "node:path";
 import type { UIMessage } from "ai";
 import { describe, expect, it, vi } from "vitest";
 import { createHarness } from "../create-harness.js";
-import type { StreamHarnessFinished } from "../execution/result.js";
+import type { StreamHarnessTurnFinished } from "../execution/result.js";
 import { localHost } from "../local-host/index.js";
 import { loadChatSdkConnector } from "./chat-sdk.js";
 import { chatSdkConnector } from "./descriptors.js";
@@ -15,7 +15,7 @@ function harness() {
   return createHarness({ host: localHost(), model });
 }
 
-function streamResult(text = "ok", finished: Promise<StreamHarnessFinished> = finishedResult()) {
+function streamResult(text = "ok", finished: Promise<StreamHarnessTurnFinished> = finishedResult()) {
   return {
     text: Promise.resolve(text),
     output: Promise.resolve(text),
@@ -28,7 +28,7 @@ function streamResult(text = "ok", finished: Promise<StreamHarnessFinished> = fi
   };
 }
 
-function finishedResult(): Promise<StreamHarnessFinished> {
+function finishedResult(): Promise<StreamHarnessTurnFinished> {
   return Promise.resolve({
     session: {} as any,
     artifacts: [],

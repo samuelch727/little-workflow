@@ -1,3 +1,4 @@
+import { assertCompletedTurn } from "../test/completed-turn.js";
 import { MockLanguageModelV3 } from "ai/test";
 import { tool } from "ai";
 import * as path from "node:path";
@@ -8,8 +9,9 @@ import { generateHarness } from "../execution/generate-harness.js";
 import { localHost } from "../local-host/index.js";
 import { withTempDir } from "../test/temp.js";
 import { remoteSessionLog } from "./client.js";
+import { createRemoteAppendRequest } from "./protocol.js";
 import { startSessionLogServer } from "./server.js";
-import { createFileSessionLog } from "./session-log-store.js";
+import { fileSessionLog } from "./session-log-store.js";
 
 const usage = {
   inputTokens: { total: 1, noCache: 1, cacheRead: 0, cacheWrite: 0 },
@@ -37,6 +39,7 @@ describe("session log service", () => {
       const persisted = await log.append({
         type: "harness.session.started",
         runId: "run_http",
+        appendIdempotencyKey: "append_http_started_0001",
         payload: { sessionId: "s1" },
       });
       expect(persisted).toMatchObject({ runId: "run_http", sequence: 1, eventId: expect.any(String) });
@@ -50,17 +53,103 @@ describe("session log service", () => {
     }
   });
 
+  it("returns the original remote event for an identical key and reports conflicts", async () => {
+    const server = await startSessionLogServer();
+    try {
+      const log = remoteSessionLog({ baseUrl: server.url });
+      const request = {
+        type: "harness.session.started",
+        runId: "run_http_idempotency",
+        appendIdempotencyKey: "http-idempotency-session-started-v1",
+        payload: { phase: "started" },
+      } as const;
+      const first = await log.append(request);
+      await expect(log.append(structuredClone(request))).resolves.toEqual(first);
+      await expect(log.append({ ...request, payload: { phase: "different" } }))
+        .rejects.toThrow(/409/u);
+      expect(await log.priorEvents!({ runId: request.runId })).toEqual([first]);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("retries the exact caller key after a response is lost post-commit", async () => {
+    const server = await startSessionLogServer();
+    try {
+      let discardFirstAppendResponse = true;
+      let appendRequests = 0;
+      const fetchWithLostResponse = (async (input: URL | RequestInfo, init?: RequestInit) => {
+        const response = await fetch(input, init);
+        if (init?.method === "POST") {
+          appendRequests += 1;
+          if (discardFirstAppendResponse) {
+            discardFirstAppendResponse = false;
+            await response.arrayBuffer();
+            throw new TypeError("simulated response loss after commit");
+          }
+        }
+        return response;
+      }) as typeof fetch;
+      const log = remoteSessionLog({ baseUrl: server.url, fetch: fetchWithLostResponse });
+      const persisted = await log.append({
+        type: "harness.runtime.command.succeeded",
+        runId: "run_http_lost_response",
+        appendIdempotencyKey: "http-lost-response-command-v1",
+        payload: { commandId: "command-1", exitCode: 0 },
+      });
+      if (persisted === undefined) throw new Error("remote append returned no persisted event");
+      expect(appendRequests).toBe(2);
+      expect(persisted.sequence).toBe(1);
+      expect(await server.store.priorEvents({ runId: persisted.runId })).toEqual([persisted]);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("rejects unversioned and unknown remote protocol fields", async () => {
+    const server = await startSessionLogServer();
+    try {
+      const unversioned = await fetch(`${server.url}/v1/events`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          type: "harness.session.started",
+          runId: "run_unversioned",
+          appendIdempotencyKey: "unversioned-session-started-v1",
+          payload: {},
+        }),
+      });
+      expect(unversioned.status).toBe(400);
+
+      const request = createRemoteAppendRequest({
+        type: "harness.session.started",
+        runId: "run_unknown_field",
+        appendIdempotencyKey: "unknown-field-session-started-v1",
+        payload: {},
+      });
+      const unknown = await fetch(`${server.url}/v1/events`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ...request, futureField: true }),
+      });
+      expect(unknown.status).toBe(400);
+      expect(await server.store.priorEvents()).toHaveLength(0);
+    } finally {
+      await server.close();
+    }
+  });
+
   it("rejects requests without the configured bearer token", async () => {
     const server = await startSessionLogServer({ authToken: "session-scoped-token" });
     try {
       const unauthenticated = remoteSessionLog({ baseUrl: server.url });
       await expect(
-        unauthenticated.append({ type: "harness.session.started", runId: "r", payload: {} }),
+        unauthenticated.append({ type: "harness.session.started", runId: "r", appendIdempotencyKey: "append_auth_started_0001", payload: {} }),
       ).rejects.toThrow(/401/u);
 
       const authenticated = remoteSessionLog({ baseUrl: server.url, authToken: "session-scoped-token" });
       await expect(
-        authenticated.append({ type: "harness.session.started", runId: "r", payload: {} }),
+        authenticated.append({ type: "harness.session.started", runId: "r", appendIdempotencyKey: "append_auth_started_0001", payload: {} }),
       ).resolves.toMatchObject({ sequence: 1 });
     } finally {
       await server.close();
@@ -72,7 +161,7 @@ describe("session log service", () => {
     try {
       const health = await fetch(`${server.url}/v1/health`);
       expect(health.status).toBe(200);
-      expect(await health.json()).toEqual({ ok: true });
+      expect(await health.json()).toEqual({ schemaVersion: "lh.remote-session.v1", ok: true });
     } finally {
       await server.close();
     }
@@ -103,6 +192,7 @@ describe("session log service", () => {
       const ok = await remoteSessionLog({ baseUrl: server.url }).append({
         type: "harness.session.started",
         runId: "run_after",
+        appendIdempotencyKey: "append_after_started_0001",
         payload: {},
       });
       expect(ok).toMatchObject({ sequence: 1 });
@@ -123,32 +213,33 @@ describe("session log service", () => {
         })) as typeof fetch,
     });
     await expect(
-      log.append({ type: "harness.session.started", runId: "run_stall", payload: {} }),
+      log.append({ type: "harness.session.started", runId: "run_stall", appendIdempotencyKey: "append_stall_started_0001", payload: {} }),
     ).rejects.toThrow(/timeout|abort/iu);
   });
 
   it("survives a torn tail line in the file store instead of poisoning the log", async () => {
     await withTempDir(async (dir) => {
       const logPath = path.join(dir, "events.ndjson");
-      const writer = createFileSessionLog({ path: logPath });
-      await writer.append({ type: "harness.session.started", runId: "run_torn", payload: {} });
+      const writer = fileSessionLog({ path: logPath });
+      await writer.append({ type: "harness.session.started", runId: "run_torn", appendIdempotencyKey: "append_torn_started_0001", payload: {} });
       // Simulate a crash mid-append: a partial JSON line at the end of the file.
       const { appendFile } = await import("node:fs/promises");
       await appendFile(logPath, '{"type":"harness.session.comp', "utf8");
 
-      const reopened = createFileSessionLog({ path: logPath });
+      const reopened = fileSessionLog({ path: logPath });
       const events = await reopened.priorEvents({ runId: "run_torn" });
       expect(events).toHaveLength(1);
       const appended = await reopened.append({
         type: "harness.session.completed",
         runId: "run_torn",
+        appendIdempotencyKey: "append_torn_completed_0001",
         payload: {},
       });
       expect(appended.sequence).toBe(2);
 
       // The append after the torn tail must start a fresh line: a third reload sees both
       // valid events, not a merged garbage line.
-      const reloaded = createFileSessionLog({ path: logPath });
+      const reloaded = fileSessionLog({ path: logPath });
       const finalEvents = await reloaded.priorEvents({ runId: "run_torn" });
       expect(finalEvents.map((event) => event.sequence)).toEqual([1, 2]);
     });
@@ -157,19 +248,20 @@ describe("session log service", () => {
   it("persists events across a session-log server restart with the file store", async () => {
     await withTempDir(async (dir) => {
       const logPath = path.join(dir, "events.ndjson");
-      const first = await startSessionLogServer({ store: createFileSessionLog({ path: logPath }) });
+      const first = await startSessionLogServer({ store: fileSessionLog({ path: logPath }) });
       const log = remoteSessionLog({ baseUrl: first.url });
-      await log.append({ type: "harness.session.started", runId: "run_file", payload: {} });
+      await log.append({ type: "harness.session.started", runId: "run_file", appendIdempotencyKey: "append_file_started_0001", payload: {} });
       await log.append({
         type: "harness.session.completed",
         runId: "run_file",
+        appendIdempotencyKey: "append_file_completed_0001",
         payload: {},
       });
       await first.close();
 
       // A brand-new server process over the same file sees the same run — the property the
       // in-memory reference store cannot provide.
-      const second = await startSessionLogServer({ store: createFileSessionLog({ path: logPath }) });
+      const second = await startSessionLogServer({ store: fileSessionLog({ path: logPath }) });
       try {
         const events = await remoteSessionLog({ baseUrl: second.url }).priorEvents!({
           runId: "run_file",
@@ -179,6 +271,7 @@ describe("session log service", () => {
         const appended = await remoteSessionLog({ baseUrl: second.url }).append({
           type: "harness.session.started",
           runId: "run_file",
+          appendIdempotencyKey: "append_file_started_0002",
           payload: {},
         });
         expect(appended).toMatchObject({ sequence: 3 });
@@ -201,7 +294,7 @@ describe("session log service", () => {
         const harness = createHarness({
           host: localHost({ dataDir: firstDir }),
           model: firstModel,
-          durability: remoteSessionLog({ baseUrl: server.url }),
+          sessionLog: remoteSessionLog({ baseUrl: server.url }),
         });
         const result = await generateHarness({
           harness,
@@ -209,6 +302,7 @@ describe("session log service", () => {
           session: "remote-resume",
           runId: "run_remote_resume",
         });
+        assertCompletedTurn(result);
         expect(result.text).toBe("remote cached response");
       });
       expect(firstModel.doGenerateCalls).toHaveLength(1);
@@ -221,7 +315,7 @@ describe("session log service", () => {
         const harness = createHarness({
           host: localHost({ dataDir: secondDir }),
           model: secondModel,
-          durability: remoteSessionLog({ baseUrl: server.url }),
+          sessionLog: remoteSessionLog({ baseUrl: server.url }),
         });
         const resumed = await generateHarness({
           harness,
@@ -229,6 +323,7 @@ describe("session log service", () => {
           session: "remote-resume",
           runId: "run_remote_resume",
         });
+        assertCompletedTurn(resumed);
         expect(resumed.text).toBe("remote cached response");
       });
       expect(secondModel.doGenerateCalls).toHaveLength(0);
@@ -280,7 +375,7 @@ describe("session log service", () => {
         const harness = createHarness({
           host: localHost({ dataDir: dir }),
           model: makeModel(),
-          durability: remoteSessionLog({ baseUrl: server.url }),
+          sessionLog: remoteSessionLog({ baseUrl: server.url }),
           tools: {
             add: tool({
               description: "Add two numbers.",
@@ -298,6 +393,7 @@ describe("session log service", () => {
           session: "remote-tools",
           runId: "run_remote_tools",
         });
+        assertCompletedTurn(result);
         expect(result.text).toBe("the sum is 7");
       });
       expect(firstToolCalls).toBe(1);
@@ -311,7 +407,7 @@ describe("session log service", () => {
         const harness = createHarness({
           host: localHost({ dataDir: dir }),
           model: resumedModel,
-          durability: remoteSessionLog({ baseUrl: server.url }),
+          sessionLog: remoteSessionLog({ baseUrl: server.url }),
           tools: {
             add: tool({
               description: "Add two numbers.",
@@ -329,6 +425,7 @@ describe("session log service", () => {
           session: "remote-tools",
           runId: "run_remote_tools",
         });
+        assertCompletedTurn(resumed);
         expect(resumed.text).toBe("the sum is 7");
       });
       expect(resumedToolCalls).toBe(0);

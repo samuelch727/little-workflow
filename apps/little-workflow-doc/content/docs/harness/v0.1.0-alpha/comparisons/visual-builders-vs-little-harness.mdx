@@ -1,0 +1,45 @@
+---
+title: Visual Builders Vs Little Harness
+description: How Dify, Flowise, Langflow, n8n, and Zapier Agents compare with Little Harness.
+---
+
+Visual builders and automation platforms are real alternatives when the goal is to create an AI app quickly without owning every code path.
+
+Little Harness is for the opposite posture: keep the host app as the product control plane, but outsource the annoying harness runtime details.
+
+## Use Visual Builders When
+
+- non-developers need to assemble agents or workflows
+- visual graph editing is more important than code-level ownership
+- built-in RAG, tool catalogs, integrations, and deployment matter
+- the team wants logs and operations inside the builder platform
+
+## Use Little Harness When
+
+- the agent should live inside an existing product codebase
+- auth, storage, tenancy, UI, and deployment should stay in the host app
+- the developer wants a library, not a platform workspace
+- files, artifacts, skills, and Persistent Dirs should be runtime primitives
+
+## Platform Notes
+
+| Platform | Strongest Fit | Little Harness Difference |
+|---|---|---|
+| Dify | Low-code AI apps, agents, RAG, workflows, APIs, plugins. | Dify is the app/control plane; Little Harness embeds into yours. |
+| Flowise | Visual AI agents, Chatflows, Agentflows, document stores, tracing integrations. | Flowise centers the graph and server; Little Harness centers the host app. |
+| Langflow | Python component graph for agents, MCP, vector stores, files, traces. | Langflow is visual Python graph authoring; Little Harness is TS-friendly runtime API. |
+| n8n | Event automation, app integrations, AI Agent nodes, execution history. | n8n is automation catalog-first; Little Harness is session runtime-first. |
+| Zapier Agents | Hosted natural-language business automation over Zapier's app ecosystem. | Zapier optimizes non-developer automation; Little Harness optimizes developer embedding. |
+
+## Sources
+
+- [Dify workflow and chatflow](https://docs.dify.ai/en/use-dify/build/workflow-chatflow)
+- [Dify agent docs](https://docs.dify.ai/en/use-dify/build/agent)
+- [Flowise docs](https://docs.flowiseai.com/)
+- [Flowise analytics](https://docs.flowiseai.com/using-flowise/analytics)
+- [Langflow docs](https://docs.langflow.org/)
+- [Langflow traces](https://docs.langflow.org/traces)
+- [n8n AI Agent node](https://docs.n8n.io/integrations/builtin/cluster-nodes/root-nodes/n8n-nodes-langchain.agent/)
+- [n8n executions](https://docs.n8n.io/workflows/executions/)
+- [Zapier Agents build guide](https://help.zapier.com/hc/en-us/articles/24393442652557-Build-an-agent-in-Zapier-Agents)
+- [Zapier Agents actions](https://help.zapier.com/hc/en-us/articles/26028298697485-Use-actions-on-Zapier-Agents)

@@ -30,6 +30,7 @@ type MemoryMode = "rw" | "ro" | "none";
 export type WorkflowDefinitionSnapshot = {
   readonly id: string;
   readonly description: string;
+  readonly policy?: string;
   readonly inputSchemaHash: string;
   readonly outputSchemaHash: string;
   readonly modelSlots: readonly WorkflowDefinitionModelSlotSnapshot[];
@@ -65,6 +66,7 @@ export type WorkflowDefinitionModelSlotSnapshot = {
 export type PlanningDefinitionSnapshot = {
   readonly id: string;
   readonly description: string;
+  readonly policy?: string;
   readonly inputSchema: {
     readonly hash: string;
     readonly summary: PlanningSchemaSummary;
@@ -108,6 +110,7 @@ export type PlanningToolSnapshot = {
 export type WorkflowDefinitionSnapshotInput = {
   readonly id: string;
   readonly description?: string;
+  readonly policy?: string;
   readonly inputSchema?: unknown;
   readonly suggestedInputSchema?: unknown;
   readonly output?: unknown;
@@ -143,6 +146,8 @@ export function getWorkflowDefinitionSnapshot(
   return {
     id: workflow.id,
     description: workflow.description ?? "",
+    // Only when set, so a workflow without a policy keeps its hashes.
+    ...(workflow.policy === undefined ? {} : { policy: workflow.policy }),
     inputSchemaHash: sha256Digest(normalizeSchema(workflow.inputSchema ?? true)),
     outputSchemaHash: sha256Digest(outputContractFor(workflow)),
     modelSlots: modelSlotSnapshots(workflow.models ?? [], plannerSlot),
@@ -189,6 +194,8 @@ export function getPlanningDefinitionSnapshot(
   return {
     id: workflow.id,
     description: workflow.description ?? "",
+    // Only when set, so a workflow without a policy keeps its hashes.
+    ...(workflow.policy === undefined ? {} : { policy: workflow.policy }),
     inputSchema: {
       hash: sha256Digest(inputSchema),
       summary: schemaSummary(inputSchema),

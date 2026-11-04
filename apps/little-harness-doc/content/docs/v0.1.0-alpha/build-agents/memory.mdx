@@ -1,24 +1,24 @@
 ---
 title: Memory
-description: Let a Little Harness agent save durable lessons during normal turns.
+description: Give a Little Harness agent long-term memory as plain files it reads and edits, in one folder or in layers such as company knowledge and per-user preferences.
 ---
 
-Harness memory is the opt-in path for model-authored durable context. It is useful when an agent learns something reusable while working, such as which database table answers a repeated natural-language question or which customer-specific field name should be preferred.
+Harness memory is opt-in long-term memory. The agent keeps it as plain files in a folder, sees what the folder holds on every turn, and changes it with the same file tools it uses for everything else. There is no memory tool: saving is writing a file, changing a memory is editing its file, and forgetting is deleting it.
 
-Memory is not a background dreaming loop. Dreaming can be added later as a consolidation job, but hot-path memory lets the model save a narrow lesson during the turn where it discovers it.
+It is useful when an agent learns something it should reuse later, such as a rule a reviewer gave it, which table answers a repeated question, or how a person likes their answers.
 
 <Callout title="Related but distinct">
-  Harness `memory()` is model-authored durable context on a `/persistent/memory`
-  Persistent Dir. It is **not** the same feature as Little Workflow's role-scoped
-  memory mounts (`/mnt/memory/...`), which give planner and worker roles their own
-  three-scope mounts inside a workflow run. See the
+  Harness `memory()` is model-authored long-term memory on a Persistent Dir. It is
+  **not** the same feature as Little Workflow's role-scoped memory mounts
+  (`/mnt/memory/...`), which give planner and worker roles their own three-scope
+  mounts inside a workflow run. See the
   [Little Workflow docs](https://github.com/samuelch727/little-workflow/tree/main/packages/little-workflow#readme)
   for that model. Both are called "memory"; neither is the other.
 </Callout>
 
 ## Add Memory
 
-Use `memory(...)` on `createHarness()` when the model should be allowed to save durable lessons.
+Pass `memory(...)` to `createHarness()`:
 
 ```ts
 import {
@@ -26,7 +26,7 @@ import {
   generateHarness,
   localHost,
   memory,
-} from "little-harness";
+} from "@little-stack/harness";
 
 const harness = createHarness({
   host: localHost({ dataDir: ".little-harness" }),
@@ -36,6 +36,7 @@ const harness = createHarness({
   tools: { queryDatabase, inspectSchema },
   memory: memory({
     sourceDir: "memory/db-query-agent",
+    description: "Lessons about this database: which tables answer which questions.",
   }),
 });
 
@@ -52,55 +53,96 @@ await generateHarness({
 });
 ```
 
-With the default options, Little Harness does three things:
+Little Harness then does three things:
 
-- mounts a Persistent Dir at `/persistent/memory`
-- injects a bounded `MEMORY.md` index into the system context on future turns
-- exposes a `remember` tool so the model can save a durable memory explicitly
+- mounts the folder as a Persistent Dir at `/persistent/memory`, and stores what the turn changed there when the turn ends
+- shows the agent a short note about the folder and one line per file, every turn
+- adds a built-in `memory` skill that says how to save, change and forget memories
 
 The backing `sourceDir` belongs to the host app. With Local Host, a relative `sourceDir` resolves under `localHost({ dataDir })`; use `projectDir(...)` only when you intentionally expose a project folder.
 
 ## What The Model Sees
 
-If `MEMORY.md` exists, future turns receive a small memory section in the system context.
+Every turn, the system prompt gets a section like this:
 
 ```txt
 # Memory
 
-Long-term memory is mounted at /persistent/memory.
+Long-term memory is kept as files in the folders below. It carries over to later conversations.
 
-Use remember to save durable facts, preferences, decisions, and user-approved context that should be available in future turns.
-
-Current MEMORY.md:
-# Memory Index
-- 2026-06-09: [db-query-agent](entries/2026-06-09/db-query-agent-a1b2c3d4e5f6.md) - Invoices live in billing_invoices; do not start with orders for invoice status questions.
+## /persistent/memory
+Lessons about this database: which tables answer which questions.
+You may change this memory in this conversation. Read the memory skill before you save, change or forget anything here.
+Files (one line each):
+- invoices/status.md: Invoice status lives in billing_invoices; don't start with orders.
+- schema/customer-names.md: Customer names are in accounts.display_name, not accounts.name.
 ```
 
-The full memory entry is stored under `entries/YYYY-MM-DD/...`. `MEMORY.md` stays bounded and keeps the newest index bullets first so future prompts get a compact reminder instead of a growing transcript.
+The list is built from the files each turn; there is no index file to keep up to date. Each line is the file's frontmatter `description` when it has one, or else the start of its text, in its own words with only whitespace collapsed, up to 600 characters. The agent often acts on this line without opening the file, so the built-in skill tells it to make the description state the memory itself, not a title.
 
-## Save A Memory
+The list stops at `maxIndexBytes` (8000 by default). Files that don't fit are counted in a last line that tells the agent to list the folder, and the turn's result carries a `policy_warning` with `reason: "memory_index_truncated"`. Hidden files, such as `.gitkeep`, are not listed.
 
-The default tool is named `remember`.
+## The Memory Skill
+
+When memory is on, the agent's skill list includes `memory`. It tells the agent to:
+
+- keep one Markdown file per memory, named for its topic, with a one-line `description` in its frontmatter
+- change a memory by rewriting its file, and forget one by deleting it, instead of adding another
+- put shared knowledge in the shared folder and a person's preferences in their own
+- never save secrets or one-off task details
+- when it may not change a folder, say so, and who can, instead of saving the change somewhere else
+
+A memory the agent writes looks like this:
+
+```markdown
+---
+description: Invoice status lives in billing_invoices; don't start with orders.
+---
+
+For "is this invoice paid?" questions, query billing_invoices first.
+orders and order_items don't carry payment status.
+```
+
+The skill says nothing about where the folders are or who may write them. The per-turn note carries those, so your own version of the skill keeps working when they change.
+
+### Use Your Own Skill
+
+A skill named `memory` in `skills` replaces the built-in one:
 
 ```ts
-{
-  memory: "Invoices live in billing_invoices; do not start with orders for invoice status questions.",
-  topic: "db-query-agent",
-  tags: ["database", "invoices"],
-  reason: "The agent tried orders and order_items first, then found the correct table in schema search.",
-}
+createHarness({
+  host: localHost({ dataDir: ".little-harness" }),
+  model,
+  memory: memory({ sourceDir: "memory/agent" }),
+  skills: [skill("./skills/memory")],
+});
 ```
 
-The tool writes a markdown entry and updates the memory index. It accepts:
+Start from the built-in skill's text and change what you need, such as the file layout or what counts as worth saving. Your copy no longer updates with the package.
 
-| Field | Type | Description |
-|---|---|---|
-| `memory` | `string` | Required durable lesson. Defaults to at most 4000 bytes. |
-| `reason` | `string` | Optional explanation for why the memory was saved. |
-| `topic` | `string` | Optional label used in the index and entry filename. |
-| `tags` | `string[]` | Optional short tags, up to 8 entries. |
+To use no skill at all, pass `skill: false` and put any guidance in `instructions`, which is shown with the folder every turn:
 
-Use memory for compact lessons, preferences, decisions, and user-approved context. Put raw query outputs, large documents, and generated reports in artifacts or the source system instead.
+```ts
+memory({
+  sourceDir: "memory/agent",
+  skill: false,
+  instructions: "Keep one file per table. Delete a file when the table is dropped.",
+});
+```
+
+## Agents Without Bash
+
+With `runtime: { bash: false }`, the agent cannot `cat` a skill or write a file with the shell, so the harness adds plain tools for exactly that:
+
+| Tool | What it does |
+|---|---|
+| `load_skill` | Opens a skill from the skill list by name: its `SKILL.md`, or another of its files. Added whenever the turn has skills. |
+| `list_files` | Lists the files in the memory folders. |
+| `read_file` | Reads a file in a memory folder. |
+| `write_file` | Creates or replaces a file in a memory folder. |
+| `delete_file` | Deletes a file in a memory folder. |
+
+The file tools reach only the memory folders, and refuse a write to a folder that is read-only for the turn. A tool of your own with one of these names is rejected when bash is off; rename it.
 
 ## Configure Scope
 
@@ -116,58 +158,170 @@ const harness = createHarness<
   system,
   tools,
   memory: memory({
-    sourceDir: ({ extraBody }) =>
-      `memory/teams/${extraBody?.teamId ?? "unknown"}/db-query-agent`,
+    sourceDir: ({ extraBody }) => {
+      const teamId = extraBody?.teamId;
+      if (!teamId || !/^[A-Za-z0-9_-]+$/.test(teamId)) {
+        throw new Error("This turn needs a valid teamId in extraBody.");
+      }
+      return `memory/teams/${teamId}/db-query-agent`;
+    },
     harnessDir: "/persistent/team-memory",
   }),
 });
 ```
 
+Check the id and throw when it is missing instead of falling back to a placeholder such as `"unknown"`: every turn without one would otherwise read and write one shared folder. With Local Host, a `sourceDir` function must return a relative path inside `dataDir`; a result that is absolute, contains `..`, or resolves outside `dataDir` fails the turn with a `HarnessPathError`, so an id such as `../company` cannot reach another folder.
+
 The model only sees the `harnessDir`, not the host filesystem path. Keep secrets and private data boundaries in the host app; Little Harness does not infer tenancy from path names.
+
+## Layers: Shared And Per-User Memory
+
+Pass an array to give one agent several memories. A company agent can keep knowledge everyone shares next to one memory per user:
+
+```ts
+type DeskUser = { userId: string; role: "officer" | "underwriter" };
+
+const harness = createHarness<typeof tools, DeskUser>({
+  host: localHost({ dataDir: ".little-harness" }),
+  model,
+  system,
+  tools,
+  memory: [
+    memory<DeskUser>({
+      sourceDir: "memory/company",
+      harnessDir: "/persistent/company",
+      description:
+        "The bank's shared lending knowledge. A rule here is part of the lending policy. Only underwriters may change it.",
+      canWrite: ({ extraBody }) => extraBody?.role === "underwriter",
+    }),
+    memory<DeskUser>({
+      sourceDir: ({ extraBody }) => {
+        const userId = extraBody?.userId;
+        if (!userId || !/^[A-Za-z0-9_-]+$/.test(userId)) {
+          throw new Error("This turn needs a valid userId in extraBody.");
+        }
+        return `memory/users/${userId}`;
+      },
+      harnessDir: "/persistent/me",
+      description: "This person's own preferences, such as how they like answers. Never lending rules.",
+    }),
+  ],
+});
+```
+
+The per-user `sourceDir` throws when the turn has no valid `userId`, because falling back to a default such as `"unknown"` would make every turn without a user share one personal memory.
+
+Each memory gets its own mount and its own section in the note. Two memories at the same `harnessDir`, or one inside another, are rejected.
+
+### Who May Write
+
+`canWrite` decides each turn, from that turn's `extraBody`, whether the person in the conversation may change a memory. When it returns false:
+
+- the folder is mounted read-only for the turn, so a write fails at once, in bash and in the file tools
+- the note says the memory is read-only in this conversation, and that the agent should say so if asked to change it
+- nothing is stored from the folder after the turn
+
+When it returns true, the note says the person may change the memory, so the agent does not refuse a change from someone who may make it. Without `canWrite`, anyone in the conversation can write.
+
+`extraBody` comes from your app. Derive the role from your own sign-in, never from what the person typed.
+
+## Keep Memory Somewhere Else
+
+Use `backend` instead of `sourceDir` to keep a memory in another service, such as a knowledge base. It is a Persistent Dir: `load` returns the files to mount for the turn, and `store` receives what the turn changed, as paths relative to `harnessDir`:
+
+```ts
+memory({
+  harnessDir: "/persistent/company",
+  description: "The company's shared knowledge.",
+  backend: {
+    load: async () => {
+      const facts: { id: string; summary: string; text: string }[] =
+        await knowledgeBase.list({ space: "company" });
+      return Object.fromEntries(
+        facts.map((fact) => [
+          `${fact.id}.md`,
+          `---\ndescription: ${JSON.stringify(fact.summary)}\n---\n\n${fact.text}\n`,
+        ]),
+      );
+    },
+    store: async ({ changes }) => {
+      for (const [path, bytes] of Object.entries({ ...changes.created, ...changes.updated })) {
+        await knowledgeBase.put({ space: "company", id: path.replace(/\.md$/, ""), text: new TextDecoder().decode(bytes) });
+      }
+      for (const path of changes.deleted) {
+        await knowledgeBase.remove({ space: "company", id: path.replace(/\.md$/, "") });
+      }
+    },
+  },
+});
+```
+
+- A file the agent created is in `changes.created`, one it edited in `changes.updated`, and one it deleted, a memory it forgot, in `changes.deleted`.
+- `canWrite` guards a backend too: `store` is not called for a turn that may not write.
+- `load` and `store` receive the turn's `extraBody` and `session`, so a backend can pick the person's space and use credentials scoped to it.
+
+## Managed By LittleDB
+
+LittleDB can keep memory for you instead of a folder or a backend of your own. `db.memory.org()` and `db.memory.user()` from `@little-stack/littledb` each return an ordinary `memory()` option whose backend is LittleDB, so the agent's side stays exactly as on this page:
+
+```ts
+// Private, UNRELEASED: @little-stack/littledb and its server are not available yet.
+memory: [
+  db.memory.org<DeskUser>({
+    space: "lending-rules",
+    description: "The bank's shared lending knowledge. Only underwriters may change it.",
+    canWrite: ({ extraBody }) => extraBody?.role === "underwriter",
+  }),
+  db.memory.user<DeskUser>({
+    user: ({ extraBody }) => extraBody && { id: extraBody.userId, label: extraBody.name },
+  }),
+],
+```
+
+- **Org memory** is shared by everyone in an org. A change the agent makes waits for a person to approve it in LittleDB's Memory tab, unless the space says otherwise, and `canWrite` defaults to nobody.
+- **A person's memory** saves at once and only that person's conversations see it.
+- Every file keeps its history: which conversation wrote it, what the person said, and who approved it. Each turn's trace records exactly which revisions it ran with.
+
+See [Managed memory](/docs/v0.1.0-alpha/reference/using-littledb#managed-memory) in Using LittleDB.
 
 ## Options
 
 ```ts
-memory({
+memory<{ role: string }>({
   sourceDir: "memory/db-query-agent",
   harnessDir: "/persistent/memory",
+  description: "Lessons about this database.",
   commit: "after-turn",
-  tool: {
-    name: "remember",
-    description:
-      "Save a durable database-query lesson for future Little Harness turns.",
-  },
-  indexPath: "MEMORY.md",
+  canWrite: ({ extraBody }) => extraBody?.role === "admin",
+  instructions: "Save only schema-routing lessons the user would want reused.",
   maxIndexBytes: 8000,
-  maxEntryBytes: 4000,
-  instructions:
-    "Save only durable schema-routing lessons the user would want reused.",
 });
 ```
 
 | Option | Default | Description |
 |---|---|---|
-| `sourceDir` | required | Local Host source folder, `projectDir(...)`, or a function of `extraBody`. |
+| `sourceDir` | one of `sourceDir` or `backend` | Local Host source folder, `projectDir(...)`, or a function of `extraBody` that returns a relative path inside `dataDir`. |
+| `backend` | one of `sourceDir` or `backend` | `{ load, store? }` for a memory kept in another service. |
 | `harnessDir` | `/persistent/memory` | Agent-visible mount path. It must stay under `/persistent/`. |
+| `description` | none | What the memory holds, shown in the note every turn. |
 | `commit` | `after-turn` | `after-turn`, `manual`, or `read-only`. |
-| `tool` | `{ name: "remember" }` | Customize the tool, or set `false` to mount memory without adding a tool. |
-| `indexPath` | `MEMORY.md` | Relative index file path inside the memory directory. |
-| `maxIndexBytes` | `8000` | Maximum UTF-8 bytes injected for the memory index. |
-| `maxEntryBytes` | `4000` | Maximum UTF-8 bytes accepted by the `remember` tool for one memory. |
-| `instructions` | generated | Extra model instructions, or `false` to suppress memory-specific instructions. |
+| `canWrite` | anyone | `({ extraBody }) => boolean`, checked each turn. False makes the memory read-only for that turn. |
+| `instructions` | none | Guidance shown with the memory every turn, up to 4096 characters. |
+| `maxIndexBytes` | `8000` | Most UTF-8 bytes of the file list shown every turn. |
+| `skill` | built-in skill | `false` leaves the built-in `memory` skill out for this memory. |
 
-`commit: "read-only"` mounts existing memory and injects it into context without exposing `remember`. `tool: false` keeps the Persistent Dir behavior but does not add the built-in tool. `commit: "manual"` lets the completed result expose the normal manual Persistent Dir commit path.
+`commit: "read-only"` mounts existing memory and shows it, but never stores anything from it. `commit: "manual"` lets the completed result expose the normal manual Persistent Dir commit path.
 
 ## Boundaries
 
-Memory is built on Persistent Dirs. It uses the same session isolation, load, diff, trace, and commit model as other persistent files.
+Memory is built on Persistent Dirs. It uses the same session isolation, load, diff, trace, and commit model as other persistent files, and `canWrite` is a Persistent Dir option you can use on any of them.
 
 Keep these boundaries explicit:
 
-- opt-in only: no memory is saved unless the harness config includes `memory(...)`
-- app-owned storage: the host controls `sourceDir`, tenancy, access, and retention
-- compact entries: memory is for reusable lessons, not transcripts or large datasets
-- explicit write: the default model-authored write path is the `remember` tool
-- no automatic dreaming yet: consolidation jobs can read and rewrite the same files later
+- opt-in only: no memory is mounted or shown unless the harness config includes `memory(...)`
+- app-owned storage: the host controls `sourceDir` or `backend`, tenancy, who may write (`canWrite`), and retention; with LittleDB managing it, LittleDB stores the files and your code still decides the org, the person, and who may write
+- plain files: memory is for reusable lessons, not transcripts or large datasets; put reports and raw outputs in artifacts
+- agent turns only: the agent's own model calls see memory; workflow steps it runs do not, so pass what a step needs as its input
+- no automatic consolidation yet: a later job can read and rewrite the same files
 
 For lower-level storage behavior, read [Persistent Dirs](/docs/v0.1.0-alpha/foundations/persistent-dirs) and [Persistent Dir Reference](/docs/v0.1.0-alpha/reference/persistent-dir-reference).

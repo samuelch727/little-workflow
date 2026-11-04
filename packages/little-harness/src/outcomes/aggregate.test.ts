@@ -78,6 +78,65 @@ describe("outcome folding", () => {
     const second = outcome("success", { reportKey: "k1" });
     expect(foldOutcomeReports([second, first]).counted[0]?.status).toBe("success");
   });
+
+  it("orders reports with a revision by it: a late, lower revision loses", () => {
+    const down = outcome("failure", { reportKey: "k1", revision: 2 });
+    // The up at 1 had its answer lost and was sent again, so it arrived after the down.
+    const up = outcome("success", { reportKey: "k1", revision: 1 });
+    const folded = foldOutcomeReports([down, up]);
+    expect(folded.counted.map((event) => event.status)).toEqual(["failure"]);
+    expect(folded.supersededCount).toBe(1);
+  });
+
+  it("with a revision, a retraction withdraws what is live below it, and wins at its own", () => {
+    // The up's removal, numbered after a down: it withdraws the down, as the caller ordered.
+    const cleared = foldOutcomeReports([
+      outcome("success", { reportKey: "k1", revision: 1 }),
+      outcome("failure", { reportKey: "k1", revision: 2 }),
+      outcome("success", { reportKey: "k1", revision: 3, retracted: true }),
+    ]);
+    expect(cleared.counted).toHaveLength(0);
+    expect(cleared.clearedCount).toBe(1);
+    // Arriving before the up it takes back, a retraction at the up's revision still wins.
+    const early = foldOutcomeReports([
+      outcome("success", { reportKey: "k2", revision: 5, retracted: true }),
+      outcome("success", { reportKey: "k2", revision: 5 }),
+    ]);
+    expect(early.counted).toHaveLength(0);
+    // And a retraction numbered before a newer report leaves it.
+    const kept = foldOutcomeReports([
+      outcome("failure", { reportKey: "k3", revision: 7 }),
+      outcome("failure", { reportKey: "k3", revision: 6, retracted: true }),
+    ]);
+    expect(kept.counted.map((event) => event.status)).toEqual(["failure"]);
+  });
+
+  it("at one revision keeps the first report, and a retraction there still wins", () => {
+    // A retry repeats the report; a different report at the same revision changes nothing.
+    const first = foldOutcomeReports([
+      outcome("success", { reportKey: "k1", revision: 4 }),
+      outcome("success", { reportKey: "k1", revision: 4 }),
+      outcome("failure", { reportKey: "k1", revision: 4 }),
+    ]);
+    expect(first.counted.map((event) => event.status)).toEqual(["success"]);
+    expect(first.supersededCount).toBe(2);
+    // A retraction then a report at its revision: the retraction stands.
+    const removed = foldOutcomeReports([
+      outcome("failure", { reportKey: "k2", revision: 4, retracted: true }),
+      outcome("success", { reportKey: "k2", revision: 4 }),
+      outcome("failure", { reportKey: "k2", revision: 4 }),
+    ]);
+    expect(removed.counted).toHaveLength(0);
+  });
+
+  it("ranks a report without a revision below any with one, a retraction included", () => {
+    const folded = foldOutcomeReports([
+      outcome("success", { reportKey: "k1", revision: 0 }),
+      outcome("failure", { reportKey: "k1" }),
+      outcome("success", { reportKey: "k1", retracted: true }),
+    ]);
+    expect(folded.counted.map((event) => event.status)).toEqual(["success"]);
+  });
 });
 
 describe("outcome aggregation", () => {
@@ -133,6 +192,7 @@ describe("reading outcomes back from a trace", () => {
         source: "chat-sdk",
         promptHash: "p1",
         reportKey: "k1",
+        revision: 4,
         reporter: "anon_abc",
         surface: { platform: "slack" },
       },
@@ -148,6 +208,7 @@ describe("reading outcomes back from a trace", () => {
       source: "chat-sdk",
       promptHash: "p1",
       reportKey: "k1",
+      revision: 4,
       reporter: "anon_abc",
       metadata: { surface: { platform: "slack" } },
     });

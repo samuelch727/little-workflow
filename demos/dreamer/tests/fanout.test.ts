@@ -5,10 +5,10 @@ import type { LanguageModel } from "ai";
 import { afterAll, afterEach, beforeAll, expect, it } from "vitest";
 import {
   loadHarness,
-  resolveHarnessWorkflowTools,
   type HarnessWorkflow,
   type HarnessWorkflowExecution,
-} from "little-harness";
+} from "@little-stack/harness";
+import { resolveHarnessWorkflowTools } from "@little-stack/harness/internals";
 import { setDreamerModel } from "../agents/dreamer/env";
 
 const dirs: string[] = [];

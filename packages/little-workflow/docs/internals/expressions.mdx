@@ -9,7 +9,7 @@ LWIR holds plain JSON, but cells that read run-time values use a string template
 
 Expressions are accepted in three places inside a step:
 
-- `step.with` — model prompts, tool inputs, code arguments.
+- `step.with` — `ai.generate` prompts (`with.prompt`, `with.system`), `tool.call` arguments (`with.args`), `parallel` `items` / `itemKey`, and `decision` `when`. Other `with` fields reach the step as written.
 - `step.input` — explicit per-step input maps.
 - `step.cache` — caching keys.
 
@@ -45,6 +45,8 @@ Inside a `parallel` step body, the executor adds `item.*` to the allowed roots; 
 
 Template-only resolution **preserves the underlying type** — `{{ input.candidates }}` returns the actual array. Embedded resolution always returns a string and uses `JSON.stringify` for non-primitive interpolations.
 
+The exception is an `ai.generate` step's `with.prompt` and `with.system`. A prompt is always text, so a template-only value there that resolves to an object or array is JSON-stringified by the embedded rule: `"{{ steps.credit.output }}"` becomes JSON text.
+
 ## Allowed Roots
 
 ```ts
@@ -65,6 +67,8 @@ Steps with `maxVisits > 1` expose two additional accessors:
 
 - `{{ steps.X.lastOutput }}` — output of the most recently committed visit. Equivalent to `{{ steps.X.output }}` when `maxVisits === 1`.
 - `{{ steps.X.allVisits }}` — array of all committed visit outputs in chronological order.
+
+Before step X has completed once, as when an earlier step in a loop reads it through a back-edge, `lastOutput` (and any path under it) has no value and `allVisits` is `[]`. In an embedded expression a missing value becomes empty text, so `"Notes: {{ steps.review.lastOutput.note }}"` reads `"Notes: "` on the first pass. `{{ steps.X.output }}` on a step that has not completed is still an error.
 
 Using `{{ steps.X.output }}` on a step with `maxVisits > 1` is a **validation error** (`lwir.output_ambiguous_for_multi_visit`). The planner must use `lastOutput` or `allVisits` explicitly — silent degradation at runtime is rejected at compile time.
 
@@ -130,7 +134,7 @@ Errors surface as `expression.invalid_root`, `expression.invalid_function`, `exp
 
 ## Runtime Resolution
 
-The runtime calls `resolveExpressionValue()` on every step's `with` and `input` map just before dispatching the step adapter. The `ExpressionContext` is:
+Just before dispatching a step, the runtime resolves the step's input with `resolveExpressionValue()`: `step.input`, else `with.args`. For an `ai.generate` step it also resolves `with.prompt` and `with.system` to text, against the same context, so `"Credit: {{ steps.credit.output.score }}"` reaches the model with the score filled in. The `parallel` executor resolves `items` and `itemKey`, and a `decision` step resolves each `when`. Other `with` fields are not resolved. The `ExpressionContext` is:
 
 ```ts
 type ExpressionContext = {

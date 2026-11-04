@@ -1,0 +1,154 @@
+---
+title: Embedding in Your App
+description: Configure and run a Little Harness agent inside your own app — createHarness, streaming, non-chat runs, and sessions.
+---
+
+> **Starting a new project?** [Setup](/docs/get-started/setup) creates a Node or Next.js project with a Harness agent, or adds one to an existing Next.js app. This page shows how to configure and call `createHarness` in code you already have.
+
+
+Little Harness is a local-first agent runtime for teams that want useful sessions before choosing managed hosting, sandboxes, artifact plumbing, or workflow orchestration. Give it a Local Host, model, system prompt, tools, skills, and optional persistent directories; it creates or resumes the session, exposes the right harness directories, captures traces, and runs each session in its own workspace. By default (`"auto"`), a turn that can run model-authored code or reach the network runs in the subprocess sandbox; other turns stay in-process, which is not an isolation boundary. See [Isolation And Security](/docs/harness/v0.1.0-alpha/runtime/isolation-and-security).
+
+<Callout title="New here?">
+  Start with [Getting Started](/docs/harness/v0.1.0-alpha/getting-started) — scaffold an agent workspace and
+  chat with it from the CLI in a couple of minutes. This guide is the *embedding* path: how to call
+  `createHarness` from your own route, job, or worker.
+</Callout>
+
+There are two ways to run an agent, and they share the same `createHarness` config:
+
+- **A dedicated agent workspace** (recommended for iterating) — keep your agents in their own folder, define each in an `agent.ts` that default-exports `createHarness(...)`, and run them with the CLI (`little-harness test`) or [`loadHarness()`](/docs/harness/v0.1.0-alpha/build-agents/agent-folders).
+- **Embedded in your own app** — call `createHarness` directly and serve it from a route, job, or worker, as shown below.
+
+Either way, everything here is the `createHarness` config — the exact object your `agent.ts` exports. For the full option-by-option reference, see [`createHarness()`](/docs/harness/v0.1.0-alpha/reference/create-harness).
+
+## Install
+
+Little Harness needs Node.js 22+ and AI SDK 7. `ai` is a peer dependency, so install it alongside the
+package (from the `alpha` dist-tag during the alpha) and an AI SDK 7 provider package:
+
+```bash
+pnpm add @little-stack/harness@alpha ai@^7 zod @ai-sdk/openai
+```
+
+Swap `@ai-sdk/openai` for any AI SDK 7 provider (`@ai-sdk/anthropic`, `@ai-sdk/google`, ...).
+
+## Create And Serve A Harness
+
+```ts
+import { openai } from "@ai-sdk/openai";
+import type { UIMessage } from "ai";
+import { createHarness, localHost, skill, streamHarness } from "@little-stack/harness";
+// Your own AI SDK tools (see Tools) and a skill folder in your project.
+import { queryCustomers, searchDocs } from "./tools";
+
+const system = "You help account teams find practical renewal risks.";
+
+const harness = createHarness({
+  host: localHost({ dataDir: ".little-harness" }),
+  model: openai("gpt-5"),
+  system,
+  tools: { searchDocs, queryCustomers },
+  skills: [skill("./skills/domain-glossary")],
+});
+
+export async function POST(req: Request) {
+  const { messages }: { messages: UIMessage[] } = await req.json();
+
+  const result = streamHarness({
+    harness,
+    messages,
+  });
+
+  return result.toUIMessageStreamResponse();
+}
+```
+
+For interactive chat, use `streamHarness()` and return an AI SDK-compatible UI
+message stream. For workers, tests, cron jobs, or Little Workflow nodes, use the
+same harness with `generateHarness()` and await the completed result.
+
+```ts
+import { Output } from "ai";
+import { generateHarness } from "@little-stack/harness";
+
+const result = await generateHarness({
+  harness,
+  type: "support.ticket_triage",
+  input: ticket,
+  output: Output.object({ schema: triageSchema }),
+});
+
+// A turn parks only when a tool parks it; otherwise it completes.
+if (result.status === "completed") {
+  console.log(result.output.priority);
+}
+console.log(result.trace.id);
+console.log(result.trace.path);
+```
+
+## The Default Runtime
+
+Every `streamHarness()` or `generateHarness()` call runs inside an isolated session workspace. If you do not pass a session key, Little Harness creates an ephemeral session for that request. If you pass a stable session key, such as your app's chat id, Little Harness continues the same private workspace.
+
+One session never runs more than one turn at the same time. Local Host queues same-session calls by default, while different sessions can run concurrently. The runtime exposes a small, predictable filesystem — `/session/`, `/artifacts/`, `.agents/skills/`, and opt-in `/persistent/` — described in [Files And Artifacts](/docs/harness/v0.1.0-alpha/foundations/files-and-artifacts). In Local Host, stable sessions are inspectable under `.little-harness/sessions/<session-id>/`.
+
+## Continue A Session
+
+Pass a stable session key to continue the same private workspace and trace. In chat apps, this is usually your app's chat, thread, or conversation id.
+
+```ts
+const result = streamHarness({
+  harness,
+  messages,
+  session: chatId,
+});
+```
+
+Continuing a session preserves the agent's working files and lets the host app show a single evolving thread. Starting a new session gives the agent a fresh workspace.
+
+> **Note:** A continued session preserves the agent's files, artifacts, and trace — **not** the chat transcript. Pass the full `messages[]` history on every turn (standard AI SDK client-carries-history); `session` does not re-feed prior messages to the model.
+
+On the client, keep using ordinary AI SDK chat primitives (`useChat` from `@ai-sdk/react` with a `DefaultChatTransport` pointed at your route).
+
+## Configuring the Agent
+
+The building blocks below each have a dedicated guide. From the embedding side, they are all just fields on the `createHarness` config:
+
+- **Tools and large outputs** — pass normal AI SDK tools; let them write big results to session files or artifacts instead of flooding context. See [Tools](/docs/harness/v0.1.0-alpha/build-agents/tools).
+- **Message-file staging** — move chat uploads into the session before the model turn via `chat.stageMessage`. See [Message Files](/docs/harness/v0.1.0-alpha/build-agents/message-files).
+- **Skills** — expose procedural knowledge read-only, disclosed on demand. See [Skills](/docs/harness/v0.1.0-alpha/build-agents/skills).
+- **Persistent Dirs and memory** — opt in to cross-session files and model-authored memory. See [Persistent Dirs](/docs/harness/v0.1.0-alpha/foundations/persistent-dirs) and [Memory](/docs/harness/v0.1.0-alpha/build-agents/memory).
+- **Runtime substrate** — the built-in command runtime (bash, `jq`, `sqlite3`, Python/JS) is powered by [just-bash](/docs/harness/v0.1.0-alpha/runtime/just-bash). By default, turns that can run Python or JavaScript run it in a [subprocess sandbox](/docs/harness/v0.1.0-alpha/runtime/execution-environments) with an empty environment.
+- **Workflows** — expose Little Workflow workflows as typed tools with `workflows: [asHarnessWorkflow(...)]`. See [Triggering a workflow from an agent](/docs/harness/v0.1.0-alpha/build-agents/workflows).
+- **Outcomes** — record whether a run worked with `reportHarnessOutcome` (chat reactions are captured automatically). See [Outcome Capture](/docs/harness/v0.1.0-alpha/build-agents/outcomes).
+
+## Commit And Error Behavior
+
+When you use Persistent Dirs, writes land in the isolated session first and commit after the turn. Persistence failures are host-facing: inspect them on the result rather than in the model context.
+
+```ts
+const result = streamHarness({ harness, messages, session, extraBody });
+const finished = await result.finished;
+
+if (finished.status === "completed" && finished.persistence.status === "failed") {
+  // Show a warning, retry in the background, or page ops.
+}
+```
+
+If a persistence commit fails, Little Harness does not inject that failure into the agent's normal context. Uncommitted files remain recoverable from the isolated session, and the trace records the commit failure for debugging. See [Persistent Dirs](/docs/harness/v0.1.0-alpha/foundations/persistent-dirs) for the full commit model.
+
+## Non-Goals
+
+- No containers, microVMs, or raw execution environment required for the happy path.
+- No artifact storage choice before the first agent works.
+- No host filesystem paths exposed to the model by default.
+- No accidental cross-session persistence.
+- No Little Workflow dependency for users who only need an agent runtime.
+
+## Next Steps
+
+- Read [Foundations](/docs/harness/v0.1.0-alpha/foundations) for sessions, files, tools, persistence, and traces.
+- Read [Generating And Streaming](/docs/harness/v0.1.0-alpha/build-agents/generating-and-streaming) for deeper route, worker, file, and callback examples.
+- Read [Sessions](/docs/harness/v0.1.0-alpha/foundations/sessions) to understand continuation and isolation.
+- Read [Local Host](/docs/harness/v0.1.0-alpha/runtime/local-host) for the local session, artifact, trace, and Persistent Dir layout.
+- Read [API Reference](/docs/harness/v0.1.0-alpha/reference/api-reference) when shaping package exports.

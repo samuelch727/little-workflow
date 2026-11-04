@@ -54,14 +54,12 @@ it("little init creates a workflow project from non-interactive flags", async ()
   let stdout = "";
   const code = await initCommand([
     "ops-workflows",
-    "--workflow",
+    "--workflow-name",
     "ticket-triage",
     "--provider",
     "deepseek",
     "--model",
     "deepseek-chat",
-    "--yes",
-    "--no-install",
   ], {
     cwd,
     stdout: (text) => { stdout += text; },
@@ -78,7 +76,7 @@ it("little init --here --with-harness creates workflow and harness files in cwd"
   const cwd = await tmp();
   const code = await initCommand([
     "--here",
-    "--workflow",
+    "--workflow-name",
     "candidate-review",
     "--with-harness",
     "--agent",
@@ -87,8 +85,6 @@ it("little init --here --with-harness creates workflow and harness files in cwd"
     "deepseek",
     "--model",
     "deepseek-reasoner",
-    "--yes",
-    "--no-install",
   ], { cwd, stdout: () => {} });
 
   expect(code).toBe(0);
@@ -102,7 +98,7 @@ it("little init --here works in a non-empty directory", async () => {
   await writeFile(join(cwd, "README.md"), "# existing project\n");
   let stderr = "";
   const code = await initCommand(
-    ["--here", "--workflow", "alpha", "--yes", "--no-install"],
+    ["--here", "--workflow-name", "alpha"],
     { cwd, stdout: () => {}, stderr: (text) => { stderr += text; } },
   );
 
@@ -114,7 +110,7 @@ it("little init --here works in a non-empty directory", async () => {
 
 it("little add workflow adds a workflow to the current project", async () => {
   const cwd = await tmp();
-  await initCommand(["--here", "--workflow", "alpha", "--yes", "--no-install"], {
+  await initCommand(["--here", "--workflow-name", "alpha"], {
     cwd,
     stdout: () => {},
   });
@@ -131,7 +127,7 @@ it("little add workflow adds a workflow to the current project", async () => {
 
 it("little add workflow honors --dir for custom workflow roots", async () => {
   const cwd = await tmp();
-  await initCommand(["--here", "--workflow", "alpha", "--yes", "--no-install"], {
+  await initCommand(["--here", "--workflow-name", "alpha"], {
     cwd,
     stdout: () => {},
   });
@@ -157,7 +153,7 @@ it("little add workflow honors --dir for custom workflow roots", async () => {
 
 it("little add harness --new-workflow creates both the new workflow and shim", async () => {
   const cwd = await tmp();
-  await initCommand(["--here", "--workflow", "alpha", "--yes", "--no-install"], {
+  await initCommand(["--here", "--workflow-name", "alpha"], {
     cwd,
     stdout: () => {},
   });
@@ -185,7 +181,7 @@ it("little add harness rejects selecting and creating a workflow at the same tim
   let stderr = "";
   const code = await addCommand([
     "harness",
-    "--workflow",
+    "--workflow-name",
     "alpha",
     "--new-workflow",
     "beta",
@@ -195,5 +191,57 @@ it("little add harness rejects selecting and creating a workflow at the same tim
   });
 
   expect(code).toBe(1);
-  expect(stderr).toMatch(/choose either --workflow or --new-workflow/i);
+  expect(stderr).toMatch(/choose either --workflow-name or --new-workflow/i);
+});
+
+it("little init takes --workflow as a boolean and names the workflow with --workflow-name", async () => {
+  const cwd = await tmp();
+  const code = await initCommand(["demo", "--workflow", "--with-harness"], { cwd, stdout: () => {} });
+
+  expect(code).toBe(0);
+  // --workflow did not swallow --with-harness as a workflow name.
+  expect(await exists(join(cwd, "demo", "workflows", "candidate-review", "workflow.ts"))).toBe(true);
+  expect(await exists(join(cwd, "demo", "agents", "support", "workflows", "candidate-review.ts"))).toBe(true);
+});
+
+it("little init rejects --workflow=<name> with a pointer to --workflow-name", async () => {
+  const cwd = await tmp();
+  let stderr = "";
+  const code = await initCommand(["demo", "--workflow=alpha"], { cwd, stderr: (text) => { stderr += text; } });
+
+  expect(code).toBe(1);
+  expect(stderr).toContain("--workflow-name");
+  expect(await exists(join(cwd, "demo"))).toBe(false);
+});
+
+it("little init rejects install and prompt flags it would otherwise ignore", async () => {
+  for (const flag of ["--yes", "--no-install"]) {
+    const cwd = await tmp();
+    let stderr = "";
+    const code = await initCommand(["demo", flag], { cwd, stderr: (text) => { stderr += text; } });
+
+    expect(code).toBe(1);
+    expect(stderr).toContain(`does not take ${flag}`);
+    expect(await exists(join(cwd, "demo"))).toBe(false);
+  }
+});
+
+it("little init defaults to the openai provider, like little setup and little-harness init", async () => {
+  const cwd = await tmp();
+  const code = await initCommand(["demo"], { cwd, stdout: () => {} });
+
+  expect(code).toBe(0);
+  const workflowTs = await readFile(join(cwd, "demo", "workflows", "candidate-review", "workflow.ts"), "utf8");
+  expect(workflowTs).toContain('import { openai } from "@ai-sdk/openai";');
+  const packageJson = JSON.parse(await readFile(join(cwd, "demo", "package.json"), "utf8"));
+  expect(packageJson.dependencies["@ai-sdk/openai"]).toBeDefined();
+});
+
+it("little add harness rejects --workflow <name> with a pointer to --workflow-name", async () => {
+  const cwd = await tmp();
+  let stderr = "";
+  const code = await addCommand(["harness", "--workflow", "alpha"], { cwd, stderr: (text) => { stderr += text; } });
+
+  expect(code).toBe(1);
+  expect(stderr).toContain("--workflow-name <name>");
 });

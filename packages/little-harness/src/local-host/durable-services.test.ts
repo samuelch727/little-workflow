@@ -85,6 +85,29 @@ it("persists task and continuation ledgers across service instances", async () =
   await expect(second.resumeQueue.claimNext("sess_1")).resolves.toMatchObject({ resumeId: "resume_1" });
 });
 
+it("claims a queued resume by its id, once, whatever its place in the queue", async () => {
+  const root = await mkdtemp(join(tmpdir(), "lh-durable-services-"));
+  dirs.push(root);
+  const services = createLocalHarnessDurableServices({ rootDir: root });
+  const queued = (resumeId: string, enqueuedAt: string) => ({
+    resumeId,
+    continuationId: `cont_${resumeId}`,
+    sessionId: "sess_1",
+    originTurnId: "turn_1",
+    reason: "predicate_satisfied" as const,
+    terminalResultIds: [],
+    enqueuedAt,
+  });
+  await services.resumeQueue.enqueue(queued("resume_1", "2026-06-22T00:00:01.000Z"));
+  await services.resumeQueue.enqueue(queued("resume_2", "2026-06-22T00:00:02.000Z"));
+  await expect(services.resumeQueue.claim!("resume_2")).resolves.toMatchObject({ resumeId: "resume_2", claimedAt: expect.any(String) });
+  await expect(services.resumeQueue.claim!("resume_2")).resolves.toBeUndefined();
+  await expect(services.resumeQueue.claim!("resume_3")).resolves.toBeUndefined();
+  await services.resumeQueue.markCompleted("resume_1", "2026-06-22T00:00:03.000Z");
+  await expect(services.resumeQueue.claim!("resume_1")).resolves.toBeUndefined();
+  await expect(services.resumeQueue.listOpen("sess_1")).resolves.toEqual([]);
+});
+
 it("persists failed and cancelled task diagnostics across service instances", async () => {
   const root = await mkdtemp(join(tmpdir(), "lh-durable-services-"));
   dirs.push(root);
@@ -456,6 +479,169 @@ it("repairs missing task call-identity indexes before minting a new task id", as
     callIdentity: "call_1",
   })).resolves.toMatchObject({ taskId: "task_1" });
   await expect(second.tasks.reserveTask({ sessionId: "sess_1", kind: "tool" })).resolves.toMatchObject({ taskId: "task_2" });
+});
+
+it("recovers an atomic Agent Group start binding after authority commit", async () => {
+  const root = await mkdtemp(join(tmpdir(), "lh-durable-services-"));
+  dirs.push(root);
+  const first = createLocalHarnessDurableServices({
+    rootDir: root,
+    faultInjection: failOnce("agent-group-start-binding-after-authority-commit"),
+  });
+  const tasks = [];
+  for (const memberIndex of [0, 1]) {
+    tasks.push(await first.tasks.reserveTask({
+      sessionId: "sess_start_binding",
+      kind: "agent",
+      callIdentity: `start-binding-${memberIndex}`,
+      agentGroupScopeIdentity: "agent-start-scope-1",
+      agentMemberId: `member_${memberIndex + 1}`,
+      agentMemberIndex: memberIndex,
+    }));
+  }
+  const acceptedAt = new Date(Date.now() + 60_000).toISOString();
+  const binding = {
+    sessionId: "sess_start_binding",
+    scopeIdentity: "agent-start-scope-1",
+    groupRef: "external-start-group-1",
+    acceptedAt,
+    members: tasks.map((task, memberIndex) => ({
+      taskId: task.taskId,
+      memberId: `member_${memberIndex + 1}`,
+      memberIndex,
+      taskRef: `external-start-task-${memberIndex + 1}`,
+    })),
+  };
+
+  await expect(first.tasks.bindAgentGroupStart!(binding))
+    .rejects.toThrow("agent-group-start-binding-after-authority-commit");
+
+  const recovered = createLocalHarnessDurableServices({ rootDir: root });
+  const records = await recovered.tasks.listTasks({ sessionId: "sess_start_binding" });
+  expect(records).toHaveLength(2);
+  expect(records).toEqual(expect.arrayContaining([
+    expect.objectContaining({
+      externalAgentGroupRef: "external-start-group-1",
+      externalAgentTaskRef: "external-start-task-1",
+      agentGroupRevision: 0,
+    }),
+    expect.objectContaining({
+      externalAgentGroupRef: "external-start-group-1",
+      externalAgentTaskRef: "external-start-task-2",
+      agentGroupRevision: 0,
+    }),
+  ]));
+  await expect(recovered.tasks.bindAgentGroupStart!(binding))
+    .resolves.toMatchObject({ outcome: "replayed" });
+});
+
+it("recovers an atomically committed Agent Group projection after a crash before task mirrors", async () => {
+  const root = await mkdtemp(join(tmpdir(), "lh-durable-services-"));
+  dirs.push(root);
+  const first = createLocalHarnessDurableServices({
+    rootDir: root,
+    faultInjection: failOnce("agent-group-projection-after-authority-commit"),
+  });
+  const tasks = await Promise.all([0, 1].map((memberIndex) => first.tasks.reserveTask({
+    sessionId: "sess_agents",
+    kind: "agent",
+    callIdentity: `agent-call-${memberIndex}`,
+    agentGroupScopeIdentity: "agent-scope-1",
+    agentMemberId: `member_${memberIndex + 1}`,
+    agentMemberIndex: memberIndex,
+  })));
+  const projection = {
+    sessionId: "sess_agents",
+    scopeIdentity: "agent-scope-1",
+    groupRevision: 1,
+    groupStatus: "satisfied" as const,
+    groupObservationDigest: stableHash({ groupRevision: 1, status: "satisfied" }),
+    groupObservedAt: "2099-01-01T00:00:00.000Z",
+    members: tasks.map((task, memberIndex) => ({
+      taskId: task.taskId,
+      memberRevision: 1,
+      memberObservationDigest: stableHash({ memberIndex, revision: 1, status: "completed" }),
+      memberStateDigest: stableHash({ memberIndex, status: "completed" }),
+      memberObservedAt: "2099-01-01T00:00:00.000Z",
+      status: "completed" as const,
+      outputSummary: `member ${memberIndex + 1} completed`,
+    })),
+  };
+
+  await expect(first.tasks.projectAgentGroupObservation!(projection))
+    .rejects.toThrow("agent-group-projection-after-authority-commit");
+
+  const recovered = createLocalHarnessDurableServices({ rootDir: root });
+  expect(await recovered.tasks.listTasks({ sessionId: "sess_agents" })).toEqual(expect.arrayContaining([
+    expect.objectContaining({
+      taskId: tasks[0]!.taskId,
+      status: "completed",
+      agentGroupRevision: 1,
+      agentMemberRevision: 1,
+    }),
+    expect.objectContaining({
+      taskId: tasks[1]!.taskId,
+      status: "completed",
+      agentGroupRevision: 1,
+      agentMemberRevision: 1,
+    }),
+  ]));
+  await expect(recovered.tasks.getTask({ sessionId: "sess_agents", taskId: tasks[1]!.taskId }))
+    .resolves.toMatchObject({ status: "completed", outputSummary: "member 2 completed" });
+  await expect(recovered.tasks.projectAgentGroupObservation!(projection))
+    .resolves.toMatchObject({ outcome: "replayed" });
+});
+
+it("rejects generic mutation of launched Agent Group tasks instead of lying behind authority", async () => {
+  const root = await mkdtemp(join(tmpdir(), "lh-durable-services-"));
+  dirs.push(root);
+  const services = createLocalHarnessDurableServices({ rootDir: root });
+  const reserved = await services.tasks.reserveTask({
+    sessionId: "sess_agents",
+    kind: "agent",
+    callIdentity: "agent-call-1",
+    agentGroupScopeIdentity: "agent-scope-1",
+    agentMemberId: "member_1",
+    agentMemberIndex: 0,
+  });
+  const launched = {
+    ...reserved,
+    externalAgentGroupRef: "external-group-1",
+    externalAgentTaskRef: "external-task-1",
+  };
+  await services.tasks.updateTask(launched);
+  await services.tasks.projectAgentGroupObservation!({
+    sessionId: "sess_agents",
+    scopeIdentity: "agent-scope-1",
+    groupRevision: 1,
+    groupStatus: "running",
+    groupObservationDigest: stableHash({ groupRevision: 1, status: "running" }),
+    groupObservedAt: "2099-01-01T00:00:00.000Z",
+    members: [{
+      taskId: reserved.taskId,
+      memberRevision: 1,
+      memberObservationDigest: stableHash({ revision: 1, status: "running" }),
+      memberStateDigest: stableHash({ status: "running" }),
+      memberObservedAt: "2099-01-01T00:00:00.000Z",
+      status: "running",
+    }],
+  });
+
+  await expect(services.tasks.cancelTask({ sessionId: "sess_agents", taskId: reserved.taskId }))
+    .rejects.toThrow(/cancel_agent_group/i);
+  await expect(services.tasks.updateTaskTerminal({
+    sessionId: "sess_agents",
+    taskId: reserved.taskId,
+    status: "failed",
+  })).rejects.toThrow(/cancel_agent_group/i);
+  await expect(services.tasks.markTerminal(
+    { sessionId: "sess_agents", taskId: reserved.taskId },
+    { status: "failed", updatedAt: "2099-01-01T00:00:01.000Z" },
+  )).rejects.toThrow(/cancel_agent_group/i);
+  await expect(services.tasks.updateTask({ ...launched, status: "running" }))
+    .rejects.toThrow(/cancel_agent_group/i);
+  await expect(services.tasks.getTask({ sessionId: "sess_agents", taskId: reserved.taskId }))
+    .resolves.toMatchObject({ status: "running", agentGroupRevision: 1 });
 });
 
 it("does not reuse a task id when meta lags behind written task records", async () => {

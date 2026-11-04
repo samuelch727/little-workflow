@@ -1,0 +1,81 @@
+---
+title: Virtual World
+description: Keep workflow events, artifacts and run files in a supplied filesystem without disk.
+---
+
+Use `virtualWorld()` when a run has a just-bash filesystem instead of a local
+disk, such as a chat in one self-hosted workerd Durable Object. The runtime uses
+the supplied filesystem for events, artifacts, scratch folders, memory, kept
+plans and outer-loop manifests.
+
+```ts
+import { runWorkflow, virtualWorld } from "@little-stack/workflow";
+import { InMemoryFs } from "just-bash";
+
+const fs = new InMemoryFs();
+const world = virtualWorld({ fs, dataDir: "/workflows", maxConcurrentSteps: 4 });
+const result = await runWorkflow(myWorkflow, myInput, { world });
+```
+
+## Options
+
+| Option | Default | Meaning |
+|---|---|---|
+| `fs` | required | The `IFileSystem` that owns every run file. Available as `world.files`. |
+| `dataDir` | `/` | The POSIX data root, normalized independently of the process working directory. |
+| `maxConcurrentSteps` | unlimited | The same per-run concurrency cap as `localWorld()`. |
+
+Event rules are shared with `localWorld()`: receipt lookup comes first, followed
+by artifact-reference validation, then sequence allocation. Repeating an append
+idempotency key returns the original event; changing its request digest fails.
+Event envelopes are frozen and event ids deterministic.
+
+## Layout
+
+```txt
+<dataDir>/
+  events/<runId>/0000000001.json
+  artifacts/<artifactId>.json
+  artifacts/blobs/<artifactId>.bin
+  runs/<runId>/scratch/
+  runs/<runId>/steps/<stepPath>/scratch/
+  runs/<runId>/planner-reuse/<workflowVersionId>/
+  memory/org/
+  memory/workflows/<workflowId>/
+  workflow-versions/<workflowVersionId>.json
+  outer-loops/<outerLoopId>.json
+```
+
+An event is written under a temporary name and moved to its final name. Readers
+ignore temporary files. A temporary file left before publication does not consume
+a sequence number. After publication, retrying the same idempotency key returns
+the event even if the caller did not receive the first result.
+
+## Persistence and ownership
+
+`virtualWorld()` inherits the filesystem's persistence and atomic-move guarantees;
+it adds no durability of its own. A bare `InMemoryFs` is lost when its process
+stops. A new World over the same filesystem can reopen completed data. That is
+reopen behavior, not a process-crash recovery guarantee. An app that saves files
+only after completed turns preserves those completed turns' files and kept plans;
+interrupted turns may be lost.
+
+One process must own a data filesystem at a time. Locks and write chains are
+shared by the exact filesystem object, the normalized data root and the run or
+lock identity. Two Worlds over that same object coordinate; separate objects
+with identical paths stay independent. Wrapping a World, for example with
+`tracingWorld`, preserves `world.files`. Separate wrappers around the same
+filesystem are different objects: callers sharing storage must pass the same
+filesystem object explicitly.
+
+## Limits
+
+- Filesystem and remote skill folders are refused before a virtual run starts.
+- Bash sees scratch and memory through filesystem views. Read-only mounts reject
+  writes, and a single-file mount reveals only that file. Commands depend on the
+  just-bash build; workerd lacks Python, JavaScript, SQLite and other Node-only commands.
+- Restricted runtimes validate draft-07 JSON Schema without code generation.
+  Node continues to use Ajv. Both paths ignore the `format` keyword; a property
+  named `format` is still validated normally.
+- This is single-process storage. Sharing it across processes requires a
+  different storage and locking contract.

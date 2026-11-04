@@ -5,54 +5,52 @@ description: How to execute a workflow definition against a world, with options,
 
 `runWorkflow()` is the alpha entry point. It provisions a one-shot runtime, executes one run, returns the result, and tears the runtime down. It suits scripts, tests, and the kill-and-resume demo. A long-lived runtime for processes that serve many runs is not part of the alpha API. To serve workflows from a long-lived agent process, hand them to Little Harness; see [Compose With Little Harness](/docs/v0.1.0-alpha/authoring/compose-with-harness).
 
-Pass a single `WorkflowDefinition` and the workflow's own planner harness runs. Passing an array with an `orchestrator` config selects the deprecated orchestrator surface (see below).
+`runWorkflow(workflow, input, options?)` runs one workflow. `workflow.run(input, options?)` on a `defineWorkflow` result is the same call. The deprecated orchestrator, which composes several workflows, has its own function, `runOrchestration` (see below).
 
 ## Single Workflow
 
 ```ts
-import {
-  createLittleWorkflow,
-  localWorld,
-  runWorkflow,
-} from 'little-workflow';
+import { localWorld, runWorkflow } from "@little-stack/workflow";
 
-const result = await runWorkflow({
-  world: localWorld({ dataDir: '.little-workflow' }),
-  workflows: summarizeTicket,    // single WorkflowDefinition → planner harness runs
-  input: {
-    ticketId: 'TCK-123',
-    transcript: 'Customer reports intermittent billing export failures...',
+const result = await runWorkflow(
+  summarizeTicket,
+  {
+    ticketId: "TCK-123",
+    transcript: "Customer reports intermittent billing export failures...",
   },
-  tools,   // ToolRegistry created with createToolRegistry()
-  runId: 'run_tck_123',
-  timeout: '10m',
-});
+  {
+    world: localWorld({ dataDir: ".little-workflow" }), // optional; this is the default
+    runId: "run_tck_123",
+    timeout: "10m",
+  },
+);
 
 console.log(result.runId);
 console.log(result.output);
 ```
 
-`runWorkflow` returns a promise that resolves when the run reaches `RunCompleted`, or rejects on `RunFailed`. Internally it starts a planner harness session to compile the workflow to LWIR, registers a locked `WorkflowVersion`, executes the steps via worker harness sessions, and persists every event and artifact into the world. Reusing the same `runId` on a terminal run replays durable state instead of calling the planner, tools, or models again.
+`runWorkflow` returns a promise that resolves when the run reaches `RunCompleted`, or rejects on `RunFailed`. Internally it starts a planner harness session to compile the workflow to LWIR (a fixed-plan workflow skips the model call), registers a locked `WorkflowVersion`, executes the steps via worker harness sessions, and persists every event and artifact into the world. Reusing the same `runId` on a terminal run replays durable state instead of calling the planner, tools, or models again.
 
 ## Multiple Workflows (Orchestration, Deprecated)
 
-> **Deprecated (`LWF_DEP_ORCHESTRATOR`).** The array-plus-`orchestrator` form is being retired. To compose workflows, adapt each one with `asHarnessWorkflow` and pass them to `createHarness({ workflows })`; see [Compose With Little Harness](/docs/v0.1.0-alpha/authoring/compose-with-harness). The form below still works in this release and emits a one-time `DeprecationWarning`.
+> **Deprecated (`LWF_DEP_ORCHESTRATOR`).** `runOrchestration` is being retired. To compose workflows, adapt each one with `asHarnessWorkflow` and pass them to `createHarness({ workflows })`; see [Compose With Little Harness](/docs/v0.1.0-alpha/authoring/compose-with-harness). It still works in this release and emits a one-time `DeprecationWarning`.
 
-Passing an array runs an orchestrator: a harness session with tools to plan and run sub-workflows. An `orchestrator` config is required when `workflows` is an array.
+`runOrchestration` runs an orchestrator: a harness session with tools to plan and run sub-workflows. It takes the workflows, the shared input, and the `orchestrator` config in one options object.
 
 ```ts
-const result = await runWorkflow({
-  world: localWorld({ dataDir: '.little-workflow' }),
-  workflows: [candidateReview, candidateScoring],   // array → orchestrator runs
+import { runOrchestration } from "@little-stack/workflow";
+
+const result = await runOrchestration({
+  workflows: [candidateReview, candidateScoring],
   input: { jobDescription, candidates: [...] },
   tools,
-  orchestrator: {                                   // required when workflows is an array
-    model: openai('gpt-5'),
-    system: 'Orchestrate candidate evaluation. Plan once per job description; spawn parallel runs per candidate.',
-    skills: [skill('./skills/batch-fan-out/')],
+  orchestrator: {
+    model: openai("gpt-5"),
+    system: "Orchestrate candidate evaluation. Plan once per job description; spawn parallel runs per candidate.",
+    skills: [skill("./skills/batch-fan-out/")],
   },
   maxConcurrentSubRuns: 20,
-  runId: 'run_eng_123',
+  runId: "run_eng_123",
 });
 ```
 
@@ -67,19 +65,13 @@ For batched parallel work (same workflow shape, many items), the orchestrator ca
 ## Options
 
 ```ts
-type RunWorkflowOptions<W extends RunTarget> = {
+type RunWorkflowOptions = {
   // Core
-  world: LocalWorld;
-  workflows: W;                  // WorkflowDefinition (single) | readonly WorkflowDefinition[] (pipeline)
-  input: unknown;
-  tools?: ToolRegistry;
+  world?: World;                 // defaults to localWorld()
+  tools?: ToolRegistry;          // defaults to the tools declared inline on the workflow
   mcp?: HarnessMcpConfig;        // declarative MCP servers, exposed as gateway tools
   bash?: BashCapabilities;       // run-level default for harness Bash tool capabilities
   permissions?: ToolPermissions; // rule-based allow/deny/ask gate on tool calls (opt-in; default allow)
-
-  // DEPRECATED orchestrator surface — required iff workflows is an array; forbidden for single workflows
-  orchestrator?: OrchestratorConfig;
-  maxConcurrentSubRuns?: number; // cap on simultaneous sub-workflow runs; default 10; orchestrator only
 
   // Run identity + lifecycle
   runId?: string;
@@ -87,6 +79,7 @@ type RunWorkflowOptions<W extends RunTarget> = {
   signal?: AbortSignal;
   label?: string;                // human-readable run label; defaults to the workflow's label, then its id
   tags?: readonly string[];      // free-form tags for filtering runs
+  trigger?: RunTrigger;          // how the run started, recorded on its RunStarted event
   progress?: (event: WorkflowRunProgressEvent) => void | Promise<void>;
   workflowVersionReuseStrategy?: WorkflowVersionReuseStrategy;
 
@@ -94,6 +87,14 @@ type RunWorkflowOptions<W extends RunTarget> = {
   maxAttempts?: number;
   maxOuterCycles?: number;
   outerLoopId?: string;
+};
+
+// DEPRECATED: runOrchestration's options
+type RunOrchestrationOptions = Omit<RunWorkflowOptions, "maxOuterCycles" | "outerLoopId"> & {
+  workflows: readonly WorkflowDefinition[];
+  input: unknown;
+  orchestrator: OrchestratorConfig;
+  maxConcurrentSubRuns?: number; // cap on simultaneous sub-workflow runs; default 10
 };
 
 type OrchestratorConfig = {      // deprecated
@@ -108,34 +109,30 @@ type OrchestratorConfig = {      // deprecated
 };
 ```
 
-- **`world`** — the runtime backend. Use `localWorld()` for development; production worlds (Postgres + Redis + S3) arrive after alpha.
-- **`workflows`** — a single `WorkflowDefinition` from `createLittleWorkflow()`, or an array of them. Single triggers the planner harness; array triggers the orchestrator harness.
-- **`input`** — validated against the workflow's `inputSchema` before the run starts. A mismatch throws before any model is called.
-- **`tools`** — a `ToolRegistry` created with `createToolRegistry()`. Required when the workflow (or any sub-workflow) references a global tool by name.
-- **`mcp`** — declarative MCP servers. Little Harness resolves them into gateway tools (normally `mcp_list_tools` and `mcp_call_tool`); list those names in `globalTools` when steps need MCP. See [Tools → MCP Integration](/docs/v0.1.0-alpha/authoring/tools-and-capabilities#mcp-integration).
+- **`world`** — the runtime backend. Defaults to `localWorld()`, which stores runs in `.little-workflow/`; pass `localWorld({ dataDir })` to use another directory. Production worlds (Postgres + Redis + S3) arrive after alpha.
+- **`input`** (the second argument) — validated against the workflow's `input` schema before the run starts. A mismatch throws before any model is called.
+- **`tools`** — a `ToolRegistry` created with `createToolRegistry()`. Defaults to the tools declared inline on the workflow (`defineWorkflow({ tools: { ... } })`). Required when the workflow names tools (`tools: ["name"]`) that it does not declare inline.
+- **`mcp`** — declarative MCP servers. Little Harness resolves them into gateway tools (normally `mcp_list_tools` and `mcp_call_tool`); list those names in the workflow's `tools` when steps need MCP. See [Tools → MCP Integration](/docs/v0.1.0-alpha/authoring/tools-and-capabilities#mcp-integration).
 - **`permissions`** — runtime tool-call gate; see [Permissions](#permissions).
 - **`bash`** — run-level default for the SDK-injected Bash tool sandbox. Workflow-level `workflow.bash` wins for planner/worker/fixer sessions; `orchestrator.bash` wins for the orchestrator session. Defaults are network off, Python on, JavaScript on, all inside explicit mounts.
-- **`orchestrator`** *(deprecated)* — orchestrator harness config. Enforced at the type level: required when `workflows` is an array, forbidden when it is a single definition.
-- **`maxConcurrentSubRuns`** *(deprecated, orchestrator only)* — maximum sub-workflow runs the orchestrator may have in flight. Default `10`. On the Harness surface, `workflowBudgets.maxConcurrentWorkflowRuns` plays this role.
 - **`runId`** — optional durable run identity. If omitted, one is generated. Reusing a terminal `runId` validates persisted state and replays the result.
 - **`timeout`** — wall-clock cap. Accepts a duration string (`'10m'`, `'2h'`) or milliseconds. The run is cancelled and marked `RunFailed` if it elapses.
 - **`signal`** — an `AbortSignal` for external cancellation. Same outcome as `timeout` but on demand.
 - **`label`** / **`tags`** — a human-readable run label (overrides the definition's `label`, which defaults to the workflow id) and free-form tags for filtering runs.
+- **`trigger`** — how the run started, `{ kind, source?, from?, label? }`, for trace readers such as LittleDB: for example `{ kind: "api", source: "POST /loans" }`. It is recorded as `trigger` on the run's own `RunStarted` event; a sub-run records `parentRunId` instead. A workflow a harness tool call runs gets `{ kind: "harness", sessionId, turnId, toolCallId }` from `asHarnessWorkflow`. A run without one started from your own code.
 - **`progress`** — callback invoked with `{ currentStep?, lastEvent? }` after each recorded `StepScheduled`, `StepAttemptStarted`, `StepFailed`, and `StepCompleted` event.
-- **`workflowVersionReuseStrategy`** — `"planner_reviewed"` (default) shows the planner a previously compiled `WorkflowVersion` of the same workflow, which it may reuse unchanged. `"always_fresh"` always plans from scratch. This overrides the definition's setting.
+- **`workflowVersionReuseStrategy`** — `"planner_reviewed"` (default) reuses the newest `WorkflowVersion` that completed a run of the same workflow. When the planner would read nothing new since it planned that version or last reviewed and kept it (same definition, tools, model slots, output contract and input shape; only input values differ), the run keeps that version without a planner call. Otherwise the planner is shown it and keeps it, adapts it, or drafts a fresh one. `"planner_reviews_each_run"` shows the planner that version on every run; use it when input values change what the plan should be, such as an input that carries instructions (`{ task: "..." }`). `"always_fresh"` always plans from scratch. This overrides the definition's setting. [`result.plan`](#which-plan-ran) says which happened.
 - **`maxAttempts`** — default retry budget for step attempts unless a step declares its own retry policy.
 - **`maxOuterCycles`** — default `1` (single-cycle). Set to `> 1` to engage the outer loop, which calls `planner.supervise()` after each cycle. See [Durability](/docs/v0.1.0-alpha/running/replay-and-durability) for the outer-loop resume model.
 - **`outerLoopId`** — resume an existing outer-loop session by ID. If omitted and `maxOuterCycles > 1`, a new `outerLoopId` is generated.
+- **`orchestrator`**, **`maxConcurrentSubRuns`** *(deprecated, `runOrchestration` only)* — the orchestrator harness config and the maximum sub-workflow runs it may have in flight (default `10`). On the Harness surface, `workflowBudgets.maxConcurrentWorkflowRuns` plays this role.
 
 ### Bash sandbox
 
 `ctx.bash` is powered by `just-bash`, not the host shell. Each role sees explicit mounts only: Memory Stores, Run Scratch, and Skills. The default cwd is the role's writable `/mnt/scratch/own/` when available. Replay returns recorded Bash tool output; it does not re-execute commands or reconstruct live shell state.
 
 ```ts
-await runWorkflow({
-  world,
-  workflows: summarizeTicket,
-  input,
+await runWorkflow(summarizeTicket, input, {
   tools,
   bash: {
     network: {
@@ -147,32 +144,17 @@ await runWorkflow({
 });
 ```
 
-### Removed fields (vs prior alpha)
+### Not run options
 
-The following `RunWorkflowOptions` fields have been removed:
+The planner and models belong to the workflow definition, not to a run:
 
-- ❌ **`planner`** — the workflow's own `WorkflowDefinition.planner` is the source of truth. Custom harness implementations are passed there.
-- ❌ **`models`** — models are declared at the workflow level inside `createLittleWorkflow`; there is no top-level model map override.
-- ❌ **`ai`** (`RuntimeAiAdapter`) — the worker harness owns AI step execution; there is no separate adapter.
-- ❌ **`codeRunner`** (`RuntimeCodeRunner`) — the worker harness owns `code.run` step execution; there is no separate runner.
+- **`planner`** — set `planner` (or a fixed `plan`) on `defineWorkflow`. Custom harness implementations are passed there.
+- **`models`** — set `model` or `models` on `defineWorkflow`; there is no run-level model override.
+- **`ai`** / **`codeRunner`** — the worker harness owns AI step and `code.run` step execution; there is no separate adapter or runner.
 
-## Type-Level Enforcement
+## Errors From The Call
 
-TypeScript catches misconfiguration at compile time:
-
-```ts
-// ✓ Single: orchestrator omitted (or `never`)
-await runWorkflow({ workflows: myWorkflow, /* ... */ });
-
-// ✓ Array: orchestrator required
-await runWorkflow({ workflows: [wfA, wfB], orchestrator: { /* ... */ }, /* ... */ });
-
-// ✗ Compile error: orchestrator required when workflows is an array
-await runWorkflow({ workflows: [wfA, wfB], /* missing orchestrator */ });
-
-// ✗ Compile error: orchestrator forbidden for single workflow
-await runWorkflow({ workflows: myWorkflow, orchestrator: { /* ... */ } });
-```
+`runWorkflow` takes exactly one workflow. Passing an array throws a `TypeError` that points to `asHarnessWorkflow` + `createHarness({ workflows })` (or the deprecated `runOrchestration`). `runOrchestration` throws a `TypeError` when `workflows` is not a non-empty array.
 
 ## Return Shape
 
@@ -182,9 +164,18 @@ type RunResult<T = unknown> = {
   workflowVersionId: string;
   status: 'completed';
   output: T;
+  plan: RunPlan;
   usage: UsageTotals;
   events: readonly EventEnvelope[];
   artifacts: readonly ArtifactRef[];
+};
+
+type RunPlan = {
+  readonly kind: 'drafted' | 'kept' | 'adapted' | 'fixed';
+  readonly plannerCalled: boolean;
+  readonly workflowVersionId: string;
+  readonly previousWorkflowVersionId?: string; // for 'kept' and 'adapted'
+  readonly rationale?: string;                 // why an earlier plan was kept, adapted or replaced
 };
 
 type UsageTotals = {
@@ -199,6 +190,46 @@ type UsageTotals = {
 ```
 
 `output` is typed by the workflow's output schema. `events` are the durable event envelopes for this run, and `artifacts` are artifact refs whose payloads live in the world's artifact store and can be inspected with `little events`.
+
+### Which Plan Ran
+
+`plan` says how the run got the plan it executed:
+
+- **`"drafted"`** — the planner wrote a new plan.
+- **`"kept"`** — an earlier plan ran unchanged. `plannerCalled` is `false` when it was kept because nothing the planner reads changed, and `true` when the planner reviewed it and chose to keep it.
+- **`"adapted"`** — the planner changed an earlier plan.
+- **`"fixed"`** — the workflow's own `plan` ran. No planner model is called.
+
+`previousWorkflowVersionId` names the earlier plan for `"kept"` and `"adapted"`, and `rationale` gives the planner's reason (or the runtime's, when it kept the plan without asking). Read the steps a run executed with `readWorkflowVersion`:
+
+```ts
+import { localWorld, readWorkflowVersion } from "@little-stack/workflow";
+
+const world = localWorld();
+const result = await summarizeTicket.run(input, { world });
+if (result.plan.plannerCalled) {
+  const { lwir } = await readWorkflowVersion(world, result.plan.workflowVersionId);
+  console.log(lwir.steps.map((step) => `${step.id}: ${step.uses}`));
+}
+```
+
+### Grading Runs
+
+A run can finish and still be wrong. Grade it with `gradeRun`, from a reviewer, a test or a checker:
+
+```ts
+import { gradeRun, listRunGrades } from "@little-stack/workflow";
+
+await gradeRun(world, result.runId, {
+  verdict: "fail",
+  reason: "Declined a score of 616. The policy does not cover it, so it should be referred.",
+  gradedBy: "underwriting-review",
+});
+```
+
+A `"fail"` grade counts as a change to the plan that run executed. The next run of the workflow does not keep that plan without a planner call: the planner gets the plan back with the grade's reason, and adapts it, replaces it, or keeps it and says why in `result.plan.rationale`. After that review the plan is kept without a planner call again until something else changes or another run is graded `"fail"`. A `"pass"` grade is recorded for the planner to read and changes nothing. With `workflowVersionReuseStrategy: "always_fresh"` every run is planned anew, so grades are not read.
+
+`listRunGrades(world, { runId })` or `listRunGrades(world, { workflowVersionId })` returns the recorded grades, oldest first. Grades are stored under `<dataDir>/run-grades/`, outside the run's event log, so grading a run never changes its replay.
 
 ### Usage And Cost
 
@@ -223,10 +254,12 @@ Budget **enforcement** against these numbers is post-alpha; so is pre-run cost e
 The promise rejects on `RunFailed`. The rejection carries the structured failure:
 
 ```ts
+import { isRunFailedError, runWorkflow } from "@little-stack/workflow";
+
 try {
-  await runWorkflow({ /* ... */ });
+  await runWorkflow(summarizeTicket, input);
 } catch (err) {
-  if (err.name === 'RunFailedError') {
+  if (isRunFailedError(err)) {
     console.error(err.runId, err.failedStepPath, err.causeCode);
     // outer-loop failures carry additional context:
     console.error(err.outerLoopId, err.lastCycleOutput);
@@ -237,7 +270,7 @@ try {
 }
 ```
 
-`RunFailedError` includes `runId`, `workflowVersionId`, `causeCode`, optional `failedStepPath`, and a `FailedRunResult` when the SDK recorded a terminal run. Cause codes:
+`isRunFailedError(err)` narrows `err` to `RunFailedError`. Prefer it to `instanceof RunFailedError`: it also recognizes the error from another copy of the package, such as a workflow folder loaded with `loadWorkflow`. `RunFailedError` includes `runId`, `workflowVersionId`, `causeCode`, optional `failedStepPath`, and a `FailedRunResult` when the SDK recorded a terminal run. Cause codes:
 
 - **`input_schema_error`** — input did not match the workflow's input schema.
 - **`planner_validation_exhausted`** — the planner could not produce a valid LWIR document within its repair budget.
@@ -264,10 +297,7 @@ Cancellation always produces a `RunFailed` with `causeCode: 'cancelled'`. The ru
 const controller = new AbortController();
 setTimeout(() => controller.abort(), 5_000);
 
-await runWorkflow({
-  /* ... */
-  signal: controller.signal,
-});
+await runWorkflow(myWorkflow, input, { signal: controller.signal });
 ```
 
 Cancellation is propagated into any in-flight harness sessions (planner, orchestrator, or worker). See [Durability](/docs/v0.1.0-alpha/running/replay-and-durability) for the crash and cancellation recovery model.
@@ -277,10 +307,7 @@ Cancellation is propagated into any in-flight harness sessions (planner, orchest
 The `permissions` option is a runtime, rule-based `allow` / `deny` / `ask` gate over tool calls (modelled on opencode's permission system). It ships in alpha; only *budget* enforcement is deferred.
 
 ```ts
-await runWorkflow({
-  world,
-  workflows: myWorkflow,
-  input,
+await runWorkflow(myWorkflow, input, {
   permissions: {
     ruleset: [
       { tool: "delete_*", action: "deny" },

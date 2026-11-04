@@ -13,14 +13,14 @@ files, artifacts, Persistent Dirs, and trace metadata.
 ## Import
 
 ```ts
-import { streamHarness } from "little-harness";
+import { streamHarness } from "@little-stack/harness";
 ```
 
 ## Basic Usage
 
 ```ts
 import type { UIMessage } from "ai";
-import { streamHarness } from "little-harness";
+import { streamHarness } from "@little-stack/harness";
 
 export async function POST(req: Request) {
   const { messages, chatId, extraBody }: {
@@ -77,6 +77,23 @@ const result = streamHarness({
 
 When `messages` are provided, do not also provide `type` and `input`.
 
+### `prompt`
+
+`string`
+
+One user message, as plain text. Use it when the caller has a sentence rather
+than a chat transcript.
+
+```ts
+const result = streamHarness({
+  harness,
+  session: "loan_APP-1001",
+  prompt: "Pre-approve APP-1001.",
+});
+```
+
+Pass `prompt` or `messages`, not both, and not with `type` or `input`.
+
 ### `type`
 
 `string`
@@ -109,7 +126,8 @@ input: {
 }
 ```
 
-Use `messages` for chat and `type + input` for non-chat callers.
+Use `messages` for chat, `prompt` for one plain-text request, and `type + input`
+for non-chat callers with a typed payload.
 
 ### `session`
 
@@ -276,14 +294,54 @@ streamHarness({
 
 ### `sessionLog`
 
-`HarnessSessionLog`
+`HarnessSessionLog` (type from `@little-stack/harness/events`)
 
 Per-call session-log override (the durable event log this run appends to and
 replays from). When omitted, the log configured on `createHarness()` is used.
-`durability` is the historical alias for the same option; `sessionLog` wins
-when both are set. See
+
+> **UNRELEASED:** the current source removes the `durability` alias. Published
+> `0.2.0-alpha.0` accepts `durability` as an alias of `sessionLog` (`sessionLog`
+> wins when both are set). See [Alpha Migrations](/docs/v0.1.0-alpha/reference/alpha-migrations#one-name-per-concept).
+
+See
 [Execution Environments](/docs/v0.1.0-alpha/runtime/execution-environments#the-session-log-as-a-service)
 for the remote session-log adapter.
+
+### `trigger`
+
+`HarnessTrigger`: `{ kind: string; source?: string; from?: string; label?: string }`
+
+> **UNRELEASED:** `trigger` is in the current source only. No npm version includes it yet.
+
+How this turn started, for trace readers such as LittleDB: a `kind` (`message`,
+`schedule`, `api`, `cli`, or a word of your own), where it came from (`source`),
+who sent it, as the channel names them (`from`), and a short `label`. It goes on
+the turn's `harness.session.started` event as the string metadata `triggerKind`,
+`triggerSource`, `triggerFrom` and `triggerLabel`; it changes nothing about the
+run. A turn without one started from your own code.
+
+```ts
+streamHarness({
+  harness,
+  session: orderId,
+  prompt,
+  trigger: { kind: "webhook", source: "POST /orders", label: `Order ${orderId}` },
+});
+```
+
+The turns Little Harness starts itself carry one already:
+
+| Started by | `trigger` |
+| --- | --- |
+| A Chat SDK connector | `{ kind: "message", source: <adapter name>, from: <author's user name> }` |
+| The email connector | `{ kind: "message", source: "email", from: <sender>, label: <subject> }` |
+| A web-rich connector | `{ kind: "message", source: "web", from: <user's email or id> }` |
+| A schedule | `{ kind: "schedule", source: <schedule id>, label: <description> }` |
+| `little-harness start` | `{ kind: "api", source: "POST /sessions/<session>/messages" }` or `"POST /jobs/<type>"` |
+| The terminal chat of `little-harness test` | `{ kind: "cli" }` |
+
+`from` can be a phone number or an email address. To keep it out of traces, add
+`triggerFrom` to `trace.redaction.metadataKeys`.
 
 ### `onEvent`
 
@@ -479,7 +537,8 @@ return result.toUIMessageStreamResponse();
 
 ### `finished`
 
-Promise that resolves to `StreamHarnessFinished`.
+Promise that resolves to `StreamHarnessTurnFinished` (in published `0.2.0-alpha.0`,
+`StreamHarnessFinished`; see the table below).
 
 Resolves after the model, tools, file writes, artifact creation, and persistence
 commit work has finished.
@@ -494,12 +553,25 @@ handle `finished` rejection when they need retry or cleanup behavior.
 ```ts
 const finished = await result.finished;
 
-if (finished.persistence.status === "failed") {
+if (finished.status === "completed" && finished.persistence.status === "failed") {
   await retryQueue.enqueue(finished.persistence.failedCommits);
 }
 ```
 
-`StreamHarnessFinished`:
+When a tool parks the turn until pending work settles, `finished` resolves to
+`status: "parked"` with `continuationId` and `pending`, plus `artifacts`, `trace` and
+`warnings`, and without `persistence` or `commitManual`. `resumeParked()` continues
+a turn that parked in `await_tasks`, as a `generateHarness()` turn; see
+[Asking A Person](/docs/v0.1.0-alpha/build-agents/asking-a-person#answer-and-continue).
+The guard above compiles with every version. What the type says differs:
+
+| Version | Declared type of `finished` |
+| --- | --- |
+| Published `0.2.0-alpha.0` | `StreamHarnessFinished`, an alias of `StreamHarnessCompletedResult` only. The runtime can still resolve to a parked result; the type does not include it. |
+| UNRELEASED source (no npm version yet) | `StreamHarnessTurnFinished`, the union of the completed and parked results. `StreamHarnessFinished` no longer exists. |
+
+See [Typed parked results](/docs/v0.1.0-alpha/reference/alpha-migrations#typed-parked-results).
+A completed turn has `status: "completed"` and these fields:
 
 | Field | Type | Description |
 |---|---|---|

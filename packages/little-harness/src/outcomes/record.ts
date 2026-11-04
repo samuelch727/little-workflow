@@ -5,6 +5,7 @@ import { resolveTraceOptions } from "../trace/options.js";
 import { sanitizeTraceValue } from "../trace/redaction.js";
 import { validateTraceEvent } from "../trace/validate.js";
 import type { Harness, HarnessSession, JsonObject } from "../types.js";
+import { isRevision } from "./aggregate.js";
 import { nextSideChannelSequence } from "./sequence.js";
 import type {
   HarnessOutcomeError,
@@ -57,7 +58,7 @@ export async function reportHarnessOutcome(
   }
 
   if (target === undefined) {
-    return { recorded: false, delivered: 0, failed: 0, errors };
+    return { recorded: false, delivered: 0, stale: 0, failed: 0, errors };
   }
 
   const promptHash =
@@ -68,6 +69,16 @@ export async function reportHarnessOutcome(
           errors.push({ stage: "resolve", message: errorMessage(error) });
           return undefined;
         }));
+
+  // A revision orders reports under one key, so it means nothing without one.
+  const revision = options.revision;
+  const ordered = isRevision(revision) && options.reportKey !== undefined;
+  if (revision !== undefined && !ordered) {
+    errors.push({
+      stage: "resolve",
+      message: "`revision` is a whole number from 0 and needs a `reportKey`; the outcome was recorded without it.",
+    });
+  }
 
   const traceOptions = resolveTraceOptions(undefined, undefined);
   const extraMetadata = sanitizeTraceValue(options.metadata ?? {}, traceOptions).value as JsonObject;
@@ -88,6 +99,7 @@ export async function reportHarnessOutcome(
     ...(options.detail === undefined ? {} : { detail: options.detail }),
     ...(options.reporter === undefined ? {} : { reporter: options.reporter }),
     ...(options.reportKey === undefined ? {} : { reportKey: options.reportKey }),
+    ...(ordered ? { revision: revision! } : {}),
     ...(options.stepPath === undefined ? {} : { stepPath: options.stepPath }),
     ...(promptHash === undefined ? {} : { promptHash }),
   };
@@ -108,6 +120,7 @@ export async function reportHarnessOutcome(
   }
 
   let delivered = 0;
+  let stale = 0;
   let failed = 0;
   for (const [index, sink] of (options.sinks ?? []).entries()) {
     const name = sink.name ?? `sink[${index}]`;
@@ -115,6 +128,7 @@ export async function reportHarnessOutcome(
       const result = await sink.deliver(event);
       if (result === undefined || result.ok) {
         delivered += 1;
+        if (result?.stale === true) stale += 1;
       } else {
         failed += 1;
         errors.push({ stage: "sink", sink: name, message: "Sink reported ok: false." });
@@ -125,7 +139,7 @@ export async function reportHarnessOutcome(
     }
   }
 
-  return { recorded, event, delivered, failed, errors };
+  return { recorded, event, delivered, stale, failed, errors };
 }
 
 export type HarnessOutcomeReporterOptions = {
@@ -230,6 +244,7 @@ export function outcomeMetadata(event: HarnessOutcomeEvent): JsonObject {
     ...(event.detail === undefined ? {} : { detail: event.detail }),
     ...(event.reporter === undefined ? {} : { reporter: event.reporter }),
     ...(event.reportKey === undefined ? {} : { reportKey: event.reportKey }),
+    ...(event.revision === undefined ? {} : { revision: event.revision }),
     ...(event.stepPath === undefined ? {} : { stepPath: event.stepPath }),
     ...(event.promptHash === undefined ? {} : { promptHash: event.promptHash }),
   };

@@ -1,0 +1,100 @@
+---
+title: Guardrails and autonomy
+description: Decide what LittleDB's improvement loop may ship on its own, write the rules it must keep in your own words, and steer it in plain words with the LittleDB agent. Private source; not installable.
+---
+
+<Callout title="Private and UNRELEASED" type="warn">
+  LittleDB is private source and needs a LittleDB server, which is not publicly
+  available. Little Harness and Little Workflow work without it.
+</Callout>
+
+LittleDB's loop proposes changes to your agent (its prompt, its model, a
+workflow's steps), tests them, and can put them live. You decide how much of
+that happens without you, and what it may never change.
+
+## What goes live on its own
+
+Set once for the project, or per harness or workflow, in the LittleDB UI or
+`PATCH /v1/settings` (`policy.autonomy.mode`):
+
+| Mode | What happens to a change that passes its gates |
+| --- | --- |
+| `review` | A person approves every change. |
+| `guarded` (default) | Goes live on its own, up to `autoPromote` risk (default `medium`), unless it touches a guardrail. |
+| `auto` | Goes live on its own. Only a guardrail marked strict still holds a change for you. |
+
+In every mode, a change that **breaks** a guardrail never goes live. One that
+**touches** a guardrail, or that LittleDB can't be sure keeps one, waits for
+you; Allow lets it go on. A change that still owes a live trial waits *before*
+it, so no user sees it until you say so.
+
+## Guardrails
+
+A guardrail is a rule in your words ("never change the refund policy"),
+turned into exact checks where it can be, and shown to you before it is saved:
+
+- **Protected text and fields**: a passage that must stay word for word, or a
+  field that may not change. Checked by code on every change, before anything
+  is spent.
+- **Behavior rules** over your agent's tool calls, checked by code on every run
+  of a candidate: offline, on its live trial, and after release (a release that
+  breaks one is rolled back).
+- **The words**, read by the AI review of each change. It must quote the
+  change to call it broken; otherwise it counts as unsure, and you decide.
+
+A new behavior rule can start as **watch only**: it records what it finds and
+holds nothing.
+
+## Money thresholds: two layers
+
+"Refunds under $20 are automatic; over $20 need a person" is two rules, and
+each belongs in a different place.
+
+**At run time, in your tool.** The loop changes prompts, models and workflow
+steps. It never changes your tool code, so a check there holds whatever any
+version of the prompt says:
+
+```ts
+import { harnessToolContext } from "@little-stack/harness";
+import { tool } from "ai";
+import { z } from "zod";
+
+const refundOrder = tool({
+  description: "Refund an order. Refunds over $20 wait for a person's approval.",
+  inputSchema: z.object({ order_id: z.string(), amount: z.number(), reason: z.string() }),
+  execute: async (input, options) => {
+    if (input.amount > 20) {
+      const approval = await harnessToolContext(options).ask!({
+        question: `Refund $${input.amount} on ${input.order_id}? ${input.reason}`,
+        options: [{ id: "refund", label: "Refund" }, { id: "decline", label: "Decline" }],
+      });
+      if (approval.status === "waiting") return { status: "waiting_for_approval", taskId: approval.taskId };
+      if (approval.answer?.option !== "refund") return { status: "declined" };
+    }
+    return payments.refund(input);
+  },
+});
+```
+
+See [Asking a person](/docs/harness/v0.1.0-alpha/build-agents/asking-a-person).
+
+**In the loop, as a guardrail.** Tell LittleDB the rule so it never ships a
+change that works against it: the policy line stays word for word, and the
+change's runs are checked, for example "never call `refund_order` with an
+amount above 500", or "before `refund_order` above 20, call `escalate` for the
+same order first". The guardrail form (or the LittleDB agent) turns your words
+into these checks and tries them on your recent runs first.
+
+## The LittleDB agent
+
+Every page of the LittleDB UI has an agent (Ctrl/Cmd+K) that you steer in plain
+words, as you would a coding agent: "why is this change waiting?", "add a
+guardrail: refunds over $500 are escalated, never refunded", "start a review of
+refund tickets, under $1.50", "tell the running review to leave refund amounts
+alone", "roll that back".
+
+It acts through LittleDB's API as you, so it can do no more than your role.
+Changes show as cards you approve; approving a change, letting a held one go
+on, and loosening anything always wait for your click, even in its auto mode.
+It runs on the model you pick in Settings, on LittleDB's model key, and its
+spend shows in Usage.

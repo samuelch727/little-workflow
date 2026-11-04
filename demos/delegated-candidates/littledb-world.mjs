@@ -3,13 +3,13 @@
  * durably first (local SQLite event store) and then tees each committed event
  * envelope to the Rust littledb-engine's HTTP /ingest endpoint, best-effort.
  *
- * Mirrors the @little-workflow/littledb client's tee logic; inlined here so the
+ * Mirrors the @little-stack/littledb client's tee logic; inlined here so the
  * demo doesn't pull a cross-repo dependency (which would risk a second
  * `little-workflow` instance). It exercises the identical engine API, and adds
  * listRuns/loadTraceTree/search helpers so the run can verify ingestion.
  */
 
-import { createLocalWorld } from "little-workflow";
+import { localWorld } from "@little-stack/workflow";
 
 function engineUrlFor(base, path) {
   return new URL(path, base.endsWith("/") ? base : `${base}/`);
@@ -30,7 +30,7 @@ async function fetchJson(doFetch, url, notFoundAsNull = false) {
  * @param {{ dataDir?: string, engineUrl: string, fetchImpl?: typeof fetch, baseWorld?: object }} opts
  */
 export function littledbWorld(opts) {
-  const local = opts.baseWorld ?? createLocalWorld({ dataDir: opts.dataDir });
+  const local = opts.baseWorld ?? localWorld({ dataDir: opts.dataDir });
   const doFetch = opts.fetchImpl ?? fetch;
   const engineUrl = opts.engineUrl;
   const buffer = [];

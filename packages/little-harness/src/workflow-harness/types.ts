@@ -1,5 +1,5 @@
 import { HARNESS_EVENT_TYPES, type HarnessEventType } from "../events/names.js";
-import type { HarnessDurabilitySink, HarnessTraceSink } from "../events/occurrence.js";
+import type { HarnessSessionLog, HarnessTraceSink } from "../events/occurrence.js";
 import type { HarnessRuntimeMount, JsonObject } from "../types.js";
 
 export const WORKFLOW_HARNESS_ID = "workflowHarness@1.0.0";
@@ -43,6 +43,8 @@ export type WorkflowStepContext = {
   readonly stepPath: string;
   readonly visitIndex: number;
   readonly attempt?: number;
+  /** Set when the runtime re-runs an `ai.generate` step to repair its output: 1 for the first repair. */
+  readonly repairAttempt?: number;
   readonly toolCallScope?: JsonObject;
   readonly toolExecutionContext?: unknown;
 };
@@ -284,7 +286,7 @@ export type WorkflowDurableHarnessEventType =
   (typeof workflowDurableHarnessEventTypes)[number];
 
 export type WorkflowHarnessDurabilitySink =
-  HarnessDurabilitySink<WorkflowDurableHarnessEventType>;
+  HarnessSessionLog<WorkflowDurableHarnessEventType>;
 export type WorkflowHarnessTraceSink = HarnessTraceSink<WorkflowHarnessEventType>;
 
 const workflowDurableHarnessEventTypeSet = new Set<string>(

@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { HarnessWorkflow } from "little-harness";
+import type { HarnessWorkflow } from "@little-stack/harness";
 import { getWorkflowDefinitionHash } from "../workflow-definition-hash.js";
 import type { ToolRegistry } from "../tool-registry.js";
 import { hashImportGraph } from "./import-graph.js";
@@ -257,26 +257,57 @@ describe("loadWorkflow", () => {
     expect(second.definitionIdentity).not.toBe(first.definitionIdentity);
   });
 
-  it("changes definitionIdentity when a workspace package export target changes", async () => {
+  it("changes definitionIdentity when a linked workspace package export target changes", async () => {
     const dir = await fixture("package-export");
     await writeBasicWorkflow(dir);
-    await write(join(dir, "node_modules", "@local", "pkg", "package.json"), JSON.stringify({
+    // A monorepo package: node_modules links to its source folder inside the workspace.
+    await write(join(dir, "packages", "pkg", "package.json"), JSON.stringify({
       name: "@local/pkg",
       version: "1.0.0",
       type: "module",
       exports: { ".": "./target.ts" },
     }));
-    await write(join(dir, "node_modules", "@local", "pkg", "target.ts"), "export const label = 'first';\n");
+    await write(join(dir, "packages", "pkg", "target.ts"), "export const label = 'first';\n");
+    await symlinkPackage(dir, "@local/pkg", join(dir, "packages", "pkg"));
     await write(join(dir, "tools", "lookup.ts"), `
       import { label } from '@local/pkg';
-      export default { description: label, inputSchema: true, execute: async () => label };
+      export default { description: "Lookup", inputSchema: true, execute: async () => label };
     `);
     const first = await loadWorkflow(dir);
 
-    await write(join(dir, "node_modules", "@local", "pkg", "target.ts"), "export const label = 'second';\n");
+    await write(join(dir, "packages", "pkg", "target.ts"), "export const label = 'second';\n");
     const second = await loadWorkflow(dir);
 
     expect(second.definitionIdentity).not.toBe(first.definitionIdentity);
+  });
+
+  it("identifies an installed package by name and version, even inside the workspace's node_modules", async () => {
+    const dir = await fixture("installed-package");
+    await writeBasicWorkflow(dir);
+    const installPackage = async (version: string, body: string) => {
+      await write(join(dir, "node_modules", "installed-dep", "package.json"), JSON.stringify({
+        name: "installed-dep",
+        version,
+        type: "module",
+        exports: { ".": "./index.js" },
+      }));
+      // The package's own dynamic import is its business, not the workflow's.
+      await write(join(dir, "node_modules", "installed-dep", "index.js"), `${body}\nexport const later = () => import("./later.js");\n`);
+    };
+    await installPackage("1.0.0", "export const label = 'first';");
+    await write(join(dir, "tools", "lookup.ts"), `
+      import { label } from 'installed-dep';
+      export default { description: "Lookup", inputSchema: true, execute: async () => label };
+    `);
+
+    const first = await loadWorkflow(dir, { executionMode: "durable" });
+    await installPackage("1.0.0", "export const label = 'patched';");
+    const samePackage = await loadWorkflow(dir, { executionMode: "durable" });
+    await installPackage("1.1.0", "export const label = 'patched';");
+    const upgraded = await loadWorkflow(dir, { executionMode: "durable" });
+
+    expect(samePackage.definitionIdentity).toBe(first.definitionIdentity);
+    expect(upgraded.definitionIdentity).not.toBe(first.definitionIdentity);
   });
 
   it("durable mode rejects dynamic imports unless sourceIdentity is supplied", async () => {

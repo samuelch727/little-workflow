@@ -301,7 +301,7 @@ describe("durable harness hashing", () => {
       event(4, "harness.tool_call.succeeded", { callId, result: { ok: true }, durationMs: 2 }),
     ], call);
 
-    expect(replay).toEqual({ kind: "completed", result: { ok: true } });
+    expect(replay).toEqual({ kind: "completed", result: { ok: true }, callId });
   });
 
   it("returns failed for the latest matching terminal failed tool call", () => {
@@ -313,7 +313,24 @@ describe("durable harness hashing", () => {
       event(2, "harness.tool_call.failed", { callId, error: { name: "Error", message: "not found" }, durationMs: 1 }),
     ], call);
 
-    expect(replay).toEqual({ kind: "failed", error: { name: "Error", message: "not found" } });
+    expect(replay).toEqual({ kind: "failed", error: { name: "Error", message: "not found" }, callId });
+  });
+
+  it("matches a call by its own id first, so two calls with the same arguments keep their own records", () => {
+    const call = { caller: "model" as const, toolName: "change", args: { to: ".05" }, turn: 1 };
+    const events = [
+      event(1, "harness.tool_call.started", { ...call, callId: "call_a" }),
+      event(2, "harness.tool_call.started", { ...call, callId: "call_b" }),
+      event(3, "harness.tool_call.succeeded", { callId: "call_a", result: "changed", durationMs: 1 }),
+    ];
+
+    // By arguments alone both calls are the latest one, still running.
+    expect(findToolReplay(events, call)).toEqual({ kind: "inflight", callId: "call_b" });
+    expect(findToolReplay(events, call, { callId: "call_a" })).toEqual({ kind: "completed", result: "changed", callId: "call_a" });
+    expect(findToolReplay(events, call, { callId: "call_b" })).toEqual({ kind: "inflight", callId: "call_b" });
+    // A call with no record of its own (new ids) takes a matching record no other call has taken.
+    expect(findToolReplay(events, call, { callId: "call_new", claimed: new Set(["call_b"]) })).toEqual({ kind: "completed", result: "changed", callId: "call_a" });
+    expect(findToolReplay(events, call, { callId: "call_new", claimed: new Set(["call_a", "call_b"]) })).toEqual({ kind: "none" });
   });
 
   it("replays runtime tool calls without colliding with model or code callers", () => {
@@ -324,7 +341,7 @@ describe("durable harness hashing", () => {
       event(2, "harness.tool_call.succeeded", { callId: runtimeCallId, result: { stdout: "/tmp" }, durationMs: 2 }),
     ];
 
-    expect(findToolReplay(events, runtimeCall)).toEqual({ kind: "completed", result: { stdout: "/tmp" } });
+    expect(findToolReplay(events, runtimeCall)).toEqual({ kind: "completed", result: { stdout: "/tmp" }, callId: runtimeCallId });
     expect(findToolReplay(events, { caller: "model", toolName: "bash", args: { command: "pwd" }, turn: 1 })).toEqual({ kind: "none" });
     expect(findToolReplay(events, { caller: "code", toolName: "bash", args: { command: "pwd" } })).toEqual({ kind: "none" });
   });

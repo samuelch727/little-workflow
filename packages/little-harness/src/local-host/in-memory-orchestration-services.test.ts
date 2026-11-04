@@ -1,3 +1,4 @@
+import { assertCompletedTurn } from "../test/completed-turn.js";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -397,5 +398,6 @@ it("backs a real localHost turn as the injected orchestration services", async (
     ] as any,
     session: "in-memory-orchestration",
   });
+  assertCompletedTurn(result);
   expect(result.text).toBe("in-memory ok");
 });

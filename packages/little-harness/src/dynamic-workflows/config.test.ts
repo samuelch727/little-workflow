@@ -22,6 +22,24 @@ describe("resolveDynamicWorkflows", () => {
     expect(resolved?.limits.maxSteps).toBe(8);
     expect(resolved?.exclude).toEqual(["d"]);
   });
+  it("keeps extra model slots and refuses 'default' or an unusable slot name", () => {
+    const fast = { modelId: "fast" };
+    expect(resolveDynamicWorkflows({ enabled: true, factory, models: { fast } })?.models).toEqual({ fast });
+    expect(resolveDynamicWorkflows({ enabled: true, factory })?.models).toBeUndefined();
+    expect(() => resolveDynamicWorkflows({ enabled: true, factory, models: { default: fast } })).toThrow(
+      /'default' cannot be a model slot name/u,
+    );
+    expect(() => resolveDynamicWorkflows({ enabled: true, factory, models: { "two words": fast } })).toThrow(HarnessInputError);
+  });
+  it("keeps a registry and refuses one whose hooks are not functions", () => {
+    const registry = { resolve: (records: readonly unknown[]) => records as never };
+    expect(resolveDynamicWorkflows({ enabled: true, factory, registry })?.registry).toBe(registry);
+    expect(resolveDynamicWorkflows({ enabled: true, factory })).not.toHaveProperty("registry");
+    expect(() => resolveDynamicWorkflows({ enabled: true, factory, registry: { resolve: "all" } as never })).toThrow(
+      /registry must be an object/u,
+    );
+    expect(() => resolveDynamicWorkflows({ enabled: true, factory, registry: null as never })).toThrow(HarnessInputError);
+  });
   it("throws a clear error when enabled without a factory (bare true)", () => {
     expect(() => resolveDynamicWorkflows({ enabled: true } as never)).toThrow(HarnessInputError);
     expect(() => resolveDynamicWorkflows(true as never)).toThrow(/dynamicWorkflows\(\)/);

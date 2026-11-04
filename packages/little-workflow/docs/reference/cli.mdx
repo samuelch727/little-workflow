@@ -3,11 +3,11 @@ title: CLI
 description: The minimal command surface that ships with v0.1.0-alpha.
 ---
 
-The `little` binary ships with the `little-workflow` package (`npx little-workflow@alpha <command>` without installing). Alpha ships the local commands needed for the SDK loop: scaffold workflow projects, validate compiled LWIR, run compiled LWIR in Local World, run folder-authored workflows, dump events, replay state, and report what a run cost. There is no `runs list`, `runs inspect`, timeline, retry-from-step, or fork command yet; a fuller inspection surface is planned (see the [Roadmap](/docs/v0.1.0-alpha/roadmap)).
+The `little` binary ships with the `@little-stack/workflow` package (`npx @little-stack/workflow@alpha <command>` without installing). Alpha ships the local commands needed for the SDK loop: scaffold workflow projects, validate compiled LWIR, run compiled LWIR in Local World, run folder-authored workflows, dump events, replay state, and report what a run cost. There is no `runs list`, `runs inspect`, timeline, retry-from-step, or fork command yet; a fuller inspection surface is planned (see the [Roadmap](/docs/v0.1.0-alpha/roadmap)).
 
 ```txt
-little setup [directory] [--here] [--template next|node] [--workflow]
-little init [name] [--with-harness] [--provider <id>] [--model <id>]
+little setup [directory | --here] [--template node|next|existing-next] [--workflow]
+little init [name | --here] [--workflow-name <name>] [--with-harness] [--provider <id>] [--model <id>]
 little add workflow <name> | little add harness
 little validate <workflow.json>
 little run <workflow.json> --input <input.json> [--run-id <id>]
@@ -25,19 +25,21 @@ Successful command output is JSON by default (`--json` is accepted and changes n
 
 ```bash
 # Interactive Next.js or standalone Node agent wizard
-npx little-workflow@0.2.0-alpha.1 setup
+npx @little-stack/workflow@alpha setup
 
 # Preview additive changes in an existing TypeScript App Router project
-npx little-workflow@0.2.0-alpha.1 setup --here --workflow --plan
+npx @little-stack/workflow@alpha setup --here --template existing-next --workflow --plan
 
 # Apply, explicitly allow the SQLite native build, and run keyless verification
-npx little-workflow@0.2.0-alpha.1 setup --here --workflow --yes --install --allow-native-build --verify
+npx @little-stack/workflow@alpha setup --here --template existing-next --workflow --yes --install --allow-native-build --verify
 
 # Recover CLI-owned files after an interrupted transaction
-npx little-workflow@0.2.0-alpha.1 setup --here --rollback --yes
+npx @little-stack/workflow@alpha setup --here --rollback --yes
 ```
 
-`setup` includes Harness and optionally a working durable Workflow echo example. It detects `app/` or `src/app/`, places agent definitions beside the app, preserves routes, scripts, configuration and environment files, and rejects conflicts before writing. Rerunning the same choices is a no-op. The default demo uses no keys or model calls. Live production chat requires application authentication; filesystem and SQLite persistence are for local development. Compute is unavailable in this release. Run `setup --help` for provider, model, package manager, route, page, installation and verification options.
+`setup` includes Harness and optionally (`--workflow`) a working durable Workflow echo example, a fixed-plan `starter_echo` workflow. The target is a directory argument, or `--here` for the current directory. `--template` picks what to create: `node` (default) or `next` for a new project in an empty directory, or `existing-next` to add Little to an existing Next.js app. The default provider is `openai`. It detects `app/` or `src/app/`, places agent definitions beside the app, preserves routes, scripts, configuration and environment files, and rejects conflicts before writing. Rerunning the same choices is a no-op. The default demo uses no keys or model calls. Live production chat requires application authentication; filesystem and SQLite persistence are for local development. Compute is not published. Run `setup --help` for provider, model, package manager, route, page, installation and verification options.
+
+Setup journals generated files and temporary writes. Rollback restores unchanged CLI-written content, preserves concurrent edits, and removes an empty recovery directory created by that invocation so a fresh-project setup can be retried. After process termination, stop the installer before using `--rollback`, and pass the same project directory (or `--here` from inside it); the interrupted-setup error prints the exact command. Recovery reports whether it found nothing to recover, rolled back an uncommitted setup, finished cleanup of a committed one, or preserved edited files and left the journal for manual recovery (an error exit).
 
 ## Validate
 
@@ -52,18 +54,18 @@ The command exits `0` when the document is valid and `1` when findings are prese
 ## Init And Add
 
 ```bash
-little init [project-name] [--here] [--workflow <name>] [--with-harness] [--agent <name>] [--provider <provider>] [--model <model>] [--yes] [--no-install] [--force]
+little init [project-name] [--here] [--workflow] [--workflow-name <name>] [--with-harness] [--agent <name>] [--provider <provider>] [--model <model>] [--force]
 little add workflow <name> [--dir <dir>] [--provider <provider>] [--model <model>] [--force]
-little add harness [--agent <name>] [--workflow <existing-name> | --new-workflow <name>] [--provider <provider>] [--model <model>] [--force]
+little add harness [--agent <name>] [--workflow-name <existing-name> | --new-workflow <name>] [--provider <provider>] [--model <model>] [--force]
 ```
 
-`init` creates a workflow-first TypeScript project in `./<name>` (default `little-workflow-project`; `--here` uses the current directory, which need not be empty). It writes `little-workflow.json`, a starter `workflows/<name>/workflow.ts` (default name `candidate-review`), `instructions.md`, `tools/echo.ts`, `tsconfig.json`, `input.example.json`, and a `package.json` with `test:workflow` and `typecheck` scripts. The default provider is `deepseek`; `--provider` accepts any provider the Little Harness scaffolder knows, and `--model` overrides its default model. `--yes` and `--no-install` are accepted for parity; `init` never installs packages. An existing non-empty target is refused unless you pass `--force`.
+`init` creates a workflow-first TypeScript project in `./<name>` (default `little-workflow-project`; `--here` uses the current directory, which need not be empty). It writes `little-workflow.json`, a starter `workflows/<name>/workflow.ts` (name it with `--workflow-name`; default `candidate-review`), `instructions.md`, `tools/echo.ts`, `tsconfig.json`, `input.example.json`, and a `package.json` with `test:workflow` and `typecheck` scripts. The starter is a `defineWorkflow` with a fixed one-step `plan`, so `little test` runs it without a model call; delete `plan` to let the planner draft the steps. `--workflow` is accepted for parity with `little setup` and changes nothing: `init` always writes the starter workflow. The default provider is `openai`, as in `little setup` and `little-harness init`; `--provider` accepts any provider the Little Harness scaffolder knows, and `--model` overrides its default model. `init` never prompts or installs packages, so it rejects `--yes`, `--no-install` and `--install`. An existing non-empty target is refused unless you pass `--force`. For a Harness-first Node or Next.js project, use `little setup`.
 
-The generated `package.json` pins versions instead of using `latest`. `little-workflow` is pinned to the CLI's own version (`^0.2.0-alpha.1`), `ai` to `^7.0.0`, and the provider package to its AI SDK 7-era range. It also sets `"pnpm": { "onlyBuiltDependencies": ["better-sqlite3"] }` so pnpm 10 builds the event store's native binding.
+The generated `package.json` pins versions instead of using `latest`. `@little-stack/workflow` is pinned to the CLI's own version, `ai` to `^7.0.0`, and the provider package to its AI SDK 7-era range. It also sets `"pnpm": { "onlyBuiltDependencies": ["better-sqlite3"] }` so pnpm 10 builds the event store's native binding.
 
 `--with-harness` also creates `little-harness.json`, an agent folder (`agents/<agent>/`, default `support`), a `test:agent` script, and an agent workflow shim, `agents/<agent>/workflows/<name>.ts`. The shim default-exports `loadWorkflow(...)` for the manifest folder, so the agent gets the workflow as a tool. See [Compose With Little Harness](/docs/v0.1.0-alpha/authoring/compose-with-harness#folder-workflows-loadworkflow).
 
-`add workflow` adds another workflow folder (under `workflows/`, or `--dir`) and records it in `little-workflow.json`. `add harness` creates or reuses a Harness agent and writes an agent workflow shim for either an existing manifest workflow (`--workflow`) or a new one (`--new-workflow`).
+`add workflow` adds another workflow folder (under `workflows/`, or `--dir`) and records it in `little-workflow.json`. `add harness` creates or reuses a Harness agent and writes an agent workflow shim for either an existing manifest workflow (`--workflow-name`) or a new one (`--new-workflow`).
 
 ## Orchestrate
 

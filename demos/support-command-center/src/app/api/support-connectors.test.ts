@@ -2,13 +2,12 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { UIMessage } from "ai";
-import { createHarness, localHost } from "little-harness";
+import { createHarness, localHost, type StreamHarnessTurnFinished } from "@little-stack/harness";
 import {
   attachSessionConnector,
   listSessionConnectors,
   loadWebRichConnector,
-} from "little-harness/connectors";
-import type { StreamHarnessFinished } from "little-harness/execution";
+} from "@little-stack/harness/connectors";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import {
   clearSupportMirrorDeliveries,
@@ -398,7 +397,7 @@ function streamResult(text: string) {
       persistence: { status: "not-configured" },
       warnings: [],
       commitManual: async () => ({ status: "not-configured" }),
-    } satisfies StreamHarnessFinished),
+    } satisfies StreamHarnessTurnFinished),
   };
 }
 

@@ -1,0 +1,310 @@
+---
+title: Providers
+description: The canonical sandbox boundary, selected substrates, and production promotion gates.
+---
+
+Little Compute owns the `SandboxProvider` contract and conformance suite. Provider SDKs,
+CRDs, task models, and aggregate success flags do not cross that boundary. PostgreSQL keeps
+canonical Task, Attempt, Lease, winner, budget, and workspace state; a provider reports
+observations and receipts only.
+
+## Provider status
+
+This is the one provider list; other pages link here.
+
+| Provider | Status |
+| --- | --- |
+| Rootless Podman (`podman-direct`) | Default local substrate; the default self-host tier uses it. |
+| Kubernetes Agent Sandbox (`agent-sandbox-direct`) | Conditional production direction; adapter exists, not promoted. |
+| Cloudflare Sandbox (`cloudflare-sandbox`) | Contract fixtures only; its production gateway and managed G1 loop are unproven. |
+| microsandbox (`microsandbox`) | microVM provider with runtime clone, driven through `msb` 0.7.8. Passed a live three-child fork on Apple Silicon; not yet wired into self-host. |
+| OpenSandbox | Evaluated against pinned fixtures and not selected. |
+| `fake`, `in-memory-selected` | Test doubles for conformance and unit tests. |
+
+## Contract invariants
+
+Every positive mutation carries a resolver-issued digest binding its immutable method and
+resource-kind grant, principal, complete Operation, Task, Attempt, and Lease fence, exact
+provider cluster, resource ID, resource UID, and provider epoch. An existing resource stores
+its exact creation authority and cannot be adopted by another Lease. Cleanup can only perform
+its declared verb against one exact stale resource under a strictly newer epoch; endpoint
+cleanup additionally binds one exact grant. Exact tenant reads and gateway-owned watches use
+separate authority envelopes.
+
+The wire protocol uses safe JSON integers. Internally, epochs and generations are bigint.
+Checked adapters preserve every canonical field, reject unknown keys, and reject any value
+that cannot cross the boundary without rounding. Internal provider digests also reject hidden
+getters, symbols, non-enumerable state, custom objects, cycles, sparse arrays, and malformed
+Unicode. Provider descriptors use only the canonical
+capability vocabulary for lifecycle, exec, files, endpoints, metrics, scalar/vector calls,
+content, observation, relay, isolation, and egress.
+
+## Durable dispatch boundary
+
+The M1 PostgreSQL provider-operation kernel serializes each resource through a
+monotonic per-resource sequence and stores immutable plan, transition, dispatch-claim,
+claim-heartbeat, renewal, and response receipts. Planning binds the current Attempt,
+Reservation, optional Lease, provider authority epoch, provider resource UID/generation,
+request digest, and authority digest. `exec` and `vector_ensure` are rejected without a
+Lease; reservation-only lifecycle work remains explicit.
+
+Before the first provider socket write, the gateway atomically commits `send_started` with
+`may_have_sent`, activates the Reservation and charge, marks the Lease provisioning, and
+appends canonical event receipts under the Task authority stripe. The socket callback is then
+invoked only after that transaction has closed. Read-only recovery runs before Vault: replaying
+an unresolved send returns `recovery_required` without a second write or bearer issue, while a
+durable confirmation returns accepted. Provider results are append-only facts ordered
+`none < ambiguous < confirmed`. If cleanup advances the mutable operation while socket I/O is
+in flight, the late outcome is retained in an immutable sidecar without rewinding cleanup or
+inventing a competing operation transition; late ambiguity also creates the exact cleanup
+handoff. Claim tokens are never persisted raw, token-derived fences are compared in
+constant time, and authentication happens before receipt replay so a captured request digest
+is not a replay credential.
+
+Claim expiry uses the database safe-time cut. A replacement claimant receives a strictly
+higher generation and fence after the prior heartbeat expires or is fenced; a stale claimant
+cannot begin, confirm, or classify a send. The cleanup states retain observation cuts,
+generation tombstones, absence proofs, or signed fence certificates before terminal release.
+The exact replay, wrong-token, expiration/reclaim, concurrency, and ambiguity paths run against
+both PostgreSQL 17 and 18 in CI.
+
+Exec settlement is receipt-bound rather than trusting an in-process provider
+object. The provider gateway signs the exact provider observation with an
+`exec_observation_gateway` key; the host independently signs the sealed output
+and workspace cut with a `workspace_host_attester` key. A separately supervised
+verifier process checks both Ed25519 signatures, authority epochs, key windows,
+revocations, safe time, and exact payload shapes before committing immutable
+receipts. Runner code receives only committed receipt projections and has no
+signer, verifier key, ingress token, or raw provider-observation verifier.
+
+Initial writable Lease attachment follows the same separation. The
+provider-gateway producer can sign the exact provider resource, authority
+epoch, workspace generation, and workspace-head subject with a
+`provider_gateway` key, while the scheduler-side attachment contract accepts
+only the committed evidence receipt and one-version Lease transition. This is
+currently substrate, not an enabled self-host path. The v40 SQL loader can
+reconstruct and validate exact fresh or historical attachment lineage. The v41
+provider-compilation profile and registrar now bind the v39 scheduler intent to
+the v26 OCI launch digest domain, and executable self-host startup has a
+safe-time-gated, receipt-verified one-shot for installing that immutable
+authority. The native provider observation boundary, runner/gateway/materializer
+composition, and independently credentialed verifier are still required before
+attachment readiness can be promoted.
+
+## Durable provider watch
+
+Migration v12 adds a Little-owned, restart-safe watch supervisor for provider
+adapters that advertise an owned watch stream. The provider cursor remains an
+opaque adapter value; PostgreSQL assigns a monotonic sequence under the exact
+provider cluster and authority epoch. Every batch is staged before the cursor
+advances, so a lost response can replay the same observation receipts without
+skipping facts or applying them twice.
+
+Two independent fenced leases protect recovery. A short supervisor-owner lease
+serializes claim-intent recovery across stateless replicas, while the provider
+claim fences the active watch and its checkpoint writes. Raw claim tokens stay
+in the credential broker; PostgreSQL stores only their hashes and non-secret
+references. Expired or terminal secrets are retired through sealed functions,
+and another replica can take over at a strictly higher generation. Claim and
+renewal deadlines are admitted against database safe time, not process clocks.
+
+The selected Podman and Agent Sandbox adapters still report durable owned watch
+as unsupported. The supervisor does not manufacture that capability: it is the
+production control-plane boundary an adapter must pass before enabling it.
+
+## Local selection
+
+M0 selects direct Podman as the local substrate. The exported
+`PodmanSandboxProvider` now implements the selected scalar Task 14 port with
+exact Little ownership/generation labels, resolver-bound item reads, ambiguous
+create/delete repair, foreground exec result inspection, sanitized errors, and
+a serialized last-send/observation-cut absence proof. Binary copy remains only
+historical substrate-spike evidence. The provider advertises file transfer as
+unavailable until a pinned guest transport proves bounded streaming,
+destination fsync, and same-filesystem atomic replacement.
+The generic binary-copy capability remains unavailable. A narrower baseline
+Session File bridge now uses a digest-pinned, fixed-entrypoint supervisor:
+PID 1 owns a root-only Unix socket, publishes the exact immutable generation
+and mutable workspace before readiness, and reports projection loss rather
+than rolling a used workspace back after tmpfs loss. This candidate is not
+registered as production Podman evidence until the complete rootless
+driver-to-supervisor-to-materializer-to-PostgreSQL path passes. A standalone
+selected-adapter run now passes 1,000 real rootless Podman 6.0.1 lifecycle cycles
+with UID/GID maps covering both 0 and 65532, exact PID 1/workload capability
+checks, and no leaked container or volume; that is stronger local-provider
+evidence, but it does not promote the still-unregistered materializer.
+The native Apple Silicon gate ran rootless Podman
+6.0.1 through libkrun/krunkit with a pinned Fedora CoreOS machine image and a pinned native
+arm64 BusyBox fixture. Docker Desktop was present on the test host but deliberately excluded
+from detection and qualification. It is not a dependency or fallback.
+
+The selected adapter proves a locked-down scalar lifecycle, foreground
+execution, immediate idempotent deletion, delayed-send
+fencing, and no leaked test containers. It does not advertise background or
+process-tree exec, durable ordered replay across an adapter restart, metrics,
+binary file installation, vector lifecycle, resumable owned watch, or
+authenticated preview endpoints.
+Those missing capabilities remain explicit rather than being inferred from Podman. OCI identities are
+lowercase and option-safe, images are digest-pinned, every caller-controlled identity follows
+an option terminator, and authority for another provider cluster is rejected before a runtime
+call.
+
+An independent operator-run gate now targets at least 1,000 simultaneously
+live gVisor environments on one rootless remote Podman host. It binds the exact
+Podman client/server/connection, digest-pinned image, runsc release, binary and
+registration config; performs two full live observations; measures peak
+resources; recovers killed-client lost responses; and proves label/native-ID
+fenced zero-residue cleanup. Its executable and runtime inventory are checked
+in, including an exact host-observed retained release-archive SHA-512. An
+explicit same-config `recover-clean` mode safely removes crash residue and
+writes a separate cleanup-only receipt. A physical receipt is still pending.
+Even after it runs, the result is
+single-host substrate density evidence only—not multi-host HA, scheduling,
+snapshot/resume, or canonical Operation lifecycle evidence.
+
+One executable common-slice runner now applies the same thirteen cases to direct Podman,
+Agent Sandbox/raw pod, and OpenSandbox controller/raw pod. Its strict JSON schema requires one
+ordered result per case, honest `supported`, `failed`, or `unavailable` status, and clean
+teardown; `productionQualified` can only be `false`. It also binds the evidence to digests of
+the runner, drivers, OCI adapter, and fixtures. The checked arm64 Podman result supports
+eight substrate mechanics but still fails durable exec inspection, mixed-stream replay and
+backpressure, vector receipts, and durable watch/relist. Authenticated preview is unavailable.
+The cached run records `coldPullMs: null`, 479.365 ms ensure, and 113.819 ms first command as
+separate phases.
+
+The Session File gate also ran complete Lease handoffs between different Podman container
+resources in both Persistent modes. All four managed roots crossed the trusted canonical
+snapshot/blob boundary, `/.agents` stayed immutable, Lease A was destroyed with absence proof,
+and Lease B restored exact bytes while continuing the same Attempt and reopened durable Harness
+Session log. Both resources were on one Podman VM, so this is not evidence of physical-node
+separation. A separate fail-closed CI profile requires two provider connections and two
+different infrastructure-attested node identities; it records an operator attestation rather
+than independent hardware proof.
+
+## Production lifecycle direction
+
+The pinned Kind comparison selected direct Kubernetes Agent Sandbox as the conditional
+production lifecycle substrate. Little remains responsible for scheduling, authority,
+durable exec/file/watch, preview grants, vector receipts, accounting, and canonical repair.
+
+`AgentSandboxProvider` talks directly to the v1beta1 CRD through the exact
+`@kubernetes/client-node` 1.4.0 dependency. It maps Little IDs and generations
+into hashed Kubernetes labels plus exact annotations, uses UID-preconditioned
+delete, normalizes resourceVersion watch expiry into a bounded relist, and
+executes only foreground commands through the controller-created pod. Network
+mode must be selected explicitly, and every enabled mode verifies an exact
+namespace-wide `little.compute/managed=true` ingress-and-egress deny-all
+NetworkPolicy before lifecycle I/O. The adapter also re-reads the exact
+v1beta1 CRD and pinned controller rollout at the last pre-create gate; a
+controller or schema drift is a known `capability_missing` refusal before the
+Sandbox CR is sent. `conformance-only` does not claim that the
+fixture CNI enforces that object. `qualified-deny-all` additionally requires a
+cluster-, namespace-, policy-, CNI-version-, and evidence-digest-bound record;
+without it the provider refuses to start and reports no egress enforcement.
+The default adapter refuses absence proof:
+operators may enable `conditional_admission_tombstone` only after a deployment-
+specific admission component has passed the exact delayed-send qualification.
+This prevents raw Agent Sandbox from being promoted on lifecycle mechanics
+alone.
+
+The exact Agent Sandbox v0.5.1 and OpenSandbox controller 0.2.0 fixtures both executed on
+native arm64. They recovered exact-name lifecycle after a discarded response, re-applied
+idempotently, emitted raw watch events, and deleted idempotently. Neither passed the production
+data-plane gate: the 4 MiB kubectl stdin path truncated, raw pod exec lacked durable identity
+and ordered replay, and the node used containerd/runc rather than gVisor, Kata, or a VM.
+
+The common run also attempted orphan repair, three-member vector behavior, and cursor expiry
+plus relist. Raw Kubernetes labels, UIDs, process groups, and resourceVersion were observable,
+but there were no Little fence-bound cleanup receipts, durable exec targets, per-member vector
+receipts, or owned replay cursor. OpenSandbox reached three indexed members but did not return
+`status.ready` to one within five seconds after scale-down; exact deletion cleaned it.
+
+The full OpenSandbox stack is not the default direction. Its official all-in-one chart is
+0.1.0 while the separately pinned controller, server, and execd lines are 0.2.0, 0.2.1, and
+1.0.20. Components such as execd can still be evaluated independently behind Little's
+contract.
+
+A manual CI gate exists for a dedicated native linux/amd64 runner with exact Podman 6.0.1. It
+forces only the locked qualification image cold, requires separate cold-pull/ensure/first-
+command measurements, validates the common artifact, and leaves no labeled resources. That
+workflow has not yet produced M0 Linux evidence, so Apple arm64 numbers are not Linux claims.
+
+Production promotion still requires durable restart-safe exec/file semantics, gVisor or
+Kata/VM isolation, selective CNI egress, storage/snapshot conformance, multi-node churn at the
+target scale, watch expiry/relist, leak and quota tests, N/N-1 upgrade/rollback, and complete
+artifact provenance/license closure.
+
+Both selected adapters report filesystem/runtime snapshot and clone support as
+`unsupported`, and refuse a sandbox request that names a checkpoint to start from.
+Upstream feature discovery cannot enable them; an exact provider,
+runtime, storage, threat-model and compatibility qualification must change the
+descriptor deliberately.
+
+When an installation selects gVisor (`init --hardened`), the direct Podman provider
+reports `gvisor` as its isolation and runtime class, and verification fails if the
+Podman service's default OCI runtime is not `runsc`. Installations without gVisor
+keep `namespace` and an unchanged capability digest.
+
+### Runtime clone contract
+
+A runtime clone starts several children from one running sandbox, memory and
+processes included, while the source keeps running. It is an accelerator over a
+workspace-generation fork, never state of its own (ADR 0036): a child that cannot be
+cloned starts from the same committed generation through ordinary materialization.
+
+The contract is checkpoint, then start N. `checkpointSandbox` with `kind: "runtime"`
+captures a sandbox with no command in flight at its committed workspace generation
+and leaves it running. The checkpoint reference carries a compatibility digest
+(runtime, guest kernel, CPU features, image), the isolation class, the workspace
+generation, the placement host, the image, an expiry and the size. Each child is an
+ordinary `ensureSandbox` under its own Lease with
+`source: { kind: "checkpoint", checkpoint }`. Before seeding a child, the provider
+refuses a reference it did not issue or that was altered, another installation's or
+tenant's checkpoint, an expired or incompatible checkpoint, a different image, a
+different placement host, and an isolation class weaker than the parent's.
+
+A provider that advertises `lifecycle.fork: runtime_clone` must also advertise
+`runtime_checkpoint` and implement `checkpointSandbox`, and capability negotiation
+refuses both without approved, version-specific threat-model evidence. The provider
+conformance suite adds five clone cases: a checkpoint waits for a quiet sandbox and
+leaves it running, one checkpoint starts several independent children, children read
+fresh random state, foreign, altered and mismatched checkpoints are refused, and
+children are destroyed without residue. A clone copies secrets and random state held
+inside processes, so long-lived credentials stay outside the sandbox and a process
+that keeps its own must re-key or restart after a fork.
+
+The microsandbox provider implements the contract with `msb` 0.7.8. A checkpoint is a
+paused template microVM forked from the running source, and each child is a fork of that
+template, so every child starts from the same captured state however much later it
+starts. Each child keeps its checkpoint's image, CPU, memory and deny-all network policy,
+and runs on the same host. Templates are released when they expire, including ones an
+earlier provider process left behind; a host should call
+`releaseExpiredRuntimeCheckpoints()` periodically, because a held template keeps a paused
+microVM's memory. The provider is not wired into the self-host runtime yet. Its unit tests
+drive a scripted `msb`, and `driver.microsandbox.test.ts` is the live check for Apple
+Silicon or Linux with KVM. On an Apple Silicon Mac it forked a running Python process into
+three children: the checkpoint paused the source for about 750 ms, each child answered in
+under 300 ms with the source's process and in-memory token, kernel randomness differed in
+every sandbox, and Python's own random generator did not. The in-memory reference provider
+also implements the contract, for tests.
+
+A sandbox's first capture copies all of its memory while it is paused, about 0.4 to 0.9 s
+for a 1 GiB microVM on that Mac. Later captures copy only memory written since the previous
+capture, so their pause depends on how much the sandbox has written, not on its size.
+`prepareRuntimeCheckpoint()` takes a capture ahead of time, at a moment the host picks, such
+as while the agent is waiting on a model, so the checkpoint a fork waits on is a short one.
+`prepareRuntimeCheckpointOnReady` takes the first capture as soon as each sandbox starts.
+On the same Mac, with a capture on ready and another while idle, the fork's own checkpoint
+copied 5.8 MB and paused the source for 61 ms instead of about 750 ms. The two advance
+captures paused it for 478 ms (full, 73 MB) and 555 ms (incremental, 37 MB), so a capture
+taken only on ready does not keep a long-running sandbox's fork pause short: prepare again
+shortly before forking. The cost is memory: after its first capture a sandbox keeps a
+baseline of about one more VM's memory on macOS.
+
+## Distribution boundary
+
+Little detects but does not bundle or silently install Podman, krunkit, libkrun, libkrunfw,
+gvproxy, or virglrenderer. Podman owns its machine image in the user's cache, and qualification workloads
+are direct registry pulls. Exact versions and digests are pinned in the dependency inventory.
+Mirroring or redistribution requires a separate SBOM/license/source gate, including the
+exact corresponding-source obligations for the Linux kernel embedded by libkrunfw.

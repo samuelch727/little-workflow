@@ -76,6 +76,13 @@ path. Large tool results that are sent back to the model are written under
 `/artifacts/tool-results/...` and also appear as ordinary file and artifact
 events.
 
+Hosts may advertise an existing per-file byte ceiling as `FileWriter.limits.maxFileBytes`.
+If an optional model/tool trace copy would exceed that ceiling, Harness does not write an
+artifact. Its reference has `captured: false`, `unavailableReason: "storage_limit"`,
+`storageLimitBytes`, and sanitized byte/hash metadata; its preview keeps the legacy code-unit bound described below.
+This does not change the model input, returned reply, replay data, or required file writes.
+Unadvertised limits and failures from writes that are attempted still propagate.
+
 The trace does not capture:
 
 - API keys, cookies, auth headers, or provider credentials
@@ -128,22 +135,42 @@ const finished = await result.finished;
 
 console.log(finished.trace.id);
 console.log(finished.trace.path);
-console.log(finished.persistence.status);
+if (finished.status === "completed") console.log(finished.persistence.status);
 ```
 
 The exact trace backend can change. The developer experience should not require
 a trace backend decision before a local harness works.
 
-## Streaming to littleDB
+## Sending traces to LittleDB
 
-> **Preview:** the `@little-workflow/littledb` client is not published yet and needs a littleDB
-> service that is not publicly available. See [Using littledb](/docs/v0.1.0-alpha/reference/using-littledb).
+> **Preview:** the `@little-stack/littledb` client is not published yet and needs a LittleDB
+> service that is not publicly available. See [Using LittleDB](/docs/v0.1.0-alpha/reference/using-littledb).
 
-Little Harness can stream trace events and eval snapshots to littleDB by wiring
-`createLittleDbHarnessReporter(...).onEvent` into `createHarness({ onEvent })`
-or a per-run `generateHarness`/`streamHarness` call.
+The local trace stays where it is. To also see turns in LittleDB, hand a LittleDB tracer to
+`createHarness({ onEvent })` or to a per-run `generateHarness`/`streamHarness` call:
 
-The reporter is push-first and best-effort. Harness execution and local trace
-persistence do not depend on littleDB being reachable. When littleDB is online,
-the Viewer refreshes from engine live updates and shows the run while it is
-still executing.
+```ts
+// Preview — @little-stack/littledb is not published yet.
+const db = createLittleDB({ url: process.env.LITTLEDB_URL!, apiKey: process.env.LITTLEDB_API_KEY! });
+const tracer = db.harnessTracer({ harness: "support-desk" });
+
+createHarness({
+  // ...
+  onEvent: tracer.onEvent,
+  trace: { content: { previewBytes: 65_536 } },
+});
+```
+
+The tracer turns each turn's events into one trace: the turn, an `llm` span per model call with
+its token usage, and a `tool` span per tool call. It reads the events as they are emitted and sends
+them in the background, so harness execution and local trace persistence never depend on LittleDB
+being reachable.
+
+LittleDB sees what the events carry. Events carry the small previews described under
+[Content Policy](#content-policy), 512 UTF-16 code units by default. `trace.content.previewBytes`
+is the legacy option name for that code-unit bound; a boundary drops a dangling high surrogate.
+It is not a UTF-8 storage quota. Artifact/file ceilings and byte/hash metadata still use actual
+UTF-8 bytes. Raise the preview limit when LittleDB should show more prompt and output text;
+a preview alone does not establish that full content was captured.
+
+LittleDB also accepts OpenTelemetry (OTLP/HTTP) traces, for apps that already export them.

@@ -1,0 +1,69 @@
+---
+title: Planned enforcement
+description: Egress credential custody and subtree-budget designs; implementation is P2 work.
+---
+
+The egress credential proxy and run-wide subtree budgets are designs, not
+installed features. Existing Lease/network policy and conserved quota
+primitives do not prove that credential injection or dollar, VM-second, and
+token ceilings are available end to end.
+
+## Egress credential custody
+
+The planned proxy holds upstream credentials outside sandboxes and model
+context. An admitted Lease receives a scoped, short-lived capability to call
+a named connector. The trusted service checks policy, current execution
+fences, and quota before injecting a credential into a bounded upstream call.
+
+Provider network enforcement must make the proxy path unavoidable; a proxy
+environment variable is insufficient. Direct sockets, alternate DNS,
+redirects, metadata endpoints, and peer traffic must not bypass policy. The
+service must also prevent credentials from being reflected into responses,
+logs, or artifacts. Unsupported enforcement fails admission instead of
+silently weakening isolation.
+
+Lost responses are not proof that an external effect was absent. An uncertain
+non-idempotent request keeps its reservation and requires reconciliation;
+retry does not automatically resend it. Restoring workspace bytes never
+undoes a remote write. Missing externality observations must not be reported
+as an all-false, side-effect-free segment.
+
+The package design is `packages/little-compute/docs/egress-credential-proxy.md`.
+It specifies policy/capability bindings, dispatch recovery, credential
+rotation, and adversarial acceptance tests for P2.
+
+## Subtree budgets
+
+The planned budget follows a root run and all bound descendants, including
+retries and failed branches. A fork or restored milestone does not reset its
+allowance. Admission reserves rights before work starts; consumption and
+release follow exact, replayable effects in the conserved quota ledger.
+
+Budget dimensions remain distinct: currency micros use an explicit rate
+card, VM-seconds measure allocated environment time, and tokens bind to
+admitted model requests. CPU allocation is not elapsed compute time. Missing
+usage stays unknown and uncertain effects remain reserved.
+
+When a ceiling is reached, policy can refuse new work, park the run, or
+preempt a branch through ordinary fenced cancellation. Cancellation does not
+refund spent cost or release uncertain resources early. Workers must stop
+at locally enforceable limits even when disconnected from the control plane.
+
+Cost-to-reach and total run spend are different views. A merge counts shared
+ancestral charges once; failed siblings remain in run spend. Reusing a known
+milestone prefix is measurable, but the exact price of a hypothetical
+restart is not. Neither absent telemetry nor retry selection justifies a
+zero-cost or exact-savings claim.
+
+The package design is `packages/little-compute/docs/subtree-budgets.md`.
+It covers conservation, enforcement policy, recovery, measurement coverage,
+and concurrent PostgreSQL/provider fault tests required before shipping.
+
+## Deployment boundary
+
+Both designs keep one control plane and PostgreSQL as canonical authority.
+Future worker hosts contribute capacity through outbound connections; they
+do not become schedulers or failover control planes. The designs do not add
+parked Vault Cleanup, signed-evidence GC, or release-attestation owners to
+the lean tier. New budget persistence belongs in its own versioned stream;
+the existing `cell_core` v137 history remains frozen.

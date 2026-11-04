@@ -12,14 +12,14 @@ Workflow nodes.
 ## Import
 
 ```ts
-import { generateHarness } from "little-harness";
+import { generateHarness } from "@little-stack/harness";
 ```
 
 ## Basic Usage
 
 ```ts
 import { Output } from "ai";
-import { generateHarness } from "little-harness";
+import { generateHarness } from "@little-stack/harness";
 
 const result = await generateHarness({
   harness,
@@ -29,6 +29,31 @@ const result = await generateHarness({
   session: ticket.id,
 });
 
+// Compiles against published 0.2.0-alpha.0 and against the unreleased source.
+if (result.status === "completed") {
+  console.log(result.output.priority);
+}
+```
+
+A turn can park when a tool returns a parked result. The published
+`0.2.0-alpha.0` types do not say so: there, `generateHarness()` returns
+`GenerateHarnessResult`, which names the completed result only, even though the
+runtime can still return a parked one. Guard on `status === "completed"` before
+reading completed-only fields.
+
+> **UNRELEASED:** in the current source, `generateHarness()` returns
+> `HarnessTurnResult`, the `status`-discriminated union, so the parked branch
+> type-checks. The `GenerateHarnessResult` alias is removed. No npm version
+> includes this yet. See
+> [Typed parked results](/docs/v0.1.0-alpha/reference/alpha-migrations#typed-parked-results).
+
+```ts
+// UNRELEASED: needs the unreleased source SDK.
+if (result.status === "parked") {
+  // The agent is waiting in await_tasks, for example for a person's answer.
+  // resumeParked() continues the turn once the wait is over.
+  return;
+}
 console.log(result.output.priority);
 ```
 
@@ -40,8 +65,8 @@ async function generateHarness<
   TInput = unknown,
   TExtraBody = unknown,
 >(
-  options: GenerateHarnessOptions<TInput, TExtraBody>,
-): Promise<GenerateHarnessResult<TOutput>>;
+  options: GenerateHarnessOptions<TInput, TExtraBody, TOutput>,
+): Promise<HarnessTurnResult<TOutput>>;
 ```
 
 ## Parameters
@@ -68,6 +93,23 @@ const result = await generateHarness({
   session: chatId,
 });
 ```
+
+### `prompt`
+
+`string`
+
+One user message, as plain text. The quickest way to run a turn from a script or
+a worker.
+
+```ts
+const result = await generateHarness({
+  harness,
+  session: "loan_APP-1001",
+  prompt: "Pre-approve APP-1001.",
+});
+```
+
+Pass `prompt` or `messages`, not both, and not with `type` or `input`.
 
 ### `type`
 
@@ -174,6 +216,53 @@ output: Output.object({ schema: renewalBriefSchema })
 
 Cancels the run when possible.
 
+### `turnLimits`
+
+`HarnessTurnLimits`
+
+Step, cost and time limits for this run. Overrides the harness's own
+[`turnLimits`](/docs/v0.1.0-alpha/reference/create-harness#turnlimits) as a
+whole.
+
+```ts
+await generateHarness({
+  harness,
+  prompt,
+  turnLimits: { maxSteps: 24, maxCostUsd: 3, price: ({ model, usage }) => priceOf(model, usage) },
+});
+```
+
+A run stopped by one throws `HarnessTurnLimitError`, whose `reason` (and
+`name`) is `StepLimitExceeded`, `CostLimitExceeded`, `Interrupted`, or
+`BudgetStateUnavailable` (unknown or missing logical-turn accounting). The
+`harness.session.failed` event carries the same `reason`.
+
+### `beforeInvocation`
+
+`() => void | Promise<void>`
+
+A trusted caller fence awaited immediately before each actual provider `doGenerate`
+or `doStream`, including retries and `prepareStep.model` replacements. Rejection
+blocks provider I/O. Required-record errors and cancellation are rechecked after the
+fence resolves; `onEvent` is observational and cannot replace this guard. It requires
+concrete model handles; aliases with this option fail with `HarnessInputError`.
+`resumeParked` forwards the same option to each resumed run. An invocation already
+in flight may finish. The hook does not establish exactly-once provider billing.
+
+### `inbox`
+
+`HarnessInbox`
+
+Messages that arrive while the turn runs. Before each model step the turn calls
+`inbox.take()` and the model reads what it returns as the person's words, placed
+where they arrived in the conversation (a turn that parks keeps them). The
+agent server's `POST /sessions/<session>/staged` route is built on it.
+
+```ts
+const arrived: string[] = [];
+await generateHarness({ harness, prompt, inbox: { take: () => arrived.splice(0) } });
+```
+
 ### `runId`
 
 `string`
@@ -195,14 +284,54 @@ const result = await generateHarness({
 
 ### `sessionLog`
 
-`HarnessSessionLog`
+`HarnessSessionLog` (type from `@little-stack/harness/events`)
 
 Per-call session-log override (the durable event log this run appends to and
 replays from). When omitted, the log configured on `createHarness()` is used.
-`durability` is the historical alias for the same option; `sessionLog` wins
-when both are set. See
+
+> **UNRELEASED:** the current source removes the `durability` alias. Published
+> `0.2.0-alpha.0` accepts `durability` as an alias of `sessionLog` (`sessionLog`
+> wins when both are set). See [Alpha Migrations](/docs/v0.1.0-alpha/reference/alpha-migrations#one-name-per-concept).
+
+See
 [Execution Environments](/docs/v0.1.0-alpha/runtime/execution-environments)
 for the remote session-log adapter.
+
+### `trigger`
+
+`HarnessTrigger`: `{ kind: string; source?: string; from?: string; label?: string }`
+
+> **UNRELEASED:** `trigger` is in the current source only. No npm version includes it yet.
+
+How this turn started, for trace readers such as LittleDB: a `kind` (`message`,
+`schedule`, `api`, `cli`, or a word of your own), where it came from (`source`),
+who sent it, as the channel names them (`from`), and a short `label`. It goes on
+the turn's `harness.session.started` event as the string metadata `triggerKind`,
+`triggerSource`, `triggerFrom` and `triggerLabel`; it changes nothing about the
+run. A turn without one started from your own code.
+
+```ts
+await generateHarness({
+  harness,
+  session: orderId,
+  prompt,
+  trigger: { kind: "webhook", source: "POST /orders", label: `Order ${orderId}` },
+});
+```
+
+The turns Little Harness starts itself carry one already:
+
+| Started by | `trigger` |
+| --- | --- |
+| A Chat SDK connector | `{ kind: "message", source: <adapter name>, from: <author's user name> }` |
+| The email connector | `{ kind: "message", source: "email", from: <sender>, label: <subject> }` |
+| A web-rich connector | `{ kind: "message", source: "web", from: <user's email or id> }` |
+| A schedule | `{ kind: "schedule", source: <schedule id>, label: <description> }` |
+| `little-harness start` | `{ kind: "api", source: "POST /sessions/<session>/messages" }` or `"POST /jobs/<type>"` |
+| The terminal chat of `little-harness test` | `{ kind: "cli" }` |
+
+`from` can be a phone number or an email address. To keep it out of traces, add
+`triggerFrom` to `trace.redaction.metadataKeys`.
 
 ### `onEvent`
 
@@ -278,6 +407,29 @@ continue after executed tool calls instead of stopping after the first step.
 
 ## Returns
 
+A turn ends in one of two states:
+
+- `status: "completed"`: the turn finished. Every field below is present.
+- `status: "parked"`: a tool parked the turn until pending work settles. The result
+  carries `continuationId` and `pending`, plus `artifacts`, `trace` and `warnings`. It
+  has no `output`, `persistence` or `commitManual`, so check `status` before reading
+  them. When the turn parked in `await_tasks`, `resumeParked()` continues it once
+  the wait is over; see
+  [Asking A Person](/docs/v0.1.0-alpha/build-agents/asking-a-person#answer-and-continue).
+
+How the type says so depends on the version:
+
+| Version | Declared return type |
+| --- | --- |
+| Published `0.2.0-alpha.0` | `GenerateHarnessResult<TOutput>`, an alias of `HarnessCompletedResult<TOutput>` only. The runtime can still return a parked result; the type does not include it. |
+| UNRELEASED source (no npm version yet) | `HarnessTurnResult<TOutput>`, the union of the completed and parked results. `GenerateHarnessResult` no longer exists. |
+
+`HarnessTurnResult` already declares both states in `0.2.0-alpha.0`; only the
+declared return type changes. A `status === "completed"` guard compiles with both. See
+[Typed parked results](/docs/v0.1.0-alpha/reference/alpha-migrations#typed-parked-results).
+
+The fields below describe a completed result.
+
 ### `text`
 
 `string`
@@ -338,21 +490,28 @@ if (result.warnings.some((warning) => warning.code === "undefined_input_type")) 
 
 ### From A Script (No HTTP Request)
 
-In a plain script or worker there is no `req.json()` to read `messages` from, so
-build the `UIMessage[]` array yourself.
+In a plain script or worker there is no `req.json()` to read `messages` from.
+Pass the request as `prompt`:
 
 ```ts
-import { generateHarness } from "little-harness";
+import { generateHarness } from "@little-stack/harness";
+
+const result = await generateHarness({ harness, prompt: "Summarize the latest incident." });
+if (result.status === "completed") console.log(result.text);
+```
+
+For more than one message, build the `UIMessage[]` array yourself. Each
+`UIMessage` needs an `id` and `parts`; the AI SDK's `{ role, content }` model
+messages are refused with an error that says so.
+
+```ts
 import type { UIMessage } from "ai";
 
 const messages: UIMessage[] = [
   { id: "u1", role: "user", parts: [{ type: "text", text: "Summarize the latest incident." }] },
 ];
 const result = await generateHarness({ harness, messages });
-console.log(result.text);
 ```
-
-Each `UIMessage` requires an `id`; omitting it is a TypeScript error.
 
 ### Generate A Structured Brief
 
@@ -368,11 +527,13 @@ const result = await generateHarness({
   session: "acct_123-renewal",
 });
 
-await reports.create({
-  accountId: "acct_123",
-  body: result.output,
-  traceId: result.trace.id,
-});
+if (result.status === "completed") {
+  await reports.create({
+    accountId: "acct_123",
+    body: result.output,
+    traceId: result.trace.id,
+  });
+}
 ```
 
 ### Run A Chat Transcript To Completion
@@ -385,6 +546,9 @@ const result = await generateHarness({
   output: Output.text(),
 });
 
+if (result.status !== "completed") {
+  return Response.json({ status: result.status }, { status: 202 });
+}
 return Response.json({
   text: result.text,
   artifacts: result.artifacts,
@@ -401,7 +565,7 @@ const result = await generateHarness({
   session: projectId,
 });
 
-if (result.persistence.status === "failed") {
+if (result.status === "completed" && result.persistence.status === "failed") {
   await retryQueue.enqueue(result.persistence.failedCommits);
 }
 ```

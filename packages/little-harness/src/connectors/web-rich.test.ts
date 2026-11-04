@@ -5,7 +5,7 @@ import type { UIMessage } from "ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createHarness } from "../create-harness.js";
 import { HarnessInputError } from "../errors.js";
-import type { StreamHarnessFinished } from "../execution/result.js";
+import type { StreamHarnessTurnFinished } from "../execution/result.js";
 import { localHost } from "../local-host/index.js";
 import { chatSdkConnector, webRichConnector } from "./descriptors.js";
 import { loadConnectorToolExtensions } from "./discovery.js";
@@ -58,7 +58,7 @@ function jsonRequest(
   });
 }
 
-function streamResult(text = "ok", finished: Promise<StreamHarnessFinished> = finishedResult()) {
+function streamResult(text = "ok", finished: Promise<StreamHarnessTurnFinished> = finishedResult()) {
   return {
     text: Promise.resolve(text),
     output: Promise.resolve(text),
@@ -71,7 +71,7 @@ function streamResult(text = "ok", finished: Promise<StreamHarnessFinished> = fi
   };
 }
 
-function finishedResult(): Promise<StreamHarnessFinished> {
+function finishedResult(): Promise<StreamHarnessTurnFinished> {
   return Promise.resolve({
     session: {} as any,
     artifacts: [],
@@ -119,19 +119,21 @@ describe("loadWebRichConnector", () => {
       `import { extendTool } from ${JSON.stringify(toolExtensionsPath)};
        export default extendTool({} as any, { description: "Web order tool." });`,
     );
-    const calls: Array<{ connector: unknown; connectorTools: unknown }> = [];
+    const calls: Array<{ connector: unknown; connectorTools: unknown; trigger: unknown }> = [];
     const loaded = await loadWebRichConnector({
       agentDir: agent,
       connector: "web",
       loadHarness: async () => harnessWithTools(),
       loadConnectorToolExtensions,
       streamHarness: (options) => {
-        calls.push({ connector: options.connector, connectorTools: options.connectorTools });
+        calls.push({ connector: options.connector, connectorTools: options.connectorTools, trigger: options.trigger });
         return streamResult();
       },
     });
 
     await loaded.POST(jsonRequest({ id: "chat_1", messages: requestMessages }));
+
+    expect(calls[0]?.trigger).toEqual({ kind: "message", source: "web", from: "u1" });
 
     expect(calls[0]?.connector).toEqual({
       id: "web",
@@ -256,7 +258,7 @@ describe("loadWebRichConnector", () => {
   });
 
   it("does not deliver mirrors when text resolves but finished rejects", async () => {
-    const finished = deferred<StreamHarnessFinished>();
+    const finished = deferred<StreamHarnessTurnFinished>();
     const onError = vi.fn(async (_ctx: any) => {});
     const deliver = vi.fn(async () => {});
     const loaded = await loadWebRichConnector({
@@ -486,7 +488,7 @@ describe("loadWebRichConnector", () => {
   });
 
   it("runs beforeRun before streaming and afterRun only after finished resolves without consuming the response stream", async () => {
-    const finished = deferred<StreamHarnessFinished>();
+    const finished = deferred<StreamHarnessTurnFinished>();
     const events: string[] = [];
     const result = streamResult("ok", finished.promise);
     const beforeRun = vi.fn(async () => {
@@ -574,7 +576,7 @@ describe("loadWebRichConnector", () => {
       status: 500,
     });
 
-    const finishedFailure = deferred<StreamHarnessFinished>();
+    const finishedFailure = deferred<StreamHarnessTurnFinished>();
     const finishedLoaded = await loadWebRichConnector({
       agentDir: "agents/support",
       connector: webRichConnector({

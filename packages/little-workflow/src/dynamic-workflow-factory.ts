@@ -1,20 +1,26 @@
+import { getSchemaValidator } from "./schema-validator.js";
 import type {
+  AgentWorkflowBindings,
+  AgentWorkflowBuildResult,
+  AgentWorkflowDefinition,
   DynamicCompileResult,
   DynamicPlanSubmission,
   DynamicWorkflowFactory,
   HarnessWorkflow,
   HarnessWorkflowExecution,
   HarnessWorkflowRunContext,
-} from "little-harness";
-import { localWorld, model } from "./authoring.js";
+} from "@little-stack/harness";
+import { defineWorkflow, model } from "./authoring.js";
 import type { BashCapabilities } from "./bash-tool.js";
+import type { DynamicWorkflowWorld, DynamicWorkflowWorldContext } from "./dynamic-workflow.js";
 import {
   compileWorkflow,
   type CompilableWorkflowDefinition,
   type PlannerAdapter,
 } from "./compiler.js";
 import { parseAdHocPlan } from "./dynamic-workflow-plan.js";
-import { mapWorkflowError } from "./harness-workflow.js";
+import { asHarnessWorkflow, harnessRunTrigger, mapWorkflowError } from "./harness-workflow.js";
+import { defaultWorldForHarness } from "./harness-default-world.js";
 import {
   lowerAdHocPlan,
   referencedCapabilities,
@@ -24,14 +30,25 @@ import {
 import type { LwirWorkflow } from "./lwir.js";
 import { executeWorkflowVersion, type ExecuteWorkflowVersionOptions } from "./runtime.js";
 import { createToolRegistry, type AiSdkTool, type ToolRegistry } from "./tool-registry.js";
+import { getWorkflowDefinitionHash } from "./workflow-definition-hash.js";
 import type { RunId } from "./world.js";
+import type { World } from "./world-port.js";
 
 // The workflow id doubles as the frozen LWIR's metadata.name; the compiler's
 // request-binding check (validateRequestBinding) requires the two to match.
 const AD_HOC_WORKFLOW_ID = "ad_hoc_plan";
 
-export function littleWorkflowDynamicWorkflowFactory(): DynamicWorkflowFactory {
+export type LittleWorkflowDynamicWorkflowFactoryOptions = {
+  /** Where runs are stored. Defaults to the harness's virtual or local filesystem store. */
+  readonly world?: DynamicWorkflowWorld;
+};
+
+export function littleWorkflowDynamicWorkflowFactory(
+  options: LittleWorkflowDynamicWorkflowFactoryOptions = {},
+): DynamicWorkflowFactory {
+  const world = options.world;
   return {
+    define: (definition, bindings) => defineAgentWorkflow(definition, bindings, world),
     compile(submission: DynamicPlanSubmission): DynamicCompileResult {
       const parsed = parseAdHocPlan(submission.plan);
       if (!parsed.ok) {
@@ -72,6 +89,7 @@ export function littleWorkflowDynamicWorkflowFactory(): DynamicWorkflowFactory {
         referenced,
         outputSchema: submission.outputSchema,
         maxRuntimeMs: submission.limits.maxRuntimeMs,
+        world,
       });
       return {
         ok: true,
@@ -84,12 +102,147 @@ export function littleWorkflowDynamicWorkflowFactory(): DynamicWorkflowFactory {
   };
 }
 
+/**
+ * An agent-defined workflow is an ordinary `defineWorkflow` definition: the agent's model plans
+ * the steps (once, then the plan is kept), steps may use any of the agent's model slots, and the
+ * policy goes into every model step. It runs in `ctx.persistence.dataDir`, which the harness
+ * keeps per host so plans carry over between sessions.
+ */
+/** What an agent-made workflow runs with outside its harness: its tools, its model slots and the planner model. */
+export type AgentWorkflowRunBindings = Pick<AgentWorkflowBindings, "tools" | "models" | "planner">;
+
+/**
+ * Build an agent-made workflow from its definition (what `define_workflow` wrote, or a version
+ * LittleDB proposes), so it runs outside the harness: in a test, a script, or an eval worker.
+ * Pass the same tools and model slots the harness gives it. Throws on a definition that cannot run.
+ */
+export function agentWorkflow(definition: AgentWorkflowDefinition, bindings: AgentWorkflowRunBindings) {
+  for (const [field, schema] of [
+    ["inputSchema", definition.inputSchema],
+    ["outputSchema", definition.outputSchema],
+  ] as const) {
+    const problem = jsonSchemaProblem(schema);
+    if (problem !== undefined) throw new TypeError(`${field} is not a usable JSON Schema: ${problem}`);
+  }
+  const missing = definition.tools.filter((name) => !Object.prototype.hasOwnProperty.call(bindings.tools, name));
+  if (missing.length > 0) throw new TypeError(`The definition uses tools it was not given: ${missing.join(", ")}.`);
+  const tools = Object.fromEntries(definition.tools.map((name) => [name, bindings.tools[name]]));
+  return defineWorkflow({
+    id: definition.id,
+    description: definition.description,
+    ...(definition.policy === undefined ? {} : { policy: definition.policy }),
+    input: definition.inputSchema,
+    output: definition.outputSchema,
+    tools: tools as Record<string, AiSdkTool>,
+    planner: bindings.planner,
+    models: Object.entries(bindings.models).map(([slot, raw]) => model(raw, { id: slot })),
+  });
+}
+
+function defineAgentWorkflow(
+  definition: AgentWorkflowDefinition,
+  bindings: AgentWorkflowBindings,
+  world: DynamicWorkflowWorld | undefined,
+): AgentWorkflowBuildResult {
+  for (const [field, schema] of [
+    ["inputSchema", definition.inputSchema],
+    ["outputSchema", definition.outputSchema],
+  ] as const) {
+    const problem = jsonSchemaProblem(schema);
+    if (problem !== undefined) return { ok: false, message: `${field} is not a usable JSON Schema: ${problem}` };
+  }
+  try {
+    const workflow = defineWorkflow({
+      id: definition.id,
+      description: definition.description,
+      ...(definition.policy === undefined ? {} : { policy: definition.policy }),
+      input: definition.inputSchema,
+      output: definition.outputSchema,
+      tools: bindings.tools as Record<string, AiSdkTool>,
+      planner: bindings.planner,
+      models: Object.entries(bindings.models).map(([slot, raw]) => model(raw, { id: slot })),
+    });
+    const definitionIdentity = getWorkflowDefinitionHash(workflow);
+    const adapted = asHarnessWorkflow(workflow, { definitionIdentity });
+    if (world === undefined) return { ok: true, workflow: adapted };
+    // The World is picked per run, so a factory sees the run, the session and the revision.
+    const definitionOnly = pickDefinition(definition);
+    return {
+      ok: true,
+      workflow: {
+        ...adapted,
+        runForHarness: (input, ctx) =>
+          asHarnessWorkflow(workflow, {
+            definitionIdentity,
+            world: worldForRun(world, ctx, {
+              kind: "defined",
+              definition: definitionOnly,
+              ...(bindings.record === undefined
+                ? {}
+                : {
+                    revision: bindings.record.revision,
+                    ...(bindings.record.metadata === undefined ? {} : { metadata: bindings.record.metadata }),
+                  }),
+            }),
+          }).runForHarness(input, ctx),
+      },
+    };
+  } catch (error) {
+    return { ok: false, message: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+function pickDefinition(definition: AgentWorkflowDefinition): AgentWorkflowDefinition {
+  return {
+    id: definition.id,
+    description: definition.description,
+    inputSchema: definition.inputSchema,
+    outputSchema: definition.outputSchema,
+    tools: definition.tools,
+    ...(definition.policy === undefined ? {} : { policy: definition.policy }),
+    ...(definition.models === undefined ? {} : { models: definition.models }),
+  };
+}
+
+function worldForRun(
+  world: DynamicWorkflowWorld,
+  ctx: HarnessWorkflowRunContext,
+  extra: Pick<DynamicWorkflowWorldContext, "kind" | "definition" | "revision" | "metadata">,
+): World {
+  if (typeof world !== "function") return world;
+  return world({
+    ...extra,
+    workflowId: ctx.workflowId,
+    handle: ctx.workflowHandle,
+    runId: ctx.reservedRunId,
+    dataDir: ctx.persistence.dataDir,
+    ...(ctx.persistence.fs === undefined ? {} : { fs: ctx.persistence.fs }),
+    sessionId: ctx.parentSessionId,
+    turnId: ctx.parentTurnId,
+    toolCallId: ctx.toolCallId,
+  });
+}
+
+/** Why the runtime would refuse this JSON Schema, or undefined when it would take it. */
+function jsonSchemaProblem(schema: unknown): string | undefined {
+  if (schema === true) return undefined;
+  if (typeof schema !== "object" || schema === null || Array.isArray(schema)) return "expected a JSON Schema object.";
+  if ("$schema" in schema) return "leave out `$schema`; draft-07 is assumed.";
+  try {
+    const schemaValidator = getSchemaValidator();
+    return schemaValidator.validateSchema(schema) ? undefined : schemaValidator.errorsText(schemaValidator.errors);
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+}
+
 function buildHarnessWorkflow(frozen: {
   readonly lwir: LwirWorkflow;
   readonly definitionHash: string;
   readonly referenced: ReferencedCapabilities;
   readonly outputSchema: unknown;
   readonly maxRuntimeMs: number;
+  readonly world: DynamicWorkflowWorld | undefined;
 }): HarnessWorkflow {
   return {
     id: AD_HOC_WORKFLOW_ID,
@@ -162,7 +315,10 @@ function buildHarnessWorkflow(frozen: {
           ? AbortSignal.any([ctx.abortSignal, timeoutSignal])
           : timeoutSignal;
         const options: ExecuteWorkflowVersionOptions = {
-          world: localWorld({ dataDir: ctx.persistence.dataDir }),
+          world:
+            frozen.world === undefined
+              ? defaultWorldForHarness(ctx)
+              : worldForRun(frozen.world, ctx, { kind: "ad_hoc" }),
           workflowVersion: compiled.workflowVersion,
           input,
           runId: ctx.reservedRunId as RunId,
@@ -173,6 +329,7 @@ function buildHarnessWorkflow(frozen: {
           progress: async (event) => {
             await ctx.observation.recordProgress(event);
           },
+          trigger: harnessRunTrigger(ctx),
         };
         const result = await executeWorkflowVersion(options);
         if (result.status === "completed") {

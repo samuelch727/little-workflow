@@ -1,0 +1,15 @@
+{
+  "title": "Guides and API",
+  "pages": [
+    "index",
+    "getting-started",
+    "quickstart",
+    "foundations",
+    "build-agents",
+    "runtime",
+    "reference",
+    "cookbook",
+    "comparisons",
+    "roadmap"
+  ]
+}

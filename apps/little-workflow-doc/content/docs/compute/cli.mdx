@@ -1,0 +1,928 @@
+---
+title: CLI Reference
+description: The default developer commands and retained advanced control surfaces.
+---
+
+## Default self-host commands
+
+> **UNRELEASED:** the `little-compute` CLI is not published on npm, and the
+> public `samuelch727/little-workflow` repository does not contain it. These
+> commands need a CLI built from an accessible source checkout; see
+> [Self-hosting](/docs/compute/self-hosting).
+
+> **Images:** the documented source install builds the control-plane and
+> supervisor images locally, so it does not depend on published images. If you
+> choose the `0.1.0-alpha.0` GitHub Container references instead, check that
+> both can be pulled anonymously before relying on them. Publishing those images
+> is distribution work and does not gate the source install.
+
+The default rootless-Podman tier has one operator-owned config and one
+background owner. Installation and health verification are exactly three
+Little Compute commands. Export the credential before `up` because the owner
+imports it at startup; the shell export is not a Little Compute command:
+
+```bash
+cd /path/to/your/repository   # or pass --repository /path/to/your/repository
+little-compute init --yes
+export OPENAI_API_KEY='replace-with-your-key'
+little-compute up
+little-compute status
+```
+
+`init` binds the agent to a Git repository: the current directory by default,
+or the path given with `--repository <path>`. Run it from the repository the
+agent should change, not from the source checkout that built the CLI.
+It writes `./.little-compute/little-compute.yaml` in an owner-private
+directory, detects the local rootless Podman authority, resolves mutable image tags once into private installation state,
+and creates internal runtime authority without asking the operator to run
+certificate or evidence commands. Model credentials are optional until the
+owner starts. The OpenAI default reads `OPENAI_API_KEY`; select another variable
+with `--api-key-env`. Namespace isolation is the default; the
+`little-compute init --hardened --yes` command selects gVisor. `up` waits for
+developer readiness, while `status` independently validates the owner.
+`little-compute --version` prints the installed version, and
+`little-compute admin --help` lists the operator commands.
+
+The first product action is separate from setup:
+
+```bash
+little-compute dev run "Inspect the repository and fix the failing test"
+
+# Stops the owner while preserving durable data and artifacts.
+little-compute down
+```
+
+`up` launches the owner in a private crash-safe state directory. `status`
+validates its host boot identity, process start token, executable, and command
+digest before trusting its PID. `down` requests bounded shutdown and preserves
+PostgreSQL data, artifacts, and task state.
+
+The simple initializer also exposes provider and preview configuration without
+selecting the parked advanced tier:
+
+```bash
+# This repository's preview script must bind HTTP on 0.0.0.0:4173.
+little-compute init --yes \
+  --model-provider openai \
+  --model-protocol openai-responses \
+  --model-endpoint https://api.openai.com/v1 \
+  --preview-command pnpm \
+  --preview-arg run \
+  --preview-arg preview \
+  --preview-port 4173
+```
+
+Repeat `--preview-arg` for every exact argument. Preview publication is disabled
+when the preview command and port are omitted. OpenSSL 3 is detected and used
+internally; there is no default certificate ceremony. See the
+[self-hosting guide](/docs/compute/self-hosting) for the exact Node, Podman 6.0.1,
+rootless Ubuntu, source-install, and anonymous-image verification prerequisites.
+
+The local prompt-to-preview, kill/restart, and zero-residue cleanup loop passed
+its G1 acceptance on 2026-09-07, and the fresh-Ubuntu source install passed G2
+on 2026-09-08 (see [Self-hosting](/docs/compute/self-hosting)). Those are historical
+acceptance receipts, not a release: the managed Cloudflare G1 loop is still
+unproven, and Little Compute remains pre-release.
+
+## Operator and qualification executables
+
+`@little-stack/compute` installs one command, `little-compute`. The operator
+daemons, release tools and qualification campaigns that the sections below
+name still ship in the package, under `dist/`, but they are not installed as
+separate commands. Run one by path:
+
+```bash
+compute="$(node -p 'require("node:fs").realpathSync("node_modules/@little-stack/compute")')"
+node "$compute/dist/artifact-gc/cli.js" --help
+```
+
+Use the package's real path, as above. Under pnpm, `node_modules/@little-stack/compute`
+is a symlink, and most of these executables do nothing when started through one.
+The control-plane and supervisor images already run these files by path.
+
+<details>
+<summary>Former command names and their files</summary>
+
+| Former command | File in the package |
+| --- | --- |
+| `little-compute-local-loop` | `dist/qualification/local-managed-agent-loop-v1/agent-group-physical-driver.js` |
+| `little-compute-managed-agent-kernel` | `dist/managed-agent-runtime/kernel-cli.js` |
+| `little-compute-blob-registrar` | `dist/artifact-registrar/cli.js` |
+| `little-compute-artifact-gc` | `dist/artifact-gc/cli.js` |
+| `little-compute-artifact-gc-physical-campaign` | `dist/artifact-gc/physical-release-campaign-cli-v1.js` |
+| `little-compute-exec-output-retention` | `dist/exec-output-retention/cli.js` |
+| `little-compute-evidence-verifier` | `dist/evidence-verifier/cli.js` |
+| `little-compute-workspace-authority` | `dist/workspace-authority/cli.js` |
+| `little-compute-workspace-authority-physical-campaign` | `dist/workspace-authority/physical-release-campaign-cli-v1.js` |
+| `little-compute-runner-physical-campaign` | `dist/runner-activation/physical-release-campaign-cli-v1.js` |
+| `little-compute-runner-production-owner-physical-campaign` | `dist/runner-activation/production-owner-physical-release-campaign-cli-v2.js` |
+| `little-compute-runner-aged-production-gc-physical-campaign` | `dist/runner-activation/aged-production-gc-physical-campaign-cli-v1.js` |
+| `little-compute-sandbox-gc-physical-campaign` | `dist/sandbox-gc/physical-release-campaign-cli-v1.js` |
+| `little-compute-warm-pool-park-resume-physical-campaign` | `dist/qualification/warm-pool-v145-park-resume-physical-cli-v1.js` |
+| `little-compute-adaptive-resource-physical-receipt` | `dist/qualification/adaptive-resource-v145-physical-cli-v1.js` |
+| `little-compute-adaptive-resource-host-residue-observer` | `dist/qualification/adaptive-resource-v145-host-residue-helper-bundle-v1.mjs` |
+| `little-compute-adaptive-resource-production-campaign-executor` | `dist/qualification/adaptive-resource-v146-production-campaign-executor-bundle-v1.mjs` |
+| `little-compute-adaptive-resource-one-shot-qualification` | `dist/qualification/adaptive-resource-v146-one-shot-cli-v1.js` |
+| `little-compute-self-host-release-attestor` | `dist/cli/self-host-release-activation-attestor-cli-v1.js` |
+| `little-compute-self-host-release-package-closure-prepare` | `dist/cli/self-host-release-activation-package-closure-prepare-v1.js` |
+| `little-compute-self-host-release-package-closure-builder` | `dist/cli/self-host-release-activation-package-closure-builder-v1.js` |
+| `little-compute-self-host-release-physical-campaign` | `dist/cli/self-host-release-activation-physical-campaign-cli-v1.js` |
+| `little-compute-self-host-release-physical-plan` | `dist/cli/self-host-release-activation-physical-plan-cli-v1.js` |
+| `little-compute-self-host-release-qualification-runner` | `dist/cli/self-host-release-activation-qualification-runner-cli-v1.js` |
+| `little-compute-self-host-release-production-campaign` | `dist/activation-bundles/production-campaign.js` |
+| `little-compute-self-host-appliance-runtime` | `dist/activation-bundles/production-foreground.js` |
+| `little-compute-lifecycle-five-process-qualifier` | `dist/qualification/lifecycle-five-process-podman-cli-v1.js` |
+| `little-compute-lifecycle-five-process-verifier` | `dist/qualification/lifecycle-five-process-podman-verifier-cli-v1.js` |
+| `little-compute-lifecycle-executable-boundary-qualifier` | `dist/qualification/lifecycle-executable-boundary-podman-cli-v1.js` |
+| `little-compute-ha-backup-restore` | `dist/qualification/ha-backup-restore/cli-v1.js` |
+| `little-compute-self-host-release-activation-state` | `dist/cli/self-host-release-activation-state-cli-v1.js` |
+| `little-compute-gvisor-live-density` | `dist/qualification/gvisor-live-density-v1/cli.js` |
+| `little-compute-thousands-environment-campaign` | `dist/qualification/thousands-environment-scale/cli.js` |
+| `little-compute-thousands-environment-multi-host-release` | `dist/activation-bundles/multi-host-release.js` |
+| `little-compute-thousands-environment-host-daemon` | `dist/activation-bundles/multi-host-host-daemon.js` |
+| `little-compute-thousands-environment-central-coordinator` | `dist/activation-bundles/multi-host-central-coordinator.js` |
+| `little-compute-canonical-managed-agent-scale` | `dist/qualification/canonical-managed-agent-scale-v1/cli.js` |
+| `little-compute-workflow-installer` | `dist/qualification/m1-postgres/workflow-installer-entry.js` |
+| `little-compute-topology-authority` | `dist/topology-authority/cli.js` |
+| `little-compute-credential-worker` | `dist/topology-authority/credential-worker-cli.js` |
+| `little-compute-credential-dispatcher` | `dist/topology-authority/credential-dispatcher-cli.js` |
+| `little-compute-storage-quota-authority` | `dist/storage-quota-authority/cli-v1-main.js` |
+| `little-compute-repository-cache-quota-authority` | `dist/storage-quota-authority/repository-cache-cli-v150-main.js` |
+| `little-compute-storage-quota-host` | `dist/storage-quota-authority/host-installer-cli-v1-main.js` |
+
+</details>
+
+## Advanced production-separated CLI (parked)
+
+The following surface is retained for separated identities, immutable release
+inputs, destructive maintenance, and historical qualification. Every command
+in it lives under `little-compute admin` (see `little-compute admin --help`). It
+is not required for the default developer tier.
+
+The local self-host path is explicit and Docker-independent:
+
+```bash
+little-compute admin init --yes \
+  --control-plane-image <control-plane-oci-reference> \
+  --sandbox-image <sandbox-supervisor-oci-reference>
+little-compute admin doctor --config ./little-compute.yaml --probe-runtime
+# Keep this foreground owner running. --foreground-compatibility selects the
+# legacy per-user socket; a service manager instead passes
+# --service-manifest <absolute-path> --service-manifest-digest sha256:<hex>.
+little-compute admin appliance --foreground-compatibility --config ./little-compute.yaml
+# From a second terminal:
+little-compute admin up --config ./little-compute.yaml
+little-compute admin status --config ./little-compute.yaml --json
+little-compute admin down --config ./little-compute.yaml
+little-compute admin down --config ./little-compute.yaml --purge --confirm <installation-name>
+little-compute admin reinitialize --config ./little-compute.yaml --purge --confirm <installation-name>
+```
+
+`appliance` is the required long-lived mutation owner for normal operation.
+`up`, `status`, and non-purge `down` are bounded desired-state RPCs to its
+private Unix socket; they are not independent Podman supervisors. Use
+`--legacy-direct` only for the explicitly documented maintenance and
+reinitialization path.
+
+`init` accepts `--api-port` and `--database-port`; both are loopback-only and
+must differ. Use `--podman-connection <name>` to bind the installation to one
+named loopback-SSH Podman Machine authority with an owner-private identity.
+For an executable `development-single-engine` installation,
+`--managed-agent-settings <relative-path>` records the managed-Agent settings
+location in the installation config. The normalized path is resolved relative
+to that config file and is rejected for production-separated or
+control-plane-only installations.
+The CLI captures that connection's exact URI and identity, rejects password,
+query, and fragment material, and never uses the mutable connection name to route
+a frozen server command. Later name reads only fail closed on rebinding. `init`
+also starts one uniquely named,
+digest-pinned probe and requires an exact nonce round trip through the configured
+loopback publish before it publishes the image lock, config, credentials, or
+context. Arbitrary SSH/TCP/Unix remote services are rejected because CLI loopback
+publishes would not be the same endpoint. `init`, runtime-probing `doctor`,
+`up`, and `down` serialize all local mutations. Plain `doctor` and `status`
+perform strict read-only inspection without repairing files or pulling images.
+Initialization rejects one artifact reused for both roles and verifies the
+control-plane and sandbox-supervisor OCI entrypoint, user, working directory,
+and package-root contracts before it publishes the image lock.
+The default `down` preserves durable volumes; purge requires the exact configured
+installation name. Human output contains only the installation name and state;
+`--json` emits stable non-secret status/resource digests and a versioned error
+object on failure. Error codes are selected from a closed CLI-owned allowlist;
+unrecognized failures map to `cli_command_failed`. Messages and the few exposed
+details are static CLI text, so parser input and downstream error strings are
+never reflected into JSON. The single exception is `podman_container_exec_failed`
+from a non-sensitive `podman exec` the CLI ran itself, such as the purge
+snapshot's `psql`: its `detail`, and a second line of human output, carry the
+exit code and at most 2 KiB of the tail of that process's stderr, redacted for
+URL credentials, password/token/secret assignments, bearer values, private keys
+and opaque token runs. Sensitive execs never expose output.
+
+The private image lock uses schema v2. It records the source/index manifest,
+the content-addressed image ID, the canonical runnable platform manifest, and
+the sorted same-repository manifest set. Managed containers are created from
+the platform-qualified reference and must retain its exact digest, ID, name,
+create argv, and labels. A probe may observe a different platform digest than
+its requested index only when an exact image inspect proves both names belong
+to the same repository image ID.
+
+The mutation lease drains nested work that entered before the outer command
+returns. It rejects later nested entry, and cancellation or drain timeout keeps
+the kernel lease poisoned until all entered work finishes. Forwarding-probe
+cleanup runs before create and on every exit path using its own bounded signal;
+it removes only an exact digest+nonce+argv+publish match.
+
+`reinitialize` is the only supported image/service-authority reset. It refuses
+unless the stack was fully purged, then removes the exact old context before its
+exact image lock and reruns initialization while preserving configuration and
+credentials. Context+lock, lock-only, and neither-file crash states are safe to
+retry. It never silently re-resolves a tag during `up` or `status`.
+
+The network produced during initialization is initializer authority, not
+runtime authority. Only `up` may recognize that exact legacy label set and
+upgrade it to the full frozen runtime labels; `status` rejects it.
+
+`up` treats the complete agent-execution process set as one executable profile
+contract. The database-time sampler, Cell scheduler, API, and exec-output
+retention worker are currently supervised members. The retention worker gets a
+dedicated `little_compute_reconciler` LOGIN, a file-mounted DSN, bounded
+resources, and verified restart/shutdown ordering. Runner execution, provider dispatch and materialization,
+workspace authority, lifecycle reconciliation, sandbox/orphan collection,
+Artifact GC, and isolated evidence verification are
+mandatory members too. Until every member has a production composition and its
+own least-privilege credential, `up` fails before Podman mutation with
+`self_host_runtime_profile_incomplete` instead of presenting an API-only stack
+as working agent compute. The error detail is a stable set of component/error
+codes and never contains a DSN or secret.
+
+`little-compute-artifact-gc-physical-campaign` runs the non-promoting
+Artifact-GC rootless-Podman qualification. It requires `--connection` and a
+digest-pinned `--image`; optional `--postgres-image` adds the advisory writer
+lease proof. The command emits one canonical JSON receipt on stdout and never
+pulls an image.
+
+## Repository-cache quota host v150
+
+The production repository-cache quota helper is installed by a root-only,
+versioned operator workflow:
+
+```bash
+sudo little-compute admin storage-quota-host repository-cache plan \
+  --request /absolute/private/repository-cache-quota-request.json
+sudo little-compute admin storage-quota-host repository-cache install \
+  --request /absolute/private/repository-cache-quota-request.json
+
+# Later lifecycle operations use a request whose exact `operation` agrees with
+# the selected command.
+sudo little-compute admin storage-quota-host repository-cache upgrade \
+  --request /absolute/private/repository-cache-quota-request.json
+sudo little-compute admin storage-quota-host repository-cache rotate \
+  --request /absolute/private/repository-cache-quota-request.json
+sudo little-compute admin storage-quota-host repository-cache retire-predecessor \
+  --request /absolute/private/repository-cache-quota-request.json
+sudo little-compute admin storage-quota-host repository-cache recover \
+  --request /absolute/private/repository-cache-quota-request.json
+sudo little-compute admin storage-quota-host repository-cache uninstall \
+  --request /absolute/private/repository-cache-quota-request.json
+```
+
+The canonical request is an absolute, root-private, single-link `0600` file.
+Install and rotation accept an exact host template plus file projections for
+new 32-byte physical-receipt and transport keys; callers cannot supply the
+database attestation that PostgreSQL owns. Upgrade cannot change the database
+keyring. Predecessor retirement reuses externally verified surviving current
+and transport keys, while uninstall accepts no key or database capability.
+`recover` replays the same request after an interruption: it rolls back before
+an irreversible database cut and completes the journaled forward plan after
+one. Rotation admits one bounded predecessor generation, which remains usable
+only until explicit database-approved retirement.
+
+The desired install template exposes bounded
+`maximumConcurrentOperations`, `maximumConcurrentGcOperations`,
+`provisioningReconciliationIntervalMilliseconds`, and
+`maximumProvisioningReconciliationCandidates` controls. The helper performs an
+immediate serialized reconciliation pass. Activation remains fenced until its
+health is `idle`, at least one pass has completed, the reported limits exactly
+match the attested process config, and its counters are coherent. A disabled,
+running, degraded, or drifted supervisor is not ready.
+
+Those host-local knobs are separate from the two database-fenced daemon blocks
+in the production Repository Snapshot owner config:
+`controlPlane.mirrorGarbageCollection` retires canonical mirrors and
+`controlPlane.orphanQuotaRecovery` cleans quota left by interrupted remote
+admission. Both bind distinct `workerId` values plus concurrency,
+claims-per-poll, claim-lease, maximum-attempt, authorization-duration,
+idle-poll, retry base/maximum, and drain-timeout limits. Orphan recovery starts
+lease heartbeats only after durable database authorization and exposes
+retry/dead-letter health; owner shutdown drains it before mirror GC. Neither
+daemon owns root XFS mutation directly or substitutes for provisioning
+reconciliation in the helper.
+
+This path has no Docker daemon, Docker Desktop, or Docker license dependency.
+It requires a supported Linux host with systemd, rootful Podman 6.0.x, a
+preloaded digest-pinned qualified helper image, and live XFS project-quota
+accounting and enforcement on the exact
+`/var/lib/little-compute/repository-cache-mirrors` mount. The installer never
+pulls, accepts a mutable image tag, or substitutes another filesystem. The
+current source remains promotion-closed until its v150 database authority has
+passed live PostgreSQL 17 and 18 qualification and the exact rootful
+Podman/XFS/systemd lifecycle has passed on a supported physical Linux host.
+
+## Adaptive Resource one-shot qualification
+
+```bash
+little-compute-adaptive-resource-one-shot-qualification \
+  --plan /absolute/private/adaptive-resource-v146-plan.json \
+  --output /absolute/private/new-adaptive-resource-v146-receipt.json
+```
+
+`--plan` is an absolute private canonical JSON file. It pins the canonical
+candidate and expected digest, exact clean source `HEAD`, profile manifest,
+installed runtime closure, immutable runtime image, topology manifest and
+authority digest, plus distinct digest-pinned static campaign-executor and
+host-observer executables. `--output` is an absolute new receipt path; existing
+output is never replaced.
+
+The executor submits four exact Operations under the topology's single
+tenant/project scope and reads a sealed PostgreSQL projection with four
+distinct qualified resource identities and exact final absence. It has no
+direct broker, supervisor, evidence-worker, advisor-worker, quota, or Podman
+authority. The independent observer proves stable host/boot/Podman/cgroup/mount
+authority and zero process, container, cgroup, mount, loop-device, and
+device-mapping residue, including foreign before/after inventory drift.
+
+On success, stdout contains a bounded canonical summary with the run, plan and
+receipt digests, `qualificationPassed: true`, and
+`automaticPromotionPerformed: false`. The command never promotes a deployment.
+PostgreSQL 17/18 and the physical Linux/XFS/rootless-Podman gate must actually
+run before the evidence is release-eligible. The repository records no v146
+production receipt; official Node 24.18.1 image publication remains an external
+activation blocker even though Node 22.23.2 code validation is green.
+
+## Canonical managed-Agent scale campaign
+
+`little-compute-canonical-managed-agent-scale` composes the real public
+Operation API, the purpose-exclusive v134 PostgreSQL qualifier, the selected
+rootless Podman connection, and an exclusive fsynced receipt stream:
+
+```bash
+little-compute-canonical-managed-agent-scale register-candidate \
+  --config /absolute/canonical-scale-config.v1.json
+little-compute-canonical-managed-agent-scale run \
+  --config /absolute/canonical-scale-config.v1.json
+# After interruption, use the exact restartArguments reported by the command:
+little-compute-canonical-managed-agent-scale resume \
+  --config /absolute/canonical-scale-config.v1.json
+```
+
+Registration is a separate security-admin step and writes a no-replace `0400`
+receipt in a new `0700` directory. `run` likewise requires a new `0700`
+campaign directory; `resume` requires its existing append-only journal.
+`SIGINT` and `SIGTERM` cancel the campaign and start bounded port cleanup.
+
+The canonical config and every bearer-token, database URL, TLS CA,
+client-certificate, and private-key input must be an effective-owner-owned,
+single-link regular file at exact mode `0400`. Credential values are never
+accepted in argv or environment variables. The config pins the candidate,
+source manifest, image set, API deployment, leaf TLS identity, and selected
+Podman connection. Production composition requires at least 1,000 live
+Operations.
+
+This command is intentionally a local single-host diagnostic. Its evidence is
+always `diagnostic_non_release`, unsigned, and explicitly lacks multi-host
+external attestation. It cannot replace the externally verified multi-host
+scale release campaign.
+
+## Multi-host thousand-environment release campaign
+
+`little-compute-thousands-environment-multi-host-release` coordinates the
+independent production scale gate:
+
+```bash
+little-compute-thousands-environment-multi-host-release \
+  --config /absolute/multi-host-release-config.v1.json \
+  --output /absolute/new-campaign-evidence-directory
+```
+
+The config is an effective-owner-owned, single-link canonical JSON file at
+exact mode `0400`. It binds the complete 1,000+ Operation plan, release and
+trust-policy digests, separately pinned operator-trust-registry and topology
+authorization files, a file-backed release signer, the authenticated public
+API, and one mutually authenticated TLS 1.3 physical-host daemon per sorted
+host. Client certificate, private-key, and CA files are owner-private `0400`
+files. The daemon endpoint is purpose-frozen at
+`/v1/thousands-environment/campaign-agent`; hostname, exact SPKI digest, and
+the single exact SPIFFE URI SAN are all verified. Tokens are read from the
+private config and never from argv or inherited environment variables.
+
+The `qualified_static_process` transport is an explicit advanced alternative,
+not the production default. It accepts only a separately qualified,
+digest-pinned static Linux ELF and never invokes an SSH shell, interpreter,
+dynamic loader, or ambient `PATH`.
+
+The host agents sign independently pinned machine/kernel readiness and the
+actual scheduler, provider host/cluster, snapshot-content, cgroup-v2,
+isolation, failure/fence, and cleanup observations. Exactly one cleanup
+observer must be outside all workload ranges and on a distinct host and
+failure domain. Provider-host, scheduler-leader, and database-primary failures
+are mandatory.
+
+The command creates or resumes an owner-private `0700` directory. A
+crash-recoverable exact-CAS claim is acquired before any mutation or transport
+is opened. Each predecessor evidence artifact is installed no-replace at mode
+`0400`; interrupted hard-link publication is recovered only when the one exact
+sibling inode and canonical bytes match. The command reopens and verifies the
+full chain, then writes the terminal receipt last. It accepts success only
+after the public v108/v140 campaign path reports physical evidence verified,
+the separately signed multi-host release cut authorized, and the durable
+decision persisted and replayable.
+
+Availability of the command is not a release claim. Promotion remains closed
+until the exact candidate runs on real distinct hosts and the resulting
+immutable evidence directory is retained. Local Podman and gVisor campaigns
+cannot substitute for this gate.
+
+### Central coordination authority
+
+Self-host one central coordination authority for the campaign:
+
+```bash
+little-compute-thousands-environment-central-coordinator \
+  --config /etc/little-compute/central/config.v141.json \
+  --config-digest sha256:<exact-config-file-digest>
+```
+
+This is a self-contained Node bundle without runtime `node_modules`, Docker,
+Docker Desktop, or dynamic plugins. The config is canonical JSON with one
+trailing newline in an effective-owner-owned, single-link `0400` file. The
+second argument pins the raw bytes of that file. Every referenced plan,
+operator registry, topology authorization, campaign execution, database
+credential, and TLS credential is independently `0400` and digest-pinned.
+Credentials and implementations are not accepted through argv or inherited
+environment variables.
+
+The process owns one verified PostgreSQL pool of at most four connections,
+shared by distinct coordination and v142 exact-shard cleanup-step authorities
+for every plan host, including the observer-only host. A digest-pinned remote
+release signer and a digest-pinned global-metrics process are central-only;
+remote signing key material and database credentials are never sent to host
+daemons.
+
+The pinned PostgreSQL DSN explicitly names its user, host, port, and database
+without query or fragment options. It may omit a password when the required
+TLS 1.3 client certificate authenticates the service; inherited `PG*`
+settings are rejected before pool construction. Listener request, response,
+concurrent, and replay byte limits are cross-bounded, with capacity for at
+least one in-flight operation from every bound host. Cleanup claim lease and
+retry timing are central policy, the listener timeout must cover the lease,
+and replay capacity reserves all seven authenticated operations for every
+bound host.
+
+The listener accepts TLS 1.3 only and pins its server SPIFFE identity/SPKI,
+certificate/key/CA bytes, and every client SPIFFE/SPKI/capability binding. One
+canonical self-digesting ready record is printed only after all host
+authorities are ready and the listener is bound. Signals and unexpected
+listener failure trigger ownership-ordered, retry-safe shutdown.
+
+### Physical-host daemon
+
+The package provides this Docker-independent, self-contained production
+command:
+
+```bash
+little-compute-thousands-environment-host-daemon \
+  --config /etc/little-compute/host-daemon/host-a/config.v1.json
+```
+
+The config and its plan, trust-registry, topology, campaign-execution, and
+executor-configuration artifacts are separate canonical, single-link,
+effective-owner-owned `0400` files with exact content digests. It pins the
+host/listener, TLS 1.3 server and coordinator SPIFFE identities and SPKI
+fingerprints, credential paths, journal root, bounded periodic garbage
+collection, concurrency, operation deadlines, and shutdown deadline.
+
+The installed bundle statically composes the first-party host-attestation,
+mTLS coordination, canonical Operation/lifecycle/provider, physical-evidence,
+v142 remote exact-shard cleanup, per-target physical cleanup, failure, and
+independent cleanup-observer authorities required by that host's signed plan.
+The host bundle contains no cleanup PostgreSQL adapter or credentials. No
+dynamic executor factory or test/stub fallback is accepted. Release and
+packed-package checks reject the former
+`multi_host_host_daemon_production_authorities_unavailable` marker and prove
+the production authority closure is bundled without runtime `node_modules`.
+
+The pinned executor artifact uses
+`little.compute.thousands-environment-multi-host-host-daemon-production-config.v1`.
+It cross-binds every campaign and host digest, admits exactly the signer keys
+authorized for the host, and references credentials only through absolute,
+effective-owner-owned, single-link `0400` files. The shard-cleanup PostgreSQL
+URL, CA/client TLS material, claimant identity, and lease policy are accepted
+only by the central coordinator and cannot appear in this artifact. Workload
+hosts receive one central, exact-target fenced claim at a time over their
+authenticated mTLS capability; observer-only hosts are mutation-forbidden and
+may attest only an exact empty shard.
+
+Startup acquires the crash-sticky journal writer lease and checks all planned
+authorities before opening the listener or emitting the canonical ready record.
+A helper, PostgreSQL, mTLS, signer, or binding failure therefore leaves the
+endpoint closed. Shutdown stops admission, joins admitted authority work, and
+closes each nested port through exactly one owner.
+
+Executable configuration also pins
+`runtime.providerCompilationAuthority.manifestPath` and `expectedDigest`.
+New executable `init` requires
+`--provider-compilation-authority-manifest <relative-path>` and validates that
+private canonical v41 document before engine mutation. Its provider epoch and
+digest-pinned supervisor image must match the selected runtime; the exact
+manifest digest is written into the configuration.
+`up` reads that private canonical manifest before its runtime probe or stack
+mutation; missing legacy references, the generated all-zero placeholder,
+noncanonical bytes, unsafe paths, and digest drift fail closed with stable
+provider-authority codes. Once the complete runtime profile is available, the
+startup graph proves database safe-time and runs the private
+`reconcile-provider-compilation-profile-v41` one-shot on every `up`. Its
+security-admin DSN and manifest are file-mounted secrets, its canonical receipt
+uses a dedicated durable volume, and retention/scheduler/API remain closed
+until the lifecycle validates that receipt. `status` remains read-only and can
+still report older missing/unprovisioned executable configurations.
+
+`status --json` reports `runtimeProfile.schemaVersion`, the aggregate
+`control-plane-only|incomplete|executable` state, and one entry per component with its database
+role, state, exact error code, and required action. An incomplete profile forces
+the aggregate stack to `degraded`, even when the historical containers are
+running. This keeps partial installations and crash state observable without
+silently omitting workers.
+
+For a complete composed profile, process liveness is only the first status
+gate. `status` fences the immutable Podman container IDs before and after its
+observations, then runs three independently bounded read-only probes: database
+safe-time/sampler authority, scheduler lease/capacity authority, and API
+instance identity. The API proof is a fresh 256-bit nonce challenge against the
+exact configured loopback endpoint; redirects, endpoint authority drift,
+responses over 4 KiB, and a response whose HMAC is not bound to both the nonce
+and frozen instance are rejected. Scheduler readiness requires both the
+seeded-lane lease and the exact active capacity publication. Sampler readiness
+requires a certain usable safe-time cut, no outstanding handoff, and a catalog
+observation of exactly one granted advisory lock for the expected key held by
+the dedicated sampler login and application name. The sampler container is
+fenced separately. PostgreSQL's lock catalog does not expose session-versus-
+transaction lock scope or bind that backend to an OS process ID, so status does
+not claim either property.
+
+`status --json` returns this as `readiness` with schema
+`little.compute.self-host-readiness-status.v1`, scope
+`point-in-time-read-only-probe`, one stable non-secret service result, and an
+aggregate `ready|degraded|not-applicable` state. This is an on-demand
+observation, not a continuous repair or restart supervisor, and its result can
+become stale immediately after return. A failed observation degrades status but
+does not mutate the stack. `up` retries within its bounded readiness window and,
+if it cannot prove the final state, independently quiesces the exact API and
+scheduler before failing.
+
+New `init` configurations default to `runtime.mode: executable`. Use
+`init --runtime-mode control-plane-only` only when intentionally operating the
+historical API/scheduler/time-sampler control plane. Configurations created
+before the field existed retain their canonical digest and are interpreted as
+`control-plane-only`; they are never silently promoted to executable compute.
+
+For the supervised members, lifecycle starts the scheduler only after
+migration and safe-time handoff, proves that the exact
+scheduler acquired the seeded local lane
+`lane_00000000000000000000000001`, and opens API admission only afterward. The
+scheduler uses Podman `restart=no`: before starting an absent or stopped
+incarnation, `up` captures the lane authority's current `lease_epoch` and
+`version` through the exact PostgreSQL container, then requires both fields to
+advance after start (or a current row to appear from an absent baseline). It
+also re-proves the fresh lease and exact capacity publication before API
+admission. The scheduler receives a deterministic instance-bound holder, a 15-second lease,
+and read-only access to an owner-private capacity authority volume. A separate
+mode-0400 secret carries only the operator's capacity intent; the
+security-admin registrar resolves the next publisher epoch in PostgreSQL and
+atomically publishes the exact mode-0400 envelope plus its digest into that
+volume. `resources.total*` is
+the whole-installation budget: published CPU and memory subtract the exact
+steady control-plane limits plus the largest serialized one-shot limit. That
+job reserves 512 MiB after a physical migration OOM at the former 256 MiB
+limit, while
+published disk subtracts 20% (at least 2 GiB) for database/control state, then
+partitions the physical remainder into disjoint sandbox/workspace and output
+spool ceilings; `diskBytes + outputSpoolBytes` never exceeds that remainder. Disk
+is an admission ceiling because portable local-volume quotas are unavailable;
+providers must enforce admitted CPU/memory reservations. No database URL or
+capacity value is placed in process arguments, and no Docker daemon is involved.
+Configuration is rejected unless the post-control vector can run at least one
+repository `micro` sandbox (500 CPU millis, 512 MiB memory, 4 GiB disk, and the
+minimum PID/slot dimensions). The former `interactiveReservePercent` field is
+rejected: the single local lane has no honest priority-reservation mechanism.
+Before capacity registration, an exact repeatable v25 one-shot reconciles a
+dedicated suspended system anchor for only the reserved local lane. It is
+distinct from the user-facing local tenant, has admission paused and
+`max_active_tasks = 0`, and cannot be selected by callers. A second exact
+one-shot uses the derived security-admin credential to resolve and register the
+mounted intent.
+The scheduler credential has publish/renew authority only for that registered
+digest and cannot rotate capacity authority itself. Its public publisher
+identity remains stable across resource-envelope rotation, pinned-image
+replacement, and database-credential rotation; neither secret material nor a
+mutable resource/image digest contributes to that identity.
+
+`down` stops API admission before the scheduler. A normal scheduler stop drains
+its bounded current cycle and releases the seeded-lane lease, with a four-second
+runtime drain bound and the 15-second database lease as the fail-closed crash
+fallback. The sampler stops only after the scheduler; PostgreSQL stops last.
+
+On the first `up`, the migration job uses `migrate bootstrap`, not a blanket
+`migrate apply --allow-contract --allow-offline`. Under the migration advisory
+lock it proves that the database, owner, ACLs, schemas, extensions, and session
+set are pristine, then creates a private `little_compute_self_host` marker in
+the same transaction as migration history. The marker binds the installation
+lineage, exact bootstrap instance, manifest, state checks, bootstrap checksum,
+stream targets, and every action/execution digest. A crash may resume only that
+frozen plan. Its sole transition is `installing` to `complete`; a completed
+marker grants no opt-in to later offline or contract migrations.
+
+The CLI never imports ambient `.env`, SSH-agent, cloud, Docker, or Kubernetes
+credentials. Runtime installation resources are OCI objects managed through
+Podman 6.0.1 or newer; an OCI image may be built by any standards-compliant
+builder. The checked-in repository-root build context produces a narrow,
+non-root image exposing only `serve`, `init-roles`, `migrate`,
+`reconcile-local-capacity-anchor`, `register-scheduler-capacity`, and
+`attest-database-time-handoff`; all Podman
+lifecycle authority stays in the host CLI.
+
+`status --json` exposes `capacityReconfigurationPhase` and an
+`activeCapacityAuthority` summary containing the exact publisher epoch,
+intent/envelope digests, predecessor digest, registration request, and receipt
+digest. It never includes canonical envelope bytes. A capacity-only config
+change is recovered through the durable phases `prepared`, `registered`,
+`lock-published`, `context-published`, and `active`; non-active phases report a
+degraded stack and `status` never advances them. A mutating retry completes the
+same lineage-bound cutover, so A→B→A produces three linked publisher epochs
+rather than reusing genesis authority.
+
+`serve` runs one long-lived role with one matching PostgreSQL credential. The
+API is the default; the database-time sampler and PostgreSQL Cell scheduler
+are independently runnable:
+
+```bash
+LITTLE_COMPUTE_API_DATABASE_URL='postgresql://api-login:...@db/little_compute' \
+  little-compute admin serve --role api --host 127.0.0.1 --port 7777
+
+LITTLE_COMPUTE_TIME_SAMPLER_DATABASE_URL='postgresql://sampler-login:...@db/little_compute' \
+  little-compute admin serve --role time-sampler
+
+LITTLE_COMPUTE_SCHEDULER_DATABASE_URL='postgresql://scheduler-login:...@db/little_compute' \
+LITTLE_COMPUTE_SCHEDULER_CAPACITY_ENVELOPE_FILE='/run/secrets/scheduler-capacity-envelope.json' \
+LITTLE_COMPUTE_SCHEDULER_CAPACITY_ENVELOPE_DIGEST='sha256:<canonical-envelope-digest>' \
+LITTLE_COMPUTE_SCHEDULER_LANE_ID='lane_00000000000000000000000001' \
+LITTLE_COMPUTE_SCHEDULER_HOLDER_ID='scheduler-pod-7' \
+LITTLE_COMPUTE_SCHEDULER_LEASE_TTL_MS='15000' \
+  little-compute admin serve --role scheduler
+```
+
+Recognized role names are `api`, `scheduler`, `reconciler`, `runner`,
+`vault-cleanup`, `gc`, `provider-gateway`, `workspace-authority`,
+`lease-attachment-verifier`, `evidence-verifier`, `time-sampler`, `directory`,
+`router`, and `capacity-delegator`. Exactly one is accepted per process; `all`
+and comma-combined roles are rejected. Capacity delegation is the deliberate
+two-database exception: its resolver owns two distinct, independently verified
+credentials rather than sharing one LOGIN across both authorities.
+
+The CLI has complete lifecycle bindings for `api`, `scheduler`, and
+`time-sampler`. Executable-profile status also distinguishes components that
+have a standalone production executable from components whose production
+daemon composition is absent. Neither is called managed until `up/status/down`
+owns its credential, readiness order, restart policy, and drain order.
+Reconciler, runner, GC, provider-gateway, workspace-authority,
+lease-attachment-verifier, and evidence-verifier selection returns a
+configuration error before database access until the corresponding production
+executable or worker is wired. The lease-attachment verifier uses the normal
+isolated runtime group `little_compute_lease_attachment_verifier` and
+`LITTLE_COMPUTE_LEASE_ATTACHMENT_VERIFIER_DATABASE_URL`; it does not inherit
+the signing-capable evidence-verifier role.
+Reconciler/GC additionally require real signed cleanup evidence and a
+ResourceLifecycleGateway; a no-op or in-memory test adapter is never selected.
+
+## Serve configuration
+
+Every role reads only its role-specific database variable:
+
+| Role | Required database variable | Required service group |
+| --- | --- | --- |
+| API | `LITTLE_COMPUTE_API_DATABASE_URL` | `little_compute_api` |
+| Scheduler | `LITTLE_COMPUTE_SCHEDULER_DATABASE_URL` | `little_compute_scheduler` |
+| Time sampler | `LITTLE_COMPUTE_TIME_SAMPLER_DATABASE_URL` | `little_compute_time_sampler` |
+| Capacity delegator (Cell) | `LITTLE_COMPUTE_CAPACITY_DELEGATOR_CELL_DATABASE_URL` | `little_compute_reconciler` |
+| Capacity delegator (Global) | `LITTLE_COMPUTE_CAPACITY_DELEGATOR_GLOBAL_DATABASE_URL` | `little_compute_router` |
+
+`LITTLE_COMPUTE_DATABASE_URL` and `DATABASE_URL` are not fallbacks for
+`serve`; they remain migration inputs. PostgreSQL system identifier, live WAL
+timeline, and recovery state define primary identity; no operator-supplied
+primary label is accepted. API additionally requires
+`LITTLE_COMPUTE_HOME_CELL_ID`, a 32-128 byte base64url
+`LITTLE_COMPUTE_CURSOR_SIGNING_KEY`, and an existing readable
+`LITTLE_COMPUTE_EXECUTION_CONTEXT_DIR` containing content-addressed context
+JSON files. `LITTLE_COMPUTE_SAFE_TIME_MAXIMUM_STALENESS_MS` controls
+database-clock freshness for destructive readiness (default 30000, bounded to
+1000-30000 milliseconds). Scheduler additionally requires a configured
+`LITTLE_COMPUTE_SCHEDULER_LANE_ID` and a unique
+`LITTLE_COMPUTE_SCHEDULER_HOLDER_ID` per live replica. Its optional
+`LITTLE_COMPUTE_SCHEDULER_LEASE_TTL_MS` defaults to 10000 and is bounded to
+5000-300000 milliseconds. A private
+`LITTLE_COMPUTE_SCHEDULER_CAPACITY_ENVELOPE_FILE` and its independently supplied
+`LITTLE_COMPUTE_SCHEDULER_CAPACITY_ENVELOPE_DIGEST` are also required. Startup
+recomputes that digest instead of trusting a self-consistent modified file; the
+envelope binds the publisher and frozen topology to an exact resource vector.
+Holder identity is never inferred from a mutable hostname or process ID.
+
+`capacity-delegator` additionally requires installation, Cell, and unique
+replica holder IDs under the
+`LITTLE_COMPUTE_CAPACITY_DELEGATOR_{INSTALLATION_ID,CELL_ID,HOLDER_ID}`
+variables. `LITTLE_COMPUTE_CAPACITY_DELEGATOR_DESIRED_FILE` is a private,
+descriptor-stable JSON file with schema
+`little.compute.cell-capacity-delegator-desired-set.v125`; it binds the
+installation and Cell and contains one or more signed v125 desired intents.
+The process re-reads it each cycle so an operator can rotate it atomically.
+
+Expired aggregate rights are not treated as proof that provider resources
+disappeared. The role therefore requires a purpose-exclusive mutual-TLS
+provider endpoint configured by
+`LITTLE_COMPUTE_CAPACITY_DELEGATOR_FENCE_DETACH_ENDPOINT`,
+`..._SERVER_NAME`, `..._CLIENT_SPIFFE_ID`,
+`..._CLIENT_CERTIFICATE_FILE`, `..._CLIENT_PRIVATE_KEY_FILE`, and
+`..._SERVER_CA_FILE`. The endpoint accepts the digest-bound v125 probe and
+fence-or-detach protocol only. Readiness remains false until the Cell
+Reconciler credential, separate Global Router credential, desired set, and
+provider readiness probe all succeed. Global policy bootstrap remains a
+separate operator path and this process never accepts its credential.
+
+Before opening a worker or HTTP listener, startup verifies every connection
+lane, the exact service-group membership, the immutable migration/profile
+contract, and canonical cutover readiness. Zero, multiple, wrong, generic
+runtime, migration-owner, verifier, or administrator memberships fail closed.
+The running JSON diagnostic prints the selected process role and database
+group but never its DSN or secret.
+
+API probes separate availability from time-authorized destructive work:
+
+- `/healthz` reports process liveness;
+- `/readyz` checks the immutable runtime schema contract; and
+- `/readyz/destructive` also requires a certain persisted safe-time cut.
+
+Only the `time-sampler` process attempts fenced sampler leadership. API
+replicas read the persisted cut and never assume sampler authority.
+The sampler database lane must be direct or session-pooled. PgBouncer
+transaction/statement pooling is rejected by design because the leadership
+advisory lock belongs to one PostgreSQL backend session.
+
+## HA backup/restore qualification
+
+The installed package includes one configuration-driven command:
+
+```bash
+little-compute-ha-backup-restore \
+  --config /absolute/private/ha-backup-restore-config.v1.json
+```
+
+The mode-`0400`, caller-owned configuration uses schema
+`little.compute.ha-backup-restore-cli-config.v1`. `qualify-local` requires an
+absolute Podman executable, an already-present PostgreSQL 17 or 18 image, an
+exact profile manifest and safe-time policy, and an absolute new evidence
+path. It never pulls or prunes and always reports `local_physical`.
+
+`qualify-production` requires two different preconfigured Podman connection
+names, one already-present image digest on both hosts, and one empty,
+run-specific backup-repository path as seen from each host. Connection
+credentials stay in the operator-owned Podman connection store. The source
+writes and verifies the base backup, the restore host copies that repository
+material read-only into its own volume, and measured RTO includes the copy.
+Cleanup removes only run-ID-labelled containers and volumes and deliberately
+retains the repository for immutable-storage attestation. Production context
+must bind three distinct source, restore, and repository identities.
+
+`verify-promotion` supplies absolute evidence, attestation, trust-policy, and
+new receipt paths plus the independently configured trust-policy digest,
+minimum policy sequence, and minimum revocation epoch. It re-verifies the raw
+artifact bytes, Ed25519 trust, exact release bindings, three-way failure-domain
+separation, RPO=0, bounded RTO, evidence age, and immutable-store retention
+before publishing a mode-`0400` promotion receipt. The receipt is not a
+standalone bearer credential; consumers must rerun verification with current
+anti-rollback floors.
+
+## Database lifecycle
+
+The migration commands are implemented against raw PostgreSQL and do not
+require Docker or an ORM:
+
+```bash
+little-compute admin init-roles \
+  --database-url "$POSTGRES_CLUSTER_ADMIN_URL" \
+  --migration-role little_compute_migrator
+
+export LITTLE_COMPUTE_DATABASE_URL='postgresql://little_compute_migrator:...@db/little_compute'
+little-compute admin migrate plan --profile local
+little-compute admin migrate apply --profile local
+little-compute admin migrate apply --profile local --max-resumable-batches 100
+little-compute admin migrate status --profile local
+```
+
+The host lifecycle supplies three non-secret authority bindings when it invokes
+the first-install-only `migrate bootstrap`: installation name, a persistent
+installation-authority digest, and the exact bootstrap-instance identity
+digest. They are intentionally visible in the managed container specification
+and are never database credentials. Do not reuse this command for upgrades;
+run `plan` and ordinary `apply` with the explicit gates below.
+
+`init-roles` is a cluster bootstrap and requires a PostgreSQL role administrator.
+`--migration-role` names an already-provisioned unprivileged LOGIN; when it is
+omitted, `current_user` is used and must itself meet that constraint. The command
+creates only fixed NOLOGIN groups, keeps each service group as an independent
+trust leaf, and gives every approved migration login SET-only access to the
+NOLOGIN evidence-authority owner. It is idempotent after service LOGIN
+provisioning and migration-credential rotation, but accepts only safe external
+LOGIN leaves with exact non-admin membership options. Unsafe attributes, inherited
+evidence ownership, option drift, unexpected managed-role edges, and managed roles
+under external parents fail closed. LOGIN creation, password rotation, and granting
+a login to one service group stay with the operator.
+
+The resulting service groups are `little_compute_api`,
+`little_compute_scheduler`, `little_compute_reconciler`,
+`little_compute_runner`, `little_compute_blob_registrar`, `little_compute_gc`,
+`little_compute_provider_gateway`, `little_compute_workspace_authority`, and
+`little_compute_time_sampler`.
+`little_compute_evidence_verifier` and `little_compute_security_admin` are
+separate privileged lanes and do not inherit runtime access. Never use their
+credentials, the cluster administrator, or the migration login with `serve`;
+the runtime credential inspection rejects them before startup.
+
+`plan` and `status` are read-only. `apply` verifies the versioned profile
+manifest and every SQL SHA-256 before opening a migration transaction, then
+applies contiguous stream versions under one PostgreSQL advisory lock. Use
+`--json` for automation. Contract-stage migrations are refused unless the
+operator supplies `--allow-contract` after the rolling N/N-1 window is proven.
+Each migration also declares whether it is safe on populated data. A
+checksummed read-only preflight blocks an `offline_opt_in` migration until the
+operator schedules a maintenance window and explicitly passes
+`--allow-offline`; an empty install does not need that flag. The v5 legacy
+reconstruction is deliberately gated this way rather than taking a surprise
+table lock on a running installation. Canonical v5 itself has no rolling v4
+predecessor: drain v4 writers, pass `--allow-offline`, and start only runtime
+version 5 after the cutover. The online v6 Capability Grant safe-cut repair,
+v7 immutable-guard JSON-cache optimization, additive v8 Operation fact-head
+batch, v9 ACL repair, v10 output spool, v11 Lease-bound dispatch, and v12
+provider-watch expansions are forward-only. The current manifest/profile
+version 100 targets `cell_core` v150, requires runtime 150, and accepts only
+manifest/profile v99 as its rolling predecessor. V147 is an online,
+contract-preserving repair for four reachable v89 hibernation-archive
+PL/pgSQL ambiguity sites. V148 registers the fixed-function,
+zero-table-grant Repository snapshot v4 authority and restart-safe cleanup
+queue. Runner credentials can capture and persist but cannot schedule cleanup;
+Reconciler credentials own cache inventory and physical cleanup but cannot
+settle retained quota; final remote settlement requires a distinct LOGIN that
+inherits only `little_compute_repository_snapshot_quota_settler`.
+V149 adds one purpose-exclusive, zero-data-authority permit-verifier LOGIN for
+the authenticated Repository snapshot sidecar. It rechecks exact v148 permits,
+owner fencing, database safe time, and the closed method/stage matrix before
+external authority calls. V150 registers the function-only Repository control
+plane, physical-receipt key rotation, remote quota cleanup, mirror GC, orphan
+recovery, cache inventory, credential binding, and Artifact adoption
+authority. V13 is
+also `offline_opt_in` on a populated v12 database because it establishes exact
+physical Blob identity and explicit retention roots; stop Artifact writers and
+collectors before passing `--allow-offline`. V14 durably binds Sandbox Exec
+timeout and foreground/background mode; its offline preflight blocks while a
+nonterminal pre-v14 Exec remains, and preserves terminal rows as immutable
+audit-only history. V15 adds durable gateway authority, v16 and v17 complete
+the atomic output and finalization cutover, and v18 adds function-only
+workspace authority. V19 introduces the fenced two-phase cell scheduler, v20
+adds crash-resumable local bootstrap authority, and v21 repairs the runtime
+authority catalogs to exact owner-held relation and `SECURITY DEFINER`
+function symmetry. No live rolling predecessor is
+advertised. Historical ancestry and the manifest declaration are not
+sufficient release evidence:
+run the exact frozen-runtime gate against one observed PostgreSQL 17 target
+and one observed PostgreSQL 18 target. It fails closed on a partial or duplicate
+matrix and publishes write-once results under the run ID. Never bypass it with
+an admin or migration runtime credential.
+
+Manifest-owned online backfills use separate setup, bounded batch, and
+finalization transactions. The cursor and row counters commit atomically with
+each batch, so process loss resumes from the last acknowledged checkpoint.
+`--max-resumable-batches N` gives one `apply` invocation a cooperative work
+budget; rerun the same command to continue. `status` and JSON output expose the
+checkpoint, including `readyToFinalize`, and finalization appends immutable
+history while deleting progress in the same transaction.
+
+PostgreSQL 17 and 18 are the qualified majors. The runner rejects unknown
+streams, skipped versions, modified history, profile-manifest drift, and an
+unsafe target below the installed stream version.
+
+The names `quota-allocator`, `capacity-allocator`, `scheduler-lane`,
+`positive-authority-refresher`, and `emergency-fencer` remain reserved for
+later qualified agent-scale profiles. The parser rejects them today so an
+operator cannot accidentally deploy an empty service. `directory`, `router`,
+and `capacity-delegator` are active, independently bound process roles.
+
+Production multi-node `install`/`render` commands remain gated on their provider,
+recovery, and security qualification. The local `up`, `status`, and `down`
+commands above are implemented for the single-node Podman profile.

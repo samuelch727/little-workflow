@@ -1,4 +1,4 @@
-import { webRichConnector, type WebRichUser } from "little-harness/connectors/runtime";
+import { webRichConnector, type WebRichUser } from "@little-stack/harness/connectors/runtime";
 import { recordSupportMirrorDelivery } from "../shared/mirror-delivery";
 import { SUPPORT_SESSION_ID_HEADER, supportSessionId } from "../shared/session-id";
 

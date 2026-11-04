@@ -5,15 +5,17 @@ export default function HomePage() {
     <div className="mx-auto flex w-full max-w-5xl flex-1 flex-col justify-center px-6 py-20">
       <div className="max-w-3xl">
         <p className="mb-3 text-sm font-medium text-fd-muted-foreground">
-          Managed agent runtime design
+          The Little stack SDK
         </p>
         <h1 className="mb-5 text-4xl font-semibold tracking-normal text-fd-foreground md:text-6xl">
           Little Harness
         </h1>
         <p className="mb-8 max-w-2xl text-lg leading-8 text-fd-muted-foreground">
-          A proposed zero-config harness for agents that need tools, skills,
-          files, traces, artifacts, and isolated persistent sessions without
-          making every developer build the runtime first.
+          A zero-config harness for agents that need tools, skills, files,
+          traces, artifacts, and isolated persistent sessions without making
+          every developer build the runtime first. The agent you build here is
+          what LittleDB traces and improves, and its work lives in a workspace
+          that is ready when the user returns.
         </p>
         <div className="flex flex-wrap gap-3">
           <Link

@@ -105,6 +105,7 @@ export function buildInvestorWorkflowLwir({ workflowName }) {
         with: {
           items: "{{ steps.load-dossiers.output.companies }}",
           itemKey: "{{ item.ticker }}",
+          cardinality: { kind: "matches_items" },
           maxBranches: 50,
           maxConcurrency: 5,
           failureMode: "fail_fast",
@@ -172,7 +173,7 @@ Required Markdown shape:
 
 Risk profile: {{ input.riskProfile }}
 Company dossier JSON:
-{{ input.company }}`;
+{{ item }}`;
 
 const FINAL_REPORT_SYSTEM = `\
 You are an equity portfolio analyst. Synthesize per-company reports and compact
@@ -195,6 +196,6 @@ Mention that the source archive uses a public S&P 500-by-weight source and SEC E
 
 Risk profile: {{ input.riskProfile }}
 Dataset JSON:
-{{ input.dataset }}
+{{ steps.load-dossiers.output }}
 Company report envelopes:
-{{ input.companyReports }}`;
+{{ steps.analyze-companies.output }}`;

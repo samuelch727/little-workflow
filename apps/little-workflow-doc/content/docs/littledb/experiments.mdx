@@ -1,0 +1,196 @@
+---
+title: Experiments and the eval worker
+description: Datasets with a sealed holdout split, proposals gated on experiments, and the eval worker that runs them inside your app. Private source; not installable.
+---
+
+<Callout title="Private and UNRELEASED" type="warn">
+  `@little-stack/littledb` is private source and is not on npm, and it needs a
+  LittleDB server that is not publicly available. See [LittleDB](/docs/littledb)
+  for status and the client.
+</Callout>
+
+An **experiment** runs a candidate version (and usually the live one, as a
+baseline) on the items of a **dataset**, and scores each run. LittleDB plans the
+experiment and compares the results; **your app runs it**, because your app owns
+the tools, the data and the model keys. The piece that does that is the eval
+worker.
+
+## Datasets
+
+A dataset belongs to a harness or a workflow (its `subject`), and each item has
+an `input`, an optional `expected` and a **split**:
+
+- `dev` items are the ones a reviewer may read while it works out a change;
+- `holdout` items are sealed: reviewers never see them, and a proposal is gated
+  on them, so a change cannot be tuned to the gate.
+
+```ts
+// Private, UNRELEASED.
+const { dataset } = await db.request<{ dataset: { id: string } }>("POST", "/datasets", {
+  name: "support-desk-scenarios",
+  subject: "harness:support-desk",
+});
+
+await db.request("POST", `/datasets/${dataset.id}/items`, {
+  items: [
+    { input: { turns: ["I want a refund for ORD-1003"] }, expected: { refund: 219 }, split: "holdout" },
+    { input: { turns: ["Where is ORD-1007?"] }, split: "dev" },
+  ],
+});
+```
+
+Dataset names are unique within a project. Items without a split are assigned
+one by `holdoutFraction` (default `0`, all `dev`).
+
+## Proposals start experiments
+
+When a proposal arrives (`POST /v1/proposals`, from a person, an agent or
+LittleDB's reviewer), LittleDB gathers evidence as the project's policy says: an
+experiment of the candidate against the base version on the subject's most
+recent dataset (on its holdout split when it has one), a live trial on a share of
+sessions, or both. The gates in the policy then decide whether the version goes
+live or waits for a person.
+
+```ts
+// Private, UNRELEASED.
+await db.request("POST", "/proposals", {
+  subject: "harness:support-desk",
+  baseVersionId: resolution.versionId,
+  changes: { system: improvedPrompt }, // or `candidate` with the whole new content
+  title: "Check the delivery date before refunding",
+  body: "Three refunds in the last day were outside the window.",
+});
+```
+
+You can also start an experiment yourself with `POST /v1/experiments`
+(`subject`, `datasetId`, `candidateVersionId`, `baselineVersionId`, `split`).
+
+## Run experiments with the eval worker
+
+```ts
+// Private, UNRELEASED.
+const worker = db.evalWorker({
+  subjects: ["harness:support-desk"],
+  concurrency: 2,
+  run: async (run) => {
+    const content = run.version!.content as { system: string; model: string };
+    const tracer = db.harnessTracer({ harness: "support-desk", name: "episode", ...run.trace });
+    const result = await runConversation(content, run.item!.input, tracer.onEvent, run.signal);
+    return {
+      output: result.transcript,
+      scores: [
+        { name: "task_success", value: grade(result, run.item!.expected) ? 1 : 0 },
+      ],
+    };
+  },
+});
+
+await worker.start(); // polls until worker.stop()
+// or, in a script: while ((await worker.runOnce()).claimed > 0) {}
+```
+
+A worker claims runs only for the subjects it names. For each run it:
+
+1. hands your `run` function an `EvalRun`: the `version` to run (its `content` is
+   what `resolve` would return for it), the dataset `item`, an abort `signal`,
+   and `trace`, which you spread into `harnessTracer(...)` or `tracingWorld(...)`
+   so the run's spans land in the run's trace, tagged with the experiment, the
+   item and the version;
+2. heartbeats the claim every third of `leaseMs`; if LittleDB has handed the run
+   to another worker, `signal` aborts and the run is not completed;
+3. sends the run's trace, then completes the run with your `output` and `scores`
+   (stored on the run's trace with source `code`). A run whose function throws is
+   completed with its error, and LittleDB retries it, up to 3 attempts.
+
+Heartbeats and completions name the claim (the worker's id and the claim's
+attempt), so once LittleDB has handed a run to another worker it refuses the
+first worker's late result: `signal` aborts and the run counts as failed in
+`runOnce()`'s summary.
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `subjects` | | `harness:<slug>`, `workflow:<slug>`, a subject id, or `{ kind, slug }`. Required. |
+| `run` | | Runs one experiment run. Required. |
+| `concurrency` | `1` | Runs at once. |
+| `pollIntervalMs` | `2000` | How often to ask for work when there was none. |
+| `leaseMs` | `300000` | How long a claim lasts without a heartbeat (at least `10000`). |
+| `workerId` | `<hostname>-<random>` | Shown in LittleDB as the run's claimant. |
+
+`worker.stop({ graceMs })` stops claiming and waits for runs in flight, aborting
+them after `graceMs` (default 60 s). `worker.runOnce()` claims up to
+`concurrency` runs once, runs them and returns `{ claimed, completed, failed }`.
+
+Run the version the run hands you: an experiment compares versions that are not
+live yet. Inside `run`, LittleDB's client makes that the easy path:
+
+- **The run's own subject is pinned to the run's version.** A `db.resolve()` or a
+  [managed harness](/docs/littledb/harness#let-littledb-manage-the-prompt) turn of
+  the subject returns the run's version, so with a managed harness `run` only
+  calls `generateHarness` (`support.evalWorker({ run })` names the subject for
+  you).
+- **Pinned agents.** When LittleDB tests a fix to an agent inside a workflow that
+  calls it, the run carries `run.pins`: the agent versions to use instead of the
+  live ones. A resolve of a pinned agent inside the run returns its pinned
+  version, without a request.
+- **Experiment traffic.** Traces made inside a run (an agent the run's workflow
+  calls, a workflow the run's agent starts) are tagged `experiment`, not
+  `production`, so they never count as real use.
+
+LittleDB warns on an experiment whose runs nobody is claiming: no worker has
+asked for its subject in the last two minutes.
+
+## Workflows
+
+`db.workflowEvalWorker` is the eval worker for one workflow. It claims that
+workflow's runs, wraps your World with the [tracing World](/docs/littledb/workflow)
+(tagged with the run's trace, version, experiment and item), and grades what
+your `run` returns:
+
+```ts
+// Private, UNRELEASED.
+const worker = db.workflowEvalWorker({
+  workflow: "support.triage",
+  world: () => localWorld({ dataDir: ".little-workflow" }),
+  run: ({ content, input, world }) => runWorkflow(buildTriage(content), input, { world }),
+  grade: ({ output, expected }) => [
+    { name: "correct", value: sameDecision(output, expected) ? 1 : 0 },
+  ],
+});
+
+await worker.start();
+```
+
+| Option | Meaning |
+| --- | --- |
+| `workflow` | The workflow's slug in LittleDB. Required. |
+| `world` | The World a run uses, called once per run. Required. |
+| `run` | Gets the version's `content`, the item's `input` and the traced `world`; builds the workflow from `content`, runs it and returns what `runWorkflow` returns. Required. |
+| `grade` | Gets `output`, `input`, `expected` and `content`; returns the run's scores. |
+| `origin`, `captureContent` | As on `tracingWorld`. |
+| `concurrency`, `pollIntervalMs`, `leaseMs`, `workerId` | As on `evalWorker`. |
+
+A run that throws (a failed workflow throws `RunFailedError`) is completed with
+its error and not graded, so LittleDB retries it and counts it in the error gate.
+
+## Workflows an agent made
+
+`db.agentWorkflowEvalWorker` runs the experiments on the workflows an agent made
+in one harness, such as a revised definition LittleDB proposes. Build each run's
+definition with Little Workflow's `agentWorkflow`, with the same tools and model
+slots the harness gives it:
+
+```ts
+// Private, UNRELEASED.
+import { agentWorkflow, localWorld, runWorkflow } from "@little-stack/workflow";
+
+const worker = db.agentWorkflowEvalWorker({
+  harness: "support-desk",
+  world: () => localWorld({ dataDir: ".little-workflow" }),
+  run: ({ definition, input, world }) =>
+    runWorkflow(agentWorkflow(definition, { tools, models: { default: model }, planner: model }), input, { world }),
+  grade: ({ output, expected }) => [{ name: "correct", value: sameDecision(output, expected) ? 1 : 0 }],
+});
+```
+
+Without `handles`, the worker runs every agent-made workflow of the harness that
+exists when it starts.

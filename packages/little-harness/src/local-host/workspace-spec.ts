@@ -1,4 +1,6 @@
-import type { HarnessWorkspaceSpec } from "../types.js";
+import type { IFileSystem } from "just-bash";
+import type { HarnessRootDirs } from "../files/path-policy.js";
+import type { HarnessSession, HarnessWorkspaceSpec } from "../types.js";
 import type { LocalHarnessSession } from "./session-store.js";
 
 /**
@@ -7,34 +9,47 @@ import type { LocalHarnessSession } from "./session-store.js";
  * execution-environment factory is configured; the factory never sees the session itself.
  */
 export function localSessionWorkspace(session: LocalHarnessSession): HarnessWorkspaceSpec {
+  return harnessWorkspace(session, session.paths);
+}
+
+/**
+ * The canonical layout over any session's four roots: directories on disk, or, with
+ * `filesystem`, folders of that just-bash filesystem.
+ */
+export function harnessWorkspace(
+  session: HarnessSession,
+  roots: HarnessRootDirs,
+  filesystem?: IFileSystem,
+): HarnessWorkspaceSpec {
   return {
     sessionId: session.id,
     workingDir: "/session",
     mounts: [
       {
         mountPath: "/session",
-        backingPath: session.paths.sessionDir,
+        backingPath: roots.sessionDir,
         mode: "rw",
         trackChanges: true,
       },
       {
         mountPath: "/artifacts",
-        backingPath: session.paths.artifactsDir,
+        backingPath: roots.artifactsDir,
         mode: "rw",
         trackChanges: true,
       },
       {
         mountPath: "/persistent",
-        backingPath: session.paths.persistentCheckoutDir,
+        backingPath: roots.persistentCheckoutDir,
         mode: "rw",
         trackChanges: true,
         getReadOnlyPrefixes: () => session.getReadOnlyPersistentDirs(),
       },
       {
         mountPath: "/.agents",
-        backingPath: session.paths.agentsDir,
+        backingPath: roots.agentsDir,
         mode: "ro",
       },
     ],
+    ...(filesystem === undefined ? {} : { filesystem }),
   };
 }

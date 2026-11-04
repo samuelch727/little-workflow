@@ -1,0 +1,28 @@
+{
+  "name": "workerd-chats",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "wrangler deploy --dry-run --outdir dist",
+    "dev": "wrangler dev",
+    "serve": "workerd serve workerd.capnp --experimental",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test ./test/*.test.mjs"
+  },
+  "dependencies": {
+    "@ai-sdk/deepseek": "^3.0.58",
+    "@little-stack/harness": "workspace:*",
+    "ai": "^7.0.126",
+    "just-bash": "3.0.1",
+    "@little-stack/littledb": "workspace:*",
+    "@ai-sdk/openai-compatible": "3.0.61",
+    "@little-stack/workflow": "workspace:*"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "5.20261006.1",
+    "typescript": "^6.0.3",
+    "workerd": "1.20261006.1",
+    "wrangler": "4.150.0"
+  }
+}

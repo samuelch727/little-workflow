@@ -20,7 +20,9 @@ export type ResolvedHarnessTraceOptions = {
 };
 
 export type HarnessTraceContentOptions = {
+  /** Legacy option name: maximum UTF-16 code units in a preview, not a UTF-8 storage quota. */
   previewBytes: number;
+  /** Maximum UTF-8 bytes before full optional content is stored in an artifact. */
   maxInlineBytes: number;
   captureReasoning: boolean;
   captureModelMessages: boolean;
@@ -49,6 +51,9 @@ export type TraceContentRef = {
   mediaType?: string;
   redacted?: boolean;
   redactionReason?: string;
+  /** Full optional content could not be stored; preview/hash/size describe the sanitized value. */
+  unavailableReason?: "storage_limit";
+  storageLimitBytes?: number;
 };
 
 export type TraceFileDiff =

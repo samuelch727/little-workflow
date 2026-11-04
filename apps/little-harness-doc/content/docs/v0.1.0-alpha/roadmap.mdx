@@ -14,17 +14,17 @@ everything here as subject to change.
 
 The near-term focus is hardening the alpha developer experience: steadier SDK
 surfaces, sharper error messages, and refinement of the host and runtime adapter
-boundaries so that swapping the execution environment or session log stays a
+boundaries so that swapping the sandbox or session log stays a
 one-line change. The public API shape from alpha should carry forward with as few
 breaking changes as possible.
 
 ## Production durability
 
 Alpha durability is proven through the file-backed and remote session logs
-(`createFileSessionLog`, `remoteSessionLog` over `startSessionLogServer`) and the
+(`fileSessionLog`, `remoteSessionLog` over `startSessionLogServer`) and the
 subprocess execution adapter; there is no built-in remote execution adapter yet —
-a remote or container sandbox plugs in as a custom execution-environment factory
-or as the `nextTier` of `tieredExecutionEnvironment`. The next step is making crash-safe,
+a remote or container sandbox plugs in as a custom sandbox factory
+or as the `nextTier` of `tieredSandbox`. The next step is making crash-safe,
 resumable runs a first-class production story: durable session logs behind real
 stores, replay that survives process restarts across machines, and clear
 operational guidance for retrying failed Persistent Dir commits.

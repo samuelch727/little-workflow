@@ -1,0 +1,13 @@
+{
+  "title": "Guides and API",
+  "pages": [
+    "getting-started",
+    "foundations",
+    "authoring",
+    "running",
+    "reference",
+    "cookbook",
+    "roadmap",
+    "internals"
+  ]
+}

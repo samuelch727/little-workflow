@@ -392,6 +392,24 @@ const corpus: readonly CorpusCase[] = [
     reasons: [{ kind: "opaque-script", command: "./env.sh" }, supported("echo", "source")],
   },
   {
+    // A package launcher is a Node program, not a shell script: it needs what `node`
+    // needs, so a Tier-0 without javascript escalates instead of failing "No such file".
+    name: "a node_modules/.bin launcher is classified as node",
+    script: "cd /session && ./node_modules/.bin/vite build 2>&1; echo \"EXIT=$?\"",
+    runtime: { javascript: false },
+    decision: "escalate",
+    reasons: [
+      { kind: "capability-disabled", command: "./node_modules/.bin/vite", capability: "javascript" },
+      supported("cd", "echo"),
+    ],
+  },
+  {
+    name: "a node_modules/.bin launcher runs where node runs",
+    script: "node_modules/.bin/tsc --noEmit",
+    decision: "run",
+    reasons: [supported("node")],
+  },
+  {
     name: "bash <file> is an opaque script, not a bash -c payload",
     script: "bash scripts/setup.sh",
     decision: "run",

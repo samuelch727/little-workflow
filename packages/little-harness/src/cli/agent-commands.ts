@@ -16,7 +16,7 @@ import {
 } from "../connectors/tool-extensions.js";
 import { rejectReservedDiscoveredToolNames } from "../workspace/tool-name-policy.js";
 import { loadHarness, loadWorkspace } from "../workspace/index.js";
-import { scaffoldAgent as writeAgent, scaffoldProject } from "./agent-scaffold.js";
+import { DEFAULT_PROVIDER, scaffoldAgent as writeAgent, scaffoldProject } from "./agent-scaffold.js";
 import {
   CUSTOM_MODEL_CHOICE,
   modelChoices,
@@ -57,7 +57,15 @@ function positionals(args: readonly string[]): string[] {
   return args.filter((a) => !a.startsWith("-"));
 }
 
+function wantsHelp(args: readonly string[]): boolean {
+  return args.includes("--help") || args.includes("-h");
+}
+
 export async function initCommand(args: readonly string[], io: AgentCommandIo): Promise<number> {
+  if (wantsHelp(args)) {
+    await out(io, `${INIT_USAGE}\n`);
+    return 0;
+  }
   try {
     const parsed = parseInitArgs(args);
     const answers = await resolveInitAnswers(parsed, io);
@@ -87,15 +95,27 @@ export async function initCommand(args: readonly string[], io: AgentCommandIo): 
   }
 }
 
+const NEW_USAGE = "Usage: little-harness new <name> [--provider <provider>] [--model <model>] [--force]";
+
 export async function newCommand(args: readonly string[], io: AgentCommandIo): Promise<number> {
-  const parsed = parseAgentArgs(args);
+  if (wantsHelp(args)) {
+    await out(io, `${NEW_USAGE}\n`);
+    return 0;
+  }
+  let parsed: AgentArgs;
+  try {
+    parsed = parseAgentArgs(args);
+  } catch (error) {
+    await err(io, `${error instanceof Error ? error.message : String(error)}\n${NEW_USAGE}\n`);
+    return 1;
+  }
   const name = parsed.positionals[0];
   if (name === undefined) {
-    await err(io, "Usage: little-harness new <name> [--provider <provider>] [--model <model>] [--force]\n");
+    await err(io, `${NEW_USAGE}\n`);
     return 1;
   }
   try {
-    const provider = resolveProvider(parsed.provider ?? "anthropic");
+    const provider = resolveProvider(parsed.provider ?? DEFAULT_PROVIDER);
     const { agentsDir } = await loadWorkspace(cwdOf(io));
     const created = await writeAgent(agentsDir, name, {
       force: parsed.force,
@@ -128,8 +148,16 @@ type AgentArgs = {
   force: boolean;
 };
 
+const INIT_USAGE =
+  "Usage: little-harness init [name] [--provider <provider>] [--model <model>] [--yes] [--no-install] [--here] [--force]";
+
 function parseInitArgs(args: readonly string[]): InitArgs {
-  const parsed = parseKnownOptions(args, new Set(["provider", "model"]));
+  if (args.some((arg) => arg.startsWith("--workflow"))) {
+    throw new Error(
+      `little-harness init scaffolds a Harness agent only. For an agent with a durable workflow, run: npx @little-stack/workflow@alpha setup <dir> --workflow\n${INIT_USAGE}`,
+    );
+  }
+  const parsed = parseKnownOptions(args, new Set(["provider", "model"]), new Set(["yes", "no-install", "here", "force"]));
   return {
     positionals: parsed.positionals,
     ...(parsed.options.provider === undefined ? {} : { provider: parsed.options.provider }),
@@ -142,7 +170,7 @@ function parseInitArgs(args: readonly string[]): InitArgs {
 }
 
 function parseAgentArgs(args: readonly string[]): AgentArgs {
-  const parsed = parseKnownOptions(args, new Set(["provider", "model"]));
+  const parsed = parseKnownOptions(args, new Set(["provider", "model"]), new Set(["force"]));
   return {
     positionals: parsed.positionals,
     ...(parsed.options.provider === undefined ? {} : { provider: parsed.options.provider }),
@@ -151,7 +179,12 @@ function parseAgentArgs(args: readonly string[]): AgentArgs {
   };
 }
 
-function parseKnownOptions(args: readonly string[], valueOptions: ReadonlySet<string>): {
+/** Parse `--name value` / `--name=value` options and boolean `--flag`s; any other option is an error. */
+export function parseKnownOptions(
+  args: readonly string[],
+  valueOptions: ReadonlySet<string>,
+  flagOptions: ReadonlySet<string> = new Set(),
+): {
   positionals: string[];
   options: Record<string, string | undefined>;
   flags: Set<string>;
@@ -180,6 +213,9 @@ function parseKnownOptions(args: readonly string[], valueOptions: ReadonlySet<st
       if (eqIndex === -1) index += 1;
       continue;
     }
+    if (!flagOptions.has(key) || eqIndex !== -1) {
+      throw new Error(`Unknown option: ${arg}`);
+    }
     flags.add(key);
   }
 
@@ -197,7 +233,7 @@ async function resolveInitAnswers(parsed: InitArgs, io: AgentCommandIo): Promise
   const promptable = prompts !== undefined || tty;
   const positionalProjectName = parsed.positionals[0];
   if (parsed.positionals.length > 1) {
-    throw new Error("Usage: little-harness init [name] [--provider <provider>] [--model <model>] [--yes] [--no-install] [--here] [--force]");
+    throw new Error(INIT_USAGE);
   }
 
   let projectName = positionalProjectName ?? prompts?.projectName;
@@ -215,7 +251,7 @@ async function resolveInitAnswers(parsed: InitArgs, io: AgentCommandIo): Promise
   }
 
   const provider = parsed.provider ?? prompts?.provider ?? (
-    parsed.yes ? "anthropic" : await promptProvider(io)
+    parsed.yes ? DEFAULT_PROVIDER : await promptProvider(io)
   );
   const resolvedProvider = resolveProvider(provider);
   const model = resolveModelChoice(
@@ -242,7 +278,7 @@ async function promptInput(message: string, defaultValue: string, io: AgentComma
 
 async function promptProvider(io: AgentCommandIo): Promise<string> {
   if (io.prompts?.provider !== undefined) return io.prompts.provider;
-  return promptSearchOrSelect("Provider", providerChoices(), "anthropic", io);
+  return promptSearchOrSelect("Provider", providerChoices(), DEFAULT_PROVIDER, io);
 }
 
 async function promptModel(provider: ProviderId, io: AgentCommandIo): Promise<string> {
@@ -520,7 +556,7 @@ export async function connectorsCommand(args: readonly string[], _dataDir: strin
   return 0;
 }
 
-function readLineFromStdin(): () => Promise<string | null> {
+export function readLineFromStdin(): () => Promise<string | null> {
   const rl = createInterface({ input: process.stdin });
   const iterator = rl[Symbol.asyncIterator]();
   return async () => {

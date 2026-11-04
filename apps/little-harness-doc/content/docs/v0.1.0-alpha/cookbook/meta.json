@@ -4,6 +4,7 @@
     "nextjs-use-chat",
     "document-research-agent",
     "customer-research-agent",
-    "internal-data-agent"
+    "internal-data-agent",
+    "gbrain-memory"
   ]
 }

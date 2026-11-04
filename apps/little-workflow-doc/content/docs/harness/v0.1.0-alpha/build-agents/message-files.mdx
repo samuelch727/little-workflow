@@ -1,0 +1,116 @@
+---
+title: Message Files
+description: Staging user-uploaded files from UIMessage input into the harness filesystem.
+---
+
+Chat messages are still the normal AI SDK path. When a user sends a message
+with files, Little Harness should let the app stage those files into the
+session before the model turn starts.
+
+```ts
+const harness = createHarness({
+  host: localHost(),
+  model,
+  system: "Help users reason over uploaded documents.",
+  chat: {
+    stageMessage: async ({ message, inputFiles, files }) => {
+      const stagedFiles = await Promise.all(
+        inputFiles.map(async (file) => {
+          const path = `/session/user-input/${message.id}/${file.safeName}`;
+
+          await files.write(path, file.content, {
+            mediaType: file.mediaType,
+            source: "user-message",
+          });
+
+          return {
+            path,
+            filename: file.filename,
+            mediaType: file.mediaType,
+          };
+        }),
+      );
+
+      return {
+        stagedFiles,
+        notice:
+          stagedFiles.length > 0
+            ? `Uploaded files are available:\n${stagedFiles
+                .map((file) => `- ${file.path}`)
+                .join("\n")}`
+            : undefined,
+      };
+    },
+  },
+});
+```
+
+The route can still pass raw `UIMessage[]`.
+
+```ts
+const result = streamHarness({
+  harness,
+  messages,
+  session: chatId,
+  extraBody,
+});
+
+return result.toUIMessageStreamResponse();
+```
+
+## Why Stage Files
+
+The user-facing chat transcript and the harness filesystem have different jobs.
+
+The transcript should preserve what the UI sent. The filesystem should hold
+large or inspectable data the model can work with through tools, shell commands,
+or scripts. Staging files keeps large document bodies, spreadsheets, PDFs, and
+binary assets out of prompt context while still making them available to the
+agent.
+
+## What `stageMessage` Receives
+
+The hook receives:
+
+- `message`: the newly submitted user `UIMessage`
+- `inputFiles`: normalized file parts extracted from that message
+- `files`: the session file writer
+- `extraBody`: app-defined request context
+- `session`: the current session handle
+
+`inputFiles` should hide transport details where possible. A file may have come
+from an AI SDK file part, a signed URL, a data URL, a multipart upload, or app
+storage. The hook should see a safe filename, media type, size metadata, and a
+readable content value or stream.
+
+## Model Notice
+
+`stageMessage` should return small metadata, not mutate the transcript directly.
+
+```ts
+return {
+  stagedFiles: [{ path: "/session/user-input/msg_123/report.pdf" }],
+  notice: "The uploaded report is available at /session/user-input/msg_123/report.pdf.",
+};
+```
+
+Little Harness can add the notice to the model turn so the agent knows which
+paths exist. The notice should contain paths and short descriptions, not raw file
+contents.
+
+## Restaging
+
+By default, message staging should run only for newly submitted user messages.
+That avoids duplicating uploads during resume, regenerate, or trace replay.
+
+Advanced callers can opt into restaging when they intentionally need to rebuild
+the session filesystem from message history.
+
+```ts
+streamHarness({
+  harness,
+  messages,
+  session: chatId,
+  restage: true,
+});
+```

@@ -21,14 +21,13 @@ import * as ai from "ai";
 import { tool } from "ai";
 import { createDeepSeek } from "@ai-sdk/deepseek";
 import {
-  createWorkflowHarness,
-  createLittleWorkflow,
   createToolRegistry,
-  listEvents,
+  defineWorkflow,
   localWorld,
   model,
-  runWorkflow,
-} from "little-workflow";
+  runOrchestration,
+} from "@little-stack/workflow";
+import { createWorkflowHarness } from "@little-stack/workflow/internals";
 
 import {
   batchInputSchema,
@@ -144,7 +143,7 @@ async function main() {
     for (let attempt = 1; attempt <= sessionAttempts; attempt += 1) {
       lastRunId = `run_demo_ticket_factory_${useStub ? "stub" : "live"}_s${index + 1}_a${attempt}_${Date.now()}`;
       try {
-        result = await runWorkflow({
+        result = await runOrchestration({
           world,
           workflows: [setup.workflow],
           orchestrator: { ...setup.orchestrator, maxConcurrentSubRuns },
@@ -166,14 +165,14 @@ async function main() {
 
     // Prefer the successful result's events; otherwise salvage the last
     // attempt's committed event log from disk.
-    const events = result?.events ?? await listEvents(world, lastRunId).catch(() => []);
+    const events = result?.events ?? await world.listEvents(lastRunId).catch(() => []);
     const runResults = harvestRunWorkflowResults(events);
     const ou = sumUsageFromEvents(events);
     const wu = { inputTokens: 0, outputTokens: 0 };
     for (const runResult of runResults) {
       if (typeof runResult.runId !== "string") continue;
       try {
-        const usage = sumUsageFromEvents(await listEvents(world, runResult.runId));
+        const usage = sumUsageFromEvents(await world.listEvents(runResult.runId));
         wu.inputTokens += usage.inputTokens;
         wu.outputTokens += usage.outputTokens;
       } catch {
@@ -308,11 +307,11 @@ function buildLiveSetup() {
     description: "DeepSeek v4 flash worker (thinking off) that generates ticket batches.",
   });
 
-  const workflow = createLittleWorkflow({
+  const workflow = defineWorkflow({
     id: BATCH_WORKFLOW_ID,
     description:
       "Generate one batch of realistic fake CloudDesk support tickets as a JSON array.",
-    inputSchema: batchInputSchema,
+    input: batchInputSchema,
     output: { kind: "array", element: ticketArraySchema.items },
     models: [workerSlot],
     planner: {
@@ -353,17 +352,17 @@ function buildStubSetup({ ticketCount, batchSize }) {
     { id: "model.worker", description: "Unused stub model slot (tool.call path)." },
   );
 
-  const workflow = createLittleWorkflow({
+  const workflow = defineWorkflow({
     id: BATCH_WORKFLOW_ID,
     description: "Deterministic keyless ticket batch generator.",
-    inputSchema: batchInputSchema,
+    input: batchInputSchema,
     output: { kind: "array", element: ticketArraySchema.items },
     models: [stubWorkerSlot],
     planner: {
       model: { provider: "stub", modelId: "stub-planner" },
       harness: stubPlannerHarness(),
     },
-    globalTools: ["generate_batch"],
+    tools: ["generate_batch"],
     worker: { harness: createWorkflowHarness() },
   });
 

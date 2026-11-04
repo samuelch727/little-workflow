@@ -1,53 +1,74 @@
 import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ConfigBundle, SessionConfig } from "@little-workflow/littledb/harness";
-import { littledb } from "@little-workflow/littledb/harness";
+import {
+  createLittleDB,
+  scoreId,
+  turnTraceId,
+  type HarnessTracer,
+  type LittleDB,
+  type Resolution,
+} from "@little-stack/littledb";
 import type { LanguageModel } from "ai";
-import { skill } from "little-harness";
-import type { HarnessEvent, HarnessOutcomeSink, SkillInput } from "little-harness";
+import type { HarnessOutcomeEvent, HarnessOutcomeSink, HarnessTurnOptions } from "@little-stack/harness";
+import { z } from "zod";
 import { demoRoot, DEFAULT_MODEL_SLOT, modelForSlot } from "./env";
 
 const agentDir = dirname(fileURLToPath(import.meta.url));
 
 /**
- * The subset of a resolved session config that a per-run `streamHarness` call can actually
- * apply. `system` and `model` are on `HarnessAgentOptions`, which `StreamHarnessOptions`
- * extends, and `resolveTurnConfig` merges them over the harness config for that turn.
- * `skills` is NOT on `HarnessAgentOptions` — see `warnAboutSkills` below.
+ * What a LittleDB version of the Librarian holds: the system prompt and a model slot. A
+ * proposal (from a person, LittleDB's reviewer or the dream loop) changes one or both.
+ * LittleDB is told this shape, so it never proposes a version the Librarian cannot run.
  */
+export const LibrarianVersion = z.object({
+  system: z.string().trim().min(1),
+  model: z.enum([DEFAULT_MODEL_SLOT, "deepseek-v4-pro"]),
+});
+export type LibrarianVersionContent = z.infer<typeof LibrarianVersion>;
+
+/** What a turn runs with: the version's prompt and the model its slot names. */
 export type ManagedTurnOverrides = {
-  readonly system: string;
-  readonly model: LanguageModel;
-  readonly onEvent: (event: HarnessEvent) => Promise<void>;
+  readonly system?: string;
+  readonly model?: LanguageModel;
+};
+
+export type LibrarianSession = {
+  readonly resolution: Resolution<LibrarianVersionContent>;
+  readonly content: LibrarianVersionContent;
+  readonly tracer: HarnessTracer;
+  readonly overrides: ManagedTurnOverrides;
 };
 
 export type LibrarianLittleDb = {
-  readonly controlPlaneUrl: string;
-  readonly engineUrl: string;
-  readonly harnessId: string;
+  readonly db: LittleDB;
+  readonly url: string;
+  /** The harness slug in LittleDB. */
+  readonly harness: string;
+  readonly channel: string;
+  /** Chat reactions as `user_feedback` scores on the turn they grade. */
   readonly outcomeSink: HarnessOutcomeSink;
   /**
-   * Resolve managed config for `sessionId` (once per session, cached), so the SYNC
-   * `streamHarness` seam has something to read by the time the run starts. Call this from
-   * the connector's `beforeRun`, which the run pipeline awaits before `streamHarness`.
+   * The Harness `turnOptions` hook (`agent.ts` passes it to `createHarness`): every turn, on
+   * every path (the Slack connector, `little-harness test`, the driver), runs the version its
+   * session runs on and is traced with it.
    */
-  prepareSession(sessionId: string): Promise<SessionConfig>;
-  /** Sync lookup for the `streamHarness` wrapper. `undefined` until `prepareSession` resolves. */
-  overridesFor(sessionId: string): ManagedTurnOverrides | undefined;
-  /** The pinned config version for a session, for reporting. */
-  configFor(sessionId: string): SessionConfig | undefined;
+  readonly turnOptions: HarnessTurnOptions;
+  /** What `sessionId` ran on in its latest turn, for reporting. */
+  sessionFor(sessionId: string): LibrarianSession | undefined;
   flush(): Promise<void>;
+  shutdown(): Promise<void>;
 };
 
 /**
  * Read the bootstrap prompt from the SAME file `loadHarness` uses as the system prompt.
  *
- * `LIBRARIAN_PROMPT_FILE` (a path, absolute or relative to the demo root) seeds littleDB
- * with a DIFFERENT prompt without touching `instructions.md` — that is how
- * `experiment/run.mjs` bootstraps the deliberately-flawed v1. It affects the littleDB
- * bootstrap ONLY: a run with `LITTLEDB_URL` unset still uses `instructions.md`, and
- * littleDB ignores the bootstrap once the channel has a config version.
+ * `LIBRARIAN_PROMPT_FILE` (a path, absolute or relative to the demo root) seeds LittleDB
+ * with a DIFFERENT prompt without touching `instructions.md`: that is how
+ * `experiment/run.mjs` bootstraps the deliberately-flawed v1. It affects the LittleDB
+ * bootstrap ONLY: a run with `LITTLEDB_URL` unset still uses `instructions.md`. Once the
+ * harness has versions, a changed bootstrap does not run straight away: LittleDB opens a
+ * "Changed in code" proposal for it, which ships like any other proposal.
  */
 export function bootstrapPrompt(): string {
   const override = process.env.LIBRARIAN_PROMPT_FILE;
@@ -59,131 +80,127 @@ export function bootstrapPrompt(): string {
 }
 
 /**
- * The seed littleDB stores on the FIRST `/api/config/resolve` call for this harness+channel.
- * Every field of `ConfigBundleSchema` is required — there are no optionals — so the inert
- * ones are spelled out rather than omitted.
+ * The Librarian as the code defines it, sent with every resolve. LittleDB stores the first one
+ * as version 1, and turns a later edit into a "Changed in code" proposal.
  */
-export function bootstrapConfig(): ConfigBundle {
-  return {
-    prompt: bootstrapPrompt(),
-    skills: [],
-    modelSlot: process.env.KB_CHATBOT_MODEL_SLOT ?? DEFAULT_MODEL_SLOT,
-    // Inert in the harness adapter today: nothing maps these onto harness options.
-    toolManifest: null,
-    sampling: {},
-    hyperparams: {},
-    memoryPolicy: null,
-  };
+export function bootstrapContent(): LibrarianVersionContent {
+  return LibrarianVersion.parse({ system: bootstrapPrompt(), model: process.env.KB_CHATBOT_MODEL_SLOT ?? DEFAULT_MODEL_SLOT });
 }
 
+/** The score a chat reaction becomes. */
+export const FEEDBACK_SCORE = "user_feedback";
+
+const FEEDBACK_VALUE = { success: 1, partial: 0.5, failure: 0 } as const;
+
 /**
- * Managed config resolves ONCE PER SESSION, but `createHarness` builds ONE instance with
- * static options and `loadChatSdkConnector` loads ONE agent folder. The seam that makes
- * per-session config expressible is the injectable `streamHarness`, which accepts a
- * per-run `system` / `model` / `onEvent`. That seam is SYNCHRONOUS, so the async resolve
- * has to have already happened: `prepareSession` runs in the connector's awaited
- * `beforeRun`, and the wrapper reads the cache synchronously.
- *
  * Held on `globalThis` because `little-harness`'s `importDefault` constructs a NEW jiti
- * instance per module — `connectors/slack/connector.ts` (loaded by connector discovery)
- * and `load.ts` (loaded by the driver) do not share a module registry, so a plain
- * module-level singleton would give each of them its own resolver and its own cache.
+ * instance per module: `agent.ts` (loaded by `loadHarness`) and the driver do not share a
+ * module registry, so a plain module-level singleton would give each of them its own client
+ * and its own cache.
  */
 const SINGLETON = Symbol.for("kb-chatbot.librarian.littledb");
 
 type Holder = { [SINGLETON]?: LibrarianLittleDb | null };
 
 /**
- * The littleDB handle, or `undefined` when `LITTLEDB_URL` is unset — the demo runs fully
- * without littleDB (plain `createHarness` + `instructions.md`, no reporter, no sink).
+ * The LittleDB handle, or `undefined` when `LITTLEDB_URL` is unset: the demo runs fully
+ * without LittleDB (plain `createHarness` + `instructions.md`, no traces, no scores).
  */
 export function librarianLittleDb(): LibrarianLittleDb | undefined {
   const holder = globalThis as unknown as Holder;
   const existing = holder[SINGLETON];
   if (existing !== undefined) return existing ?? undefined;
 
-  const controlPlaneUrl = process.env.LITTLEDB_URL;
-  if (controlPlaneUrl === undefined || controlPlaneUrl.length === 0) {
+  const url = process.env.LITTLEDB_URL;
+  if (url === undefined || url.length === 0) {
     holder[SINGLETON] = null;
     return undefined;
   }
 
-  const created = create(controlPlaneUrl);
+  const created = create(url);
   holder[SINGLETON] = created;
   return created;
 }
 
-function create(controlPlaneUrl: string): LibrarianLittleDb {
-  const engineUrl = process.env.LITTLEDB_ENGINE_URL ?? "http://localhost:7878";
-  const harnessId = process.env.LITTLEDB_HARNESS_ID ?? "kb-librarian";
+function create(url: string): LibrarianLittleDb {
+  const apiKey = process.env.LITTLEDB_API_KEY;
+  if (apiKey === undefined || apiKey.length === 0) {
+    throw new Error("LITTLEDB_URL is set but LITTLEDB_API_KEY is not. `littledb dev` prints a local key.");
+  }
+  const harness = process.env.LITTLEDB_HARNESS ?? "kb-librarian";
   const channel = process.env.LITTLEDB_CHANNEL ?? "production";
-
-  const db = littledb({
-    controlPlaneUrl,
-    engineUrl,
-    harnessId,
+  const db = createLittleDB({ url, apiKey });
+  const managed = db.managedHarness({
+    slug: harness,
     channel,
-    ...(process.env.LITTLEDB_PROJECT_KEY ? { projectKey: process.env.LITTLEDB_PROJECT_KEY } : {}),
-    modelFor: (slot: string) => modelForSlot(slot),
-    // Provided from day one: a bundle carrying skills with no resolver THROWS in
-    // `bundleToHarnessOptions`, and a promoted config can add skills at any time.
-    skillFor: (name: string): SkillInput => skill(join(agentDir, "skills", name)),
+    bootstrap: bootstrapContent(),
+    schema: LibrarianVersion,
+    models: (slot) => modelForSlot(slot),
   });
+  const tracer = managed.tracer!;
+  const sessions = new Map<string, LibrarianSession>();
 
-  const sessions = new Map<string, Promise<SessionConfig>>();
-  const resolved = new Map<string, SessionConfig>();
+  const remember = async (sessionId: string): Promise<LibrarianSession> => {
+    const { resolution, content, overrides } = await managed.session(sessionId);
+    if (resolution.fallback !== undefined) {
+      console.warn(
+        `littledb: session ${sessionId} runs on the ${resolution.fallback === "last_known" ? "last known version" : "bootstrap"} (${resolution.error ?? "LittleDB unreachable"}).`,
+      );
+    }
+    const session: LibrarianSession = { resolution, content, tracer, overrides };
+    sessions.set(sessionId, session);
+    return session;
+  };
 
-  return {
-    controlPlaneUrl,
-    engineUrl,
-    harnessId,
-    outcomeSink: db.outcomeSink,
-    prepareSession(sessionId) {
-      let pending = sessions.get(sessionId);
-      if (pending === undefined) {
-        pending = db.createSessionConfig(bootstrapConfig()).then((config) => {
-          warnAboutSkills(config);
-          if (config.staleConfig) {
-            console.warn(
-              `littledb: session ${sessionId} is running on a CACHED config bundle (control plane unreachable).`,
-            );
-          }
-          resolved.set(sessionId, config);
-          return config;
-        });
-        sessions.set(sessionId, pending);
+  const outcomeSink: HarnessOutcomeSink = {
+    name: "littledb",
+    async deliver(event: HarnessOutcomeEvent) {
+      // The turn the reaction grades, or the session's latest one.
+      const traceId =
+        event.turnId !== undefined ? turnTraceId(event.sessionId, event.turnId) : tracer.traceIdFor(event.sessionId);
+      if (traceId === undefined) return { ok: false };
+      // One score per rater per message: a changed mind replaces it, an un-reaction removes it.
+      const id = scoreId(traceId, undefined, `${FEEDBACK_SCORE}\n${event.reportKey ?? event.eventId}`, "human");
+      if (event.retracted === true) {
+        await db.flush();
+        try {
+          await db.request("DELETE", `/scores/${encodeURIComponent(id)}`);
+        } catch {
+          // Already gone, or never sent: either way there is nothing left to retract.
+        }
+        return { ok: true };
       }
-      return pending;
-    },
-    overridesFor(sessionId) {
-      const config = resolved.get(sessionId);
-      if (config === undefined) return undefined;
-      const system = config.harnessOptions.system;
-      const model = config.harnessOptions.model;
-      if (typeof system !== "string" || model === undefined) return undefined;
-      return { system, model, onEvent: (event) => config.reporter.onEvent(event) };
-    },
-    configFor(sessionId) {
-      return resolved.get(sessionId);
-    },
-    async flush() {
-      await Promise.all([...resolved.values()].map((config) => config.reporter.flush()));
+      db.score({
+        id,
+        traceId,
+        name: FEEDBACK_SCORE,
+        value: event.score ?? FEEDBACK_VALUE[event.status],
+        label: event.status,
+        source: "human",
+        ...(event.detail === undefined ? {} : { comment: event.detail }),
+        metadata: {
+          outcomeSource: event.source,
+          ...(event.reporter === undefined ? {} : { reporter: event.reporter }),
+          ...event.metadata,
+        },
+      });
+      return { ok: true };
     },
   };
-}
 
-/**
- * A promoted bundle with a non-empty `skills` list RESOLVES fine (that is what `skillFor`
- * is for) and then has nowhere to go: `skills` is on `CreateHarnessOptions` only, not on
- * `HarnessAgentOptions`, so no per-run call can apply it. Silently unapplied is worse than
- * a throw, so the demo says so out loud.
- */
-function warnAboutSkills(config: SessionConfig): void {
-  const skills = config.harnessOptions.skills ?? [];
-  if (skills.length === 0) return;
-  console.warn(
-    `littledb: managed config ${config.configVersionId} carries ${skills.length} skill(s), ` +
-      "which a per-session harness override CANNOT apply (skills are construction-time only). " +
-      "They are being ignored for this session.",
-  );
+  return {
+    db,
+    url,
+    harness,
+    channel,
+    outcomeSink,
+    turnOptions: async (turn) => {
+      const options = await managed.turnOptions(turn);
+      await remember(turn.sessionId);
+      return options;
+    },
+    sessionFor: (sessionId) => sessions.get(sessionId),
+    flush: () => db.flush(),
+    shutdown: () => db.shutdown(),
+  };
 }

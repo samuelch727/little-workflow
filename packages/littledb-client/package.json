@@ -1,8 +1,8 @@
 {
-  "name": "@little-workflow/littledb",
+  "name": "@little-stack/littledb",
   "version": "0.1.0-alpha.2",
   "private": true,
-  "description": "littledb client for little-workflow and little-harness: Tracing World + managed-config harness adapter.",
+  "description": "LittleDB client for Little Harness and Little Workflow: managed harnesses and workflows, resolve versions, trace turns and runs, review agent-made workflows, run experiments, send user feedback.",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -25,11 +25,34 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
-    ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" },
-    "./harness": { "types": "./dist/harness/index.d.ts", "default": "./dist/harness/index.js" },
-    "./contract": { "types": "./dist/contract.d.ts", "default": "./dist/contract.js" }
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./harness": {
+      "types": "./dist/harness/index.d.ts",
+      "default": "./dist/harness/index.js"
+    },
+    "./workflow": {
+      "types": "./dist/workflow/index.d.ts",
+      "default": "./dist/workflow/index.js"
+    },
+    "./models": {
+      "types": "./dist/models.d.ts",
+      "default": "./dist/models.js"
+    },
+    "./contract": {
+      "types": "./dist/contract.d.ts",
+      "default": "./dist/contract.js"
+    },
+    "./testing": {
+      "types": "./dist/testing.d.ts",
+      "default": "./dist/testing.js"
+    }
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "engines": {
     "node": ">=22"
   },
@@ -41,10 +64,14 @@
     "lint": "tsc --noEmit"
   },
   "dependencies": {
-    "little-workflow": "workspace:*",
-    "little-harness": "workspace:*",
     "zod": "^4.4.3"
   },
-  "peerDependencies": { "ai": "^7.0.0" },
-  "devDependencies": { "ai": "^7.0.126", "@types/node": "^22.0.0", "typescript": "^6.0.0", "vitest": "^4.0.0" }
+  "devDependencies": {
+    "@little-stack/harness": "workspace:^",
+    "@little-stack/workflow": "workspace:^",
+    "ai": "^7.0.126",
+    "@types/node": "^22.0.0",
+    "typescript": "^6.0.0",
+    "vitest": "^4.0.0"
+  }
 }

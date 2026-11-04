@@ -1,0 +1,194 @@
+---
+title: LittleDB
+description: The product of the Little stack. Tracing, versions, experiments and self-improvement for Little Harness and Little Workflow, with one URL and one API key. Private source; not installable.
+---
+
+LittleDB is the product of the Little stack: tracing and self-improvement for
+agents. It stores traces and their scores, holds the versions of your agents and
+workflows (a system prompt and a model, for example), and runs the review loop
+around them: a proposal for a new version is tested in an experiment on your own
+past conversations, checked against your guardrails and a policy, and put live
+or left for a person to approve. What your users say feeds the same loop.
+
+Little Harness and Little Workflow are the SDK that feeds it: one `onEvent` hook
+sends each Harness turn as a trace, a wrapped World sends each Workflow run, and
+`resolve` brings back which version to run. Managed
+[workspaces](/docs/how-they-fit#workspaces) on Cloudflare report each turn's
+folder-tier share and infrastructure cost to it as well (being added now).
+Harness and Workflow work fully without LittleDB.
+
+<Callout title="Private source, not installable" type="warn">
+  The client package `@little-stack/littledb` is private source at
+  `0.1.0-alpha.2` and marked private. It is not on npm (checked 2026-10-09), and
+  there is no public LittleDB repository (checked 2026-10-09). There is no public
+  install path or runnable quickstart. Every API and example in these pages is
+  private and UNRELEASED.
+</Callout>
+
+## The service
+
+LittleDB is one Node service with a web UI, on Postgres. Its API is under `/v1`,
+and the web UI (when it is built) is served from the same URL.
+
+| Mode | Default address | Notes |
+| --- | --- | --- |
+| `littledb dev` | `http://127.0.0.1:7340` | Embedded Postgres, a default sign-in, and the API key `ldb_dev_local_key` for the `default` project |
+| Production | Where you deploy it | Your own Postgres, an owner account, keys you create |
+
+Apps authenticate with a project API key, sent as `Authorization: Bearer <key>`.
+A key belongs to one project and carries scopes (`ingest`, `read`, `write`,
+`admin`, and `feedback`, which can only send and withdraw user feedback).
+
+<Callout title="Do not expose dev mode" type="error">
+  `littledb dev` registers a well-known API key and a default sign-in. Do not
+  expose a dev-mode server to an untrusted network.
+</Callout>
+
+## Connect
+
+Everything goes through one client, made from one URL and one API key:
+
+```ts
+// Private, UNRELEASED.
+import { createLittleDB } from "@little-stack/littledb";
+
+const db = createLittleDB({
+  url: process.env.LITTLEDB_URL!, // e.g. http://127.0.0.1:7340
+  apiKey: process.env.LITTLEDB_API_KEY!,
+});
+```
+
+`littleDBFromEnv()` reads `LITTLEDB_URL` and `LITTLEDB_API_KEY` instead, and gives an
+offline client when `LITTLEDB_URL` is unset: every resolve answers your bootstrap
+and nothing is sent, so the same code runs with and without LittleDB.
+
+LittleDB is never on your app's critical path. Traces and scores are queued and
+sent in batches in the background (retried, bounded, never thrown). `resolve`
+answers from a cache and falls back to the last live answer, then to the config
+in your code; after three failures in a row it stops asking for 30 seconds, so an
+outage adds no wait. Call `await db.shutdown()` before a short-lived process exits so the
+queue is sent; `db.flush()` sends it without stopping.
+
+Problems off the app's path (a dropped batch, an unreachable server) go to
+`onError`, which by default prints one `console.warn` a minute per kind of
+problem. The API key is never logged.
+
+## What the client provides
+
+| Method | What it does | Guide |
+| --- | --- | --- |
+| `db.managedHarness()` | A harness whose prompt and model LittleDB manages: one `turnOptions` hook resolves, applies and traces each turn's version | [Harness](/docs/littledb/harness#let-littledb-manage-the-prompt) |
+| `db.managedWorkflow()` | The same for a workflow's step prompts and models | [Workflow](/docs/littledb/workflow#with-a-managed-workflow) |
+| `db.resolve()` | Which version of a harness or workflow to run | [Below](#resolve-which-version-to-run) |
+| `db.harnessTracer()` | A Harness `onEvent` hook that sends each turn as a trace | [Harness](/docs/littledb/harness) |
+| `db.memory.org()`, `db.memory.user()` | Harness memory kept in LittleDB: org memory changes wait for review, each person's memory stays theirs | [Managed memory](/docs/littledb/memory) |
+| `db.memory.handler()`, `db.memory.forgetUser()` | Lets a person see and forget their own memory from your backend; forgets a deleted account | [Managed memory](/docs/littledb/memory#a-persons-memory-stays-private) |
+| `db.agentWorkflowRegistry()` | Puts the workflows an agent defines behind review | [Harness](/docs/littledb/harness#agent-made-workflows-behind-review) |
+| `db.tracingWorld()` | Wraps a Workflow `World` so each run is also a trace | [Workflow](/docs/littledb/workflow) |
+| `db.evalWorker()` | Runs LittleDB's experiments inside your app | [Experiments](/docs/littledb/experiments) |
+| `db.workflowEvalWorker()` | Runs one workflow's experiments: builds each candidate from its content, traces and grades the run | [Experiments](/docs/littledb/experiments#workflows) |
+| `db.agentWorkflowEvalWorker()` | Runs the experiments on the workflows an agent made in one harness | [Experiments](/docs/littledb/experiments#workflows-an-agent-made) |
+| `db.score()` | Records a score on a trace or a span | [Below](#scores) |
+| `db.feedback()`, `db.retractFeedback()` | Sends (or withdraws) what an end user said about a turn | [User feedback](/docs/littledb/feedback) |
+| `db.feedbackHandler()` | A Fetch handler for your backend, so the browser can send feedback without the key | [User feedback](/docs/littledb/feedback#from-the-browser) |
+| `db.outcomeSink()` | Sends Harness outcomes and chat reactions as user feedback | [User feedback](/docs/littledb/feedback#reactions-and-outcomes) |
+| `db.request()` | Calls any other `/v1` endpoint (datasets, proposals, experiments) | [Experiments](/docs/littledb/experiments) |
+
+The package has five entry points: `@little-stack/littledb` (the client),
+`/harness` and `/workflow` (the tracer, the registry and the tracing World, for
+hosts that wire the transport themselves), `/contract` (the `/v1` wire
+contract as Zod schemas) and `/testing` (LittleDB in memory, for your tests). It has no runtime dependency on the Harness or
+Workflow packages: it reads their events and Worlds structurally.
+
+## Resolve: which version to run
+
+Everything that can change about an agent or a workflow is a **version**: plain
+JSON content, such as `{ system, model }`. Your app asks which version to run;
+the config in your code is the **bootstrap**, and it becomes version 1 the first
+time LittleDB sees the harness.
+
+```ts
+// Private, UNRELEASED.
+const resolution = await db.resolve({
+  kind: "harness",
+  slug: "support-desk",
+  stickyKey: sessionId, // the same session always gets the same side of a trial
+  bootstrap: { system: SYSTEM_PROMPT, model: "fast" },
+});
+
+const { system, model } = resolution.content as { system: string; model: string };
+```
+
+| Field | Meaning |
+| --- | --- |
+| `content` | The version's content: what to run |
+| `versionId`, `number` | The version, for traces and logs |
+| `mode` | `live`, `trial` (this sticky key is in a trial of a candidate), `holdout` (this key is in the project holdout, which keeps a small share of traffic on an older version), `none`, or `pinned` (an experiment run named the version) |
+| `fallback` | Set when your app is not running LittleDB's answer: `last_known` or `bootstrap` (LittleDB unreachable), or `invalid` (the version did not match `schema`) |
+| `code` | What LittleDB did with your bootstrap once something is live: `in_sync`, `changed` (with the proposal it opened), `stale` (an older deploy) or `ignored` |
+
+Request options besides the ones above: `schema` (a Zod schema: the content is
+checked and typed, and LittleDB checks candidates against it), `caller` (the
+workflow and step running this subject) and `channel`.
+
+The bootstrap becomes version 1 while the harness has no live version. A later
+change to it in your code becomes a "Changed in code" proposal that LittleDB
+carries onto the live version; until it ships, the live version runs. See
+[Editing the prompt in code](/docs/littledb/harness#editing-the-prompt-in-code).
+
+A sticky key keeps its answer for an hour, checked again every 30 seconds
+(`revalidateMs`): a session keeps its version through a promotion and leaves it
+after a rollback.
+
+## Scores
+
+A score is a number or a label on a trace (or one of its spans): a code check, a
+person's thumbs, a judge. What your users say goes through
+[User feedback](/docs/littledb/feedback) instead, as scores with source `user`.
+
+```ts
+// Private, UNRELEASED.
+db.score({ traceId, name: "task_success", value: 1, source: "code" });
+```
+
+`source` is `app` (the default), `human`, `judge`, `code`, `workflow` or
+`pushback`. Scores are upserted by id, and the client derives a stable id from
+the trace, span, name and source, so a retry never adds a second score. Pass
+your own `id` to keep one score per something else, such as one per rater.
+
+## The review loop
+
+A **proposal** is a candidate version with a rationale and evidence. It can come
+from LittleDB's own reviewer, from an agent of your own, from an agent that
+defined a workflow, or from a person. LittleDB then gathers evidence (an
+experiment on a dataset, a live trial, or both), checks it against your
+guardrails, applies the gates in the project's policy, and either puts the
+version live or asks a person. How much goes live without you is your choice;
+agent-made workflows always wait for a person. See
+[Guardrails and autonomy](/docs/littledb/guardrails).
+
+Your app takes part in three places: it resolves the version to run, it sends
+the traces and scores the reviewer reads, and it runs the experiments, since it
+owns the tools and the model keys. See [Experiments](/docs/littledb/experiments).
+
+## OpenTelemetry instead
+
+LittleDB also takes OTLP/HTTP traces, JSON or protobuf, at
+`POST <url>/v1/otlp/v1/traces` with the same `Authorization: Bearer <key>`
+header. It understands the GenAI semantic conventions (`gen_ai.*`) and Vercel AI
+SDK telemetry (`ai.*`), including token usage. Set the resource attribute
+`littledb.harness` (or `service.name`) to group the traces under a harness.
+
+Use it when your app already exports OpenTelemetry. The client is the richer
+path for Harness and Workflow: it also resolves versions, registers agent-made
+workflows and runs the eval worker.
+
+## Source access
+
+These pages are for readers who already have access to the private LittleDB
+source. They give no clone, install or credential instructions. Until LittleDB
+is published, use the defaults: Harness [Outcome Capture](/docs/harness/v0.1.0-alpha/build-agents/outcomes)
+to local traces, and Workflow's [Local World](/docs/workflow/v0.1.0-alpha/running/local-world).
+
+See also [How they fit](/docs/how-they-fit), [Setup](/docs/get-started/setup)
+for the published packages, and [Releases](/docs/releases).

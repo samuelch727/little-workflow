@@ -1,72 +1,72 @@
 import { describe, expect, it } from "vitest";
-import { createJustBashRuntime } from "../runtime/just-bash-runtime.js";
-import type { HarnessExecutionEnvironmentFactory, HarnessRuntimeOptions } from "../types.js";
+import { justBashSandbox } from "../runtime/just-bash-runtime.js";
+import type { HarnessSandboxFactory, HarnessRuntimeOptions } from "../types.js";
 import {
-  resolveExecutionEnvironment,
-  selectExecutionEnvironmentMode,
+  resolveSandbox,
+  selectSandboxMode,
 } from "./execution-environment.js";
 
 /** Locked down enough for the in-process adapter: no model-authored code, no network. */
 const sealed: HarnessRuntimeOptions = { python: false, javascript: false };
 
-describe("selectExecutionEnvironmentMode", () => {
+describe("selectSandboxMode", () => {
   it("stays in-process only when code execution and network are both off", () => {
-    expect(selectExecutionEnvironmentMode(sealed)).toBe("in-process");
-    expect(selectExecutionEnvironmentMode({ ...sealed, network: false })).toBe("in-process");
-    expect(selectExecutionEnvironmentMode({ ...sealed, bash: true, toolBridge: false })).toBe(
+    expect(selectSandboxMode(sealed)).toBe("in-process");
+    expect(selectSandboxMode({ ...sealed, network: false })).toBe("in-process");
+    expect(selectSandboxMode({ ...sealed, bash: true, toolBridge: false })).toBe(
       "in-process",
     );
   });
 
   it("takes the subprocess sandbox whenever the turn can execute model-authored code", () => {
-    expect(selectExecutionEnvironmentMode({ ...sealed, python: true })).toBe("subprocess");
-    expect(selectExecutionEnvironmentMode({ ...sealed, javascript: true })).toBe("subprocess");
+    expect(selectSandboxMode({ ...sealed, python: true })).toBe("subprocess");
+    expect(selectSandboxMode({ ...sealed, javascript: true })).toBe("subprocess");
   });
 
   it("takes the subprocess sandbox for any network policy", () => {
-    expect(selectExecutionEnvironmentMode({ ...sealed, network: true })).toBe("subprocess");
+    expect(selectSandboxMode({ ...sealed, network: true })).toBe("subprocess");
     expect(
-      selectExecutionEnvironmentMode({ ...sealed, network: { allowedUrlPrefixes: ["https://x/"] } }),
+      selectSandboxMode({ ...sealed, network: { allowedUrlPrefixes: ["https://x/"] } }),
     ).toBe("subprocess");
   });
 
   it("treats just-bash's defaults as code execution: unset runtime is not in-process", () => {
     // python and javascript default to ON, so "auto" only stays in-process for callers who
     // opt out of both by hand.
-    expect(selectExecutionEnvironmentMode(undefined)).toBe("subprocess");
-    expect(selectExecutionEnvironmentMode({})).toBe("subprocess");
-    expect(selectExecutionEnvironmentMode({ python: false })).toBe("subprocess");
-    expect(selectExecutionEnvironmentMode({ javascript: false })).toBe("subprocess");
+    expect(selectSandboxMode(undefined)).toBe("subprocess");
+    expect(selectSandboxMode({})).toBe("subprocess");
+    expect(selectSandboxMode({ python: false })).toBe("subprocess");
+    expect(selectSandboxMode({ javascript: false })).toBe("subprocess");
   });
 });
 
-describe("resolveExecutionEnvironment", () => {
+describe("resolveSandbox", () => {
   it("defaults to the auto rule when nothing is configured", () => {
     // just-bash enables python and javascript by default, so an unconfigured turn can run
     // model-authored code and takes the subprocess sandbox.
-    expect(resolveExecutionEnvironment(undefined, undefined)).not.toBe(createJustBashRuntime);
-    expect(resolveExecutionEnvironment(undefined, { network: true })).not.toBe(createJustBashRuntime);
+    expect(resolveSandbox(undefined, undefined)).not.toBe(justBashSandbox());
+    expect(resolveSandbox(undefined, { network: true })).not.toBe(justBashSandbox());
     const sealed: HarnessRuntimeOptions = { python: false, javascript: false };
-    expect(resolveExecutionEnvironment(undefined, sealed)).toBe(createJustBashRuntime);
+    expect(resolveSandbox(undefined, sealed)).toBe(justBashSandbox());
   });
 
   it("passes an injected factory through untouched", () => {
-    const custom: HarnessExecutionEnvironmentFactory = async () => {
+    const custom: HarnessSandboxFactory = async () => {
       throw new Error("unused");
     };
-    expect(resolveExecutionEnvironment(custom, undefined)).toBe(custom);
+    expect(resolveSandbox(custom, undefined)).toBe(custom);
   });
 
   it("pins the explicit modes regardless of runtime options", () => {
-    expect(resolveExecutionEnvironment("in-process", { network: true })).toBe(createJustBashRuntime);
-    expect(resolveExecutionEnvironment("subprocess", sealed)).not.toBe(createJustBashRuntime);
+    expect(resolveSandbox("in-process", { network: true })).toBe(justBashSandbox());
+    expect(resolveSandbox("subprocess", sealed)).not.toBe(justBashSandbox());
   });
 
   it("routes each auto branch to its adapter", () => {
-    expect(resolveExecutionEnvironment("auto", sealed)).toBe(createJustBashRuntime);
-    expect(resolveExecutionEnvironment("auto", { ...sealed, network: true })).not.toBe(
-      createJustBashRuntime,
+    expect(resolveSandbox("auto", sealed)).toBe(justBashSandbox());
+    expect(resolveSandbox("auto", { ...sealed, network: true })).not.toBe(
+      justBashSandbox(),
     );
-    expect(resolveExecutionEnvironment("auto", undefined)).not.toBe(createJustBashRuntime);
+    expect(resolveSandbox("auto", undefined)).not.toBe(justBashSandbox());
   });
 });

@@ -103,6 +103,7 @@ Generic harness events include:
 - `harness.runtime.command.denied`
 - `harness.runtime.tier.escalated`
 - `harness.runtime.tier.unavailable`
+- `harness.runtime.usage`
 - `harness.runtime.error`
 - `harness.runtime.dispose.failed`
 - `harness.file.created`
@@ -119,10 +120,10 @@ Generic harness events include:
 - `harness.persistent_dir.commit.failed`
 
 The `harness.runtime.tier.*` and `harness.runtime.command.denied` events appear
-only under `tieredExecutionEnvironment`. They record why a turn changed execution
+only under `tieredSandbox`. They record why a turn changed execution
 tier (or refused to run a command) and are never part of the model-visible prompt
 surface; commands themselves are traced identically whichever tier ran them.
-`harness.runtime.dispose.failed` records an execution environment whose teardown
+`harness.runtime.dispose.failed` records a sandbox whose teardown
 threw (error envelope under `metadata.error`); `little-harness doctor` counts it as
 a failure.
 
@@ -141,6 +142,12 @@ and `promptHash`. Aggregate them with `aggregateLocalOutcomes({ dataDir })` or t
 `little-harness outcomes [session-id]` CLI.
 
 ## Trace Options
+
+`trace.content.previewBytes` keeps its legacy name and runtime behavior: it bounds
+UTF-16 code units (512 by default), with a dangling high surrogate removed at the
+boundary. It is not a UTF-8 storage quota. `maxInlineBytes`, file/artifact storage
+ceilings, and byte/hash metadata continue to use actual UTF-8 bytes. A preview does
+not by itself prove that the full value was captured.
 
 ```ts
 createHarness({
@@ -172,10 +179,11 @@ Default redaction metadata keys include `apiKey`, `authorization`, `cookie`, `se
 
 ## Durability Replay
 
-Pass a session log (`sessionLog`, or its historical alias `durability`) to `createHarness`, `generateHarness`, or `streamHarness` when model/tool calls should be replayable. `sessionLog` wins when both are set.
+Pass a session log (`sessionLog`) to `createHarness`, `generateHarness`, or `streamHarness` when model/tool calls should be replayable. The `HarnessSessionLog` contract and the durable event types come from `@little-stack/harness/events`; the ready-made stores and the remote client and server come from `@little-stack/harness/remote-session`. The root entry re-exports neither.
 
 ```ts
-import type { HarnessSessionLog } from "little-harness";
+import { generateHarness } from "@little-stack/harness";
+import type { HarnessSessionLog } from "@little-stack/harness/events";
 
 const sessionLog: HarnessSessionLog = {
   append: async (event) => persistedEvent,
@@ -191,20 +199,34 @@ const result = await generateHarness({
 });
 ```
 
-`createInMemorySessionLog()` and `createFileSessionLog({ path })` are ready-made
+`inMemorySessionLog()` and `fileSessionLog({ path })` are ready-made
 stores: they satisfy `HarnessSessionLog` directly and also back
 `startSessionLogServer({ store })`.
 
 The package ships ready-made sinks so the log can live outside the process:
 `startSessionLogServer()` serves the append-only log over HTTP (optional
-bearer auth; pass `createFileSessionLog({ path })` as its `store` for
+bearer auth; pass `fileSessionLog({ path })` as its `store` for
 durability across server restarts) and `remoteSessionLog({ baseUrl })` is the
 matching `HarnessSessionLog` client. A fresh process re-invoked with the
 same `runId` resumes from the remote log alone. Appends are awaited before
 the turn proceeds, and the client times out stalled requests (`timeoutMs`,
 default 30 s) so a dead log service fails the turn instead of hanging it.
+The same holds for the model and tool records written from AI SDK step and
+tool callbacks, whose errors AI SDK itself ignores: a model tool call runs only
+after its `harness.tool_call.started` record is acknowledged, and once such a
+record fails the turn runs no further tool or model step and fails
+(`generateHarness` rejects, and so does `streamHarness`'s `finished`). A failed
+`harness.model.responded` record for the final step is retried once first.
 Tool results that cross the remote log must be JSON-safe — they round-trip
 through serialization on resume.
+
+`fileSessionLog()` is a single-process reference store. With its default
+`sync: true`, an acknowledgement follows file fsync and parent-directory fsync;
+a filesystem that cannot provide either operation fails the append closed.
+Newline is the record commit marker. Restart tolerates and truncates only one
+final unterminated fragment, while malformed complete records and per-run
+sequence gaps reject replay. `sync: false` explicitly gives up crash-durable
+acknowledgements. Use Little Compute's PostgreSQL store for multiple writers.
 
 Replay matching depends on request hashes for model prompts and tool calls. Do not mutate prior events. Use a stable `runId` when retrying the same run.
 
@@ -222,9 +244,25 @@ Durable events are not the same shape as `HarnessEvent`. Durable replay stores p
 type DurableHarnessEventInput<TEventType extends string = HarnessEventType> = {
   type: TEventType;
   runId: string;
+  appendIdempotencyKey: string;
   occurrenceId?: string;
-  payload: Record<string, unknown>;
-};
+} & (
+  | { payload: Record<string, unknown>; payloadArtifactId?: never }
+  | { payload?: never; payloadArtifactId: string }
+);
 ```
 
-Use `occurrenceId` to correlate a trace/callback `HarnessEvent` with a durable replay event for the same model or tool occurrence.
+The logical emitter chooses `appendIdempotencyKey` before transport. An
+identical `(runId,key,digest)` retry returns the original persisted event;
+different content conflicts. `occurrenceId` remains an optional causal group
+and can be shared by several lifecycle phases, each with its own append key.
+Persisted events add `canonicalRequestDigest`; use `payloadArtifactId` for
+content too large to inline. Little Compute's injected Session-log adapter can
+spool oversized payloads before append and resolve them after runner
+replacement; Little Harness itself remains independent of that backend.
+
+Built-in file writers allocate a fresh occurrence at each file-mutation call,
+including byte-identical repeated writes, and share it across that mutation's
+`harness.file.*`, written-by-tool, and Artifact projections. Remote adapters
+using `createHarnessFileMutationEvents()` must provide the same stable identity
+before transport retry; a content hash is not a mutation identity.

@@ -1,13 +1,13 @@
 import { tool } from "ai";
 import {
-  createWorkflowHarness,
-  createLittleWorkflow,
   createToolRegistry,
+  defineWorkflow,
   localWorld,
   model,
   output,
-  runWorkflow,
-} from "little-workflow";
+  runOrchestration,
+} from "@little-stack/workflow";
+import { createWorkflowHarness } from "@little-stack/workflow/internals";
 
 const CANDIDATE_COUNT = 30;
 const candidates = Array.from({ length: CANDIDATE_COUNT }, (_, index) => `candidate-${index + 1}`);
@@ -110,17 +110,17 @@ const orchestratorHarness = {
   },
 };
 
-const workflow = createLittleWorkflow({
+const workflow = defineWorkflow({
   id: "demo.orchestrator.candidate.review",
   description: "Review one candidate.",
-  inputSchema: candidateInputSchema,
+  input: candidateInputSchema,
   output: output.object({ schema: candidateOutputSchema }),
   models: [candidateWorkerModel],
   planner: {
     model: { provider: "demo", modelId: "planner-stub" },
     harness: plannerHarness,
   },
-  globalTools: ["demo.emitCandidate"],
+  tools: ["demo.emitCandidate"],
   worker: { harness: createWorkflowHarness() },
 });
 
@@ -152,7 +152,7 @@ console.log(`Candidates: ${CANDIDATE_COUNT}`);
 console.log(`maxConcurrentSubRuns: 10`);
 console.log();
 
-const result = await runWorkflow({
+const result = await runOrchestration({
   world,
   workflows: [workflow],
   orchestrator: {

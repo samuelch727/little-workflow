@@ -42,7 +42,10 @@ export async function hashImportGraph(options: ImportGraphHashOptions): Promise<
     if (visited.has(real)) return;
     visited.add(real);
 
-    const shouldHashSource = includeLocalSource || isUnder(real, workspaceReal);
+    // An installed package is identified by name@version, even when its node_modules folder sits
+    // inside the workspace root (the usual layout): its own dynamic imports are not the workflow's.
+    const shouldHashSource = includeLocalSource ||
+      (isUnder(real, workspaceReal) && !hasNodeModulesSegment(relative(workspaceReal, real)));
     if (!shouldHashSource) {
       const identity = await packageIdentityFor(real);
       externals.set(identity, identity);

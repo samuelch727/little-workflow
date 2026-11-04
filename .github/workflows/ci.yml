@@ -50,6 +50,11 @@ jobs:
         run: |
           pack_dir="${RUNNER_TEMP}/little-setup-packs"
           mkdir -p "${pack_dir}"
-          pnpm --filter little-workflow pack --pack-destination "${pack_dir}"
+          pnpm --filter @little-stack/harness pack --pack-destination "${pack_dir}"
+          pnpm --filter @little-stack/workflow pack --pack-destination "${pack_dir}"
           package_version="$(node -p "require('./packages/little-workflow/package.json').version")"
-          node scripts/verify-little-setup.mjs --tarball "${pack_dir}/little-workflow-${package_version}.tgz" --managers npm,pnpm
+          harness_version="$(node -p "require('./packages/little-harness/package.json').version")"
+          node scripts/verify-little-setup.mjs \
+            --tarball "${pack_dir}/little-stack-workflow-${package_version}.tgz" \
+            --harness-tarball "${pack_dir}/little-stack-harness-${harness_version}.tgz" \
+            --managers npm,pnpm

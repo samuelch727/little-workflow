@@ -17,7 +17,7 @@ import {
   createHarness,
   localHost,
   memory,
-} from "little-harness";
+} from "@little-stack/harness";
 ```
 
 ## Basic Usage
@@ -91,14 +91,18 @@ Host app capabilities exposed to the agent. Little Harness accepts normal
 AI SDK-style tools and adds a harness execution context as the second argument.
 
 ```ts
+import { harnessToolContext } from "@little-stack/harness";
+
 const queryCustomers = tool({
   description: "Query customer account data by account id or search string.",
   inputSchema: z.object({
     accountId: z.string().optional(),
     query: z.string().optional(),
   }),
-  execute: async (input, ctx) => {
+  execute: async (input, options) => {
     const rows = await customerDb.query(input);
+    // The AI SDK types do not declare the harness context; read it through the typed accessor.
+    const ctx = harnessToolContext(options);
 
     const file = await ctx.files.writeJSON(
       "/artifacts/tool/query-customers/result.json",
@@ -120,6 +124,24 @@ oversized value anyway, Little Harness can automatically spool it to a file.
 
 Tools also receive `ctx.artifacts`, which can list artifacts and read
 `/artifacts/...` files that another tool or runtime command already wrote.
+The AI SDK types do not declare these fields; for typed access, call
+`harnessToolContext(options)` from `@little-stack/harness` (it returns the context and throws outside a
+Little Harness turn; `tryHarnessToolContext(options)` returns `undefined` instead).
+
+Some tool names are reserved because Little Harness injects or protects them.
+`createHarness` rejects a configured tool with a reserved name, and
+`loadHarness` rejects a discovered `tools/<name>.ts` with one.
+
+| Version | Reserved for configured and discovered tools |
+| --- | --- |
+| Published `0.2.0-alpha.0` | `bash`, `__proto__`, `constructor`, `prototype` |
+| UNRELEASED source (no npm version yet) | The names above, plus `checkpoint` and the five Agent Group tools: `start_agent_group`, `spawn_agent`, `watch_agent_group`, `join_agent_group`, `cancel_agent_group` |
+
+In the unreleased source, these extra names stay reserved even when
+`checkpoints` or `agents` is not configured. An existing tool named
+`checkpoint` or after an Agent Group tool passes the published name validation in
+`0.2.0-alpha.0`, but must be renamed for the unreleased SDK. See
+[Broader reserved tool names](/docs/v0.1.0-alpha/reference/alpha-migrations#broader-reserved-tool-names).
 
 ### `mcp`
 
@@ -185,6 +207,45 @@ line/character counts, a bounded JSON structure sketch when available, preview,
 and a message telling it to read the file for the full result.
 
 Set `toolResultSpooling: false` to disable this behavior.
+
+### `promptCaching`
+
+`boolean`, default `true`
+
+Anthropic prompt caching on the agent's model calls. The harness puts a cache
+point on the system prompt and turns on Anthropic's automatic cache point at the
+end of the conversation:
+
+- Anthropic sends tools first, then the system prompt, so the tool definitions and
+  instructions every session repeats are read from the cache by the next session
+  that starts within the cache's lifetime (5 minutes by default).
+- Within a turn, each step reads everything the step before it sent.
+
+A cache read costs a tenth of the normal input price or less, and the first write
+about 1.25 times. Both cache points ride in `providerOptions.anthropic`, so a
+provider that does not read Anthropic options ignores them. On Amazon Bedrock (a
+model whose provider id starts with `bedrock`, such as the Anthropic models of
+`@ai-sdk/amazon-bedrock`), the harness keeps the system prompt's cache point but
+leaves out the automatic one, because Bedrock's InvokeModel rejects a top-level
+`cache_control` with a 400 for older Claude models; there, steps within a turn do
+not read each other from the cache.
+
+Anthropic allows 4 cache points per request, and the harness uses 2 of them (1 on
+Bedrock). If you add your own `cacheControl` markers to messages or tools, use at
+most 2 more, or Anthropic rejects the request.
+
+To use the 1-hour cache, pass
+`providerOptions: { anthropic: { cacheControl: { type: "ephemeral", ttl: "1h" } } }`
+to `generateHarness()` or `streamHarness()`; the system prompt's cache point uses
+the same TTL.
+
+```ts
+createHarness({ host, model, promptCaching: false }); // send no cache points
+```
+
+The cache only helps if the system prompt and tools stay the same from session to
+session: keep dates, user names and other per-session values out of `system`
+and pass them in the messages instead.
 
 ### `trace`
 
@@ -329,11 +390,18 @@ default.
 
 ### `memory`
 
-`HarnessMemoryOptions`
+`HarnessMemoryOptions | HarnessMemoryOptions[]`
 
-Opt-in model-authored long-term memory. `memory(...)` expands to a Persistent Dir,
-a bounded `MEMORY.md` index injected into future system context, and a `remember`
-tool unless the memory is read-only or `tool: false`.
+Opt-in long-term memory kept as plain files. `memory(...)` mounts a Persistent Dir,
+shows the agent a short note and one line per file every turn, and adds a built-in
+`memory` skill on how to save, change and forget memories. There is no memory tool:
+the agent writes, edits and deletes files with its file tools.
+
+Pass an array for layers, such as company knowledge plus one memory per user. Each
+needs its own `harnessDir`. `canWrite({ extraBody })` mounts a memory read-only for a
+turn, and `backend: { load, store }` keeps it in another service instead of a
+`sourceDir`. A skill named `memory` in `skills` replaces the built-in one. See
+[Memory](/docs/v0.1.0-alpha/build-agents/memory).
 
 ```ts
 const harness = createHarness({
@@ -343,6 +411,7 @@ const harness = createHarness({
   tools: { queryDatabase, inspectSchema },
   memory: memory({
     sourceDir: "memory/db-query-agent",
+    description: "Lessons about this database.",
   }),
 });
 ```
@@ -353,15 +422,13 @@ Defaults:
 |---|---|
 | `harnessDir` | `/persistent/memory` |
 | `commit` | `after-turn` |
-| `tool.name` | `remember` |
-| `indexPath` | `MEMORY.md` |
 | `maxIndexBytes` | `8000` |
-| `maxEntryBytes` | `4000` |
+| `canWrite` | anyone may write |
+| `skill` | the built-in `memory` skill |
 
-Use `commit: "read-only"` to inject existing memory without a write tool, or
-`tool: false` to mount writable memory without adding `remember`. Memory uses
-the same Persistent Dir load, diff, trace, and commit behavior as explicit
-`persistentDirs`.
+Use `commit: "read-only"` to show existing memory without ever storing changes,
+and `skill: false` to leave the built-in skill out. Memory uses the same Persistent
+Dir load, diff, trace, and commit behavior as explicit `persistentDirs`.
 
 ### `persistentDirs`
 
@@ -407,7 +474,10 @@ runtime: {
 
 `bash` controls whether Little Harness exposes the built-in command tool to the
 model. It defaults to `true`. Set `bash: false` when app tools are the only
-capabilities the model should call.
+capabilities the model should call. Without bash the harness adds `load_skill`
+when the turn has skills, so the agent can still open them, and, with `memory`,
+`list_files`, `read_file`, `write_file` and `delete_file` limited to the memory
+folders.
 
 `network` controls network access for the command runtime. It defaults to
 `false`.
@@ -433,24 +503,156 @@ streamHarness({
 });
 ```
 
-Under `localHost()`'s default `executionEnvironment: "auto"`, these toggles also
+Under `localHost()`'s default `sandbox: "auto"`, these toggles also
 choose where the turn's commands run: in-process just-bash only when `python`
 and `javascript` are both `false` and `network` is off, the subprocess sandbox
 otherwise. See
 [Execution Environments](/docs/v0.1.0-alpha/runtime/execution-environments).
+### `agents`
+
+> **UNRELEASED:** the `agents` option exists only in the current source. Published
+> `0.2.0-alpha.0` has no runtime `agents` option, and no npm version includes it
+> yet. Agent folder scaffolding is a separate, published feature.
+
+`HarnessAgentGroupsOptions`
+
+Optional neutral launcher port for ordered fan-out into isolated agents. It injects
+`start_agent_group`, `spawn_agent`, `watch_agent_group`, `join_agent_group`, and
+`cancel_agent_group`. When `agents` is absent, none of these tools exist.
+
+```ts
+const harness = createHarness({
+  host: localHost(),
+  model,
+  agents: {
+    launcher,
+    profiles: [{
+      handle: "repo-worker",
+      resourcesHandle: "cpu-medium",
+      secretsHandle: "repo-readwrite",
+      toolsHandle: "code-and-browser",
+      networkHandle: "package-registries",
+      priorityHandle: "interactive",
+    }],
+    joinPolicies: [{ handle: "all", policy: { kind: "all_success" } }],
+    defaultJoinPolicyHandle: "all",
+    reductionPolicies: [{
+      handle: "concise",
+      maxMemberSummaryBytes: 16_384,
+      maxGroupSummaryBytes: 32_768,
+      maxResultRefs: 32,
+    }],
+    defaultReductionPolicyHandle: "concise",
+    limits: { maxGroupPromptBytes: 2_097_152 },
+  },
+});
+```
+
+Profiles and policies are trusted declarations. The model can select their handles but cannot request raw
+resources, secrets, tools, network policy, priority, verifiers, or check sets. Launcher starts must be atomic
+and idempotent, and accepted member bindings commit through one durable group authority. Legacy observation
+snapshots use monotonic group/member revisions. A launcher that supplies the complete additive page trio may
+instead return strict aggregate/change pages and configure up to 10,000 members; cursors are opaque,
+store-bound, bounded, and gap-free. V2 pages sequence explicit member and group-control changes together, while
+still reading legacy v1 member-only pages. Both modes contain bounded summaries, not child transcripts. Model schemas
+enumerate trusted handles/descriptions, while adapter task refs and verification receipts stay internal.
+
+Paged groups retain 4,096 replay sequences, permanently reject retired stable calls, and enforce a 65,536-call
+lifetime ceiling before launcher I/O. Durable hosts can explicitly collect a terminal group through the task
+ledger's exact version/digest CAS; collection is crash-recoverable and leaves compact receipts that prevent old
+starts and cross-session reuse of external group refs from recreating deleted authority. Result-ref publication
+uses recoverable per-ref claims, preserves the first publication across higher terminal revisions, and collection
+conditionally removes only the exact owner bytes it prepared. Exact accepted-start replay is served from immutable
+Harness authority before launcher I/O, while an irreversible collection fence is honored by every writer across
+process restart.
+
+See [Agent Groups](/docs/v0.1.0-alpha/build-agents/agent-groups) for the launcher contract,
+`first_verified` binding, revision fencing, and failure semantics.
+
+### `checkpoints`
+
+> **UNRELEASED:** the `checkpoints` option exists only in the current source.
+> Published `0.2.0-alpha.0` has no `checkpoints` property on
+> `CreateHarnessOptions`, and no npm version includes it yet.
+
+`HarnessCheckpointsOptions`
+
+Optional trusted writer port for durable environment milestones. When configured, Little Harness injects one
+`checkpoint` tool. The model can annotate a point with a label, a `goal_reached` or `pre_risky_op` kind, an
+optional rationale, and evidence artifact ids:
+
+```ts
+const harness = createHarness({
+  host: localHost({ dataDir: ".little-harness" }),
+  model,
+  checkpoints: {
+    writer: {
+      async checkpoint(request) {
+        return milestoneService.checkpoint(request);
+      },
+    },
+  },
+});
+```
+
+The host or control-plane writer owns milestone identity, tier, state, author, timestamp, cost, retention, and
+verification. Those fields are deliberately absent from model input, so an agent cannot self-claim
+`verified_green`. The writer also receives the Harness-supplied session, turn, model-step, and sequence position.
+A replayed tool call carries the same deterministic `callIdentity`; writers should use it as their idempotency key
+and return the original milestone result.
+
+The result disposition is `created`, `replayed`, or `coalesced`. Coalescing can return an existing milestone id
+for a different call that adds no semantic state; the response still binds the current call's identity and
+does not move the original milestone's session position. Little Compute's Direction-v2 local profile compares
+the current compatible checkpoint head, not arbitrary historical matching trees. A changed tree or meaningful
+annotation creates a new node; returning to an older tree after an intervening change does not reuse that
+historical node. The retained advanced profile keeps its existing non-coalescing replay behavior.
+
+### `humanInput`
+
+`boolean | HumanInputOptions`
+
+Lets the agent ask a person a question without waiting on the answer. Adds the
+`ask_person` tool, which returns at once with a task id, and `ask` to every
+tool's execution context. The agent gets the answer from `await_tasks`; if it is
+not in yet, the turn parks. A tool can also wait for the answer itself with
+`ask(question, { wait: true })`. Needs a host with durable services, such as
+`localHost`.
+
+```ts
+const harness = createHarness({
+  host: localHost({ dataDir: "./data" }),
+  model,
+  humanInput: {
+    deliver: async (request) => inbox.add(request), // send the question out
+  },
+});
+```
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `deliver(request, { session })` | none | Sends a new question to a person, once per question. When it throws, the question stands and the agent is told sending it failed. |
+| `toolName` | `"ask_person"` | The tool's name. |
+| `description` | built in | The tool's description. |
+| `tool` | `true` | `false` leaves the tool out; tools can still `ask`. |
+
+Record replies with `answerInputRequest()`, list open questions with
+`listInputRequests()`, and continue parked turns with `resumeParked()`. See
+[Asking A Person](/docs/v0.1.0-alpha/build-agents/asking-a-person).
 
 ### `dynamicWorkflows`
 
 `DynamicWorkflowsConfig`
 
 Opt-in, model-authored one-shot plans. Pass the `dynamicWorkflows()` helper from
-`little-workflow` (not a bare `true` — the helper injects the plan-lowering
+`@little-stack/workflow` (not a bare `true` — the helper injects the plan-lowering
 factory, which the harness cannot import without a circular dependency). It adds
-two tools, `run_ad_hoc_plan` and `search_authored_plans`, and registers a durable
-plan store at `/persistent/dynamic-plans`.
+three tools, `run_ad_hoc_plan`, `search_authored_plans` and `define_workflow`, and
+registers a durable plan store at `/persistent/dynamic-plans`. Each workflow the agent
+defines with `define_workflow` is a tool of its own in later turns and sessions.
 
 ```ts
-import { dynamicWorkflows } from "little-workflow";
+import { dynamicWorkflows } from "@little-stack/workflow";
 
 const harness = createHarness({
   host: localHost({ dataDir: ".little-harness" }),
@@ -469,11 +671,16 @@ the ceiling or tune the caps with options:
 | `limits.maxSteps` | `8` |
 | `limits.maxRuntimeMs` | `120000` |
 | `exclude` | `[]` |
+| `models` | none: plan steps use `default`, the agent's own model |
+| `define` | `true`: the agent gets `define_workflow` |
+| `registry` | none: every stored definition is offered, from the next turn on, in every session. `{ defined?, resolve? }` hooks decide which definitions and revisions each turn offers; see [Deciding What Each Turn Offers](/docs/v0.1.0-alpha/build-agents/dynamic-workflows#deciding-what-each-turn-offers) |
+| `world` | `localWorld` in the harness's stores. A `World`, or a function of the run, for agent-defined workflow and one-shot plan runs |
 
 ```ts
 dynamicWorkflows: dynamicWorkflows({
   exclude: ["dangerousTool"],
   limits: { maxSteps: 6, maxRuntimeMs: 60_000 },
+  models: { fast: anthropic("claude-haiku-5-5") }, // extra model slots for ai.generate steps
 })
 ```
 
@@ -488,10 +695,10 @@ for the full guide.
 Workflows exposed to the agent as tools, one per workflow, named from the
 workflow id (`billing.refund` → `billing_refund`) and typed by its input schema.
 Adapt a Little Workflow `defineWorkflow` result with `asHarnessWorkflow` from
-`little-workflow`; `definitionIdentity` is required.
+`@little-stack/workflow`; `definitionIdentity` is required.
 
 ```ts
-import { asHarnessWorkflow } from "little-workflow";
+import { asHarnessWorkflow } from "@little-stack/workflow";
 
 workflows: [asHarnessWorkflow(refundWorkflow, { definitionIdentity: "billing.refund@1" })]
 ```
@@ -517,6 +724,132 @@ fields:
 ```ts
 workflowBudgets: { maxConcurrentWorkflowRuns: 2, maxModelSteps: 12 }
 ```
+
+### `turnLimits`
+
+`HarnessTurnLimits`
+
+Limits on every turn, unless a call or `turnOptions` passes its own:
+
+| Field | Effect |
+|---|---|
+| `accounting` | `"run"` (default) starts step/cost counts again on continuation. `"logical-turn"` persists actual provider attempts and known cost across parks, resumes and process restarts. |
+| `maxSteps` | The most model steps a run may take (actual provider invocations in logical-turn mode). A run whose last allowed step still calls tools stops with `StepLimitExceeded`; one that answers on it completes. |
+| `maxCostUsd` | The most a run's model calls may cost, in US dollars, by `price`. Checked after each step, so the step that crosses it finishes; then `CostLimitExceeded`. |
+| `deadlineMs` | How long a run may take from when it starts. Then its model call and tools are aborted and it stops with `Interrupted`. |
+| `price` | `({ model, usage }) => number`: what one model call cost. Little Harness has no price table, so a cost limit needs one. |
+| `refusedBeforeEffect` | Logical-turn mode only. `(error, { provider, modelId }) => boolean`: the host's word that a provider call it rejected had no effect and costs nothing. Unset by default. |
+
+```ts
+turnLimits: { maxSteps: 24, maxCostUsd: 3, deadlineMs: 300_000, price: ({ model, usage }) => priceOf(model, usage) }
+```
+
+A run stopped by a limit throws `HarnessTurnLimitError` (for `streamHarness`,
+`finished` rejects with it). Its `reason` is also its `name`, and the turn's
+`harness.session.failed` event carries it as `reason`. That holds for a limit reached on a call
+AI SDK retried, too: the turn throws the limit's error, not AI SDK's `RetryError` around it. Default `accounting: "run"` preserves per-run counts.
+
+For a cumulative allowance, set `accounting: "logical-turn"`. This requires a concrete
+provider model handle (including any `prepareStep.model` override) and a host with
+`orchestration.turnBudgets`. The initial trusted `runId` and session identify the
+budget; every parked continuation saves that identity. Keep the mode and limits
+unchanged when resuming. The standard file host durably acknowledges each model
+reservation before provider I/O and records known usage before delivering a response. Response-reported model identities
+take precedence for pricing and are recorded with settled receipts.
+A genuine repeated provider invocation counts again; replaying a completed response
+or a tool effect creates no pretend paid invocation.
+
+With only a step limit (no `maxCostUsd`), an unknown reservation still consumes
+one step but does not block another attempt. SDK retries therefore remain bounded
+by the same cumulative step allowance, including after restart. Unknown receipts
+keep their unknown usage; they are never settled as free calls.
+
+With a cost ceiling, unknown/incomplete usage or pricing and interrupted reservations
+stop with `BudgetStateUnavailable`; they never grant fresh allowance or claim the
+cost threshold was reached. HTTP status codes and `isRetryable` do not establish
+zero usage, including after transport errors, aborts or partial streams. Missing or
+corrupt required accounting stops both step-only and cost-limited budgets. Completed approved tools may
+replay at an exhausted budget, but another provider invocation is refused. The cost
+limit is a threshold after known response usage: the call crossing it can finish,
+so it is not a hard prepaid cap. Provider-internal billing/retries are opaque.
+`deadlineMs` remains per run.
+
+A host that knows its provider can say which rejections cost nothing with
+`refusedBeforeEffect`. Harness asks it only when the provider call itself rejects,
+never for an abort, an error inside a stream that began, or a stream that ends
+without usage. When it returns `true`, the reservation settles as `refused` with
+no usage and no cost, marked `refusal: "host-attested"` on the receipt, and it
+still takes one step, so `maxSteps` bounds a provider that keeps refusing. A hook
+that throws counts as `false`. For example, Anthropic rejects a 429 or 529 before
+processing and doesn't bill it:
+
+```ts
+import { APICallError } from "ai";
+
+turnLimits: {
+  accounting: "logical-turn", maxSteps: 24, maxCostUsd: 3, price,
+  refusedBeforeEffect: (error, { provider }) =>
+    provider.startsWith("anthropic") && APICallError.isInstance(error) &&
+    (error.statusCode === 429 || error.statusCode === 529),
+}
+```
+
+The bundled in-memory orchestration ledger preserves this contract only within its
+instance; it is not process-restart storage. Custom `DurableJsonStore` implementations
+need the optional `writeJsonDurable` capability for logical mode; legacy five-method
+stores remain supported for per-run mode. The file backend is a single-process
+reference over a private durable root, not a distributed/hostile-writer lock.
+
+### `turnOptions`
+
+Function that receives a `HarnessTurnContext` and returns `HarnessTurnOverrides`
+(or nothing).
+
+Decides one turn's per-run options from its session: the model, the system
+prompt, and any other option `generateHarness` takes per run (`temperature`,
+`activeTools`, `providerOptions`, ...), plus an `onEvent` for this turn's events.
+It is awaited once per turn, after the session is known and before anything
+runs, on every path that runs a turn: `generateHarness`, `streamHarness`,
+connectors, schedules and `little-harness start`.
+
+```ts
+turnOptions: async ({ sessionId, extraBody, trigger }) => {
+  const plan = await plans.forUser(extraBody?.userId);
+  return { model: plan.premium ? smartModel : fastModel, system: plan.instructions };
+}
+```
+
+| Field of the context | Meaning |
+| --- | --- |
+| `sessionId`, `session` | The turn's session. |
+| `extraBody` | The turn's `extraBody`. |
+| `trigger` | How the turn started; a connector's turn names the channel and the sender. |
+| `resumed` | Set when the turn continues a parked one: `{ continuationId, pin?, metadata? }`, what the parked turn's hook returned. |
+
+Besides run options, the hook may return:
+
+| Field | Meaning |
+| --- | --- |
+| `metadata` | JSON for the turn's caller, such as the version that ran. `onTurnStart` gets it, and the agent server sends it on the event that ends the turn and in `GET /sessions/<session>/turn`. |
+| `pin` | JSON that says what the turn was decided from. A turn that parks saves it with its conversation, in the same durable record, and the hook of the turn that continues it gets it back in `resumed.pin`, after a restart too. |
+
+A continued turn runs the system prompt it saved when it parked. A hook that
+decides per turn should therefore decide the same again from `resumed.pin`:
+otherwise the rest of the turn runs the saved prompt with options decided now.
+
+```ts
+turnOptions: async ({ sessionId, resumed }) => {
+  const version = (resumed?.pin as { version?: string } | undefined)?.version ?? (await liveVersion(sessionId));
+  return { system: prompts[version], metadata: { version }, pin: { version } };
+}
+```
+
+A continued turn reports the parked turn's `metadata` when its hook returns
+none. Options a call passes itself win over what the hook returns; `runtime` and
+`trace` merge, with the call's on top; both `onEvent`s run, the hook's first. A
+hook that throws fails the turn. LittleDB's `db.managedHarness()` returns one
+that runs each session on its version of the prompt; see
+[Using LittleDB](/docs/v0.1.0-alpha/reference/using-littledb#let-littledb-manage-the-prompt).
 
 ### `onEvent`
 
@@ -557,7 +890,7 @@ use this to log or count them.
 
 ### `sessionLog`
 
-`HarnessSessionLog`
+`HarnessSessionLog` (type from `@little-stack/harness/events`)
 
 The session log: the append-only durable event log a run appends to and replays
 from (`append` plus `priorEvents`). Re-invoking a run with the same `runId`
@@ -566,16 +899,23 @@ re-executing tool side effects. `generateHarness()` and `streamHarness()` accept
 a per-call `sessionLog` that overrides this one.
 
 ```ts
-import { createFileSessionLog, remoteSessionLog } from "little-harness";
+import { fileSessionLog, remoteSessionLog } from "@little-stack/harness/remote-session";
 
-sessionLog: createFileSessionLog({ path: ".little-harness/session-log.ndjson" })
+sessionLog: fileSessionLog({ path: ".little-harness/session-log.ndjson" })
 // or, shared across processes:
 sessionLog: remoteSessionLog({ baseUrl: process.env.SESSION_LOG_URL!, authToken })
 ```
 
-`durability` is the historical alias for the same option; `sessionLog` wins when
-both are set. See
+See
 [Execution Environments](/docs/v0.1.0-alpha/runtime/execution-environments#the-session-log-as-a-service).
+
+> **UNRELEASED:** in the current source the session-log helpers come only from
+> `@little-stack/harness/remote-session`, the file and in-memory logs are
+> `fileSessionLog()` and `inMemorySessionLog()`, and the `durability` alias is
+> gone. Published `0.2.0-alpha.0` exports `createFileSessionLog()`,
+> `createInMemorySessionLog()` and `remoteSessionLog()` from the root entry and
+> accepts `durability` as an alias of `sessionLog`. See
+> [Alpha Migrations](/docs/v0.1.0-alpha/reference/alpha-migrations#one-name-per-concept).
 
 ## Returns
 

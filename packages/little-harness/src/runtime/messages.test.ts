@@ -162,8 +162,8 @@ describe("buildModelMessages", () => {
       });
       const session = await harness.sessions.getOrCreate({ id: "chat-memory" });
       await session.files.writeText(
-        "/persistent/memory/MEMORY.md",
-        "# Memory Index\n- billing_invoices: Check invoice history before answering billing questions.\n",
+        "/persistent/memory/billing-invoices.md",
+        "---\ndescription: Check invoice history before answering billing questions.\n---\n\nSee the billing runbook.\n",
       );
       const messages = [{ id: "m1", role: "user", parts: [{ type: "text", text: "Hi" }] }] as UIMessage[];
 
@@ -175,8 +175,10 @@ describe("buildModelMessages", () => {
         messages,
       });
 
-      expect(result.system).toContain("Long-term memory is mounted at /persistent/memory.");
-      expect(result.system).toContain("billing_invoices");
+      expect(result.system).toContain("## /persistent/memory");
+      expect(result.system).toContain(
+        "- billing-invoices.md: Check invoice history before answering billing questions.",
+      );
     });
   });
 
@@ -195,8 +197,8 @@ describe("buildModelMessages", () => {
       });
       const session = await harness.sessions.getOrCreate({ id: "typed-memory" });
       await session.files.writeText(
-        "/persistent/memory/MEMORY.md",
-        "# Memory Index\n- billing_invoices: Check invoice history before answering billing questions.\n",
+        "/persistent/memory/billing-invoices.md",
+        "---\ndescription: Check invoice history before answering billing questions.\n---\n\nSee the billing runbook.\n",
       );
 
       const result = await buildModelMessages({
@@ -209,8 +211,10 @@ describe("buildModelMessages", () => {
       });
 
       expect(result.messages.at(-1)?.content).toBe("Ticket: t1");
-      expect(result.system).toContain("Long-term memory is mounted at /persistent/memory.");
-      expect(result.system).toContain("billing_invoices");
+      expect(result.system).toContain("## /persistent/memory");
+      expect(result.system).toContain(
+        "- billing-invoices.md: Check invoice history before answering billing questions.",
+      );
     });
   });
 

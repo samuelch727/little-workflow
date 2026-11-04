@@ -1,7 +1,7 @@
 import { createSlackAdapter } from "@chat-adapter/slack";
 import { createMemoryState } from "@chat-adapter/state-memory";
-import type { ChatSdkAdapterFactoryResult } from "little-harness/connectors";
-import { chatSdkConnector } from "little-harness/connectors/runtime";
+import type { ChatSdkAdapterFactoryResult } from "@little-stack/harness/connectors";
+import { chatSdkConnector } from "@little-stack/harness/connectors/runtime";
 import { librarianLittleDb } from "../../littledb";
 
 export type LibrarianExtraBody = {
@@ -42,15 +42,11 @@ async function librarianAdapter(): Promise<ChatSdkAdapterFactoryResult> {
  * driven offline through `simulateInbound`, because a `data`-backed attachment needs no
  * network and the adapter above degrades to a credential-free stub.
  *
- * Two things here are load-bearing for littleDB:
- *
- * - `beforeRun` resolves the session's managed config. The run pipeline AWAITS `beforeRun`
- *   before it calls `streamHarness`, and the `streamHarness` seam that carries per-session
- *   `system` / `model` / `onEvent` is synchronous — so this is where the async resolve has
- *   to happen. See `load.ts` for the other half.
- * - `reactions.sinks` sends 👍/👎 to littleDB. The session id is left at the DEFAULT
- *   (`<adapter>:<threadId>`) on BOTH sides: a custom `session` callback without a matching
- *   `reactions.session` would silently join outcomes onto a session that has no trace.
+ * The version a session runs comes from the harness's `turnOptions` hook (`agent.ts`), so
+ * the one thing here that is load-bearing for LittleDB is `reactions.sinks`: it sends 👍/👎
+ * to LittleDB as `user_feedback` scores on the turn's trace. The session id is left at the
+ * DEFAULT (`<adapter>:<threadId>`) on BOTH sides: a custom `session` callback without a
+ * matching `reactions.session` would silently put scores on a session that has no trace.
  */
 export default chatSdkConnector<LibrarianExtraBody>({
   userName: process.env.SLACK_BOT_USERNAME ?? "librarian",
@@ -79,8 +75,7 @@ export default chatSdkConnector<LibrarianExtraBody>({
     userId: message.author.userId,
     trigger,
   }),
-  beforeRun: async ({ session, thread }) => {
-    await db?.prepareSession(session);
+  beforeRun: async ({ thread }) => {
     await thread.startTyping?.("Checking the knowledge base...");
   },
 });

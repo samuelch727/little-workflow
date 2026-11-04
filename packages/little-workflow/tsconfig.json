@@ -11,6 +11,7 @@
     "paths": {
       "just-bash": ["src/types/just-bash.d.ts"]
     },
+    "resolveJsonModule": true,
     "rootDir": "src",
     "strict": true,
     "target": "ES2022",

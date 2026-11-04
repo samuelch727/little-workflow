@@ -1,288 +1,286 @@
 ---
-title: Using littledb
-description: Preview — the managed-config harness adapter that resolves config, stamps traces, and reports outcomes to littleDB.
+title: Using LittleDB
+description: Preview — let LittleDB manage a harness's prompt and model, send each turn to LittleDB as a trace, record scores, and put agent-made workflows behind review, with one URL and one API key.
 ---
 
 <Callout title="Preview — not yet available" type="warn">
-  `@little-workflow/littledb` is **not published to npm yet**, and it needs a littleDB control plane
-  and trace engine, which are not publicly available. This page documents the adapter's shape so you
-  can plan around it; the install and examples below will not work until the package and service are
-  released. Everything else in Little Harness — including [Outcome Capture](/docs/v0.1.0-alpha/build-agents/outcomes)
-  to local traces — works without it.
+  `@little-stack/littledb` is **not published to npm yet**, and it needs a LittleDB server, which is
+  not publicly available. This page documents the client's shape so you can plan around it; the
+  examples below will not work until the package and service are released. Everything else in
+  Little Harness — including [Outcome Capture](/docs/v0.1.0-alpha/build-agents/outcomes) to local
+  traces — works without it.
 </Callout>
 
-`littledb()` is the managed-config adapter for Little Harness. It resolves a
-session's system prompt, model, and skills from a littleDB control plane once per
-session, produces a pre-wired trace reporter that stamps every event with the
-pinned `configVersionId`, and reports run outcomes back to the platform.
+LittleDB is an optional service that stores traces and their scores, holds the **versions** of an
+agent (a system prompt and a model, for example), and runs the review loop around them: a proposal
+for a new version is tested in an experiment, checked against a policy, and put live or left for a
+person to approve.
 
-All reporting (traces, outcomes) is best-effort: failures never propagate into
-the harness hot path.
+A Harness agent connects to it in up to four places, each optional:
 
-## Install
+1. **Resolve** the version a session runs on (`db.managedHarness()` resolves and traces in one hook).
+2. **Trace** each turn with a tracer on `onEvent`.
+3. **Score** turns: code checks, and what your users say about them.
+4. **Review** the workflows the agent defines, with a registry on `dynamicWorkflows`.
 
-Not yet available. Once the package is published, it will install as:
+## Connect
 
-```bash
-# Preview — @little-workflow/littledb is not published yet.
-pnpm add @little-workflow/littledb
-```
-
-## Import
+Everything goes through one client, made from one URL and one project API key. `littledb dev`
+serves LittleDB (API and web UI) on `http://127.0.0.1:7340` and prints a key for local apps.
 
 ```ts
-import { littledb } from "@little-workflow/littledb/harness";
+// Preview — @little-stack/littledb is not published yet.
+import { createLittleDB } from "@little-stack/littledb";
+
+const db = createLittleDB({ url: process.env.LITTLEDB_URL!, apiKey: process.env.LITTLEDB_API_KEY! });
 ```
 
-## Basic Usage
+LittleDB is never on your agent's critical path. Traces and scores are queued and sent in batches
+in the background (retried, bounded, never thrown), and `resolve` falls back to its last answer,
+then to the config in your code. Call `await db.shutdown()` before a short-lived process exits so
+the queue is sent.
+
+## Trace a harness
 
 ```ts
-import { createHarness, generateHarness, localHost } from "little-harness";
-import { littledb } from "@little-workflow/littledb/harness";
+// Preview — @little-stack/littledb is not published yet.
+import { createHarness, generateHarness, localHost } from "@little-stack/harness";
 
-const db = littledb({
-  controlPlaneUrl: process.env.LITTLEDB_CONTROL_PLANE_URL!,
-  engineUrl: process.env.LITTLEDB_ENGINE_URL!,
-  harnessId: "my-agent",
-  // projectKey: process.env.LITTLEDB_PROJECT_KEY,  // omit for a local control plane
-  modelFor: (slot) => resolveModel(slot),   // return a LanguageModel for the managed modelSlot
-  // skillFor: (name) => skill(name),       // required if managed config declares skills
-});
-
-// Resolve managed config once per session.
-const session = await db.createSessionConfig(bootstrapConfig);
-
-if (session.staleConfig) {
-  console.warn("Using stale config:", session.configVersionId);
-}
+const tracer = db.harnessTracer({ harness: "support-desk" });
 
 const harness = createHarness({
   host: localHost({ dataDir: ".little-harness" }),
-  // Spread system, model, and skills from managed config.
-  ...session.harnessOptions,
-  tools: { myTool },
-  onEvent: session.reporter.onEvent,
+  model,
+  system: SYSTEM_PROMPT,
+  tools: { lookup_order },
+  onEvent: tracer.onEvent,
+  // Harness previews default to 512 UTF-16 code units; previewBytes is the legacy option name.
+  trace: { content: { previewBytes: 65_536 } },
 });
 
-// Run the harness.
-const result = await generateHarness({ harness, messages });
+await generateHarness({ harness, session: sessionId, prompt });
+```
 
-// Flush any buffered trace data after the run.
-await session.reporter.flush();
+Each turn becomes one trace, filed under the harness and the session: a root span for the turn, an
+`llm` span per model call (prompt, response, and token usage with cache reads and writes split out,
+so LittleDB can price it), and a `tool` span per tool call. The tracer never waits on the network.
+What a span carries is what the [harness event](/docs/v0.1.0-alpha/reference/events) carried, so
+raise `trace.content.previewBytes` to send whole prompts and outputs. The turn's trace also says how
+the turn started, from the `trigger` option of
+[`generateHarness`](/docs/v0.1.0-alpha/reference/generate-harness#trigger) and `streamHarness`.
 
-// Report the outcome (best-effort).
-await db.reportOutcome({
-  runId: "run_abc123",
-  status: "success",
+| Option | Meaning |
+| --- | --- |
+| `harness` | The harness's slug in LittleDB. Required. |
+| `resolution` | What `db.resolve()` returned: its version id goes on every trace, and a trial session's traces are marked `trial`. |
+| `versionId`, `environment`, `userId` | Set them without a resolution. `environment` is `production` by default. |
+| `traceId` | Put every turn in ONE trace, each turn a child of a root span. |
+| `traceIdFor` | Your own trace id per turn. The default is `turnTraceId(sessionId, turnId)`; `tracer.traceIdForTurn(sessionId, turnId)` gives back whichever applies. |
+| `name`, `tags`, `metadata` | The trace name (`turn`, or `session` with `traceId`), and what to add to every trace. |
+| `captureContent` | `false` sends structure and numbers only. |
+
+`tracer.traceIdFor(sessionId)` is the trace of the session's latest turn, to put a score on.
+
+## Let LittleDB manage the prompt
+
+Everything that can change about an agent is a version: plain JSON content such as
+`{ system, model }`. `db.managedHarness()` hands those to LittleDB and returns a
+[`turnOptions`](/docs/v0.1.0-alpha/reference/create-harness#turnoptions) hook for `createHarness`.
+Each turn then runs the version its session runs, traced with that version, on every path that
+runs a turn (`generateHarness`, `streamHarness`, connectors, schedules, `little-harness start`):
+
+```ts
+// Preview — @little-stack/littledb is not published yet.
+import { littleDBFromEnv } from "@little-stack/littledb";
+import { z } from "zod";
+
+const db = littleDBFromEnv(); // offline (your bootstrap runs) when LITTLEDB_URL is unset
+const models = { fast: haiku, smart: sonnet };
+
+const support = db.managedHarness({
+  slug: "support-desk",
+  bootstrap: { system: readFileSync("agents/support/instructions.md", "utf8"), model: "fast" },
+  schema: z.object({ system: z.string().min(1), model: z.enum(["fast", "smart"]) }),
+  models,
 });
+
+export default createHarness({ host, model: models.fast, tools, turnOptions: support.turnOptions });
 ```
 
-## API Signature
+- **Version 1 and after.** The bootstrap becomes version 1. A later edit to it becomes a "Changed
+  in code" proposal that LittleDB carries onto the live version, so your edit and LittleDB's fixes
+  both land; until it ships, the live version runs. `littledb pull harness:support-desk --field
+  system` prints the live prompt, to take back into `instructions.md`.
+- **Sticky sessions.** A session keeps its version through promotions and leaves it after a
+  rollback (checked every 30 seconds). A trial keeps a session on one side.
+- **Parked turns.** A turn that parks (waiting for a person, say) continues on the version it
+  parked on, even after a restart, a promotion or a rollback: `turnOptions` pins the version and
+  its content to the parked turn. When `resolveModel` supplies the model, the pin also preserves
+  the `provider/model` id, who pays (`key` or `credits`) and its source. The continued turn
+  reconstructs that model through `resolveModel`, resolves nothing, runs the saved content and is
+  traced as that version, including when it parks again. Keep the resolver configured: removing
+  it or loading an invalid saved model fails the continued turn. New pins also record when a
+  code model or named slot won, so adding a resolver does not replace it. Older named-slot pins
+  still work; an older prompt-only pin with no model decision is refused when a resolver needs
+  one. The session's next turn resolves as usual. `turnOptions` also returns
+  `metadata: { littledb: { subject, versionId, number, mode } }`, which the agent server sends on
+  the event that ends the turn.
+- **Checked content.** A version that does not match `schema`, or names a model slot `models` does
+  not have, never runs: the bootstrap does, and `onError` says why. LittleDB also checks every
+  candidate against the schema before testing it.
+- **Outages.** A failed resolve falls back to the last live answer, then the bootstrap, and after
+  three failures the client stops asking for 30 seconds. `lastKnownFile` on the client keeps the
+  last live answers on disk for a restart during an outage.
+- **Tests.** `testLittleDB()` from `@little-stack/littledb/testing` runs LittleDB in memory:
+  `setLive`, `startTrial`, `rollback` and `setDown` drive the cases, and `traces` holds what was sent.
+  `connect()` gives another client of the same LittleDB with nothing cached, as a restarted
+  process has.
+
+In UNRELEASED source, LittleDB can also supply the model through
+`managedHarness({ resolveModel })`, using `createModelResolver` from
+`@little-stack/littledb/models`. A version names a `provider/model` id; the resolution supplies
+that descriptor and whether calls use your provider key or LittleDB credits. In that setup
+`createHarness({ host, turnOptions: support.turnOptions })` needs no code-side model. A missing
+provider key fails the turn and never switches payment to credits. The named `models` slots in
+the example above keep precedence.
+
+To wire it yourself, `db.resolve({ kind: "harness", slug, stickyKey: sessionId, bootstrap, schema })`
+returns the version (`mode` is `live`, `trial`, `holdout` or `none`; `fallback` is set when the app
+is not running LittleDB's answer); pass its `system` and `model` to each `generateHarness` call
+and its resolution to `db.harnessTracer({ harness, resolution })`.
+
+## Scores
 
 ```ts
-function littledb(options: LittleDbOptions): LittleDb;
-
-interface LittleDb {
-  createSessionConfig(bootstrapConfig: ConfigBundle): Promise<SessionConfig>;
-  reportOutcome(outcome: ReportOutcome): Promise<{ ok: boolean }>;
-  readonly outcomeSink: HarnessOutcomeSink;
-}
+// Preview — @little-stack/littledb is not published yet.
+db.score({ traceId: tracer.traceIdFor(sessionId)!, name: "task_success", value: 1, source: "code" });
 ```
 
-## `littledb()` Options
+`source` is `app` (default), `human`, `judge`, `code`, `workflow` or `pushback`. Scores are upserted
+by a stable id, so a retry never adds a second one.
 
-### `controlPlaneUrl`
+## User feedback
 
-`string`
+What your users say about a reply goes to LittleDB as scores with source `user`, where reviews,
+trials and rollback weigh it next to the judges. There are three ways in:
 
-URL of the littleDB control plane. Config is resolved from this endpoint.
+- `db.outcomeSink({ tracer })`, a sink for chat reactions and `reportHarnessOutcome`.
+- `db.feedback({ traceId, thumbs, comment, ... })` from your backend.
+- `db.feedbackHandler({ authorize, resolveTrace })`, mounted on your backend for the browser.
 
-```ts
-controlPlaneUrl: process.env.LITTLEDB_CONTROL_PLANE_URL!
-```
+`tracer.traceIdForTurn(sessionId, turnId)` gives the trace of a turn. See
+[User Feedback](/docs/v0.1.0-alpha/build-agents/user-feedback).
 
-### `engineUrl`
+## Managed memory
 
-`string`
-
-URL of the littleDB trace engine. Session events are posted here.
-
-```ts
-engineUrl: process.env.LITTLEDB_ENGINE_URL!
-```
-
-### `harnessId`
-
-`string`
-
-The harness identifier registered in littleDB. Used to look up the active
-config and tag traces.
+`db.memory.org()` and `db.memory.user()` keep a harness's [memory](/docs/v0.1.0-alpha/build-agents/memory)
+in LittleDB. Each returns an ordinary `memory()` option, so the agent still reads and edits files:
 
 ```ts
-harnessId: "renewal-brief-agent"
-```
-
-### `projectKey`
-
-`string | undefined`
-
-Per-project API key. Omit when targeting a local control plane.
-
-```ts
-projectKey: process.env.LITTLEDB_PROJECT_KEY
-```
-
-### `channel`
-
-`string | undefined`
-
-Release channel to resolve config from. Defaults to `"production"`.
-
-```ts
-channel: "staging"
-```
-
-### `modelFor`
-
-`(slot: string) => LanguageModel | undefined`
-
-Resolves a `LanguageModel` instance from the `modelSlot` string stored in
-managed config. The adapter calls this during `createSessionConfig`. If it
-returns `undefined` for the resolved slot, `createSessionConfig` throws.
-
-```ts
-modelFor: (slot) => {
-  if (slot === "claude-sonnet") return gateway("anthropic/claude-sonnet-4-6");
-  if (slot === "claude-opus") return gateway("anthropic/claude-opus-4-7");
-},
-```
-
-### `skillFor`
-
-`((name: string) => SkillInput) | undefined`
-
-Resolves a `SkillInput` from a skill name declared in managed config. Required
-when the resolved config bundle declares any skills — `createSessionConfig`
-throws if skills are present and no resolver is provided.
-
-```ts
-skillFor: (name) => skill(`./skills/${name}`)
-```
-
-### `fetchImpl`
-
-`typeof fetch | undefined`
-
-Custom fetch implementation. Useful in environments where the global `fetch` is
-not available or needs wrapping.
-
-### `cache`
-
-`ConfigCache | undefined`
-
-Optional cache for resolved config bundles. When provided, the adapter reads
-from and writes to this cache, making `createSessionConfig` resilient to
-transient control plane failures.
-
-## `createSessionConfig(bootstrapConfig)`
-
-Resolves managed config and returns a `SessionConfig` ready to pass to
-`createHarness()`.
-
-`bootstrapConfig` is a `ConfigBundle` sent to the control plane to seed the
-first resolution for a harness/channel that has not been configured yet. It is
-the server-side bootstrap — not a client-side outage fallback (the client falls
-back to the disk cache; see "Outage behavior" below).
-
-### `SessionConfig`
-
-| Field | Type | Description |
-|---|---|---|
-| `configVersionId` | `string` | The pinned config version for this session. Recorded into every trace event. |
-| `channel` | `string` | The channel the config was resolved from. |
-| `staleConfig` | `boolean` | `true` when the adapter served the last cached config because the control plane was unreachable. |
-| `harnessOptions` | `ManagedHarnessOptions` | `{ system, model, skills }` — spread directly into `createHarness()`. |
-| `reporter` | `LittleDbHarnessReporter` | Trace reporter pre-wired with `configVersionId` and `channel`. |
-
-Config is resolved exactly once per call to `createSessionConfig`. Calling it
-again for a resumed session is safe and returns an independently pinned config
-for that session.
-
-## `reportOutcome(outcome)`
-
-Reports a run outcome to the control plane. Best-effort — the returned promise
-resolves with `{ ok: boolean }` and never rejects.
-
-### `ReportOutcome`
-
-| Field | Type | Description |
-|---|---|---|
-| `runId` | `string` | The run identifier to associate the outcome with. |
-| `status` | `"success" \| "failure" \| "partial"` | The outcome status. |
-| `score` | `number` (optional) | A numeric score for eval use cases. |
-| `detail` | `string` (optional) | Free-form note about the outcome. |
-| `metadata` | `Record<string, unknown>` (optional) | Additional structured metadata. |
-
-## `outcomeSink`
-
-A `HarnessOutcomeSink` that forwards every recorded `outcome.reported` event to
-`reportOutcome`. Hand it to Little Harness's own outcome capture so the local
-trace and littleDB receive the same outcome:
-
-```ts
-import { reportHarnessOutcome } from "little-harness";
-
-await reportHarnessOutcome({
-  session: result.session,
-  status: "success",
-  sinks: [db.outcomeSink],
+// Preview — @little-stack/littledb is not published yet.
+createHarness<typeof tools, DeskUser>({
+  // ...
+  turnOptions: desk.turnOptions,
+  memory: [
+    db.memory.org<DeskUser>({
+      space: "lending-rules",
+      org: ({ extraBody }) => extraBody?.bankId, // leave out for one company per project
+      description: "The bank's shared lending knowledge. Only underwriters may change it.",
+      canWrite: ({ extraBody }) => extraBody?.role === "underwriter",
+      by: ({ extraBody }) => extraBody && { id: extraBody.userId, label: extraBody.name, role: extraBody.role },
+      seed: new URL("./memory/lending-rules", import.meta.url),
+    }),
+    db.memory.user<DeskUser>({
+      user: ({ extraBody }) => extraBody && { id: extraBody.userId, label: extraBody.name },
+    }),
+  ],
 });
 ```
 
-It also works as a Chat SDK connector's `reactions: { sinks: [db.outcomeSink] }`.
-See [Outcome Capture](/docs/v0.1.0-alpha/build-agents/outcomes).
+- **Org memory** is one copy per org and space. Conversations may change it only where `canWrite`
+  allows (nobody by default), and a change waits for a person in LittleDB's Memory tab unless the
+  space's `review` is `after` or `none`. `seed` is version 1; a later edit to the folder arrives as
+  one "Changed in code" change to review.
+- **A person's memory** is one copy per person. It saves at once, only their conversations see it,
+  and admins open it only through an audited action.
+- **History and traces.** Each file keeps its revisions and where each came from: the
+  conversation, what the person said, who approved it. Each turn's trace records exactly which
+  revisions it loaded, and the Memory tab's map shows what a turn carried.
+- **People's control.** `db.memory.handler({ authorize })` lets a signed-in person list and forget
+  their own memory from your backend; `db.memory.forgetUser({ user, org })` forgets everything when
+  an account is deleted.
+- **Offline and tests.** `littleDBFromEnv()` without `LITTLEDB_URL` keeps the same memories in
+  folders under `.littledb/memory`. `testLittleDB().memory` holds them in memory, with `waiting()`,
+  `approve()` and `files()` for checking what a turn changed.
 
-## The Reporter
+## Agent-made workflows behind review
 
-`session.reporter` is a `LittleDbHarnessReporter` with two methods:
-
-| Method | Description |
-|---|---|
-| `onEvent(event)` | Receives each `HarnessEvent`. Wire this to `createHarness({ onEvent })`. Events are posted to the engine best-effort. |
-| `flush()` | Uploads any pending session state (eval transcript, file snapshots). Call this after the harness run completes. |
+With [Dynamic Workflows](/docs/v0.1.0-alpha/build-agents/dynamic-workflows), an agent can turn
+recurring work into a workflow with `define_workflow`. LittleDB's registry makes each definition a
+**draft version** in LittleDB with a **proposal** a person approves:
 
 ```ts
-const harness = createHarness({
-  ...session.harnessOptions,
-  host: localHost(),
-  tools: { myTool },
-  onEvent: session.reporter.onEvent,
-});
+// Preview — @little-stack/littledb is not published yet.
+import { dynamicWorkflows, localWorld } from "@little-stack/workflow";
 
-await generateHarness({ harness, messages });
-await session.reporter.flush();
+createHarness({
+  // ...
+  dynamicWorkflows: dynamicWorkflows({
+    registry: support.registry, // or db.agentWorkflowRegistry({ harness: "support-desk" })
+    world: support.registry.world((run) => localWorld({ dataDir: run.dataDir })),
+  }),
+});
 ```
 
-## Notes
+`define_workflow` then answers that the definition is saved as a draft waiting for review. Each
+turn offers the approved (live) version of every agent-made workflow, plus the drafts the session
+made itself (`ownDrafts: false` turns that off). Once a person approves the proposal, every session
+offers the new version from its next turn. A candidate LittleDB trials is offered to a share of
+sessions, and a redefinition is made on the version the session was offered, so a fix LittleDB
+shipped is carried onto it. The `world` factory sends each run of an agent-made
+workflow (and of a one-shot plan) to LittleDB as a trace that carries the session and points at
+the turn and the tool call that started it, so a session reads start to finish: how each turn
+started (the harness `trigger` option, set for you by connectors, schedules, the agent server and
+the REPL), then the runs its tool calls started. When LittleDB cannot be reached, the
+registry offers the last list it fetched.
 
-- **Replay-safe:** config is resolved once at the start of a session, before
-  the model loop. The pinned `configVersionId` is stamped on every trace event
-  so replays use the same version.
-- **Stale config:** when `session.staleConfig` is `true`, the adapter served the
-  last cached config because the control plane was unreachable. The run is safe
-  to continue; check `staleConfig` if you need to alert or log.
-- **Outage behavior:** on a control-plane outage (network error or `5xx`), the
-  adapter serves the last cached config (`staleConfig: true`). If no cache entry
-  exists, `createSessionConfig` throws rather than starting a run on an
-  unverified config. (`4xx` responses and schema mismatches always throw — a
-  revoked key or changed contract surfaces immediately, even if a cache exists.)
-- **Best-effort reporting:** trace and outcome HTTP calls are wrapped in
-  `try/catch`, so failures are swallowed and never throw into the harness. They
-  are awaited inline, though — not fire-and-forget — so a slow or hung endpoint
-  can add latency to a run. Pass a timeout-bounded `fetchImpl` if you need to
-  bound that.
-- **Skills require a resolver:** if the managed config declares skill names, a
-  `skillFor` resolver is required. Omitting it causes `createSessionConfig` to
-  throw before the harness is built.
-- **Local control plane:** omit `projectKey` when pointing at a local or
-  self-hosted control plane that does not require authentication.
+## Experiments
+
+LittleDB plans experiments (a candidate version against a dataset); your app runs them, since it
+owns the tools and the model keys:
+
+```ts
+// Preview — @little-stack/littledb is not published yet.
+const worker = support.evalWorker({
+  run: async (run) => {
+    // Inside a run, the managed harness runs the run's candidate and traces into the run's trace.
+    const result = await generateHarness({ harness, prompt: String(run.item!.input), session: `eval-${run.runId}` });
+    const answer = result.status === "completed" ? result.text : "";
+    return { output: answer, scores: [{ name: "task_success", value: grade(answer, run.item!.expected) }] };
+  },
+});
+await worker.start(); // until worker.stop(); or worker.runOnce() in a script
+```
+
+Without a managed harness, `db.evalWorker({ subjects: ["harness:support-desk"], run })` hands
+`run` the version's `content` and the run's `trace` options for `db.harnessTracer`. Traces made
+inside a run are tagged `experiment`, and an agent a run's workflow calls resolves to the version
+the run pins for it.
+
+The worker heartbeats its claims, sends each run's trace before completing it, and completes a run
+that threw with its error so LittleDB can retry it (up to 3 attempts).
+
+## OpenTelemetry instead
+
+LittleDB also takes OTLP/HTTP traces (JSON or protobuf) at `POST <url>/v1/otlp/v1/traces` with the
+same `Authorization: Bearer <key>` header, and understands the GenAI semantic conventions and
+Vercel AI SDK telemetry. Use it when your app already exports OpenTelemetry; the client is the
+richer path for a Harness agent.
+
+## Everything else
+
+`db.request(method, path, body)` calls any other `/v1` endpoint (datasets, proposals,
+experiments) and throws `LittleDBError` (`status`, `code`). `db.flush()` sends the queue now;
+`db.stats()` counts what was queued, sent and dropped. `onError` hears about problems off the
+agent's path (by default a `console.warn`, once a minute per kind of problem); the API key is never
+logged.

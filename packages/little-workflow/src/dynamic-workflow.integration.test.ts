@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterEach, expect, it } from "vitest";
 import { jsonSchema, tool } from "ai";
 import { MockLanguageModelV3 } from "ai/test";
-import { createHarness, generateHarness, localHost } from "little-harness";
+import { createHarness, generateHarness, localHost } from "@little-stack/harness";
 import { dynamicWorkflows } from "./dynamic-workflow.js";
 
 const dirs: string[] = [];
@@ -112,6 +112,7 @@ it("authors a one-shot plan, runs it, and records it for recall", async () => {
   const result = await generateHarness({ harness, type: "job", input: {} });
 
   // The harness completed after running the model-authored plan.
+  if (result.status !== "completed") throw new Error(`Expected a completed turn; received ${result.status}`);
   expect(result.text).toContain("done");
 
   // The run_ad_hoc_plan envelope the model received back carries the completed run's echo output.
@@ -188,6 +189,7 @@ it("recalls a plan authored on a PRIOR run via a second harness sharing the same
     type: "job",
     input: {},
   });
+  if (run1.status !== "completed") throw new Error(`Expected a completed turn; received ${run1.status}`);
   expect(run1.text).toContain("run1 done");
 
   // RUN 2: a FRESH harness over the SAME dataDir searches its authored plans and finds run 1's plan.
@@ -232,6 +234,7 @@ it("recalls a plan authored on a PRIOR run via a second harness sharing the same
     type: "job",
     input: {},
   });
+  if (run2.status !== "completed") throw new Error(`Expected a completed turn; received ${run2.status}`);
   expect(run2.text).toContain("recalled");
 
   // THE HEADLINE: run 2's search returned run 1's plan — proving the authored-plans store persists
@@ -306,6 +309,7 @@ it("rejects a recalled plan after a capability is removed (drift)", async () => 
   });
 
   // The run did NOT throw; the harness handled the clean failure and produced text.
+  if (result.status !== "completed") throw new Error(`Expected a completed turn; received ${result.status}`);
   expect(result.text).toContain("handled");
 
   // The invariant re-checks on resubmission: the tool result is a clean capability-drift failure.

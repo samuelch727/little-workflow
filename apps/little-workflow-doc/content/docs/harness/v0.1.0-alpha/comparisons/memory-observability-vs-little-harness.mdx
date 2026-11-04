@@ -1,0 +1,46 @@
+---
+title: Memory And Observability Vs Little Harness
+description: Why memory and tracing tools sit beside Little Harness rather than replacing it.
+---
+
+Memory and observability tools are important, but they are not harnesses.
+
+They answer "what should the agent remember?" and "what happened?" Little Harness answers "where does the agent work, what can it touch, how are files persisted, and how does the app inspect the result?"
+
+## Memory Layers
+
+Mem0, Zep, Letta, and LlamaIndex memory help agents remember user facts, conversation history, preferences, or structured knowledge across turns and sessions.
+
+Use a memory layer when the problem is personalization or retrieval of long-term context.
+
+Use Little Harness when the problem is a working environment: files the agent can edit, artifacts the app can inspect, directories that commit back to app storage, and shell/script workflows.
+
+## Observability Platforms
+
+LangSmith, Langfuse, Braintrust, Helicone, and AgentOps help teams trace LLM calls, tool invocations, retrieval steps, sessions, costs, latency, prompts, evals, and production quality.
+
+Use an observability platform when the problem is knowing what happened and measuring whether the app is improving.
+
+Use Little Harness when the problem is also giving the agent somewhere safe and useful to work. Little Harness traces should export to observability tools, but tracing alone does not create the session filesystem, artifact store, or Persistent Dir commit model.
+
+## Core Difference
+
+| Question | Memory / Observability Tools | Little Harness |
+|---|---|---|
+| Main abstraction | Memories, traces, evals, dashboards. | Managed session workspace. |
+| Files/artifacts | Usually not first-class editable runtime files. | First-class. |
+| Runtime isolation | Usually outside scope. | Core concern. |
+| Persistence | Stores facts, messages, traces, or eval data. | Stores selected harness directories through app callbacks. |
+| Best fit | Improve context and inspect behavior. | Give the agent a safe workbench. |
+
+## Sources
+
+- [Mem0 docs](https://docs.mem0.ai/)
+- [Zep memory docs](https://help.getzep.com/v2/memory)
+- [Letta memory docs](https://docs.letta.com/letta-code/memory/)
+- [LlamaIndex memory](https://docs.llamaindex.ai/en/stable/module_guides/deploying/agents/memory/)
+- [LangSmith observability](https://docs.langchain.com/oss/python/langgraph/observability)
+- [Langfuse docs](https://langfuse.com/docs)
+- [Braintrust observability](https://www.braintrust.dev/docs/observe)
+- [Helicone platform overview](https://docs.helicone.ai/getting-started/platform-overview)
+- [AgentOps sessions](https://docs.agentops.ai/v2/concepts/sessions)

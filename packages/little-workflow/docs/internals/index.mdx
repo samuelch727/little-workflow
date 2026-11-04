@@ -3,7 +3,7 @@ title: Implementation Details
 description: How the v0.1.0-alpha SDK actually works, end to end, anchored on the shipped source.
 ---
 
-This section is a guided tour of the alpha SDK internals. The [SDK Implementation Spec](/docs/v0.1.0-alpha/internals/sdk-implementation) lists the contract; these pages walk through how that contract is implemented in the `little-workflow` package — every diagram traces a real path through the source.
+This section is a guided tour of the alpha SDK internals. The [SDK Implementation Spec](/docs/v0.1.0-alpha/internals/sdk-implementation) lists the contract; these pages walk through how that contract is implemented in the `@little-stack/workflow` package — every diagram traces a real path through the source.
 
 If you only need to use the SDK, start with the [Quickstart](/docs/v0.1.0-alpha/getting-started/quickstart) and [Core Mental Model](/docs/v0.1.0-alpha/foundations). Read on here if you want to extend, debug, or audit the runtime.
 
@@ -18,7 +18,7 @@ The alpha SDK is one package shaped around a single loop: turn a `WorkflowDefini
   classDef runtime fill:#dcfce7,stroke:#16a34a,color:#0f172a;
   classDef world fill:#ede9fe,stroke:#7c3aed,color:#0f172a;
 
-  Dev["Developer code<br/>createLittleWorkflow"]:::authoring
+  Dev["Developer code<br/>defineWorkflow"]:::authoring
   Run["runWorkflow"]:::authoring
   Compile["compileWorkflow"]:::compile
   Req["OrchestrationRequest<br/>+ canonical hashes"]:::compile

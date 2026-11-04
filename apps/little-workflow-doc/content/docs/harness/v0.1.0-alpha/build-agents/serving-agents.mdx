@@ -1,0 +1,146 @@
+---
+title: Serving An Agent
+description: Run an agent folder as a server with little-harness start, develop it with little-harness dev, and run it on a timer with schedules.
+---
+
+`little-harness start` serves one agent folder. It mounts every connector the
+folder has, answers an HTTP API for messages and jobs, starts the folder's
+schedules on time, and continues turns that paused waiting for background tasks
+or [a person's answer](/docs/harness/v0.1.0-alpha/build-agents/asking-a-person). You
+write no route files or loaders, and no timer.
+
+```bash
+little-harness start loan-officer             # http://127.0.0.1:3000
+little-harness start loan-officer --port 8080 --host 0.0.0.0 --token "$TOKEN"
+little-harness dev loan-officer               # restarts on change, chat in the terminal
+```
+
+## What It Serves
+
+| Route | What it does |
+| --- | --- |
+| `POST /connectors/<id>` | Each connector in `connectors/`. A web-rich connector gets its chat route; a Chat SDK connector gets its webhook (point Slack's request URL here). |
+| `GET /` | The agent's connectors, Input Types, schedules (with their next run), and whether `humanInput` is on. |
+| `POST /sessions/<session>/messages` | `{ "prompt": "..." }` or `{ "messages": [...] }`. Runs a turn and returns `{ status, sessionId, text }`, or `{ status: "parked", continuationId, pending }`. |
+| `POST /jobs/<type>` | `{ "input": {...}, "session"?: "..." }`. Runs an Input Type, as `generateHarness({ type, input })` does. |
+| `GET /questions` | The questions waiting for a person (`?session=`, `?status=all`). |
+| `POST /sessions/<session>/questions/<requestId>/answer` | `{ "option"?, "text"?, "value"?, "answeredBy"? }`. Records the answer; the turn that waited for it continues. |
+| `POST /schedules/<id>/run` | Runs a schedule now. |
+
+```bash
+curl -s localhost:3000/sessions/APP-1001/messages \
+  -H 'content-type: application/json' \
+  -d '{"prompt":"Pre-approve APP-1001."}'
+```
+
+The API routes run the agent, so they are guarded:
+
+- With `--token` (or `LITTLE_HARNESS_TOKEN`), they need `Authorization: Bearer <token>`.
+- Without a token, the server listens only on a loopback address: the default
+  `127.0.0.1` works, and `--host 0.0.0.0` refuses to start. The API then answers
+  only programs on this machine: requests addressed to `localhost`, `127.0.0.1`
+  or `[::1]`, with `content-type: application/json` when they have a body, and
+  without an `Origin` header. A web page open in your browser cannot call it.
+- A tunnel such as ngrok or cloudflared forwards requests from the internet
+  through loopback, so the server cannot tell them from your own. Start the
+  server with `--token` before you open a tunnel to it; connectors keep working
+  without the token.
+- Connectors are served either way, and check their own requests: a Chat SDK
+  adapter checks the platform's signature, and a web-rich connector runs its
+  `authenticate`.
+
+Every 15 seconds, the server starts the schedules that are due and continues
+the turns whose wait is over. An answer posted to the API continues its turn at
+once. A continued turn's reply goes to the log. It is not posted back to the
+chat the turn came from yet, so a connector conversation that paused for an
+answer continues without its reply reaching the chat.
+
+## Develop With `dev`
+
+`little-harness dev <name>` runs `start` in a child process and restarts it when
+a file in the agent folder changes. It also opens a chat in the terminal against
+that server:
+
+```txt
+you> Review APP-1008.
+agent> (waiting; type :questions to see what it asked)
+
+you> :questions
+1. [dev-20261014T091200] APP-1008 has a 47% debt-to-income ratio. Approve?  (approve = Approve, decline = Decline)
+
+you> :answer 1 approve
+(answered; the agent continues, and its reply appears in the log)
+```
+
+`:reset` starts a new session and `:exit` quits. In `dev`, the log shows a
+continued turn's whole reply; `start` logs its first 120 characters.
+
+## Schedules — `schedules/*.ts`
+
+A schedule runs the agent on a timer. Each file in `schedules/` default-exports
+one; the file name is its id:
+
+```ts
+// agents/loan-officer/schedules/morning-backlog.ts
+import { defineSchedule } from "@little-stack/harness";
+
+export default defineSchedule({
+  cron: "0 9 * * 1-5",
+  timezone: "Asia/Hong_Kong",
+  prompt: "Pre-approve every application received since yesterday.",
+});
+```
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `cron` | required | Five fields: minute, hour, day of month, month, day of week. Supports `*`, ranges, steps, lists, and names such as `MON-FRI`. Sunday is 0 or 7. |
+| `timezone` | the server's | The IANA time zone the cron is read in. |
+| `prompt` | | What to ask the agent. Give this, or `type`. |
+| `type`, `input` | | An Input Type and its input, run as a job instead of a message. |
+| `session` | `"new"` | `"new"` starts a session per run, named `schedule-<id>-<time>`. A fixed id keeps one running conversation. |
+| `catchUp` | `true` | Whether a run missed while the server was down runs once when it starts again. |
+| `description` | | Shown by `little-harness schedules`. |
+
+The last run of each schedule is recorded in the host's data dir, under
+`schedules/<agent>/`, before the run starts:
+
+- **A restart does not repeat a run.** That includes a run that was still going
+  when the process stopped.
+- **A missed run is not dropped silently.** Several missed runs become one run,
+  marked as missed in the log. With `catchUp: false`, they are skipped.
+- **A new schedule starts counting when the server first sees it.** Times
+  before that do not run.
+
+```bash
+little-harness schedules loan-officer
+# morning-backlog  0 9 * * 1-5 (Asia/Hong_Kong)  next 2026-10-15T01:00:00.000Z  last never
+little-harness schedules run loan-officer morning-backlog   # run it now, in this process
+```
+
+## Good To Know
+
+- `start` and `dev` run the agent in one process. Run one server per data dir;
+  two servers sharing one would both start the same schedules.
+- Without a durable host (`localHost` has one), nothing continues parked turns.
+  Schedules and the API still work.
+- The terminal chat in `dev` sends whole messages and prints the final reply. To
+  see the agent's tool calls as they stream, use `little-harness test`.
+
+## See Also
+
+- [Agent Folders](/docs/harness/v0.1.0-alpha/build-agents/agent-folders): the folder layout.
+- [Chat Connectors](/docs/harness/v0.1.0-alpha/build-agents/chat-connectors): connector descriptors.
+- [CLI](/docs/harness/v0.1.0-alpha/reference/cli#start-name): flags.
+
+### Identified caller delivery
+
+With `resume: "caller"`, a dedicated API-owned session may opt into durable dispatch identities.
+Use `/sessions/:s/dispatches/:d/messages`, `/resume`, `/stop`, `/turn`, and `/staged/:messageId`.
+The path is authoritative;404 means unsupported/unknown and must never trigger a legacy fallback.
+Opt-in pins the session mode, including a pre-start Stop. Legacy-only sessions remain compatible;
+use a new session to opt in. Identified calls require a readable durable session log and concrete
+model handles. A new dispatch is409 while a previous logical dispatch is running, parked or
+interrupted; cancel its exact target first. Caller resume/message identities are immutable across
+restarts. Staged acceptance is separate from read proof: claimed requests stay uncertain until a
+durable model response. A stale Stop or delayed prior-run completion cannot affect a successor.
+See the package `docs/contracts/dispatch-delivery.md` for crash and storage boundaries.

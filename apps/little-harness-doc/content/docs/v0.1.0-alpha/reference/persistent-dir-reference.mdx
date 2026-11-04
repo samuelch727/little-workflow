@@ -69,6 +69,17 @@ commit: "read-only"
 `read-only` exposes files for inspection but rejects writes immediately; it is
 not a copy-on-write mode.
 
+## Per-Turn Write Check
+
+```ts
+canWrite: ({ extraBody }) => extraBody?.role === "editor"
+```
+
+`canWrite` runs each turn, before the directory loads. When it returns false (or a
+promise of false), the directory behaves as `read-only` for that turn: writes fail at
+once, `store` is not called, and the commit result lists the directory as `skipped`.
+Without it, every turn may write. `localDir({ canWrite })` passes it through.
+
 ## Conflict Handling
 
 The alpha API does not lock the conflict API yet. A likely shape is for `load` to return a version cursor and `store` to receive it back.

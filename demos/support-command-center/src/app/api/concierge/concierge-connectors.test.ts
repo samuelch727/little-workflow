@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import { loadConnectorToolExtensions } from "little-harness/connectors/discovery";
+import { loadConnectorToolExtensions } from "@little-stack/harness/connectors/discovery";
 import { describe, expect, test } from "vitest";
 import slackConnector from "../../../../agents/concierge/connectors/slack/connector";
 import webConnector from "../../../../agents/concierge/connectors/web/connector";

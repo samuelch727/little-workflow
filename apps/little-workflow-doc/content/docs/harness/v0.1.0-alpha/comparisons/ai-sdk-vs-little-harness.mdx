@@ -1,0 +1,87 @@
+---
+title: AI SDK Vs Little Harness
+description: How Little Harness builds on AI SDK-style streaming without replacing it.
+---
+
+AI SDK is the closest API-shape influence for Little Harness.
+
+Little Harness should feel like it belongs next to `generateText`, `streamText`, `ToolLoopAgent`, `createAgentUIStream`, `UIMessage[]`, and `useChat`. It should not ask developers to abandon the AI SDK chat path.
+
+## Use AI SDK Directly When
+
+- the app needs model calls, typed tools, and streamed UI
+- message persistence is normal app database work
+- tools return compact values that fit in model context
+- the agent does not need a managed filesystem
+- execution happens safely inside the app's existing server runtime
+
+AI SDK is the right primitive when the application layer is already simple.
+
+## Use Little Harness When
+
+- the agent needs a private workspace for scratch files
+- tools may return large outputs that should become artifacts
+- the agent needs shell/script workflows over files
+- skills should be exposed as readable directories
+- selected folders should persist through app-owned load/store callbacks
+- the host app needs traces that include file changes and persistence failures
+
+Little Harness should use AI SDK conventions while adding the missing harness layer.
+
+## Core Difference
+
+| Question | AI SDK | Little Harness |
+|---|---|---|
+| Main abstraction | Model/tool streaming. | Managed agent session workspace. |
+| Client API | `useChat`, `sendMessage`. | Still `useChat`, `sendMessage`. |
+| Server API | `generateText`, `streamText`, `ToolLoopAgent`, `createAgentUIStream`. | `generateHarness(...)`, `streamHarness(...)`. |
+| Files/artifacts | App-defined. | First-class `/session/` and `/artifacts/`. |
+| Persistence | App-authored messages and storage. | App-authored Persistent Dirs plus session workspace. |
+| Sandbox | App/server responsibility. | Harness runtime responsibility. |
+
+## How They Should Fit
+
+```ts
+export async function POST(req: Request) {
+  const { messages } = await req.json();
+
+  const result = streamHarness({
+    harness,
+    messages,
+    session: chatId,
+  });
+
+  return result.toUIMessageStreamResponse();
+}
+```
+
+For non-streaming work, Little Harness should follow the same split as AI SDK:
+
+```ts
+import { Output } from "ai";
+
+const result = await generateHarness({
+  harness,
+  type: "account.brief",
+  input: { accountId },
+  output: Output.object({ schema: accountBriefSchema }),
+});
+```
+
+The client stays ordinary AI SDK:
+
+```ts
+const { messages, sendMessage } = useChat({
+  transport: new DefaultChatTransport({ api: "/api/chat" }),
+});
+```
+
+## Sources
+
+- [AI SDK Agents overview](https://ai-sdk.dev/docs/agents/overview)
+- [AI SDK `generateText`](https://ai-sdk.dev/docs/reference/ai-sdk-core/generate-text)
+- [AI SDK `streamText`](https://ai-sdk.dev/docs/reference/ai-sdk-core/stream-text)
+- [AI SDK `ToolLoopAgent`](https://ai-sdk.dev/docs/reference/ai-sdk-core/tool-loop-agent)
+- [AI SDK `createAgentUIStream`](https://ai-sdk.dev/docs/reference/ai-sdk-core/create-agent-ui-stream)
+- [AI SDK message persistence](https://ai-sdk.dev/docs/ai-sdk-ui/chatbot-message-persistence)
+- [AI SDK telemetry](https://ai-sdk.dev/docs/ai-sdk-core/telemetry)

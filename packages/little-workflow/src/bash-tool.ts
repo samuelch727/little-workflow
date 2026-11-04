@@ -1,16 +1,17 @@
-import { copyFile, mkdir, mkdtemp, readdir, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, join } from "node:path";
+import * as nodePath from "node:path";
+import { justBashNodeExport, SubtreeFs } from "@little-stack/harness/internals";
 import {
   Bash,
   InMemoryFs,
   MountableFs,
-  OverlayFs,
-  ReadWriteFs,
   type BashExecResult,
+  type IFileSystem,
   type NetworkConfig,
 } from "just-bash";
 import type { BashTool } from "./harness/types.js";
+import { runFilesFor } from "./run-files.js";
 
 const DEFAULT_MAX_FILE_READ_SIZE = 10 * 1024 * 1024;
 
@@ -50,6 +51,7 @@ export type NormalizedBashCapabilities = {
 };
 
 export type BashScope = {
+  readonly files?: IFileSystem;
   readonly cwd: string;
   readonly readableRoots: readonly { readonly path: string; readonly mode: "rw" | "ro" }[];
   readonly pathAliases?: readonly { readonly mountPath: string; readonly backingPath: string }[];
@@ -86,7 +88,7 @@ type ResolvedBashEnvironment = {
   readonly capabilities: NormalizedBashCapabilities;
 };
 
-type MountedFilesystem = MountableFs | OverlayFs | ReadWriteFs;
+type MountedFilesystem = IFileSystem;
 
 export function createBashTool(scope: BashScope): SandboxedBashTool {
   let session: Promise<{
@@ -203,8 +205,8 @@ async function createSession(scope: BashScope): Promise<{
     fs: environment.fs,
     cwd: environment.defaultCwd,
     network: networkForJustBash(environment.capabilities.network),
-    python: environment.capabilities.python,
-    javascript: environment.capabilities.javascript,
+    python: justBashNodeExport("ReadWriteFs") === undefined ? false : environment.capabilities.python,
+    javascript: justBashNodeExport("ReadWriteFs") === undefined ? false : environment.capabilities.javascript,
     defenseInDepth: true,
     executionLimits: {
       maxCommandCount: 10_000,
@@ -224,25 +226,26 @@ async function createBashEnvironment(scope: BashScope): Promise<ResolvedBashEnvi
   const fs = new MountableFs({ base: new InMemoryFs() });
   const mounts = await mountSpecsForScope(scope);
   for (const mount of mounts) {
-    if (isNestedReadonlyAlias(mount, mounts)) {
+    if (isNestedReadonlyAlias(mount, mounts, ioForScope(scope).path)) {
       continue;
     }
+    const paths = ioForScope(scope).path;
     const nestedAliases = mount.mode === "rw"
-      ? mounts.filter((candidate) => mostSpecificWritableContainer(candidate, mounts) === mount)
+      ? mounts.filter((candidate) => mostSpecificWritableContainer(candidate, mounts, paths) === mount)
       : [];
-    const mountPoint = await filesystemMountFor(mount);
+    const mountPoint = await filesystemMountFor(mount, mount.mountPath, scope.files);
     fs.mount(
       mountPoint.mountAt,
       nestedAliases.length === 0
         ? mountPoint.filesystem
-        : await filesystemWithNestedAliases(mount, nestedAliases),
+        : await filesystemWithNestedAliases(mount, nestedAliases, scope.files),
     );
   }
 
   return {
     fs,
     mounts,
-    defaultCwd: await resolveCwdFromMounts(scope.cwd, mounts),
+    defaultCwd: await resolveCwdFromMounts(scope.cwd, mounts, ioForScope(scope).path),
     capabilities: normalizeBashCapabilities(scope.capabilities),
   };
 }
@@ -251,9 +254,10 @@ async function isolatedSingleFileMount(
   mount: MountSpec,
   mountPath: string,
 ): Promise<{ readonly rootDir: string; readonly mountAt: string }> {
+  const io = ioForScope({});
   const normalizedMountPath = trimTrailingSlash(mountPath);
-  const rootDir = await mkdtemp(join(tmpdir(), "little-workflow-bash-file-mount-"));
-  await copyFile(mount.backingPath, join(rootDir, basename(normalizedMountPath)));
+  const rootDir = await io.mkdtemp(join(tmpdir(), "little-workflow-bash-file-mount-"));
+  await io.copyFile(mount.backingPath, join(rootDir, basename(normalizedMountPath)));
   return {
     rootDir,
     mountAt: dirname(normalizedMountPath),
@@ -263,13 +267,40 @@ async function isolatedSingleFileMount(
 async function filesystemMountFor(
   mount: MountSpec,
   mountPath = mount.mountPath,
+  files?: IFileSystem,
 ): Promise<{ readonly mountAt: string; readonly filesystem: MountedFilesystem }> {
+  const io = ioForScope({ files });
   // FS roots must be directories. A single-file mount is staged into an
   // isolated directory under the advertised basename so source siblings stay hidden.
-  const backingIsFile = (await stat(mount.backingPath).catch(() => undefined))?.isFile() === true;
+  if (files !== undefined) {
+    // SubtreeFs confines lexical paths; its delegate also has to refuse symlink
+    // traversal, matching the disk adapters' allowSymlinks:false behavior.
+    const guarded = symlinkFreeFilesystem(files, mount.backingPath);
+    const backingIsFile = (await guarded.stat(mount.backingPath).catch(error => {
+      if (missingFile(error)) return undefined;
+      throw error;
+    }))?.isFile === true;
+    let view: IFileSystem;
+    if (backingIsFile) {
+      view = new InMemoryFs({ [`/${nodePath.posix.basename(mountPath)}`]: await guarded.readFileBuffer(mount.backingPath) });
+    } else {
+      await guarded.mkdir(mount.backingPath, { recursive: true });
+      view = new SubtreeFs(guarded, mount.backingPath);
+    }
+    return {
+      mountAt: backingIsFile ? nodePath.posix.dirname(trimTrailingSlash(mountPath)) : trimTrailingSlash(mountPath),
+      filesystem: mount.mode === "ro" ? readOnlyFilesystem(view) : view,
+    };
+  }
+  const backingIsFile = (await io.stat(mount.backingPath).catch(() => undefined))?.isFile() === true;
   const fileMount = backingIsFile ? await isolatedSingleFileMount(mount, mountPath) : undefined;
   const rootDir = fileMount?.rootDir ?? mount.backingPath;
-  await mkdir(rootDir, { recursive: true });
+  await io.mkdir(rootDir, { recursive: true });
+  const ReadWriteFs = justBashNodeExport("ReadWriteFs");
+  const OverlayFs = justBashNodeExport("OverlayFs");
+  if (ReadWriteFs === undefined || OverlayFs === undefined) {
+    throw new TypeError("Disk bash mounts need just-bash's Node build; use a World with files on workerd.");
+  }
   return {
     mountAt: fileMount?.mountAt ?? trimTrailingSlash(mountPath),
     filesystem: mount.mode === "rw"
@@ -291,18 +322,17 @@ async function filesystemMountFor(
 async function filesystemWithNestedAliases(
   container: MountSpec,
   aliases: readonly MountSpec[],
+  files?: IFileSystem,
 ): Promise<MountedFilesystem> {
+  const containerMount = await filesystemMountFor(container, container.mountPath, files);
   const fs = new MountableFs({
-    base: new ReadWriteFs({
-      root: container.backingPath,
-      allowSymlinks: false,
-      maxFileReadSize: DEFAULT_MAX_FILE_READ_SIZE,
-    }),
+    base: containerMount.filesystem,
   });
   for (const alias of aliases) {
     const mountPoint = await filesystemMountFor(
       alias,
       `/${relativeVirtualPath(container.mountPath, alias.mountPath)}`,
+      files,
     );
     fs.mount(mountPoint.mountAt, mountPoint.filesystem);
   }
@@ -312,24 +342,25 @@ async function filesystemWithNestedAliases(
 async function mountSpecsForScope(scope: BashScope): Promise<readonly MountSpec[]> {
   const specs: MountSpec[] = [];
   const aliases = scope.pathAliases ?? [];
+  const paths = ioForScope(scope).path;
 
   for (const alias of aliases) {
-    const mountPath = aliasMountPathForScope(scope.cwd, alias.mountPath);
+    const mountPath = aliasMountPathForScope(scope.cwd, alias.mountPath, paths);
     if (alias.backingPath.includes("*")) {
-      specs.push(...await expandWildcardAlias({ ...alias, mountPath }, scope.readableRoots));
+      specs.push(...await expandWildcardAlias({ ...alias, mountPath }, scope.readableRoots, scope.files));
       continue;
     }
     specs.push({
       mountPath,
       backingPath: alias.backingPath,
-      mode: modeForBackingPath(alias.backingPath, scope.readableRoots),
+      mode: modeForBackingPath(alias.backingPath, scope.readableRoots, paths),
       source: "alias",
     });
   }
 
   for (const root of scope.readableRoots) {
     if (aliases.some((alias) =>
-      !alias.backingPath.includes("*") && pathContains(root.path, alias.backingPath)
+      !alias.backingPath.includes("*") && pathContains(root.path, alias.backingPath, paths)
     )) {
       continue;
     }
@@ -341,13 +372,13 @@ async function mountSpecsForScope(scope: BashScope): Promise<readonly MountSpec[
     });
   }
 
-  const deduped = [...dedupeMountSpecs(specs)]
+  const deduped = [...dedupeMountSpecs(specs, paths)]
     .sort((left, right) => left.mountPath.length - right.mountPath.length);
   return deduped;
 }
 
-function aliasMountPathForScope(cwd: string, mountPath: string): string {
-  if (isAbsolute(mountPath)) {
+function aliasMountPathForScope(cwd: string, mountPath: string, paths = nodePath): string {
+  if (paths.isAbsolute(mountPath)) {
     return mountPath;
   }
   return `${trimTrailingSlash(cwd)}/${mountPath}`;
@@ -356,23 +387,25 @@ function aliasMountPathForScope(cwd: string, mountPath: string): string {
 async function expandWildcardAlias(
   alias: { readonly mountPath: string; readonly backingPath: string },
   roots: readonly { readonly path: string; readonly mode: "rw" | "ro" }[],
+  files?: IFileSystem,
 ): Promise<readonly MountSpec[]> {
+  const io = ioForScope({ files });
   const wildcardIndex = alias.backingPath.indexOf("*");
   const prefix = alias.backingPath.slice(0, wildcardIndex);
   const suffix = alias.backingPath.slice(wildcardIndex + 1);
   const parent = trimTrailingSlash(prefix);
   let entries: readonly string[] = [];
   try {
-    entries = await readdir(parent);
+    entries = await io.readdir(parent);
   } catch {
     return [];
   }
 
   const specs: MountSpec[] = [];
   for (const entry of entries) {
-    const backingPath = resolve(parent, entry, suffix.replace(/^[/\\]+/u, ""));
+    const backingPath = io.path.resolve(parent, entry, suffix.replace(/^[/\\]+/u, ""));
     try {
-      if (!(await stat(backingPath)).isDirectory()) {
+      if (!(await io.stat(backingPath)).isDirectory()) {
         continue;
       }
     } catch {
@@ -381,7 +414,7 @@ async function expandWildcardAlias(
     specs.push({
       mountPath: `${trimTrailingSlash(alias.mountPath)}/${entry}`,
       backingPath,
-      mode: modeForBackingPath(backingPath, roots),
+      mode: modeForBackingPath(backingPath, roots, io.path),
       source: "alias",
     });
   }
@@ -391,22 +424,24 @@ async function expandWildcardAlias(
 function isNestedReadonlyAlias(
   spec: MountSpec,
   specs: readonly MountSpec[],
+  paths = nodePath,
 ): boolean {
   return spec.source === "alias" &&
     spec.mode === "ro" &&
-    mostSpecificWritableContainer(spec, specs) !== undefined;
+    mostSpecificWritableContainer(spec, specs, paths) !== undefined;
 }
 
 function mostSpecificWritableContainer(
   spec: MountSpec,
   specs: readonly MountSpec[],
+  paths = nodePath,
 ): MountSpec | undefined {
   return [...specs]
     .filter((candidate) =>
       candidate.mode === "rw" &&
       trimTrailingSlash(candidate.mountPath) !== trimTrailingSlash(spec.mountPath) &&
       virtualPathContains(candidate.mountPath, spec.mountPath) &&
-      !pathContains(candidate.backingPath, spec.backingPath)
+      !pathContains(candidate.backingPath, spec.backingPath, paths)
     )
     .sort((left, right) => right.mountPath.length - left.mountPath.length)[0];
 }
@@ -420,31 +455,32 @@ function relativeVirtualPath(from: string, to: string): string {
 function modeForBackingPath(
   backingPath: string,
   roots: readonly { readonly path: string; readonly mode: "rw" | "ro" }[],
+  paths = nodePath,
 ): "rw" | "ro" {
   const match = [...roots]
-    .filter((root) => pathContains(root.path, backingPath))
+    .filter((root) => pathContains(root.path, backingPath, paths))
     .sort((left, right) => right.path.length - left.path.length)[0];
   return match?.mode ?? "ro";
 }
 
-function dedupeMountSpecs(specs: readonly MountSpec[]): readonly MountSpec[] {
+function dedupeMountSpecs(specs: readonly MountSpec[], paths = nodePath): readonly MountSpec[] {
   const byMount = new Map<string, MountSpec>();
   for (const spec of specs) {
     byMount.set(trimTrailingSlash(spec.mountPath), {
       ...spec,
       mountPath: trimTrailingSlash(spec.mountPath),
-      backingPath: resolve(spec.backingPath),
+      backingPath: paths.resolve(spec.backingPath),
     });
   }
   return [...byMount.values()];
 }
 
 async function resolveCwd(scope: BashScope, cwd: string): Promise<string> {
-  return resolveCwdFromMounts(cwd, await mountSpecsForScope(scope));
+  return resolveCwdFromMounts(cwd, await mountSpecsForScope(scope), ioForScope(scope).path);
 }
 
-async function resolveCwdFromMounts(cwd: string, mounts: readonly MountSpec[]): Promise<string> {
-  const virtualCwd = toVirtualPath(cwd, mounts);
+async function resolveCwdFromMounts(cwd: string, mounts: readonly MountSpec[], paths = nodePath): Promise<string> {
+  const virtualCwd = toVirtualPath(cwd, mounts, paths);
   if (virtualCwd === "/") {
     return virtualCwd;
   }
@@ -455,18 +491,18 @@ async function resolveCwdFromMounts(cwd: string, mounts: readonly MountSpec[]): 
   return virtualCwd;
 }
 
-function toVirtualPath(path: string, mounts: readonly MountSpec[]): string {
-  if (!isAbsolute(path)) {
+function toVirtualPath(path: string, mounts: readonly MountSpec[], paths = nodePath): string {
+  if (!paths.isAbsolute(path)) {
     return normalizeVirtualPath(path);
   }
-  const physical = resolve(path);
+  const physical = paths.resolve(path);
   const mount = [...mounts]
-    .filter((candidate) => pathContains(candidate.backingPath, physical))
+    .filter((candidate) => pathContains(candidate.backingPath, physical, paths))
     .sort((left, right) => right.backingPath.length - left.backingPath.length)[0];
   if (mount === undefined) {
     return normalizeVirtualPath(path);
   }
-  const rest = relative(mount.backingPath, physical).split(sep).filter(Boolean).join("/");
+  const rest = paths.relative(mount.backingPath, physical).split(paths.sep).filter(Boolean).join("/");
   return normalizeVirtualPath(rest.length === 0 ? mount.mountPath : `${mount.mountPath}/${rest}`);
 }
 
@@ -558,9 +594,118 @@ function commandInput(input: unknown): BashCommandInput {
   };
 }
 
-function pathContains(rootPath: string, candidatePath: string): boolean {
-  const relativePath = relative(resolve(rootPath), resolve(candidatePath));
-  return relativePath === "" || (!relativePath.startsWith("..") && !isAbsolute(relativePath));
+function pathContains(rootPath: string, candidatePath: string, paths = nodePath): boolean {
+  const relativePath = paths.relative(paths.resolve(rootPath), paths.resolve(candidatePath));
+  return relativePath === "" || (!relativePath.startsWith("..") && !paths.isAbsolute(relativePath));
+}
+
+function ioForScope(scope: Pick<BashScope, "files">) {
+  return runFilesFor({ dataDir: "/", ...(scope.files === undefined ? {} : { files: scope.files }) });
+}
+
+const READ_ONLY_MUTATIONS = new Set([
+  "writeFile", "appendFile", "mkdir", "rm", "cp", "mv", "chmod", "symlink", "link", "utimes",
+]);
+
+const SINGLE_PATH_OPERATIONS = new Set([
+  "readFile", "readFileBytes", "readFileBuffer", "writeFile", "appendFile", "exists",
+  "stat", "lstat", "mkdir", "readdir", "readdirWithFileTypes", "chmod", "readlink",
+  "realpath", "utimes",
+]);
+
+/** A Bash-only delegate: it never replaces the World's filesystem identity. */
+function symlinkFreeFilesystem(delegate: IFileSystem, backingRoot: string): IFileSystem {
+  const paths = nodePath.posix;
+  const root = paths.resolve("/", backingRoot);
+  const refused = (path: string) => Object.assign(
+    new Error(`Symlinks are not allowed in virtual Bash mounts: ${path}`), { code: "ELOOP" },
+  );
+  const assertPath = async (pathname: unknown): Promise<string> => {
+    if (typeof pathname !== "string" || pathname.includes("\0")) throw refused(String(pathname));
+    const normalized = paths.resolve("/", pathname);
+    if (normalized !== root && !normalized.startsWith(root === "/" ? "/" : `${root}/`)) {
+      throw Object.assign(new Error("Path is outside the virtual Bash mount"), { code: "EACCES" });
+    }
+    let current = "/";
+    // Check ancestors outside the mounted folder too: its root may itself be
+    // reached through a link supplied by the application's filesystem.
+    for (const part of ["", ...normalized.split("/").filter(Boolean)]) {
+      current = paths.join(current, part);
+      try {
+        if ((await delegate.lstat(current)).isSymbolicLink) throw refused(current);
+      } catch (error) {
+        if (missingFile(error)) break;
+        throw error;
+      }
+    }
+    return normalized;
+  };
+  const assertTree = async (pathname: unknown): Promise<void> => {
+    const normalized = await assertPath(pathname);
+    let entry;
+    try {
+      entry = await delegate.lstat(normalized);
+    } catch (error) {
+      if (missingFile(error)) return;
+      throw error;
+    }
+    if (entry.isSymbolicLink) throw refused(normalized);
+    if (entry.isDirectory) {
+      for (const name of await delegate.readdir(normalized)) {
+        await assertTree(paths.join(normalized, name));
+      }
+    }
+  };
+  return new Proxy(delegate, {
+    get(target, key) {
+      // Enumerating lexical names does not follow links. Actual path access is
+      // checked separately, and SubtreeFs translates only this mount's names.
+      if (key === "getAllPaths") return () => delegate.getAllPaths().filter(candidate => {
+        const normalized = paths.resolve("/", candidate);
+        return normalized === root || normalized.startsWith(root === "/" ? "/" : `${root}/`);
+      });
+      if (key === "resolvePath") return paths.resolve;
+      if (key === "symlink") return async (_target: string, link: string) => { throw refused(link); };
+      const value: unknown = Reflect.get(target, key);
+      if (typeof value !== "function") return value;
+      return async (...args: unknown[]) => {
+        if (typeof key === "string" && SINGLE_PATH_OPERATIONS.has(key)) {
+          await assertPath(args[0]);
+        } else if (key === "cp" || key === "mv") {
+          // These methods may recurse inside the delegate without reentering
+          // this proxy. Inspect both existing trees before handing them off.
+          await assertTree(args[0]);
+          await assertTree(args[1]);
+        } else if (key === "rm") {
+          await assertTree(args[0]);
+        } else if (key === "link") {
+          await assertTree(args[0]);
+          await assertPath(args[1]);
+        } else {
+          throw Object.assign(new Error(`Unsupported virtual Bash filesystem operation: ${String(key)}`), { code: "EACCES" });
+        }
+        return Reflect.apply(value, target, args);
+      };
+    },
+  });
+}
+
+function missingFile(error: unknown): boolean {
+  return typeof error === "object" && error !== null &&
+    (("code" in error && error.code === "ENOENT") ||
+      ("message" in error && typeof error.message === "string" && error.message.startsWith("ENOENT:")));
+}
+
+function readOnlyFilesystem(fs: IFileSystem): IFileSystem {
+  return new Proxy(fs, {
+    get(target, key, receiver) {
+      if (typeof key === "string" && READ_ONLY_MUTATIONS.has(key)) {
+        return async () => { throw Object.assign(new Error("Read-only filesystem"), { code: "EROFS" }); };
+      }
+      const value: unknown = Reflect.get(target, key, receiver);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
 }
 
 function virtualPathContains(rootPath: string, candidatePath: string): boolean {

@@ -1,4 +1,4 @@
-import type { HarnessDurableServices } from "../types.js";
+import type { HarnessOrchestrationServices } from "../types.js";
 import { stableHash } from "../utils/canonical-hash.js";
 import type {
   HarnessContinuationRecord,
@@ -19,7 +19,7 @@ export type DeadlineSweeperTickResult = {
 };
 
 export function createDeadlineSweeper(options: {
-  readonly durable: Pick<HarnessDurableServices, "continuations" | "resumeQueue" | "tasks" | "wakeups">;
+  readonly durable: Pick<HarnessOrchestrationServices, "continuations" | "resumeQueue" | "tasks" | "wakeups">;
   readonly now?: () => Date;
 }): DeadlineSweeper {
   return {
@@ -164,7 +164,7 @@ function waitPredicateTaskIds(
 // where one member is terminal and a sibling is still pending) so the caller still evaluates
 // `timeoutAt` and can fire the timeout.
 async function drivePredicateSatisfiedWait(
-  durable: Pick<HarnessDurableServices, "continuations" | "resumeQueue" | "tasks">,
+  durable: Pick<HarnessOrchestrationServices, "continuations" | "resumeQueue" | "tasks">,
   continuation: HarnessContinuationRecord,
   wait: HarnessContinuationWaitRecord,
   now: string,

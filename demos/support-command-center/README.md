@@ -14,6 +14,7 @@ hand-maintained whitelists.
 | Portable session | `POST /api/portable-demo/{web,discord}` | `agents/support` | one shared harness session moving between web and Discord with cross-surface **mirror** delivery (`previousActive: "mirror"` + descriptor `deliver`) | `src/app/api/portable-demo/runner.ts` |
 | Discord tool demo | `POST /api/discord/tool-demo` | `agents/support` | runs the Discord-only `send-channel-update` tool and confirms web-rich never discovers it | `src/app/api/discord/tool-demo/route.ts` |
 | Discord (live) | `POST /api/discord`, `GET /api/discord/gateway` | `agents/support` | real `@chat-adapter/discord` webhook + cron-started Gateway listener | `src/app/api/discord/`, `agents/support/connectors/discord` |
+| Email inbox (live) | `POST /api/email` | `agents/support` | the agent owns an email address: Resend's `email.received` webhook starts a run and the reply goes back in the same email thread | `src/app/api/email/`, `agents/support/connectors/email` |
 | Concierge "Relay" | `/concierge` → `POST /api/concierge/{web,slack}` | `agents/concierge` | a **second** agent: web json-render dashboards vs a real `@chat-adapter/slack` connector, with connector-scoped tools | `agents/concierge/`, `src/app/api/concierge/` |
 | Slack simulate | `POST /api/concierge/slack/simulate` | `agents/concierge` | drives a synthetic Slack event through the real Slack connector offline via `createTestChat` + `simulateInbound` | `src/app/api/concierge/slack/simulate/route.ts` |
 | CLI chat | `little-harness test support` | `agents/support` | the same agent folder in a terminal REPL | `agents/support` |
@@ -125,6 +126,42 @@ Optional Gateway env:
 export DISCORD_GATEWAY_WEBHOOK_URL=https://your-domain.example/api/discord
 export DISCORD_GATEWAY_DURATION_MS=600000
 ```
+
+## Email
+
+`agents/support/connectors/email/connector.ts` gives the support agent its own inbox through
+`emailConnector` and [Resend Inbound](https://resend.com/docs/dashboard/receiving/introduction):
+
+```txt
+POST /api/email   # Resend email.received webhook
+```
+
+```bash
+export RESEND_API_KEY=re_...
+export RESEND_WEBHOOK_SECRET=whsec_...
+export SUPPORT_EMAIL_ADDRESS=support@your-receiving-domain.example
+export SUPPORT_EMAIL_ALLOW=@your-company.example,customer@example.com   # comma-separated
+export SUPPORT_EMAIL_AUTHSERV_ID=...   # the receiving server's Authentication-Results id, see below
+```
+
+In Resend, set up receiving for the address's domain and add a webhook for the `email.received`
+event pointing at `https://your-domain.example/api/email`. Mail from senders outside
+`SUPPORT_EMAIL_ALLOW`, mail that does not pass DMARC, and auto-replies are skipped without a run.
+Each email thread is one harness session, and the agent's reply goes back to the sender in the same
+thread.
+
+Unverified in this alpha: no real email has been received through Resend Inbound yet, and whether
+Resend adds an `Authentication-Results` header (and under which authserv-id) is unconfirmed. Only a
+header from `SUPPORT_EMAIL_AUTHSERV_ID` is trusted, because a sender can plant their own. Until it is
+set, every email is skipped as `dmarc-not-passed` and the skip log line lists the authserv-ids the
+email carried. Send the agent a test email from an ordinary mailbox, read the id from that line, and
+set it. If Resend adds no such header, set `requireDmarc: false` in the connector knowingly: the
+allowlist then trusts a `From` header that anyone can forge.
+
+The demo keeps email state in memory, so a restart forgets which thread a reply belongs to. Use a
+durable state adapter such as `createRedisState()` in production.
+`src/app/api/email/email-route.test.ts` drives signed webhooks through the real Resend adapter with
+Resend's API stubbed, so it needs no credentials and sends no mail.
 
 ## Tool availability & mirror delivery
 

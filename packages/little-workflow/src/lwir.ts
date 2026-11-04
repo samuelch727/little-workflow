@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { createRequire } from "node:module";
+import { getSchemaValidator as getAjv } from "./schema-validator.js";
 import { canonicalJson, sha256Digest } from "./canonical.js";
 import { normalizeSchema, type NormalizedSchemaDescriptor } from "./schema.js";
 
@@ -125,17 +125,6 @@ type KnownStep = {
   readonly step: JsonRecord;
   readonly path: string;
 };
-type AjvError = {
-  readonly instancePath?: string;
-  readonly schemaPath?: string;
-  readonly message?: string;
-};
-type AjvInstance = {
-  validateSchema(schema: unknown): boolean | Promise<unknown>;
-  readonly errors?: readonly AjvError[] | null;
-  errorsText?(errors?: readonly AjvError[] | null): string;
-};
-type AjvConstructor = new (options?: Record<string, unknown>) => AjvInstance;
 
 const VALID_STEP_TYPES = new Set<LwirStepType>([
   "ai.generate",
@@ -178,7 +167,7 @@ const VALID_JSON_SCHEMA_TYPES = new Set([
  *
  * - `description` — the annotation `zod`'s `.describe()` emits, and the standard way
  *   to document a field for a model. Every JSON Schema validator (including the
- *   three Ajv instances this package builds) ignores it when validating instances.
+ *   shared validator this package uses) ignores it when validating instances.
  * - `title` — a human/model-readable label from `.meta({ title })`. Same story:
  *   annotation only, no instance is accepted or rejected because of it.
  * - `examples` — a draft-6+ annotation from `.meta({ examples })`. It illustrates
@@ -186,7 +175,7 @@ const VALID_JSON_SCHEMA_TYPES = new Set([
  *
  * Deliberately NOT here, because each would be a promise the alpha runtime breaks:
  * - `default` — JSON Schema `default` means "substitute this when the value is
- *   absent". Every Ajv instance in this package is built `{ allErrors: true,
+ *   absent". The Node validator is built `{ allErrors: true,
  *   strict: false, validateSchema: true }` with no `useDefaults`, so nothing
  *   injects anything. Accepting it would let an author ship a workflow whose
  *   optional fields silently stay `undefined`.
@@ -205,10 +194,10 @@ const ANNOTATION_JSON_SCHEMA_KEYS = ["description", "examples", "title"] as cons
  *
  * It clears the same bar {@link ANNOTATION_JSON_SCHEMA_KEYS} documents, but for the
  * opposite reason: `propertyNames` has REAL validation semantics ("every property NAME
- * must validate against this schema"), and the alpha runtime really evaluates them. All
- * three Ajv instances in this package (`lwir.ts`, `compiler.ts`, `runtime.ts`) are built
- * `{ allErrors: true, strict: false, validateSchema: true }` on Ajv 8, whose draft-07
- * validator implements `propertyNames` natively — so it is enforced at both sites that
+ * must validate against this schema"), and the alpha runtime really evaluates them. The
+ * shared validator used by `lwir.ts`, `compiler.ts` and `runtime.ts` uses draft-07.
+ * On Node it retains Ajv 8 with `{ allErrors: true, strict: false, validateSchema: true }`;
+ * the interpreter enforces the same property-name constraints, so it is enforced at both sites that
  * check an instance against a schema: `validateInputAgainstSchema` (compiler.ts, workflow
  * input) and `validateJsonSchema` (runtime.ts, step and final output). A non-conforming
  * key fails the run; nothing is accepted-and-ignored.
@@ -289,9 +278,7 @@ const SAFE_FUNCTION_ARITY: Record<string, { readonly min: number; readonly max?:
   upper: { min: 1, max: 1 },
 };
 const COMPARISON_OPERATORS = ["===", "!==", ">=", "<=", "==", "!=", ">", "<"] as const;
-const nodeRequire = createRequire(import.meta.url);
 
-let cachedAjv: AjvInstance | undefined;
 
 /**
  * The single finding code for "the schema accepts this field, the runtime does not
@@ -413,6 +400,86 @@ export function validateLwir(value: unknown): LwirValidationResult {
   }
 
   return findings.length === 0 ? { valid: true, findings: [] } : invalid(findings);
+}
+
+/**
+ * Add the `needs` entries a plan left out. When a step reads `{{ steps.X... }}` and X is a step in
+ * the same step list, X joins the step's `needs`. Planners often write the reference and forget
+ * the dependency, and the plan is otherwise fine.
+ *
+ * Nothing else is inferred, so these stay validation errors: a reference to a step that does not
+ * exist, a reference from a parallel body to a step outside it, and a reference that would close
+ * a cycle. A `lastOutput` / `allVisits` read through a loop's back-edge is left alone, since it is
+ * valid without a `needs` entry. A document that already validates comes back unchanged, and the
+ * input is never mutated.
+ */
+export function inferStepNeeds(value: unknown): unknown {
+  if (!isRecord(value) || !Array.isArray(value.steps)) {
+    return value;
+  }
+  const steps = inferNeedsInStepList(value.steps);
+  return steps === value.steps ? value : { ...value, steps };
+}
+
+function inferNeedsInStepList(steps: readonly unknown[]): readonly unknown[] {
+  const stepsById = new Map<string, JsonRecord>();
+  const dependenciesById = new Map<string, string[]>();
+  for (const step of steps) {
+    if (!isRecord(step) || typeof step.id !== "string" || step.id.length === 0 || stepsById.has(step.id)) {
+      continue;
+    }
+    stepsById.set(step.id, step);
+    dependenciesById.set(
+      step.id,
+      Array.isArray(step.needs) ? step.needs.filter((need): need is string => typeof need === "string") : [],
+    );
+  }
+  const outgoing = buildExecutionFlowEdges(stepsById, dependenciesById);
+  const addedByStep = new Map<JsonRecord, string[]>();
+  for (const [id, step] of stepsById) {
+    if (step.needs !== undefined && !Array.isArray(step.needs)) {
+      continue;
+    }
+    const needs = dependenciesById.get(id) ?? [];
+    for (const reference of stepReferencesIn(step, "$")) {
+      const target = reference.id;
+      if (target === id || !stepsById.has(target) || needs.includes(target)) {
+        continue;
+      }
+      const backEdgeRead = (reference.property === "lastOutput" || reference.property === "allVisits") &&
+        canReach(target, id, outgoing);
+      // target -> id would close a cycle when id already reaches target.
+      if (backEdgeRead || canReach(id, target, outgoing)) {
+        continue;
+      }
+      needs.push(target);
+      outgoing.get(target)?.add(id);
+      addedByStep.set(step, [...(addedByStep.get(step) ?? []), target]);
+    }
+  }
+
+  let changed = false;
+  const next = steps.map((step) => {
+    if (!isRecord(step)) {
+      return step;
+    }
+    let result: JsonRecord = step;
+    const added = addedByStep.get(step);
+    if (added !== undefined) {
+      result = { ...result, needs: [...(Array.isArray(step.needs) ? step.needs : []), ...added] };
+    }
+    if (step.uses === "parallel" && Array.isArray(step.steps)) {
+      const body = inferNeedsInStepList(step.steps);
+      if (body !== step.steps) {
+        result = { ...result, steps: body };
+      }
+    }
+    if (result !== step) {
+      changed = true;
+    }
+    return result;
+  });
+  return changed ? next : steps;
 }
 
 /**
@@ -1895,21 +1962,6 @@ function validateSchemaWithAjv(
   }
 }
 
-function getAjv(): AjvInstance {
-  if (cachedAjv !== undefined) {
-    return cachedAjv;
-  }
-
-  const ajvModule = nodeRequire("ajv") as
-    | AjvConstructor
-    | { readonly default?: AjvConstructor };
-  const Ajv = typeof ajvModule === "function" ? ajvModule : ajvModule.default;
-  if (Ajv === undefined) {
-    throw new TypeError("Ajv default export is unavailable.");
-  }
-  cachedAjv = new Ajv({ allErrors: true, strict: false, validateSchema: true });
-  return cachedAjv;
-}
 
 function validateSupportedSchemaSubset(
   schema: NormalizedSchemaDescriptor,

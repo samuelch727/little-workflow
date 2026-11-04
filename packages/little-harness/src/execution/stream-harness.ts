@@ -1,6 +1,8 @@
+import { randomUUID } from "node:crypto";
 import {
   createUIMessageStreamResponse,
   isStepCount,
+  type StopCondition,
   streamText,
   toUIMessageStream,
   type ModelMessage,
@@ -22,8 +24,11 @@ import {
   type ConnectorToolPolicy,
 } from "../connectors/tool-extensions.js";
 import type { HarnessSessionLog, TraceHarnessEventInput } from "../events/occurrence.js";
-import { emitHarnessOccurrence } from "../events/occurrence.js";
-import { HarnessInputError } from "../errors.js";
+import {
+  createHarnessAppendIdempotencyKey,
+  emitHarnessOccurrence,
+} from "../events/occurrence.js";
+import { HarnessInputError, HarnessTerminalStageError } from "../errors.js";
 import { createEventId, createTurnId } from "../ids.js";
 import type { ResolvedHarnessMcpGateway } from "../mcp.js";
 import { buildModelMessages, type BuildModelMessagesOptions } from "../runtime/messages.js";
@@ -37,16 +42,19 @@ import type {
   HarnessActiveConnector,
   HarnessAgentOptions,
   HarnessEvent,
-  HarnessRuntime,
+  HarnessSandbox,
   HarnessRuntimeOptions,
   HarnessSession,
   HarnessToolExecutionContext,
+  HarnessTrigger,
+  HarnessTurnStart,
   HarnessWarning,
   JsonObject,
   PersistenceError,
   PreparedTurn,
 } from "../types.js";
 import { abstractToolHiddenWarning, partitionExecutableTools } from "./abstract-tools.js";
+import { stableHash } from "../utils/canonical-hash.js";
 import { assembleTurnTools, disposeTurnRuntime } from "./turn-tools.js";
 import { harnessToolExecutionEnd, harnessToolExecutionStart } from "./tool-execution-events.js";
 import { createArtifactAccessor, createEventedFileWriter } from "./evented-file-writer.js";
@@ -59,14 +67,26 @@ import {
 } from "./model-events.js";
 import { modelRequestSettings } from "./model-request-settings.js";
 import { emitMountedFiles } from "./mount-events.js";
-import type { HarnessParkedResult, StreamHarnessCompletedResult, StreamHarnessFinished } from "./result.js";
+import type { HarnessParkedResult, StreamHarnessCompletedResult, StreamHarnessTurnFinished } from "./result.js";
 import { parkedResultFromSteps, parkedThisStep } from "./park-resume.js";
+import { recordWaitingPark, waitingPark } from "./waiting-tools.js";
+import { requiredRecords, settleRequiredRecords, type RequiredRecords } from "./required-records.js";
+import { saveParkedTurn } from "./parked-turns.js";
 import { stageChatMessages, type StageChatMessagesOptions } from "./stage-message.js";
 import { toolCallEventData } from "./tool-events.js";
+import { uncachedInstructions, withPromptCaching } from "./prompt-caching.js";
+import { withTurnMessages } from "./turn-messages.js";
+import { withTurnOptions } from "./turn-options.js";
+import { inboxPrepareStep, type HarnessInbox } from "./inbox.js";
+import { logicalTurnBudget, modelInvocationGuard } from "./logical-turn-budget.js";
+import { createTurnLimiter, HarnessTurnLimitError, turnLimitCause } from "./turn-limits.js";
+import { triggerMetadata } from "./turn-trigger.js";
 
 export type StreamHarnessOptions<TInput = unknown, TExtraBody = unknown, TOutput = unknown> =
   HarnessAgentOptions & {
     harness: Harness<any, TExtraBody>;
+    /** One user message, as plain text. Use this or `messages`, not both. */
+    prompt?: string;
     messages?: UIMessage[];
     type?: string;
     input?: TInput;
@@ -74,20 +94,28 @@ export type StreamHarnessOptions<TInput = unknown, TExtraBody = unknown, TOutput
     extraBody?: TExtraBody;
     output?: Output.Output<TOutput>;
     abortSignal?: AbortSignal;
+    /** Awaited at each actual provider invocation; rejection blocks I/O. Requires concrete model handles. */
+    beforeInvocation?: () => void | Promise<void>;
     restage?: boolean;
     runId?: string;
+    /** How this turn started (a message, a schedule, an API call), for trace readers such as LittleDB. */
+    trigger?: HarnessTrigger;
     connector?: HarnessActiveConnector;
     connectorTools?: ToolSet;
     toolPolicy?: ConnectorToolPolicy;
     /** The session log (durable event log) this run appends to and replays from. */
     sessionLog?: HarnessSessionLog;
-    /** Historical alias of `sessionLog`; `sessionLog` wins when both are set. */
-    durability?: HarnessSessionLog;
     onTraceError?: (error: unknown, event: TraceHarnessEventInput) => Promise<void> | void;
     onEvent?: (event: HarnessEvent) => void | Promise<void>;
     onPersistenceError?: (error: PersistenceError) => void | Promise<void>;
+    /** Messages that arrive while the turn runs, read before each model step. See {@link HarnessInbox}. */
+    inbox?: HarnessInbox;
+    /** Called once the turn's id and its `turnOptions` metadata are known, before it runs. */
+    onTurnStart?: (turn: HarnessTurnStart) => void | Promise<void>;
     uiMessageStream?: {
       onError?: (error: unknown) => string;
+      /** The reply message's id in the UI message stream. Default: `msg_` and a random UUID. */
+      generateMessageId?: () => string;
     };
   };
 
@@ -98,7 +126,7 @@ export type StreamHarnessResult<TOutput = string> = {
   readonly textStream: AsyncIterable<string>;
   toUIMessageStream(): ReadableStream;
   toUIMessageStreamResponse(options?: ResponseInit): Response;
-  finished: Promise<StreamHarnessFinished>;
+  finished: Promise<StreamHarnessTurnFinished>;
 };
 
 type PreparedTurnEvent = Omit<HarnessEvent, "timestamp" | "sessionId"> & { payload?: JsonObject };
@@ -189,7 +217,7 @@ export function streamHarness<TOutput = string, TInput = unknown, TExtraBody = u
 
 function startStreamHarness<TOutput, TInput, TExtraBody>(
   options: StreamHarnessOptions<TInput, TExtraBody, TOutput>,
-): { started: Promise<StartedStream<TOutput>>; finished: Promise<StreamHarnessFinished> } {
+): { started: Promise<StartedStream<TOutput>>; finished: Promise<StreamHarnessTurnFinished> } {
   let resolveStarted!: (started: StartedStream<TOutput>) => void;
   let rejectStarted!: (error: unknown) => void;
   const started = new Promise<StartedStream<TOutput>>((resolve, reject) => {
@@ -203,44 +231,73 @@ function startStreamHarness<TOutput, TInput, TExtraBody>(
 }
 
 async function runStreamHarnessTurn<TOutput, TInput, TExtraBody>(
-  options: StreamHarnessOptions<TInput, TExtraBody, TOutput>,
+  turnOptions: StreamHarnessOptions<TInput, TExtraBody, TOutput>,
   resolveStarted: (started: StartedStream<TOutput>) => void,
   rejectStarted: (error: unknown) => void,
-): Promise<StreamHarnessFinished> {
-  const config = resolveTurnConfig(options.harness.config, options);
+): Promise<StreamHarnessTurnFinished> {
+  const called = withTurnMessages(turnOptions);
   const session =
-    typeof options.session === "object"
-      ? options.session
-      : await getOrCreateSession(options.harness, options.session, options.extraBody);
+    typeof called.session === "object"
+      ? called.session
+      : await getOrCreateSession(called.harness, called.session, called.extraBody);
+  // The harness's per-turn hook decides this turn's model and prompt, now that its session is known.
+  const hooked = await withTurnOptions(called, session);
+  // Step, cost and time limits: the deadline joins the caller's abort signal, so tools see it too.
+  const limits = createTurnLimiter(
+    hooked.turnLimits ?? hooked.harness.config.turnLimits,
+    hooked.abortSignal,
+    modelName(hooked.model ?? hooked.harness.config.model),
+  );
+  const options = limits.signal === undefined ? hooked : { ...hooked, abortSignal: limits.signal };
+  const config = resolveTurnConfig(options.harness.config, options);
   const turnId = createTurnId();
   const runId = options.runId ?? createEventId();
   const durability =
-    options.sessionLog ?? options.durability ?? config.sessionLog ?? config.durability;
+    options.sessionLog ?? config.sessionLog;
   const onTraceError = options.onTraceError ?? config.onTraceError;
   const priorEvents = await durability?.priorEvents?.({ runId }) ?? [];
 
   return config.host.runExclusive(session, { turnId }, async () => {
     let prepared: PreparedTurn<TExtraBody> | undefined;
     let resolvedMcp: ResolvedHarnessMcpGateway | undefined;
-    let turnRuntime: HarnessRuntime | undefined;
+    let turnRuntime: HarnessSandbox | undefined;
     // The turn emitter is built inside the try (it needs `prepared`), but the `finally`
     // that disposes the runtime has to report a disposal failure through it.
     let emitTurnEventForDispose:
       | ((event: PreparedTurnEvent) => Promise<void>)
       | undefined;
     let turnFailed = false;
+    // AI SDK deliberately swallows callback failures in its notify helper. Keep the
+    // first failed required append from a step or tool callback local, so no tool runs
+    // unrecorded and the finished stream cannot be mistaken for a successful turn.
+    const records = requiredRecords<PreparedTurnEvent>();
     let callbackSequence = 0;
     let lastStartedModelStep: StartedModelStep | undefined;
     // AI SDK 7 tool-execution events omit the step number; track the step the model is on.
     let currentModelStepNumber: number | undefined;
     const modelSteps = new Map<number, StartedModelStep>();
+    // Each model tool call's trusted position in its step, read by tools such as `checkpoint`.
+    const modelToolPositions = new Map<
+      string,
+      Readonly<{ modelStepId: string; sequenceIndex: number }>
+    >();
+    const nextModelToolSequenceByStep = new Map<number, number>();
     const toolOccurrences = new Map<string, string>();
     const toolReplayStates = new Map<string, ToolReplayState>();
+    /** Recorded model tool calls this run has replayed or run again, so no other call takes them. */
+    const claimedReplays = new Set<string>();
     const nextCallbackSequence = () => {
       callbackSequence += 1;
       return callbackSequence;
     };
     try {
+      // In the session's turn, so a turn waiting behind another doesn't announce itself first.
+      await options.onTurnStart?.({
+        sessionId: session.id,
+        turnId,
+        ...(options.turnMetadata === undefined ? {} : { metadata: options.turnMetadata }),
+      });
+      limits.start();
       await setSessionState(session, "running");
       prepared = await config.host.prepareTurn({
         session,
@@ -248,6 +305,15 @@ async function runStreamHarnessTurn<TOutput, TInput, TExtraBody>(
         persistentDirs: config.persistentDirs,
         extraBody: options.extraBody,
       });
+      options.abortSignal?.throwIfAborted();
+      const beforeInvocation = async () => {
+        records.throwIfFailed();
+        options.abortSignal?.throwIfAborted();
+        await options.beforeInvocation?.();
+        records.throwIfFailed();
+        options.abortSignal?.throwIfAborted();
+      };
+      const budget = await logicalTurnBudget({ limits: options.turnLimits ?? config.turnLimits, services: prepared.orchestration ?? config.host.durable, sessionId: session.id, runId, priorEvents, beforeInvocation, ...(options.abortSignal ? { signal: options.abortSignal } : {}) });
 
       const traceOptions = resolveTraceOptions(config.trace, options.trace);
       const warnings: HarnessWarning[] = [];
@@ -266,10 +332,12 @@ async function runStreamHarnessTurn<TOutput, TInput, TExtraBody>(
         defaultSource: "agent",
         traceOptions,
       });
+      const startedMetadata = triggerMetadata(options.trigger);
       await emitTurnEvent({
         type: "harness.session.started",
         turnId,
         payload: { sessionId: session.id, turnId },
+        ...(startedMetadata === undefined ? {} : { metadata: startedMetadata }),
       });
       await prepared.loadPersistentDirs({ emit: emitTurnEvent });
 
@@ -342,6 +410,9 @@ async function runStreamHarnessTurn<TOutput, TInput, TExtraBody>(
         turnId,
         orchestration: prepared.orchestration ?? config.host.durable,
         abortSignal: options.abortSignal,
+        files: prepared.files,
+        hostDataDir: prepared.dataDir,
+        hostDataFs: prepared.dataFs,
       });
       resolvedMcp = assembled.mcp;
       const { resolvedSkills, turnTools } = assembled;
@@ -382,11 +453,15 @@ async function runStreamHarnessTurn<TOutput, TInput, TExtraBody>(
       if (options.connector !== undefined) {
         toolContext.connector = options.connector;
       }
+      toolContext.beforeInvocation = beforeInvocation;
       if (options.extraBody !== undefined) {
         toolContext.extraBody = options.extraBody;
       }
       if (options.abortSignal !== undefined) {
         toolContext.abortSignal = options.abortSignal;
+      }
+      if (assembled.ask !== undefined) {
+        toolContext.ask = assembled.ask;
       }
       const toolResultSpooling =
         options.toolResultSpooling !== undefined
@@ -400,7 +475,7 @@ async function runStreamHarnessTurn<TOutput, TInput, TExtraBody>(
         files: prepared.files,
         artifacts: createArtifactAccessor(prepared.files, session.artifacts),
       };
-      const runtime = await prepared.createRuntime({
+      const runtime = await prepared.createSandbox({
         ...runtimeOptions(config, options, turnTools),
         toolContext: runtimeToolContext,
         runtimeToolReplay: {
@@ -414,6 +489,8 @@ async function runStreamHarnessTurn<TOutput, TInput, TExtraBody>(
       const tools = wrapToolsWithHarnessContext(
         toolsForModel(turnTools, runtime, config.runtime),
         toolContext,
+        modelToolPositions,
+        records,
       );
 
       const prepareStep = runtimeAwarePrepareStep(
@@ -422,6 +499,11 @@ async function runStreamHarnessTurn<TOutput, TInput, TExtraBody>(
         runtime,
         options.activeTools,
       );
+      // Messages that arrive while the turn runs are read before the next step.
+      const inbox = inboxPrepareStep(guardedModelPrepareStep(prepareStep, records), options.inbox);
+      await inbox.restore({ stepNumber: 0, at: built.messages.length });
+      const invocationGuard = budget ?? modelInvocationGuard({ beforeInvocation, requireConcrete: options.beforeInvocation !== undefined, ...(options.abortSignal ? { signal: options.abortSignal } : {}) });
+      const guardedPrepareStep = invocationGuard.wrapPrepareStep(inbox.prepareStep);
       const system = prepareStep === undefined
         ? runtimeSystem(built.system, runtime, options.activeTools)
         : built.system;
@@ -435,7 +517,7 @@ async function runStreamHarnessTurn<TOutput, TInput, TExtraBody>(
                 callId: "replay_probe",
                 model: config.model,
                 system,
-                messages: built.messages,
+                messages: inbox.withArrived(built.messages),
                 tools,
                 files: prepared.files,
               traceOptions,
@@ -459,6 +541,10 @@ async function runStreamHarnessTurn<TOutput, TInput, TExtraBody>(
           await options.onPersistenceError?.(error);
         }
 
+        // The sandbox is disposed before the turn closes, so its usage event lands inside
+        // the turn's trace.
+        await disposeTurnRuntime(turnRuntime, emitTurnEvent);
+        turnRuntime = undefined;
         await emitTurnEvent({
           type: "harness.session.completed",
           turnId,
@@ -478,21 +564,26 @@ async function runStreamHarnessTurn<TOutput, TInput, TExtraBody>(
       }
       let streamWarnings: unknown[] | undefined;
       const result = callStreamText({
-        model: config.model,
+        promptCaching: config.promptCaching !== false,
+        model: invocationGuard.wrapModel(config.model),
         system,
         messages: built.messages,
         tools,
         output: outputSpec,
         temperature: options.temperature,
         abortSignal: options.abortSignal,
-        stopWhen: stopWhenWithPark(options.stopWhen ?? isStepCount(config.workflowBudgets?.maxModelSteps ?? 20)),
-        prepareStep,
+        stopWhen: stopWhenWithPark(
+          options.stopWhen ?? isStepCount(limits.maxSteps ?? config.workflowBudgets?.maxModelSteps ?? 20),
+          limits.stopWhen,
+        ),
+        prepareStep: guardedPrepareStep,
         toolChoice: options.toolChoice,
         activeTools: options.activeTools,
         providerOptions: options.providerOptions,
         headers: options.headers,
         maxRetries: options.maxRetries,
-        onStepStart: async (event) => {
+        onStepStart: (event) => records.record(async () => {
+          records.throwIfFailed();
           const stepNumber = eventStepNumber(event);
           currentModelStepNumber = stepNumber;
           const model = eventModel(event, config.model);
@@ -550,9 +641,11 @@ async function runStreamHarnessTurn<TOutput, TInput, TExtraBody>(
             payload: eventData.payload,
             metadata: eventData.metadata,
           });
-        },
+          await options.inbox?.modelRequested?.({ stepNumber, occurrenceId });
+        }),
         onStepEnd: async (event) => {
           const stepNumber = eventStepNumber(event);
+          records.throwIfFailed();
           const started = modelSteps.get(stepNumber) ?? {
             stepNumber: stepNumber + 1,
             callId: createEventId(),
@@ -561,26 +654,50 @@ async function runStreamHarnessTurn<TOutput, TInput, TExtraBody>(
             startedAt: Date.now(),
           };
           modelSteps.set(stepNumber, started);
-          const eventData = await modelRespondedEventData({
-            callId: started.callId,
-            stepNumber: stepNumber + 1,
-            model: eventModel(event, config.model),
-            result: event,
-            text: eventText(event),
-            files: prepared!.files,
-            traceOptions,
-          });
-          await emitTurnEvent({
-            type: "harness.model.responded",
-            occurrenceId: started.occurrenceId,
-            stepId: stepIdFor(stepNumber),
-            payload: eventData.payload,
-            metadata: eventData.metadata,
-          });
+          let eventToRetry: PreparedTurnEvent | undefined;
+          try {
+            const eventData = await modelRespondedEventData({
+              callId: started.callId,
+              stepNumber: stepNumber + 1,
+              model: eventModel(event, config.model),
+              result: event,
+              text: eventText(event),
+              files: prepared!.files,
+              traceOptions,
+            });
+            eventToRetry = {
+              type: "harness.model.responded",
+              occurrenceId: started.occurrenceId,
+              stepId: stepIdFor(stepNumber),
+              payload: eventData.payload,
+              metadata: eventData.metadata,
+            };
+            await emitTurnEvent(eventToRetry);
+            await options.inbox?.modelResponded?.({ stepNumber, occurrenceId: started.occurrenceId });
+          } catch (error) {
+            const terminalError = error instanceof HarnessTerminalStageError
+              ? error
+              : new HarnessTerminalStageError("model_responded");
+            // A later step stops at its prepareStep, which fails the stream.
+            records.fail({
+              stepNumber,
+              ...(eventToRetry === undefined ? {} : { event: eventToRetry }),
+              laterStep: false,
+              error: terminalError,
+            });
+            throw terminalError;
+          }
         },
-        onToolExecutionStart: async (toolEvent) => {
+        onToolExecutionStart: (toolEvent) => records.recordToolStart(toolEvent.toolCall.toolCallId, async () => {
           const event = harnessToolExecutionStart(toolEvent, currentModelStepNumber);
-          const replay = toolReplayForEvent(priorEvents as readonly DurableHarnessEvent[], event);
+          const stepNumber = eventStepNumber(event);
+          const sequenceIndex = nextModelToolSequenceByStep.get(stepNumber) ?? 0;
+          nextModelToolSequenceByStep.set(stepNumber, sequenceIndex + 1);
+          modelToolPositions.set(event.toolCall.toolCallId, Object.freeze({
+            modelStepId: stepIdFor(stepNumber),
+            sequenceIndex,
+          }));
+          const replay = toolReplayForEvent(priorEvents as readonly DurableHarnessEvent[], event, claimedReplays);
           const callId = replay.kind === "inflight" ? replay.callId : event.toolCall.toolCallId;
           const occurrenceId =
             replay.kind === "none"
@@ -601,9 +718,14 @@ async function runStreamHarnessTurn<TOutput, TInput, TExtraBody>(
             payload: eventData.payload,
             metadata: eventData.metadata,
           });
-        },
-        onToolExecutionEnd: async (toolEnd) => {
+        }),
+        onToolExecutionEnd: (toolEnd) => records.record(async () => {
           const event = harnessToolExecutionEnd(toolEnd, currentModelStepNumber);
+          // A call refused before it ran has no outcome to record. One that did run is
+          // recorded even after another record failed, so a rerun does not repeat it.
+          if (!records.ran(event.toolCall.toolCallId)) {
+            return;
+          }
           const state = toolReplayStates.get(event.toolCall.toolCallId);
           if (state?.replay.kind === "completed" || state?.replay.kind === "failed") {
             return;
@@ -623,7 +745,7 @@ async function runStreamHarnessTurn<TOutput, TInput, TExtraBody>(
             payload: eventData.payload,
             metadata: eventData.metadata,
           });
-        },
+        }),
         onEnd: (event) => {
           streamWarnings = event.warnings as unknown[] | undefined;
         },
@@ -634,6 +756,8 @@ async function runStreamHarnessTurn<TOutput, TInput, TExtraBody>(
       const uiStream = toUIMessageStream({
         stream: result.stream,
         originalMessages: options.messages ?? [],
+        // Each reply gets an id, so an app can save and update it by id as it streams.
+        generateMessageId: options.uiMessageStream?.generateMessageId ?? (() => `msg_${randomUUID()}`),
         onError: (error: unknown) => {
           uiMessageStreamError = error;
           return formatUiMessageStreamError?.(error) ?? "An error occurred.";
@@ -655,8 +779,44 @@ async function runStreamHarnessTurn<TOutput, TInput, TExtraBody>(
         output: outputPromise,
       });
 
-      const collectedValue = await collected;
-      const parked = parkedResultFromSteps(await result.steps);
+      let collectedValue: Awaited<typeof collected>;
+      let steps: Awaited<typeof result.steps>;
+      try {
+        collectedValue = await collected;
+        steps = await result.steps;
+      } catch (error) {
+        if (records.failure !== undefined) throw records.failure.error;
+        throw limits.exceeded() ?? error;
+      }
+      await settleRequiredRecords(records, steps.length - 1, emitTurnEvent);
+      // A step or cost limit stopped the model while it still wanted to call tools.
+      const limited = limits.exceeded();
+      if (limited !== undefined) throw limited;
+      const found = parkedResultFromSteps(steps);
+      const orchestration = prepared.orchestration ?? config.host.durable;
+      // Tools that waited in `ask` park the turn on their step's one continuation.
+      const waiting = found === undefined || orchestration === undefined
+        ? undefined
+        : await waitingPark({ services: orchestration, sessionId: session.id, turnId, steps });
+      const parked = found === undefined || waiting === undefined
+        ? found
+        : { ...found, continuationId: waiting.continuationId, pending: waiting.pending };
+      if (parked !== undefined && orchestration !== undefined) {
+        // resumeParked continues it, as a generateHarness turn.
+        await saveParkedTurn({
+          services: orchestration,
+          session,
+          continuationId: parked.continuationId,
+          system: built.system,
+          // Every step's messages: `response.messages` holds only the last step's.
+          messages: inbox.withArrived([...built.messages, ...(await result.responseMessages)]),
+          type: options.type,
+          pin: options.turnPin,
+          metadata: options.turnMetadata,
+          ...(budget === undefined ? {} : { budgetRef: budget.ref }),
+        });
+        if (waiting !== undefined) await recordWaitingPark(waiting, orchestration);
+      }
       warnings.push(...providerWarnings(streamWarnings));
 
       const persistence = await prepared.commitPersistentDirs({ emit: emitTurnEvent });
@@ -666,6 +826,10 @@ async function runStreamHarnessTurn<TOutput, TInput, TExtraBody>(
         await options.onPersistenceError?.(error);
       }
 
+      // The sandbox is disposed before the turn closes, so its usage event lands inside the
+      // turn's trace.
+      await disposeTurnRuntime(turnRuntime, emitTurnEvent);
+      turnRuntime = undefined;
       await emitTurnEvent({
         type: "harness.session.completed",
         turnId,
@@ -680,7 +844,7 @@ async function runStreamHarnessTurn<TOutput, TInput, TExtraBody>(
           artifacts: await session.artifacts.list(),
           trace: prepared.trace,
           warnings: [...warnings, ...collectedValue.warnings],
-        } as unknown as StreamHarnessFinished;
+        };
       }
 
       return {
@@ -692,8 +856,13 @@ async function runStreamHarnessTurn<TOutput, TInput, TExtraBody>(
         commitManual: createManualCommit(prepared, session, emitTurnEvent, options),
         warnings: [...warnings, ...collectedValue.warnings],
       };
-    } catch (error) {
+    } catch (caught) {
+      const error = turnLimitCause(caught);
       turnFailed = true;
+      // The sandbox first, for the same reason as on the success path: its usage event has to
+      // precede the terminal session event. Disposal never throws.
+      await disposeTurnRuntime(turnRuntime, emitTurnEventForDispose);
+      turnRuntime = undefined;
       rejectStarted(error);
       // Failure bookkeeping must never mask the root error: with a remote durability sink,
       // the sink itself may be what failed, and these emits would fail the same way.
@@ -734,8 +903,16 @@ async function runStreamHarnessTurn<TOutput, TInput, TExtraBody>(
             {
               type: "harness.session.failed",
               turnId,
-              payload: { sessionId: session.id, turnId, error: error instanceof Error ? error.message : String(error) },
-              metadata: { error: error instanceof Error ? error.message : String(error) },
+              payload: {
+                sessionId: session.id,
+                turnId,
+                error: error instanceof Error ? error.message : String(error),
+                ...(error instanceof HarnessTurnLimitError ? { reason: error.reason } : {}),
+              },
+              metadata: {
+                error: error instanceof Error ? error.message : String(error),
+                ...(error instanceof HarnessTurnLimitError ? { reason: error.reason } : {}),
+              },
             },
             traceOptions,
             nextCallbackSequence,
@@ -748,8 +925,10 @@ async function runStreamHarnessTurn<TOutput, TInput, TExtraBody>(
       }
       throw error;
     } finally {
+      limits.dispose();
       // Dispose the environment first: closing MCP can throw on the success path, and the
-      // sandbox child process must be reaped regardless.
+      // sandbox child process must be reaped regardless. Normally it is already gone (both
+      // paths above dispose before their terminal event); this covers a turn that parked.
       await disposeTurnRuntime(turnRuntime, emitTurnEventForDispose);
       await closeResolvedMcpGateway(resolvedMcp, { suppressErrors: turnFailed });
     }
@@ -784,19 +963,26 @@ async function closeResolvedMcpGateway(
   }
 }
 
+/**
+ * What an earlier run recorded for this call: its own record first (by `toolCallId`), else the
+ * latest matching one no other call of this run has taken. Marks the record taken.
+ */
 function toolReplayForEvent(
   events: readonly DurableHarnessEvent[],
-  event: { stepNumber?: number | undefined; toolCall: { toolName: string; input?: unknown } },
+  event: { stepNumber?: number | undefined; toolCall: { toolCallId: string; toolName: string; input?: unknown } },
+  claimed: Set<string>,
 ): ToolReplay {
   if (!("input" in event.toolCall)) {
     return { kind: "none" };
   }
-  return findToolReplay(events, {
+  const replay = findToolReplay(events, {
     caller: "model",
     toolName: event.toolCall.toolName,
     args: event.toolCall.input,
     ...(event.stepNumber === undefined ? {} : { turn: event.stepNumber + 1 }),
-  });
+  }, { callId: event.toolCall.toolCallId, claimed });
+  if (replay.kind !== "none" && replay.callId !== undefined) claimed.add(replay.callId);
+  return replay;
 }
 
 function toolOccurrenceIdFor(
@@ -871,6 +1057,7 @@ function uiMessageStreamFromText(text: string): ReadableStream {
 }
 
 function callStreamText(options: {
+  promptCaching: boolean;
   model: Parameters<typeof streamText>[0]["model"];
   system: string;
   messages: Parameters<typeof streamText>[0]["messages"];
@@ -945,6 +1132,9 @@ function callStreamText(options: {
   }
   if (options.onEnd !== undefined) {
     request.onEnd = options.onEnd;
+  }
+  if (options.promptCaching) {
+    withPromptCaching(request);
   }
   return streamText(request as Parameters<typeof streamText>[0]);
 }
@@ -1023,8 +1213,8 @@ function runtimeOptions<TInput, TExtraBody, TOutput>(
   config: Harness<any, TExtraBody>["config"],
   options: StreamHarnessOptions<TInput, TExtraBody, TOutput>,
   tools: ToolSet,
-): Parameters<PreparedTurn<TExtraBody>["createRuntime"]>[0] {
-  const out: Parameters<PreparedTurn<TExtraBody>["createRuntime"]>[0] = {
+): Parameters<PreparedTurn<TExtraBody>["createSandbox"]>[0] {
+  const out: Parameters<PreparedTurn<TExtraBody>["createSandbox"]>[0] = {
     tools,
   };
   const runtime = resolveRuntimeOptions(config.runtime, options.runtime);
@@ -1040,11 +1230,14 @@ function runtimeOptions<TInput, TExtraBody, TOutput>(
   return out;
 }
 
+/** A turn's config: the harness's, with the call's options applied and a model chosen. */
+type TurnConfig<TExtraBody> = Harness<any, TExtraBody>["config"] & { model: NonNullable<Harness<any, TExtraBody>["config"]["model"]> };
+
 function resolveTurnConfig<TInput, TExtraBody, TOutput>(
   config: Harness<any, TExtraBody>["config"],
   options: StreamHarnessOptions<TInput, TExtraBody, TOutput>,
-): Harness<any, TExtraBody>["config"] {
-  const model = (options.model ?? config.model) as Harness<any, TExtraBody>["config"]["model"] | undefined;
+): TurnConfig<TExtraBody> {
+  const model = options.model ?? config.model;
   if (model === undefined) {
     throw new HarnessInputError(
       "Little Harness model is required. Provide model to createHarness(...) or to this harness call.",
@@ -1052,7 +1245,7 @@ function resolveTurnConfig<TInput, TExtraBody, TOutput>(
     );
   }
 
-  const out: Harness<any, TExtraBody>["config"] = {
+  const out: TurnConfig<TExtraBody> = {
     ...config,
     model,
   };
@@ -1090,14 +1283,26 @@ function toolsForModel(
   return { ...tools, bash: runtime.shellTool() };
 }
 
-function stopWhenWithPark(stopWhen: Parameters<typeof streamText>[0]["stopWhen"]): Parameters<typeof streamText>[0]["stopWhen"] {
+function stopWhenWithPark(
+  stopWhen: Parameters<typeof streamText>[0]["stopWhen"],
+  limit?: StopCondition<any>,
+): Parameters<typeof streamText>[0]["stopWhen"] {
   const conditions = Array.isArray(stopWhen) ? stopWhen : [stopWhen ?? isStepCount(20)];
-  return [...conditions, parkedThisStep];
+  return [...conditions, ...(limit === undefined ? [] : [limit]), parkedThisStep];
+}
+
+/** The model's id, for a `price` function. */
+function modelName(model: unknown): string {
+  if (typeof model === "string") return model;
+  if (typeof model === "object" && model !== null && typeof (model as { modelId?: unknown }).modelId === "string") {
+    return (model as { modelId: string }).modelId;
+  }
+  return "unknown";
 }
 
 function runtimeSystem(
   system: string,
-  runtime: Pick<HarnessRuntime, "systemHints">,
+  runtime: Pick<HarnessSandbox, "systemHints">,
   activeTools: readonly string[] | undefined,
 ): string {
   return systemWithRuntimeHints(system, runtime.systemHints({ activeTools })) as string;
@@ -1106,7 +1311,7 @@ function runtimeSystem(
 function runtimeAwarePrepareStep(
   prepareStep: Parameters<typeof streamText>[0]["prepareStep"],
   baseSystem: string,
-  runtime: Pick<HarnessRuntime, "systemHints">,
+  runtime: Pick<HarnessSandbox, "systemHints">,
   activeTools: readonly string[] | undefined,
 ): Parameters<typeof streamText>[0]["prepareStep"] {
   if (prepareStep === undefined) {
@@ -1126,6 +1331,17 @@ function runtimeAwarePrepareStep(
       ),
     };
   }) as Parameters<typeof streamText>[0]["prepareStep"];
+}
+
+function guardedModelPrepareStep(
+  prepareStep: Parameters<typeof streamText>[0]["prepareStep"],
+  records: Pick<RequiredRecords<unknown>, "throwIfFailed">,
+): NonNullable<Parameters<typeof streamText>[0]["prepareStep"]> {
+  return async (event) => {
+    records.throwIfFailed();
+    if (prepareStep === undefined) return undefined;
+    return await prepareStep(event as never);
+  };
 }
 
 function prepareStepActiveTools(
@@ -1175,9 +1391,24 @@ async function emitHarnessEvent<TExtraBody>(
 ): Promise<void> {
   const sanitizedEvent = sanitizeHarnessEvent(event, traceOptions);
   const { payload, ...traceEvent } = sanitizedEvent;
+  const appendIdempotencyKey = createHarnessAppendIdempotencyKey({
+    runId: occurrence.runId,
+    eventType: traceEvent.type,
+    logicalEventId:
+      traceEvent.occurrenceId ??
+      stableHash({
+        turnId: traceEvent.turnId,
+        stepId: traceEvent.stepId,
+        parentEventId: traceEvent.parentEventId,
+        type: traceEvent.type,
+        payload,
+        metadata: traceEvent.metadata,
+      }),
+  });
   await emitHarnessOccurrence({
     type: traceEvent.type,
     runId: occurrence.runId,
+    appendIdempotencyKey,
     ...(traceEvent.occurrenceId === undefined ? {} : { occurrenceId: traceEvent.occurrenceId }),
     ...(payload === undefined ? {} : { payload }),
     ...(traceEvent.metadata === undefined ? {} : { metadata: traceEvent.metadata }),
@@ -1257,7 +1488,7 @@ function modelMetadata(model: EventModel): { provider?: string; modelId?: string
 
 function eventSystem(event: unknown, fallback: string): string {
   // AI SDK 7 renamed the step's system prompt to `instructions`; `system` is the v6 name.
-  const value = isObject(event) ? event.instructions ?? event.system : undefined;
+  const value = uncachedInstructions(isObject(event) ? event.instructions ?? event.system : undefined);
   if (value === undefined) {
     return fallback;
   }

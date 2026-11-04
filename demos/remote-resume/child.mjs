@@ -5,9 +5,9 @@ import {
   createHarness,
   generateHarness,
   localHost,
-  remoteSessionLog,
   subprocessSandbox,
-} from "little-harness";
+} from "@little-stack/harness";
+import { remoteSessionLog } from "@little-stack/harness/remote-session";
 import { tool } from "ai";
 import { MockLanguageModelV3 } from "ai/test";
 import { z } from "zod";
@@ -108,7 +108,7 @@ const modelB = new MockLanguageModelV3({
 
 const sessionLog = remoteSessionLog({ baseUrl: serverUrl, authToken });
 // Agent bash executes in a child process with a stripped environment — the sandbox port.
-const host = localHost({ dataDir, executionEnvironment: subprocessSandbox() });
+const host = localHost({ dataDir, sandbox: subprocessSandbox() });
 
 const harnessA = createHarness({ host, model: modelA, sessionLog });
 const harnessB = createHarness({

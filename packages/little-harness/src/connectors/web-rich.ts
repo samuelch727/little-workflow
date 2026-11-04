@@ -532,6 +532,7 @@ export async function loadWebRichConnector<
           ...(connectorTools === undefined ? {} : { connectorTools }),
           ...(descriptor.toolPolicy === undefined ? {} : { toolPolicy: descriptor.toolPolicy }),
           ...(options.uiMessageStream === undefined ? {} : { uiMessageStream: options.uiMessageStream }),
+          trigger: { kind: "message", source: "web", from: user.email ?? user.id },
         });
         const finishedTask = observeFinished(descriptor, runContext, result);
         options.waitUntil?.(finishedTask);

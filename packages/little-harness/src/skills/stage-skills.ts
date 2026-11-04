@@ -1,29 +1,35 @@
-import { mkdir, rm, writeFile } from "node:fs/promises";
-import * as path from "node:path";
 import { HarnessInputError, HarnessPathError } from "../errors.js";
+import { diskStorage, type WorkspaceStorage } from "../files/storage.js";
 import type { ResolvedSkill } from "../types.js";
 
+/**
+ * Writes the turn's skills under `<sessionRoot>/.agents/skills`, replacing what was there.
+ * `sessionRoot` is a session directory on disk, or "/" for a workspace kept in a just-bash
+ * filesystem.
+ */
 export async function stageResolvedSkills(
   sessionRoot: string,
   skills: ResolvedSkill[],
+  storage: WorkspaceStorage = diskStorage(),
 ): Promise<void> {
-  const stagedSkills = resolveStagedSkills(sessionRoot, skills);
+  const path = storage.path;
+  const stagedSkills = resolveStagedSkills(path, sessionRoot, skills);
   await Promise.all([
-    rm(path.join(sessionRoot, "skills"), { recursive: true, force: true }),
-    rm(path.join(sessionRoot, ".agents", "skills"), { recursive: true, force: true }),
+    // A host directory from before skills moved under .agents; a filesystem workspace never had one.
+    ...(storage.kind === "disk" ? [storage.removeTree(path.join(sessionRoot, "skills"))] : []),
+    storage.removeTree(path.join(sessionRoot, ".agents", "skills")),
   ]);
-  await mkdir(path.join(sessionRoot, ".agents", "skills"), { recursive: true });
+  await storage.makeDir(path.join(sessionRoot, ".agents", "skills"));
 
   for (const { skill, skillRoot } of stagedSkills) {
     for (const [file, content] of Object.entries(skill.files)) {
-      const target = resolveSkillFile(skillRoot, file);
-      await mkdir(path.dirname(target), { recursive: true });
-      await writeFile(target, content);
+      await storage.writeFile(resolveSkillFile(path, skillRoot, file), content);
     }
   }
 }
 
 function resolveStagedSkills(
+  path: WorkspaceStorage["path"],
   sessionRoot: string,
   skills: readonly ResolvedSkill[],
 ): Array<{ readonly skill: ResolvedSkill; readonly skillRoot: string }> {
@@ -40,7 +46,7 @@ function resolveStagedSkills(
     }
     seenNames.set(skill.name, skill);
 
-    const skillRoot = resolveSkillRoot(sessionRoot, skill.harnessDir);
+    const skillRoot = resolveSkillRoot(path, sessionRoot, skill.harnessDir);
     const existingRoot = seenRoots.get(skillRoot);
     if (existingRoot !== undefined) {
       throw new HarnessInputError("Skill harnessDir values must be unique.", {
@@ -54,24 +60,24 @@ function resolveStagedSkills(
   });
 }
 
-function resolveSkillRoot(sessionRoot: string, harnessDir: string): string {
+function resolveSkillRoot(path: WorkspaceStorage["path"], sessionRoot: string, harnessDir: string): string {
   const normalized = path.posix.normalize(harnessDir);
   if (normalized.startsWith(".agents/skills/")) {
-    return resolveRelative(sessionRoot, normalized, "Skill harnessDir resolves outside .agents/skills");
+    return resolveRelative(path, sessionRoot, normalized, "Skill harnessDir resolves outside .agents/skills");
   }
 
   throw new HarnessPathError("Skill harnessDir must be inside .agents/skills", { harnessDir });
 }
 
-function resolveSkillFile(skillRoot: string, file: string): string {
+function resolveSkillFile(path: WorkspaceStorage["path"], skillRoot: string, file: string): string {
   if (file.startsWith("/") || file.includes("\0") || file.split(/[\\/]/).includes("..")) {
     throw new HarnessPathError("Skill file paths must be relative", { path: file });
   }
 
-  return resolveRelative(skillRoot, file, "Skill file resolves outside its skill directory");
+  return resolveRelative(path, skillRoot, file, "Skill file resolves outside its skill directory");
 }
 
-function resolveRelative(root: string, relative: string, message: string): string {
+function resolveRelative(path: WorkspaceStorage["path"], root: string, relative: string, message: string): string {
   const target = path.resolve(root, relative);
   const rel = path.relative(path.resolve(root), target);
   if (rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel))) {

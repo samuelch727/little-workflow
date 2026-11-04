@@ -1,0 +1,449 @@
+---
+title: CLI
+description: Scaffold and interactively test agents, and inspect Local Host sessions and traces.
+---
+
+import { Files, File, Folder } from 'fumadocs-ui/components/files';
+
+The `little-harness` CLI does two things:
+
+- **Author and test agents** from an agent-folder workspace — `init`, `new <name>`, `test <name>`.
+- **Inspect** Local Host data under `.little-harness` — `sessions`, `trace`, `files`, `artifacts`,
+  `diff`, `doctor`, `outcomes`.
+
+The inspection commands are read-only developer debugging tools: they do not call models, execute
+tools, start runtimes, mutate session files, or commit Persistent Dirs. The `test` command is the
+exception — it loads an agent and runs it interactively, so it *does* call the model. Your app still
+owns the model, tools, auth, policy, and runtime configuration.
+
+## Install Shape
+
+When installed from the package, the binary is exposed as `little-harness`. While the package is in
+alpha, install or run it from the `alpha` dist-tag (Node.js 22+):
+
+```bash
+pnpm add -D @little-stack/harness@alpha
+pnpm little-harness --help
+```
+
+In a workspace, you can run it through pnpm:
+
+```bash
+pnpm --filter @little-stack/harness exec little-harness --help
+```
+
+## Shared Options
+
+### `--data-dir <dir>`
+
+Local Host data directory. Defaults to `.little-harness`.
+
+```bash
+little-harness sessions --data-dir .little-harness
+```
+
+The CLI reads the same layout created by `localHost({ dataDir })`.
+
+<Files>
+  <Folder name=".little-harness" defaultOpen>
+    <Folder name="sessions" defaultOpen>
+      <Folder name="<session-key>" defaultOpen>
+        <Folder name="session" defaultOpen></Folder>
+        <Folder name="artifacts" defaultOpen></Folder>
+        <Folder name=".agents" defaultOpen></Folder>
+        <Folder name="persistent" defaultOpen></Folder>
+        <Folder name="turns" defaultOpen></Folder>
+        <File name="trace.ndjson" />
+        <File name="status.json" />
+      </Folder>
+    </Folder>
+  </Folder>
+</Files>
+
+## `init`
+
+Create an agent-folder workspace with a guided wizard. The wizard asks for a project name, offers
+searchable AI SDK language-provider and model selection, accepts a custom provider model id, and asks
+before installing dependencies.
+
+```bash
+npx @little-stack/harness@alpha init
+```
+
+For scripted setup, pass the project name, provider, model, and confirmation flags:
+
+```bash
+little-harness init support-agents --provider openai --model gpt-5.2 --yes --no-install
+```
+
+To scaffold into the current directory instead of creating a new project folder, use `--here`:
+
+```bash
+little-harness init --here --provider anthropic --model claude-sonnet-4-6
+```
+
+`init` writes `little-harness.json` (`{ "agents": "agents" }`), creates `agents/`, and scaffolds a
+starter `support` agent. Pass `--force` to overwrite an existing workspace.
+
+The generated `package.json` pins versions instead of using `latest`: `@little-stack/harness` at the CLI's own
+version (`^0.2.0-alpha.0` for this release), `ai` at `^7.0.0`, the selected provider package at an AI SDK
+7-compatible range, and a TypeScript 6 / `tsx` toolchain. The same table is exported as
+`scaffoldDependencyVersions()` from `@little-stack/harness/scaffold`.
+
+Provider packages and model ids come from AI SDK providers. If the listed models do not include the one
+you need, type the provider's model id directly. The catalog currently offers 24 provider choices: the
+official AI SDK language-model providers plus a custom OpenAI-compatible API scaffold.
+
+For OpenAI-compatible APIs, use the custom provider and set the generated URL and API-key variables:
+
+```bash
+little-harness init local-agents --provider openai-compatible --model local-model --yes --no-install
+```
+
+See [Agent Folders](/docs/harness/v0.1.0-alpha/build-agents/agent-folders) for the folder layout.
+
+## `new <name>`
+
+Add another agent to an existing workspace at `agents/<name>` — an `agent.ts` (a `createHarness`
+template), an example `tools/echo.ts`, and `instructions.md`. Pass `--provider <provider>` and
+`--model <model>` to choose the provider and model written into the new `agent.ts` (defaults to the
+`anthropic` provider); pass `--force` to overwrite an existing folder.
+
+> **UNRELEASED:** in the current source, the default provider is `openai` (`gpt-5.2`) for
+> `little-harness init` and `little-harness new`, matching `little setup` and `little init`.
+> No npm version includes this yet. `init` and `new` also reject unknown options, print usage for
+> `--help`, and `init --workflow` points to `little setup --workflow`, which scaffolds a Workflow.
+
+```bash
+little-harness new support
+```
+
+## `test <name>`
+
+Load an agent folder and chat with it interactively (a streaming REPL). Unlike the inspection
+commands, this **runs the agent** — it calls the model. Type `:reset` to clear the conversation or
+`:exit` to quit.
+
+```bash
+little-harness test support
+```
+
+The stream is grouped into labeled blocks such as `[assistant]`, `[reasoning]`,
+`[tool call: lookupCustomer]`, `[tool result: lookupCustomer]`, and `[error]`; tool blocks include
+the input and output payloads when the provider exposes them.
+
+Pass `--connector <id>` to test with a connector's toolset instead of the bare agent. The CLI loads the
+connector descriptor and its `connectors/<id>/tools/*` extensions, merges them over the agent's base
+tools, filters execute-less tools, applies the descriptor's `toolPolicy`, and prints the resulting tool
+names before the REPL starts:
+
+```bash
+little-harness test support --connector slack
+```
+
+```txt
+Connector 'slack' (chat-sdk) tools: add-reaction, lookup-orders, post-to-channel
+```
+
+This reproduces the exact per-connector tool inventory a `load*Connector` run would present, so you can
+exercise connector-only and abstract-then-implemented tools from the CLI.
+
+## `connectors <name>`
+
+List an agent's discovered connectors, plus any flat-file candidates that were skipped.
+
+```bash
+little-harness connectors support
+```
+
+```txt
+Connectors for 'support':
+  slack  chat-sdk  agents/support/connectors/slack/connector.ts
+  web-rich  web-rich  agents/support/connectors/web-rich/connector.ts
+
+Skipped connector candidates:
+  helpers  agents/support/connectors/helpers.ts  Connector module must default-export a Little Harness connector descriptor.
+```
+
+Each connector line is `id  kind  path`. A flat `connectors/<id>.ts` helper that is not a connector
+descriptor is skipped and reported with its reason; a broken nested `connectors/<id>/connector.*`
+folder is a hard error that exits non-zero.
+
+## `start <name>`
+
+Serve an agent folder: its connectors at `/connectors/<id>`, an HTTP API for
+messages, Input Type jobs, questions and schedules, its schedules on time, and
+turns that continue once their wait is over. Runs until stopped (Ctrl-C or
+`SIGTERM`).
+
+```bash
+little-harness start support
+little-harness start support --port 8080 --host 0.0.0.0 --token "$TOKEN"
+```
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--port <n>` | `3000` | The port; `0` picks a free one. |
+| `--host <address>` | `127.0.0.1` | The address to listen on. |
+| `--token <token>` | `LITTLE_HARNESS_TOKEN` | Required by the API routes as `Authorization: Bearer <token>`. Without one, the server listens only on a loopback address, and the API answers only JSON requests to `localhost`, `127.0.0.1` or `[::1]` without an `Origin` header. Set one behind a tunnel (ngrok, cloudflared): tunneled requests arrive from loopback. Connectors are served either way. |
+
+Schedule state goes to the agent host's data dir, or `--data-dir` when the host
+has none. See [Serving An Agent](/docs/harness/v0.1.0-alpha/build-agents/serving-agents)
+for the routes.
+
+## `dev <name>`
+
+`start` in a child process that restarts when a file in the agent folder
+changes, with a terminal chat against it. In the chat, `:questions` lists the
+questions the agent asked, `:answer <n> <option or text>` answers one, `:reset`
+starts a new session, and `:exit` quits. Takes `--port`. When
+`LITTLE_HARNESS_TOKEN` is set, the server requires it and the chat sends it.
+
+```bash
+little-harness dev support
+```
+
+## `schedules <name>`
+
+List an agent's schedules with their next and last run, or run one now in this
+process with `schedules run <name> <id>`.
+
+```bash
+little-harness schedules support
+little-harness schedules run support morning-backlog
+```
+
+```txt
+morning-backlog  0 9 * * 1-5 (Asia/Hong_Kong)  next 2026-10-15T01:00:00.000Z  last never
+```
+
+## `sessions`
+
+List Local Host sessions.
+
+```bash
+little-harness sessions --data-dir .little-harness
+```
+
+Output is JSON:
+
+```json
+[
+  {
+    "id": "chat_123",
+    "state": "idle",
+    "pathKey": "chat_123",
+    "createdAt": "2026-06-03T10:00:00.000Z",
+    "updatedAt": "2026-06-03T10:04:12.000Z",
+    "stagedMessageIds": ["msg_1"],
+    "tracePath": ".little-harness/sessions/chat_123/trace.ndjson",
+    "artifactCount": 3
+  }
+]
+```
+
+Use this when you know the Local Host folder but not the session id used by the
+app.
+
+## `trace <session-id>`
+
+Dump validated trace events for one session.
+
+```bash
+little-harness trace chat_123 --data-dir .little-harness
+```
+
+By default, output is newline-delimited JSON, matching `trace.ndjson`.
+
+```json
+{"schemaVersion":"lh.trace.v2","eventId":"evt_01","sequence":1,"type":"harness.session.started","sessionId":"chat_123","turnId":"turn_01","timestamp":"2026-06-03T10:00:00.000Z","metadata":{}}
+```
+
+Use `--format pretty` for a timeline grouped by turn, step, and tool call:
+
+```bash
+little-harness trace chat_123 --data-dir .little-harness --format pretty
+```
+
+Example output (each event line is `sequence  type  timestamp`):
+
+```txt
+turn turn_01
+  1  harness.session.started  2026-06-03T10:00:00.000Z
+  2  harness.filesystem.mounted  2026-06-03T10:00:00.122Z
+  step step_1
+    3  harness.model.called  2026-06-03T10:00:01.304Z
+    tool call_1 lookupCustomer
+      4  harness.tool_call.started  2026-06-03T10:00:03.900Z
+      5  harness.tool_call.succeeded  2026-06-03T10:00:03.941Z
+    6  harness.model.responded  2026-06-03T10:00:04.118Z
+  7  harness.session.completed  2026-06-03T10:00:04.200Z
+```
+
+`trace` validates events before printing. If the trace contains malformed lines,
+run `doctor` to see the invalid line numbers.
+
+## `files <session-id>`
+
+List managed harness files without printing file contents.
+
+```bash
+little-harness files chat_123 --data-dir .little-harness
+```
+
+Output includes paths, file kinds, and byte counts when known:
+
+```json
+[
+  {
+    "path": "/session/input/customer.md",
+    "kind": "file",
+    "bytes": 1842
+  },
+  {
+    "path": "/.agents/skills/customer-research/SKILL.md",
+    "kind": "file",
+    "bytes": 2190
+  }
+]
+```
+
+Use this before opening raw files to understand what was mounted or written
+during the run.
+
+## `artifacts <session-id>`
+
+List artifact references.
+
+```bash
+little-harness artifacts chat_123 --data-dir .little-harness
+```
+
+Output:
+
+```json
+[
+  {
+    "id": "/artifacts/tool-results/search/abc123.json",
+    "path": "/artifacts/tool-results/search/abc123.json",
+    "bytes": 38291
+  }
+]
+```
+
+Artifacts can include developer-created outputs, automatically spooled tool
+results, and trace content refs under `/artifacts/trace/...`.
+
+## `diff <session-id> --path <harness-path>`
+
+Print the latest traced diff metadata for one harness path.
+
+```bash
+little-harness diff chat_123 \
+  --path /persistent/user/notes.md \
+  --data-dir .little-harness
+```
+
+Output:
+
+```json
+{
+  "eventId": "evt_42",
+  "sequence": 42,
+  "path": "/persistent/user/notes.md",
+  "diff": {
+    "available": true,
+    "format": "unified",
+    "preview": "@@ -1 +1 @@\\n-old note\\n+new note\\n",
+    "truncated": false
+  }
+}
+```
+
+For large diffs, `diff.contentRef` points to `/artifacts/trace/...`.
+
+## `doctor <session-id>`
+
+Summarize trace failures and debug signals.
+
+```bash
+little-harness doctor chat_123 --data-dir .little-harness
+```
+
+Output:
+
+```json
+{
+  "sessionId": "chat_123",
+  "eventCount": 84,
+  "invalidEventCount": 0,
+  "failureCount": 1,
+  "spooledOutputCount": 2,
+  "contentRefCount": 0,
+  "largeTraceArtifactCount": 0,
+  "redactionCount": 3,
+  "failures": [
+    {
+      "eventId": "evt_73",
+      "sequence": 73,
+      "type": "harness.persistent_dir.commit.failed"
+    }
+  ],
+  "invalidEvents": []
+}
+```
+
+`doctor` returns a non-zero exit code when it finds invalid trace events or
+failure events — `harness.session.failed`, `harness.model.failed`,
+`harness.tool_call.failed`, `harness.persistent_dir.commit.failed`,
+`harness.runtime.error`, and `harness.runtime.dispose.failed`. That makes it
+useful in local smoke tests.
+
+## `outcomes [session-id]`
+
+Aggregate recorded `outcome.reported` events into success rates per
+`promptHash` and `stepPath`. Omit the session id to aggregate every session in
+the data dir.
+
+```bash
+little-harness outcomes --data-dir .little-harness
+little-harness outcomes chat_123 --data-dir .little-harness
+```
+
+Output is one JSON object:
+
+```json
+{
+  "eventCount": 14,
+  "countedCount": 11,
+  "supersededCount": 2,
+  "retractedCount": 1,
+  "clearedCount": 1,
+  "overall": { "n": 11, "success": 8, "failure": 2, "partial": 1, "successRate": 0.7272727272727273 },
+  "byPromptHash": [
+    { "key": "sha256:4b1c…", "n": 11, "success": 8, "failure": 2, "partial": 1, "successRate": 0.7272727272727273 }
+  ],
+  "byStepPath": [],
+  "unattributed": { "withoutPromptHash": 0, "withoutStepPath": 11 },
+  "sessionIds": ["chat_123"],
+  "invalidEventCount": 0
+}
+```
+
+Every rate carries its sample size `n`; `successRate` is `null` when `n` is 0.
+Reports sharing a `reportKey` count once (the latest wins), and retractions
+withdraw the report they match. See
+[Outcome Capture](/docs/harness/v0.1.0-alpha/build-agents/outcomes).
+
+## What The CLI Does Not Show
+
+The CLI follows the same content policy as the trace:
+
+- no raw mounted file contents in `files`
+- no provider-hidden model reasoning
+- no credentials or redacted metadata
+- no raw binary payload bodies
+- no deleted file contents after deletion
+
+When a developer needs raw file content, they can open the Local Host session
+folder directly or read a specific artifact path from application code.

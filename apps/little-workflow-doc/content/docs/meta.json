@@ -1,8 +1,16 @@
 {
-  "title": "Little Workflow",
+  "title": "Little",
   "pages": [
     "index",
-    "comparisons",
-    "v0.1.0-alpha"
+    "get-started",
+    "how-they-fit",
+    "releases",
+    "glossary",
+    "url-migration",
+    "---Products---",
+    "harness",
+    "workflow",
+    "compute",
+    "littledb"
   ]
 }

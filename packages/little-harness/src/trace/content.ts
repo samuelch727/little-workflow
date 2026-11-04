@@ -50,7 +50,7 @@ export async function captureTraceContent(
     return { captured: false };
   }
 
-  const preview = serialized.text.slice(0, options.traceOptions.content.previewBytes);
+  const preview = textPreview(serialized.text, options.traceOptions.content.previewBytes);
   const base: TraceContentRef = {
     captured: true,
     preview,
@@ -63,6 +63,13 @@ export async function captureTraceContent(
 
   if (serialized.bytes <= options.traceOptions.content.maxInlineBytes) {
     return base;
+  }
+
+  const limit = options.files.limits?.maxFileBytes;
+  if (limit !== undefined && serialized.bytes > limit) {
+    // Only the optional trace copy is unavailable. Required model/replay data and file writes
+    // use their own paths; a storage error on a write we do attempt still propagates.
+    return { ...base, captured: false, unavailableReason: "storage_limit", storageLimitBytes: limit };
   }
 
   const path = `/artifacts/trace/${safePathSegment(options.label)}/${sha256Hex(
@@ -84,6 +91,13 @@ export async function captureTraceContent(
     ...base,
     contentRef: path,
   };
+}
+
+/** previewBytes is a legacy code-unit bound; clipping must not leave a dangling high surrogate. */
+function textPreview(text: string, maxCodeUnits: number): string {
+  const preview = text.slice(0, maxCodeUnits);
+  const last = preview.charCodeAt(preview.length - 1);
+  return last >= 0xd800 && last <= 0xdbff ? preview.slice(0, -1) : preview;
 }
 
 type SerializedTraceValue = {

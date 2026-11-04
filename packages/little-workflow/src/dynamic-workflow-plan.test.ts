@@ -18,6 +18,68 @@ describe("parseAdHocPlan", () => {
     }
   });
 
+  it("rejects fields a step type does not take, naming the right ones", () => {
+    // A tool step's arguments under `input` would be ignored, so the tool would get none.
+    const toolStep = parseAdHocPlan({
+      steps: [{ id: "credit", uses: "tool.call", tool: "fetch_credit_report", input: { applicationId: "{{ input.id }}" } }],
+      output: { from: "credit" },
+    });
+    expect(toolStep).toEqual({
+      ok: false,
+      message:
+        "Step 'credit' has a field a tool.call step does not take: 'input'. A tool.call step takes `tool` and the tool's arguments in `with`.",
+    });
+    // A model step's prompt under `with` would be ignored, so the model would get an empty prompt.
+    const modelStep = parseAdHocPlan({
+      steps: [{ id: "decide", uses: "ai.generate", model: "default", with: { prompt: "Decide." } }],
+      output: { from: "decide" },
+    });
+    expect(modelStep.ok).toBe(false);
+    expect(!modelStep.ok && modelStep.message).toBe(
+      "Step 'decide' has a field an ai.generate step does not take: 'with'. An ai.generate step takes `model` and its whole instruction in `prompt`.",
+    );
+  });
+
+  it("names the step types when uses is missing", () => {
+    const result = parseAdHocPlan({
+      steps: [{ id: "credit", kind: "tool.call", tool: "fetch_credit_report", with: {} }],
+      output: { from: "credit" },
+    });
+    expect(!result.ok && result.message).toBe(
+      'Invalid step uses: undefined. Step \'credit\' needs `uses`: "tool.call" or "ai.generate".',
+    );
+  });
+
+  it("rejects an ai.generate step with no prompt", () => {
+    const result = parseAdHocPlan({
+      steps: [{ id: "decide", uses: "ai.generate", model: "default", prompt: "  " }],
+      output: { from: "decide" },
+    });
+    expect(!result.ok && result.message).toMatch(/^Step 'decide' has no prompt\./u);
+  });
+
+  it("rejects $input-style references, which would reach the tool or model as literal text", () => {
+    const inArgs = parseAdHocPlan({
+      steps: [{ id: "credit", uses: "tool.call", tool: "fetch_credit_report", with: { applicationId: "$input.applicationId" } }],
+      output: { from: "credit" },
+    });
+    expect(!inArgs.ok && inArgs.message).toBe(
+      "Step 'credit' refers to data as '$input...'. Write {{ input.<field> }} or {{ steps.<id>.output }} (or {{ steps.<id>.output.<field> }}).",
+    );
+    const inPrompt = parseAdHocPlan({
+      steps: [{ id: "decide", uses: "ai.generate", model: "default", prompt: "Decide using $.steps.credit.output" }],
+      output: { from: "decide" },
+    });
+    expect(!inPrompt.ok && inPrompt.message).toMatch(/refers to data as '\$\.steps\.\.\.'/u);
+    // A dollar sign that is not a reference is fine.
+    expect(
+      parseAdHocPlan({
+        steps: [{ id: "decide", uses: "ai.generate", model: "default", prompt: "Amounts are in $, e.g. $250,000. {{ input.x }}" }],
+        output: { from: "decide" },
+      }).ok,
+    ).toBe(true);
+  });
+
   it("rejects a non-object plan", () => {
     expect(parseAdHocPlan(null).ok).toBe(false);
     expect(parseAdHocPlan({ steps: "no" }).ok).toBe(false);

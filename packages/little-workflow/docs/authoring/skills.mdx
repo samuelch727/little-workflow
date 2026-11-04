@@ -88,7 +88,7 @@ Optional: `model` (suggested quality tier hint; not enforced), `allowed-tools` (
 ## The `skill()` factory
 
 ```ts
-import { skill } from "little-workflow";
+import { skill } from "@little-stack/workflow";
 
 skill("./skills/writing-loop-lwir/")          // local directory
 skill("./skills/output-schema-validation.md") // single file
@@ -192,6 +192,8 @@ Skills follow the model. Where a model runs in an agent loop, skills are useful.
 
 The Fixer inherits from `worker.skills` because it is fixing a failed worker step — the same domain knowledge applies. Per-step fixer skill overrides are post-alpha.
 
+In the default worker harness an `ai.generate` step is one model call with no bash, so it sees the skill list (names and descriptions) but cannot read a skill body. Put instructions the step must follow in its `with.system` or `with.prompt`.
+
 ---
 
 ## Declaring skills on roles
@@ -199,10 +201,10 @@ The Fixer inherits from `worker.skills` because it is fixing a failed worker ste
 Skills are declared on each role's config, not as a top-level workflow field.
 
 ```ts
-import { createLittleWorkflow, runWorkflow, skill } from "little-workflow";
+import { defineWorkflow, runOrchestration, skill } from "@little-stack/workflow";
 import { openai } from "@ai-sdk/openai";
 
-const candidateReview = createLittleWorkflow({
+const candidateReview = defineWorkflow({
   id: "candidate.review",
   // ...
   planner: {
@@ -219,8 +221,8 @@ const candidateReview = createLittleWorkflow({
   },
 });
 
-// Orchestrator skills are declared on runWorkflow:
-await runWorkflow({
+// Orchestrator skills (deprecated surface) are declared on runOrchestration:
+await runOrchestration({
   world,
   workflows: [candidateReview, candidateScoring],
   input,
@@ -247,7 +249,7 @@ Files under `dataDir/memory/org/skills/`. Curated by an org admin, or written by
 
 Declared on the role config (`planner.skills`, `worker.skills`, `orchestrator.skills`). Local paths, or explicit Git URL references that the runtime materializes before the role session starts.
 
-Run-time injection (`runWorkflow({skills: [...]})` for all roles) is reserved for post-alpha.
+Run-time injection (a `skills` option on `runWorkflow` for all roles) is reserved for post-alpha.
 
 ---
 
@@ -309,7 +311,7 @@ The body is read once per session. Future turns don't re-read — it is already 
 
 ## Not in alpha
 
-- **Run-time skill injection** — `runWorkflow({skills: [...]})` injecting for all roles. Alpha supports workflow-declared and org-mounted only.
+- **Run-time skill injection** — a `skills` option on `runWorkflow` injecting for all roles. Alpha supports workflow-declared and org-mounted only.
 - **Skill versioning** — `skill("foo@1.2.0")` semver pinning.
 - **`read_skill(name)` dedicated tool** — bash is sufficient.
 - **Dynamic skill discovery** at runtime. The skill list is fixed at session start.
@@ -322,4 +324,4 @@ The body is read once per session. Future turns don't re-read — it is already 
 
 - [Memory](/docs/v0.1.0-alpha/authoring/memory) — org skills live under `dataDir/memory/org/skills/`
 - [Orchestrator](/docs/v0.1.0-alpha/authoring/orchestrating-workflows) — configuring `orchestrator.skills`
-- [Create A Workflow](/docs/v0.1.0-alpha/authoring/advanced-createlittleworkflow) — workflow definition and planner config
+- [Workflow Config](/docs/v0.1.0-alpha/authoring/advanced-createlittleworkflow) — workflow definition and planner config

@@ -1,7 +1,7 @@
 import { tool } from "ai";
 import { z } from "zod";
 import type {
-  HarnessRuntime,
+  HarnessSandbox,
   HarnessRuntimeMount,
   HarnessRuntimeOptions,
   PreparedTurn,
@@ -25,8 +25,8 @@ const workflowShellInputSchema = z.object({
 
 export async function createWorkflowRuntime(
   options: CreateWorkflowRuntimeOptions,
-): Promise<HarnessRuntime> {
-  const runtimeOptions: Parameters<PreparedTurn["createRuntime"]>[0] = {
+): Promise<HarnessSandbox> {
+  const runtimeOptions: Parameters<PreparedTurn["createSandbox"]>[0] = {
     mounts: options.mounts,
     emitToolEvents: false,
   };
@@ -37,7 +37,7 @@ export async function createWorkflowRuntime(
     runtimeOptions.abortSignal = options.abortSignal;
   }
 
-  const runtime = await options.prepared.createRuntime(runtimeOptions);
+  const runtime = await options.prepared.createSandbox(runtimeOptions);
   const shell = runtime.shellTool();
 
   return {

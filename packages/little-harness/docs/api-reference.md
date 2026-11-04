@@ -13,12 +13,51 @@ import {
   memory,
   skill,
   streamHarness,
-} from "little-harness";
+} from "@little-stack/harness";
 ```
 
-Use `little-harness/workflow-harness` only when implementing or customizing the Little Workflow-compatible harness contract.
+The root entry point exports only what an app needs to build and run an agent. `src/index.test.ts`
+pins the list. Everything else has its own subpath:
 
-Use `little-harness/connectors` when an agent folder needs optional chat connection layers:
+- `@little-stack/harness/sandbox` — for writing your own sandbox: `createShellRuntime`,
+  `createEnvironmentToolBridge`, `createRuntimeToolBridge`, `localSessionWorkspace`, `resolveSandbox`,
+  the just-bash building blocks, tracked-mount helpers and tier-0 command classification
+  (`classifyCommand`, `detectEmulationGap`, `tier0CapabilityMatrix`). The ready-made sandboxes
+  (`justBashSandbox`, `tieredSandbox`, `subprocessSandbox`) stay on the root.
+- `@little-stack/harness/host` — for writing or tuning a host: `createInMemoryOrchestrationServices`,
+  `createDurableOrchestrationServices`, the durable stores, `resolveLocalHostPaths`, `LocalSessionStore`,
+  `LocalSessionQueue`, `LocalHarnessSession`, `sessionKeyToPathKey`, `HarnessOrchestrationServices`, the
+  session file writers (`createLocalFileWriter`, `createFsFileWriter`), and the local trace readers
+  (`readLocalTrace`, `listLocalSessions`, `doctorSession`, …). `localHost()` and `virtualHost()` stay on
+  the root.
+- `@little-stack/harness/internals` — what Little Workflow and Little Compute build on (hashing and id
+  helpers, skill and MCP resolution, workflow-tool plumbing, folder discovery). It has **no stability
+  promise**; apps should not import from it.
+
+Use `@little-stack/harness/workflow-harness` only when implementing or customizing the Little Workflow-compatible harness contract.
+
+Use `@little-stack/harness/events` for the durable event contract a custom session log implements:
+`HarnessSessionLog`, `DurableHarnessEventInput`, `PersistedDurableHarnessEvent`,
+`createHarnessAppendIdempotencyKey`, `canonicalHarnessEventRequestDigest`,
+`normalizePersistedDurableHarnessEvent`, `emitHarnessOccurrence`, the event names
+(`HARNESS_EVENT_TYPES`, `isHarnessEventType`, `HARNESS_SIDE_CHANNEL_EVENT_TYPES`,
+`isHarnessSideChannelEventType`), and the `HARNESS_SESSION_EVENT_*` schema versions. It does not load the model runtime. The root entry point
+does not re-export these.
+
+Use `@little-stack/harness/remote-session` for ready-made session logs and the remote session-log
+service: `fileSessionLog`, `inMemorySessionLog`, `remoteSessionLog`, `startSessionLogServer`,
+`createHarnessFileMutationEvents`, and the `lh.remote-session.v1` protocol helpers
+(`REMOTE_SESSION_LOG_PROTOCOL_VERSION`, `RemoteSessionProtocolError`). The root entry point does not
+re-export these either.
+
+Use `@little-stack/harness/agents` (**experimental**, may change between alpha releases) when you
+implement an Agent Group launcher or a task ledger that projects Agent Groups: the
+`HarnessAgentGroupLauncher` port, its request/result types, the `HarnessAgentGroup*Error` classes, the
+`HARNESS_AGENT_GROUPS_PROTOCOL_VERSION` / `HARNESS_AGENT_GROUP_PAGES_PROTOCOL_VERSION` constants, and the
+ledger projection types. App code that only configures `createHarness({ agents })` needs nothing from it
+(`HarnessAgentGroupsOptions` is on the root).
+
+Use `@little-stack/harness/connectors` when an agent folder needs optional chat connection layers:
 
 ```ts
 import {
@@ -31,7 +70,7 @@ import {
   attachSessionConnector,
   type ToolOutputPart,
   type ToolUI,
-} from "little-harness/connectors";
+} from "@little-stack/harness/connectors";
 ```
 
 The connector subpath is optional. It exports `chatSdkConnector`, `loadChatSdkConnector`,
@@ -39,7 +78,7 @@ The connector subpath is optional. It exports `chatSdkConnector`, `loadChatSdkCo
 (`attachSessionConnector`, `detachSessionConnector`, `setSessionConnectorDelivery`,
 `listSessionConnectors`, `selectSessionDeliveryTargets`, `chatSdkEndpointId`, `webRichEndpointId`),
 connector tool helpers (`extendTool`, `harnessToolContext`, `tryHarnessToolContext`), type helpers
-for tool UI parts, and — from `little-harness/connectors` only — the inbound-attachment helpers
+for tool UI parts, and — from `@little-stack/harness/connectors` only — the inbound-attachment helpers
 (`resolveInboundAttachments`, `DEFAULT_ATTACHMENT_MAX_BYTES`) and reaction-outcome helpers
 (`createReactionOutcomeHandler`, `classifyReaction`, `pseudonymousReporterId`,
 `DEFAULT_POSITIVE_REACTIONS`, `DEFAULT_NEGATIVE_REACTIONS`) the Chat SDK loader uses internally. It
@@ -50,37 +89,37 @@ shared `streamHarness` → skill-staging code), so a **value** import from eithe
 types-only import (`import type`) from any subpath is always safe. Pick the subpath by which helpers you
 need:
 
-- `little-harness/connectors/runtime` — descriptors, loaders, session registry, tool-context helpers,
+- `@little-stack/harness/connectors/runtime` — descriptors, loaders, session registry, tool-context helpers,
   and tool-UI types. It omits the filesystem discovery helpers, so a bundler does not statically link
   the connector-module dynamic-import machinery through it — use it in server route bundles. String
   connector ids still work because the loaders import discovery dynamically at call time.
-- `little-harness/connectors` — the runtime surface plus the discovery helpers. A value import
+- `@little-stack/harness/connectors` — the runtime surface plus the discovery helpers. A value import
   statically links the discovery module (and its connector-module traversal) into the graph.
-- `little-harness/connectors/discovery` — just `discoverConnectors`, `loadConnectorDescriptor`,
+- `@little-stack/harness/connectors/discovery` — just `discoverConnectors`, `loadConnectorDescriptor`,
   `loadConnectorToolExtensions`, `loadConnectorToolExtensionsFromDir`.
-- `little-harness/execution` — streaming helpers such as `streamHarness` with no connector code.
-- `little-harness/workspace` — the agent-folder loader (`loadHarness`, `loadWorkspace`) and its
-  `discoverTools` / `discoverSkills` / `discoverWorkflows` helpers.
-- `little-harness/scaffold` — the CLI scaffolders (`initWorkspace`, `scaffoldAgent`, `scaffoldProject`,
+- `@little-stack/harness/scaffold` — the CLI scaffolders (`initWorkspace`, `scaffoldAgent`, `scaffoldProject`,
   `renderAgentSource`), provider catalog (`resolveProvider`, `resolveModelChoice`), and pinned
   dependency table (`scaffoldDependencyVersions`, `providerDependency`).
 
 ```ts
-import { loadChatSdkConnector, loadWebRichConnector } from "little-harness/connectors/runtime";
-import { streamHarness } from "little-harness/execution";
+import { loadChatSdkConnector, loadWebRichConnector } from "@little-stack/harness/connectors/runtime";
+import { loadHarness, streamHarness } from "@little-stack/harness";
 ```
 
+`streamHarness`, `generateHarness` and the agent-folder loader (`loadHarness`, `loadWorkspace`) come
+from the root entry point.
+
 Little Harness needs Node.js 22+ and takes `ai` as a **peer dependency** (`^7.0.0`):
-`pnpm add little-harness@alpha ai@^7 zod @ai-sdk/<provider>`. The root entry re-exports the
+`pnpm add @little-stack/harness@alpha ai@^7 zod @ai-sdk/<provider>`. The root entry re-exports the
 `LanguageModel`, `ModelMessage`, and `UIMessage` types. Package exports use the `default` condition and
-expose `little-harness/package.json`. Chat connectors also need the Chat SDK packages installed in the
+expose `@little-stack/harness/package.json`. Chat connectors also need the Chat SDK packages installed in the
 app: `pnpm add chat @chat-adapter/slack @chat-adapter/state-redis` (swap the adapter/state packages for
 your platforms).
 
 A string connector reference is the shortest way for a route to opt into connector folder discovery:
 
 ```ts
-import { loadChatSdkConnector } from "little-harness/connectors/runtime";
+import { loadChatSdkConnector } from "@little-stack/harness/connectors/runtime";
 
 const supportSlack = await loadChatSdkConnector({
   agentDir: "agents/support",
@@ -99,7 +138,7 @@ is typed `unknown`. Pick per route; neither form is universally preferred.
 
 ```ts
 import { openai } from "@ai-sdk/openai";
-import { createHarness, localHost, streamHarness } from "little-harness";
+import { createHarness, localHost, streamHarness } from "@little-stack/harness";
 
 const harness = createHarness({
   host: localHost({ dataDir: ".little-harness" }),
@@ -123,7 +162,7 @@ export async function POST(req: Request) {
 }
 ```
 
-`createHarness` requires a `host` and `model`. For local development, use `localHost({ dataDir })`; it stores sessions under `.little-harness/` by default.
+`createHarness` requires a `host` and `model`. For local development, use `localHost({ dataDir })`; it stores sessions under `.little-harness/` by default. Where there is no disk, such as workerd with a Durable Object per chat, use `virtualHost({ fs })`: it keeps each session's workspace (`/session`, `/artifacts`, `/persistent`, `/.agents`) and its status in the just-bash filesystem you pass, and your app saves that filesystem between turns. `dataFs` chooses where `localDir()` and memory keep their backing folders: an `IFileSystem` or async `(sessionId) => IFileSystem` factory, defaulting to the session's `fs`, under `/.little-harness/data/` outside bash's view. Sharing `dataFs` shares folders without making writes transactional across sessions; cross-Durable-Object sharing is the app's job. Virtual sources must be relative POSIX paths without `..`; `projectDir()` still needs `localHost()`. Configuring `dynamicWorkflows` on `virtualHost()` throws `HarnessInputError` up front because workflow execution still needs disk. On workerd, just-bash loads its browser build, so `python3`, `node` (`js-exec`), `sqlite3`, `tar`, `yq` and `xan` are not available. See the "Run on workerd" docs page and `demos/workerd-chats`.
 
 ## `createHarness(...)`
 
@@ -145,6 +184,8 @@ const harness = createHarness({
   dynamicWorkflows,
   skillMaxRisk,
   skillOidcToken,
+  agents,
+  checkpoints,
   toolResultSpooling,
   trace,
   sessionLog,
@@ -161,19 +202,21 @@ Important fields:
 | `host` | Session and runtime host. Use `localHost()` for filesystem-backed local sessions. |
 | `model` | AI SDK language model used by `generateHarness` and `streamHarness`. |
 | `system` | Optional system prompt as a string or model messages. |
-| `tools` | AI SDK `ToolSet`; user tool names must match `[A-Za-z_][A-Za-z0-9_-]{0,63}` and cannot be `bash`. |
+| `tools` | AI SDK `ToolSet`; user tool names must match `[A-Za-z_][A-Za-z0-9_-]{0,63}` and cannot be `bash`, `checkpoint`, or one of the five Agent Group tool names, even when `checkpoints` or `agents` is not configured. |
 | `mcp` | Declarative MCP server config. Little Harness exposes configured servers through ordinary gateway tools, usually `mcp_list_tools` and `mcp_call_tool`. |
 | `skills` | Skill directories, inline skill files, or `skill(...)` values staged under `.agents/skills/<name>/`. |
 | `inputTypes` | Named input adapters created with `inputType(...)`. |
 | `persistentDirs` | Developer-backed directories mounted under `/persistent/...`. |
-| `memory` | Convenience wrapper that creates a persistent memory dir and optional `remember` tool. |
-| `runtime` | Enables or restricts Bash runtime capabilities such as Python, JavaScript, network, and Runtime Tool Bridge exposure. Under `localHost()`'s default `"auto"` execution environment these toggles also pick the adapter (see [Choosing an execution environment](#choosing-an-execution-environment)). |
-| `workflows` | `HarnessWorkflow` objects exposed to the agent as callable tools (one named tool per workflow). Adapt a `defineWorkflow` result with `asHarnessWorkflow(workflow, { definitionIdentity })` from `little-workflow`; see [Workflows As Tools](#workflows-as-tools). |
+| `memory` | Opt-in long-term memory: a Persistent Dir of plain files, listed in every turn's prompt, with a built-in `memory` skill. |
+| `runtime` | Enables or restricts Bash runtime capabilities such as Python, JavaScript, network, and Runtime Tool Bridge exposure. Under `localHost()`'s default `"auto"` sandbox these toggles also pick the sandbox (see [Choosing a sandbox](#choosing-a-sandbox)). |
+| `workflows` | `HarnessWorkflow` objects exposed to the agent as callable tools (one named tool per workflow). Adapt a `defineWorkflow` result with `asHarnessWorkflow(workflow, { definitionIdentity })` from `@little-stack/workflow`; see [Workflows As Tools](#workflows-as-tools). |
 | `workflowBudgets` | Partial `HarnessWorkflowBudgets`. `maxConcurrentWorkflowRuns` (default 10) and `maxQueuedWorkflowRuns` (default 100) bound inline workflow-tool fan-out per session; `maxModelSteps` (default 20) is the default `stopWhen` step count. |
-| `dynamicWorkflows` | Opt-in model-authored one-shot plans. Pass `dynamicWorkflows()` from `little-workflow` (never a bare `true`); adds the `run_ad_hoc_plan` and `search_authored_plans` tools and a durable plan store under `/persistent/dynamic-plans`. A plan can never exceed the agent's own tools/MCP/bash snapshot (skills are not a plan capability in v1; drift is re-checked on resubmission as `capability_not_allowed`). Boundaries: per-call `activeTools` narrowing does not restrict what a plan may use (use `exclude` or a narrower harness); authored-plan recall is shared by every session on the same host `dataDir` (per-user isolation = per-user `dataDir`); agentic bash in plans runs network-disabled in v1. |
+| `dynamicWorkflows` | Opt-in model-authored one-shot plans. Pass `dynamicWorkflows()` from `@little-stack/workflow` (never a bare `true`); adds the `run_ad_hoc_plan`, `search_authored_plans` and `define_workflow` tools and a durable plan store under `/persistent/dynamic-plans`; each workflow the agent defines with `define_workflow` is a tool of its own in later turns and sessions on the same host `dataDir` (`dynamicWorkflows({ define: false })` leaves `define_workflow` out). A plan can never exceed the agent's own tools/MCP/bash snapshot (skills are not a plan capability in v1; drift is re-checked on resubmission as `capability_not_allowed`). Boundaries: per-call `activeTools` narrowing does not restrict what a plan may use (use `exclude` or a narrower harness); authored-plan recall is shared by every session on the same host `dataDir` (per-user isolation = per-user `dataDir`); a plan's `ai.generate` step is one model call with no tools or bash, so plans reach tools only through `tool.call` steps. |
 | `skillMaxRisk` / `skillOidcToken` | Optional remote-skill risk gate and the OIDC token it uses (see [Skills](#skills)). |
+| `agents` | Optional neutral Agent Group launcher, trusted profile/join/reduction declarations, and hard bounds. Injects `start_agent_group`, `spawn_agent`, `watch_agent_group`, `join_agent_group`, and `cancel_agent_group`; absent means no Agent Group tools. |
+| `checkpoints` | Optional trusted `{ writer }` port for environment milestones. Injects `checkpoint`; the writer owns state, tier, identity, verification, and retention. |
 | `trace` | Trace capture/redaction options or `false` to disable persisted traces. |
-| `sessionLog` | The session log (`HarnessSessionLog`): the append-only durable event log a run appends to and replays from. `durability` is the historical alias; `sessionLog` wins when both are set. |
+| `sessionLog` | The session log (`HarnessSessionLog`, from `@little-stack/harness/events`): the append-only durable event log a run appends to and replays from. |
 | `onTraceError` | Called with `(error, event)` when a trace event cannot be written. |
 
 `stopWhen`, `prepareStep`, `toolChoice`, `activeTools`, and the other AI SDK loop controls are per-call
@@ -185,6 +228,148 @@ import { isStepCount } from "ai";
 
 streamHarness({ harness, messages, stopWhen: isStepCount(8) });
 ```
+
+## Checkpoints
+
+Configure `checkpoints: { writer }` to expose one `checkpoint` tool. The model may supply a label,
+`goal_reached | pre_risky_op` kind, rationale, and evidence Artifact ids. The trusted writer receives the
+Harness-supplied session, turn, model-step, sequence position, and deterministic `callIdentity`; agents cannot
+choose state, tier, timestamps, cost, retention, or a `verified_green` verdict.
+
+The writer's `checkpoint(request)` returns `HarnessCheckpointResult` with the same session, call identity,
+and kind, plus the chosen milestone id, tier, and `created | replayed | coalesced` disposition. Exact retries
+keep their call identity and resolve to the original milestone. A semantically redundant new call may
+coalesce to an existing milestone while retaining its own call identity; milestone id is not a call key.
+Little Compute's Direction-v2 local profile compares the current compatible checkpoint head, not arbitrary
+historical matching trees, and preserves the original milestone's Harness position. A changed tree or meaningful
+annotation creates a new node, including a return to an older tree after an intervening change. The retained
+advanced profile keeps its existing non-coalescing replay behavior.
+
+## Agent Groups
+
+Agent Groups are an orchestration contract for ordered fan-out into isolated agent environments. Little
+Harness owns model-facing policy, task projection, idempotent identities, bounded reductions, and stale
+observation fencing. A launcher adapter owns the actual runtime: it can target processes, containers,
+microVMs, a remote scheduler, or another implementation without importing that system into Little Harness.
+The five generated names stay reserved for configured and discovered user tools even when Agent Groups are
+not configured, but the resolved manifest and turn toolset list/inject them only when `agents` is present.
+
+```ts
+import { createHarness, localHost } from "@little-stack/harness";
+import {
+  HarnessAgentGroupLaunchRejectedError,
+  type HarnessAgentGroupLauncher,
+} from "@little-stack/harness/agents";
+
+const launcher: HarnessAgentGroupLauncher = {
+  async startAgentGroup(request) {
+    // Atomically accept every ordered member or none. Persist and deduplicate
+    // request.callIdentity; retries after response loss have identical identities.
+    return scheduler.start(request);
+  },
+  async watchAgentGroup(request) {
+    return scheduler.watch(request);
+  },
+  async joinAgentGroup(request) {
+    return scheduler.join(request);
+  },
+  async cancelAgentGroup(request) {
+    return scheduler.cancel(request);
+  },
+};
+
+const harness = createHarness({
+  host: localHost(),
+  model,
+  agents: {
+    launcher,
+    profiles: [{
+      handle: "repo-worker",
+      description: "Bounded repository worker with no production credentials.",
+      resourcesHandle: "cpu-medium",
+      secretsHandle: "repo-readwrite",
+      toolsHandle: "code-and-browser",
+      networkHandle: "package-registries",
+      priorityHandle: "interactive",
+    }],
+    joinPolicies: [
+      { handle: "all", policy: { kind: "all_success" } },
+      {
+        handle: "verified",
+        policy: { kind: "first_verified" },
+        verifierHandle: "signed-check-verifier",
+        requiredCheckSetHandle: "repo-checks-v1",
+      },
+    ],
+    defaultJoinPolicyHandle: "all",
+    reductionPolicies: [{
+      handle: "concise",
+      maxMemberSummaryBytes: 16_384,
+      maxGroupSummaryBytes: 32_768,
+      maxResultRefs: 32,
+    }],
+    defaultReductionPolicyHandle: "concise",
+    limits: {
+      maxMembers: 32,
+      maxPromptBytes: 65_536,
+      maxGroupPromptBytes: 2_097_152,
+      maxDeadlineMs: 3_600_000,
+      maxJoinWaitMs: 30_000,
+    },
+  },
+});
+```
+
+The model selects only declared `profileHandle`, `joinPolicyHandle`, and
+`reductionPolicyHandle` values. Resource, secret, tool, network, verifier, check-set, and priority
+bindings come from trusted application configuration; raw capability requests are rejected. Generated JSON
+schemas enumerate valid handles and trusted descriptions without exposing internal capability bindings.
+`spawn_agent` is exactly a one-member lowering to the same atomic group port. Reservations fan out
+concurrently, with both per-member and aggregate prompt-byte bounds.
+
+Launcher requirements:
+
+- `startAgentGroup` must be atomic and idempotent by `callIdentity`, and external group refs must be unique.
+  Harness atomically commits the accepted group ref, immutable member count, and every member ref to one
+  durable authority before task-file mirrors. Only
+  `HarnessAgentGroupLaunchRejectedError` proves that no member was accepted. Any other error is treated as
+  indeterminate response loss, leaves reservations queued, and is safe to retry with the same identities.
+- `acceptedAt` cannot predate the Harness reservations or exceed bounded clock skew into the future.
+- Every watch/join/cancel snapshot carries a monotonic `groupRevision`; every member carries a monotonic
+  `revision`. Reusing a revision requires byte-consistent snapshot data. Lower revisions, conflicting equal
+  revisions, group regressions, and terminal member changes fail closed. Orchestration backends apply the
+  ordered projection under one group fence, so a late watch cannot overwrite a newer join. The Local Host
+  durable backend commits a single per-group authority record before mirroring individual task files; reads
+  overlay the authority, so a crash during mirroring resumes from the complete committed snapshot.
+- Join `disposition`, group summary, and result refs have a separate digest bound to `groupRevision`. A watch
+  may precede join at the same revision, but conflicting same-revision reductions fail closed.
+- Adapter output is a bounded summary protocol, not a child transcript channel. Unknown fields, raw output,
+  foreign/reordered task refs, oversized summaries, duplicate or foreign result refs, and invalid timestamps
+  are rejected before model context or the task ledger is updated.
+- `first_verified` is meaningful only through a trusted join-policy declaration bound to both a verifier and
+  required check set. A successful member supplies a receipt with an opaque ref and matching verifier/check-set
+  handles. Bare adapter booleans and receipts under other policies are rejected; the model sees only derived
+  `verified: true`. `terminal` and `deadline` join dispositions are checked against actual member state.
+- Adapter `taskRef` values are internal correlation identifiers and are omitted from start/watch/join/cancel
+  model output. Start output retains model-usable Harness `taskId` values.
+- Once a task is bound to an external Agent Group, generic task-ledger mutation/cancellation is rejected.
+  Use `cancel_agent_group` or a newer revision-fenced launcher observation so durable authority cannot disagree
+  with an apparently successful task mutation.
+- The four methods above are the `HARNESS_AGENT_GROUPS_PROTOCOL_VERSION` snapshot contract (up to 1,024
+  members). For larger groups a launcher adds the optional `paged: { watch, join, cancel }` capability: one
+  object, so the type enforces all three page methods or none. Paged requests carry
+  `HARNESS_AGENT_GROUP_PAGES_PROTOCOL_VERSION`, and the task ledger must also implement the page projection
+  methods.
+- The Agent Group errors extend `LittleHarnessError` with a stable `code`:
+  `"agent_group_launch_rejected"`, `"page_call_limit"` (`HarnessAgentGroupPageCallLimitError`), and
+  `"invalid" | "expired" | "mismatch"` (`HarnessAgentGroupCursorError`).
+
+`join_agent_group` waits only up to the configured/requested bound. It does not create an implicit durable
+continuation; callers that need cross-turn wakeup should use their scheduler/session integration around the
+launcher port.
+
+Custom task ledgers remain compatible when Agent Groups are unused. Atomic start-binding and observation-
+projection methods are optional capabilities that are required and checked only when `agents` is configured.
 
 ## Harness Events
 
@@ -220,7 +405,12 @@ type HarnessEvent<TEventType extends string = HarnessEventType> = {
 | `timestamp` | ISO timestamp for when the event was emitted. |
 | `metadata` | Event-specific details, redacted according to trace options. |
 
-`HarnessEvent` does not carry the durable replay payload directly. Durable replay uses `DurableHarnessEventInput`, which has `{ type, runId, occurrenceId?, payload }`. Trace/callback events expose event details through `metadata`; durable events store replay-matching data in `payload`.
+`HarnessEvent` does not carry the durable replay payload directly. Durable
+replay uses `DurableHarnessEventInput`, which requires
+`{ type, runId, appendIdempotencyKey, occurrenceId? }` plus exactly one of
+`payload` or `payloadArtifactId`. Trace/callback events expose details through
+`metadata`; durable events store replay-matching data or an immutable Artifact
+reference.
 
 ## `generateHarness(...)`
 
@@ -228,7 +418,7 @@ Use `generateHarness` for one-shot work, jobs, tests, server actions, and Little
 
 ```ts
 import { z } from "zod";
-import { inputType, generateHarness } from "little-harness";
+import { inputType, generateHarness } from "@little-stack/harness";
 
 const harness = createHarness({
   host: localHost(),
@@ -251,12 +441,21 @@ const result = await generateHarness({
   session: "ticket:TCK-1",
 });
 
-console.log(result.text);
-console.log(result.output);
+if (result.status === "completed") {
+  console.log(result.text);
+  console.log(result.output);
+}
 console.log(result.trace.path);
 ```
 
 If `type` is not defined in `inputTypes`, the run still proceeds and returns an `undefined_input_type` warning.
+
+Pass `trigger: { kind, source?, from?, label? }` (`HarnessTrigger`) to record how the turn started,
+for example `{ kind: "message", source: "whatsapp", from: "+15550100" }`. It goes on
+`harness.session.started` as string metadata (`triggerKind`, `triggerSource`, `triggerFrom`,
+`triggerLabel`), never in the session log or the prompt, and LittleDB shows it on the turn. The
+schedules runner, the Chat SDK, email and web connectors, the agent server and the REPL set one; a
+trigger you pass wins. Redact `triggerFrom` with `trace.redaction.metadataKeys` if it is personal data.
 
 ## `streamHarness(...)`
 
@@ -274,6 +473,8 @@ return result.toUIMessageStreamResponse();
 
 The returned UI message stream can be consumed once. Await `result.finished` for session, artifacts, trace, persistence, and warnings after streaming completes.
 
+`streamHarness` takes the same `trigger` option as `generateHarness`.
+
 `result.textStream` is an `AsyncIterable<string>` of assistant text deltas (reasoning and protocol chunks skipped), like AI SDK `streamText`'s `.textStream`, for non-AI-SDK consumers such as chat frameworks, CLIs, and queues. It is the surface the Chat SDK connector loader posts to a platform thread (`thread.post(result.textStream)`). It shares the same underlying stream, so consume `textStream` or `toUIMessageStream*()` — not both.
 
 Pass `uiMessageStream.onError` to customize the text emitted for AI SDK `error`
@@ -287,8 +488,8 @@ successful turns.
 ## Chat Connectors
 
 Per-agent `connectors/` folders contain connection layers, not model capabilities. They are ignored by
-`loadHarness()` and loaded only through `little-harness/connectors` or
-`little-harness/connectors/runtime`.
+`loadHarness()` and loaded only through `@little-stack/harness/connectors` or
+`@little-stack/harness/connectors/runtime`.
 
 Use `chatSdkConnector(...)` with `loadChatSdkConnector(...)` for Chat SDK platforms such as Slack,
 Telegram, Discord, Teams, WhatsApp, and Chat SDK web text mode. Platform history is text-only by
@@ -314,7 +515,7 @@ onOutcome }` to tune it. The reporter is stored as a pseudonym (`anon_<16 hex>` 
 // agents/support/connectors/slack/connector.ts
 import { createSlackAdapter } from "@chat-adapter/slack";
 import { createRedisState } from "@chat-adapter/state-redis";
-import { chatSdkConnector } from "little-harness/connectors/runtime";
+import { chatSdkConnector } from "@little-stack/harness/connectors/runtime";
 
 export default chatSdkConnector({
   userName: "support",
@@ -331,7 +532,7 @@ export default chatSdkConnector({
 ```ts
 // app/api/slack/route.ts
 import { waitUntil } from "@vercel/functions";
-import { loadChatSdkConnector } from "little-harness/connectors/runtime";
+import { loadChatSdkConnector } from "@little-stack/harness/connectors/runtime";
 
 const supportSlack = await loadChatSdkConnector({
   agentDir: "agents/support",
@@ -346,6 +547,37 @@ export async function POST(req: Request) {
 `loadChatSdkConnector(...)` returns the created Chat SDK adapter as `adapter` for platform-specific
 hooks such as Discord Gateway listeners. The generic `webhook(req)` path still handles HTTP
 interactions and forwarded Gateway events.
+
+Use `emailConnector(...)` to give an agent its own email address. It is a Chat SDK connector with email
+defaults: mail to `address` starts a run, each email thread is one session, and the reply goes back in
+the same thread. `senders` is required, and by default an email must come from an allowed sender, pass
+DMARC according to the `Authentication-Results` header of the receiving server named by
+`senders.authServId` (required while `requireDmarc` is on), and not be an auto-reply before the agent
+sees it. Quoted earlier messages are removed and the
+full email is saved to `/session/email/<id>.txt`.
+
+```ts
+// agents/support/connectors/email/connector.ts
+import { createRedisState } from "@chat-adapter/state-redis";
+import { emailConnector } from "@little-stack/harness/connectors/runtime";
+import { createResendAdapter } from "@resend/chat-sdk-adapter";
+
+export default emailConnector({
+  address: "support@agents.example.com",
+  adapter: {
+    name: "resend",
+    create: () => createResendAdapter({ fromAddress: "support@agents.example.com" }),
+  },
+  state: () => createRedisState(),
+  senders: { allow: ["@example.com"], authServId: "your-receivers-authserv-id" },
+});
+```
+
+Point Resend's `email.received` webhook at a route that calls `loadChatSdkConnector(...).webhook(req)`.
+Options: `accept`, `transform`, `maxRepliesPerThread` (default 20), `requireAddressedTo` (default
+`true`), `readEmail`, and `onSkip`. See the Email Connector guide for the full walkthrough and for
+finding the authserv-id. Unverified in this alpha: no real email has been received through Resend
+Inbound yet, and whether Resend adds `Authentication-Results` (and its authserv-id) is unconfirmed.
 
 Use nested connector folders when a connector owns extra files:
 
@@ -367,7 +599,7 @@ may also run standalone (returns `undefined` outside a harness run):
 ```ts
 // agents/support/connectors/slack/tools/add-reaction.ts
 import addReaction from "../../../tools/add-reaction";
-import { extendTool, harnessToolContext } from "little-harness/connectors/runtime";
+import { extendTool, harnessToolContext } from "@little-stack/harness/connectors/runtime";
 
 type SupportExtraBody = { slack: SlackClient };
 
@@ -397,7 +629,7 @@ For web text mode, use Chat SDK's Web adapter and return `webhook(req)` directly
 ```ts
 import { createRedisState } from "@chat-adapter/state-redis";
 import { createWebAdapter } from "@chat-adapter/web";
-import { chatSdkConnector } from "little-harness/connectors/runtime";
+import { chatSdkConnector } from "@little-stack/harness/connectors/runtime";
 
 export default chatSdkConnector({
   userName: "support",
@@ -431,7 +663,7 @@ export default webRichConnector({
 ```
 
 ```ts
-import { loadWebRichConnector } from "little-harness/connectors/runtime";
+import { loadWebRichConnector } from "@little-stack/harness/connectors/runtime";
 
 const supportWeb = await loadWebRichConnector({
   agentDir: "agents/support",
@@ -452,7 +684,7 @@ For custom web tool rendering, import types from individual tool modules:
 
 ```ts
 import type { UIMessage } from "ai";
-import type { ToolOutputPart, ToolUI } from "little-harness/connectors";
+import type { ToolOutputPart, ToolUI } from "@little-stack/harness/connectors";
 
 export type LookupOrderTool = typeof import("../tools/lookup-order").default;
 
@@ -497,7 +729,7 @@ observation written onto a finished run, never an input to it, so it is not part
 session log.
 
 ```ts
-import { createHarnessOutcomeReporter, generateHarness, reportHarnessOutcome } from "little-harness";
+import { createHarnessOutcomeReporter, generateHarness, reportHarnessOutcome } from "@little-stack/harness";
 
 // One-off: grade the session a run used.
 const result = await generateHarness({ harness, messages, session: "chat_123" });
@@ -607,15 +839,21 @@ When `guide` is enabled, Little Harness stages a guide skill under `.agents/skil
 The runtime exposes user tools plus an injected `bash` tool. Tool `execute` handlers receive Little Harness context through the AI SDK tool execution options:
 
 ```ts
-execute: async (input, ctx: any) => {
-  await ctx.files.writeText("/session/result.txt", "hello");
-  const ref = await ctx.files.writeJSON("/artifacts/query/result.json", input, {
+import { harnessToolContext } from "@little-stack/harness";
+
+execute: async (input, options) => {
+  const { files, artifacts } = harnessToolContext(options);
+  await files.writeText("/session/result.txt", "hello");
+  const ref = await files.writeJSON("/artifacts/query/result.json", input, {
     artifact: true,
   });
-  const readBack = await ctx.artifacts.read(ref.path);
+  const readBack = await artifacts.read(ref.path);
   return { artifactPath: ref.path, bytes: readBack.content.byteLength };
 }
 ```
+
+`harnessToolContext(options)` reads the context typed, without a cast, and throws when the tool runs
+outside a Little Harness turn; `tryHarnessToolContext(options)` returns `undefined` instead.
 
 ### Runtime Tool Bridge
 
@@ -665,7 +903,7 @@ Stable virtual paths:
 Use `persistentDirs` when your app owns persistence explicitly.
 
 ```ts
-import { localDir, projectDir } from "little-harness";
+import { localDir, projectDir } from "@little-stack/harness";
 
 createHarness({
   host: localHost({ dataDir: ".little-harness", projectRoot: process.cwd() }),
@@ -680,7 +918,13 @@ createHarness({
 });
 ```
 
-Use `memory(...)` for the default memory pattern. It mounts `/persistent/memory`, maintains `MEMORY.md`, and adds a `remember` tool unless disabled.
+Any Persistent Dir (and `localDir`) takes `canWrite({ extraBody })`, checked when the turn loads it:
+when it returns false the dir is mounted read-only for that turn and its `store` is skipped.
+
+Use `memory(...)` for long-term memory the agent keeps itself. It mounts `/persistent/memory`,
+shows the agent a short note and one line per file every turn (the file's frontmatter
+`description`, or the start of its text), and adds a built-in `memory` skill on how to save,
+change and forget memories. There is no memory tool: the agent edits files with its file tools.
 
 ```ts
 createHarness({
@@ -688,12 +932,18 @@ createHarness({
   model,
   memory: memory({
     sourceDir: "memory/customer-agent",
-    commit: "after-turn",
+    description: "What this agent has learned about each customer account.",
   }),
 });
 ```
 
-Commit modes are `after-turn`, `manual`, and `read-only`.
+Commit modes are `after-turn`, `manual`, and `read-only`. Pass an array for layers (each with its
+own `harnessDir`), `canWrite({ extraBody })` to make a memory read-only for a turn, `backend: { load,
+store }` in place of `sourceDir` to keep it in another service, `instructions` for guidance shown
+every turn (up to 4096 characters), and `skill: false` to leave the built-in skill out. A skill
+named `memory` in `skills` replaces the built-in one. With `runtime: { bash: false }` the harness
+adds `load_skill` (when the turn has skills) and `list_files`, `read_file`, `write_file` and
+`delete_file` limited to the memory folders. See the docs site guide `build-agents/memory`.
 
 ## Workflows As Tools
 
@@ -703,8 +953,8 @@ becomes a model tool named from its id (dotted segments sanitized and joined wit
 
 ```ts
 import { anthropic } from "@ai-sdk/anthropic";
-import { createHarness, localHost } from "little-harness";
-import { asHarnessWorkflow } from "little-workflow";
+import { createHarness, localHost } from "@little-stack/harness";
+import { asHarnessWorkflow } from "@little-stack/workflow";
 import { refundWorkflow } from "./refund"; // a defineWorkflow(...) result
 
 const support = createHarness({
@@ -717,7 +967,7 @@ const support = createHarness({
 ```
 
 - **A raw `defineWorkflow` result is not a `HarnessWorkflow`.** Adapt it with `asHarnessWorkflow`
-  (from `little-workflow`). `definitionIdentity` is required: a stable string you bump when the
+  (from `@little-stack/workflow`). `definitionIdentity` is required: a stable string you bump when the
   workflow's behavior changes, or `{ notApplicable: true }`. Folder workflows loaded with
   `loadWorkflow(...)` already are `HarnessWorkflow`s with a folder-derived identity.
 - **Agent folders discover them.** `loadHarness()` imports each `workflows/*.ts` module in an agent
@@ -736,7 +986,7 @@ const support = createHarness({
   `HarnessSession.dataDir` port field. A custom host that leaves `dataDir` unset gets
   `<cwd>/<sessionId>/workflows`.
 
-## Execution Environments and the Session Log
+## Sandboxes and the Session Log
 
 The sandbox, tools, session log, and orchestration are decoupled ports (see
 `docs/trace-and-durability.md` for durability and
@@ -744,26 +994,28 @@ https://little-harness.dev/docs/v0.1.0-alpha/runtime/execution-environments for 
 
 ```ts
 import {
-  createFileSessionLog,
   createHarness,
   generateHarness,
   localHost,
+  subprocessSandbox,
+} from "@little-stack/harness";
+import {
+  fileSessionLog,
   remoteSessionLog,
   startSessionLogServer,
-  subprocessSandbox,
-} from "little-harness";
+} from "@little-stack/harness/remote-session";
 
 // Always run agent bash in a child process with a stripped environment
 // (the default "auto" mode already does this for any turn that can run code or reach the network).
 const host = localHost({
   dataDir: ".little-harness",
-  executionEnvironment: subprocessSandbox({ initTimeoutMs: 10_000 }),
+  sandbox: subprocessSandbox({ initTimeoutMs: 10_000 }),
   // orchestration: myDatabaseBackedServices, // optional ledger override
 });
 
 // Keep the run's durable log outside the process for kill-and-resume.
 const server = await startSessionLogServer({
-  store: createFileSessionLog({ path: "sessions.ndjson" }),
+  store: fileSessionLog({ path: "sessions.ndjson" }),
   authToken: process.env.SESSION_LOG_TOKEN,
 });
 const result = await generateHarness({
@@ -774,27 +1026,74 @@ const result = await generateHarness({
 });
 ```
 
-`sessionLog` is the canonical option name on `createHarness`, `generateHarness`, and `streamHarness`;
-`durability` remains as an alias (and `HarnessDurabilitySink` as an alias of the `HarnessSessionLog`
-type). `HarnessOrchestrationServices` is the canonical name of the ledger contract
-(`HarnessDurableServices` is the historical alias).
+`sessionLog` is the option name on `createHarness`, `generateHarness`, and `streamHarness`; its type
+is `HarnessSessionLog` from `@little-stack/harness/events`. `HarnessOrchestrationServices` (from
+`@little-stack/harness/host`) is the ledger contract a host's `orchestration` option takes.
+The remote protocol is strictly versioned as `lh.remote-session.v1`.
+`remoteSessionLog()` retries network, timeout, rate-limit, and server failures
+with the exact same serialized body (three attempts by default). The caller's
+`appendIdempotencyKey` is never generated or replaced by the client, server, or
+store, so a response lost after commit resolves to the original event.
 
-Custom execution environments implement `HarnessExecutionEnvironmentFactory`
+Custom `HarnessSessionLog` emitters must select a stable key before transport:
+
+```ts
+import { createHarnessAppendIdempotencyKey } from "@little-stack/harness/events";
+
+await sessionLog.append({
+  type: "app.review.requested",
+  runId,
+  appendIdempotencyKey: createHarnessAppendIdempotencyKey({
+    runId,
+    eventType: "app.review.requested",
+    logicalEventId: `comment:${commentId}:revision:${revision}`,
+  }),
+  occurrenceId: `comment:${commentId}`,
+  payload: { commentId, revision },
+});
+```
+
+The in-memory, fsynced file, remote, and Little Compute PostgreSQL stores all
+enforce the same `(runId, key, canonical request digest)` contract. A file log
+rebuilds that index on restart. It is single-process, treats newline as the
+commit marker, truncates only a final unterminated fragment, rejects malformed
+complete records and sequence gaps, and by default fsyncs both file and parent
+directory before acknowledgement. An unsupported fsync fails closed;
+`sync: false` is explicitly not crash durable. Use bounded
+`afterSequence`/`limit` replay for services; Little Compute additionally returns
+anchor-bound opaque page cursors. Inline PostgreSQL payloads are capped at 64
+KiB by default; store larger JSON as an Artifact and append
+`payloadArtifactId`.
+
+Custom sandboxes implement `HarnessSandboxFactory`
 and should build on `createShellRuntime` + `createEnvironmentToolBridge` so
 they emit the same `harness.runtime.command.*` / `harness.tool_call.*` /
 `harness.file.*` traces as the built-in adapters.
 
-### Choosing an execution environment
+For an adapter that commits file mutations outside the built-in writer, use
+`createHarnessFileMutationEvents()` from `@little-stack/harness/remote-session` only
+after the remote file result is durable. It is the shared serializer for
+created, updated, deleted, written-by-tool, and artifact-created event metadata.
+Pass a stable `occurrenceId` allocated for that exact mutation before event
+transport; all projections share it, while a later identical write gets a new
+identity. This prevents content-identical mutations from sharing a durable
+append key.
+It rejects noncanonical paths and version contradictions, accessors/symbols/
+non-JSON values, JSON deeper than 64 levels or larger than 10,000 nodes/256 KiB,
+strings larger than 64 KiB, keys larger than 1 KiB, paths larger than 4 KiB, and
+source/media/artifact labels larger than 1 KiB before emitting an event.
 
-`localHost({ executionEnvironment })` accepts a factory or one of three modes:
+### Choosing a sandbox
 
-| Value | Adapter |
+`localHost({ sandbox })` accepts a sandbox factory or one of three modes (`HarnessSandboxMode`):
+
+| Value | Sandbox |
 | --- | --- |
 | unset (default) | same as `"auto"` |
 | `"auto"` | per turn, by the rule below |
 | `"in-process"` | in-process just-bash for every turn (the pre-0.2 default) |
 | `"subprocess"` | `subprocessSandbox()` with its defaults |
-| a factory | whatever you inject, e.g. `subprocessSandbox({ ... })` or `tieredExecutionEnvironment({ ... })` |
+| a factory | whatever you inject, e.g. `subprocessSandbox({ ... })`, `tieredSandbox({ ... })` or `justBashSandbox()` |
 
 `"auto"` stays in-process only when the turn can neither execute
 model-authored code nor reach the network — that is, when `runtime.python` and
@@ -812,7 +1111,7 @@ const coder = createHarness({ host: localHost(), model });
 
 // In-process: no code execution, no network.
 const reader = createHarness({
-  host: localHost({ executionEnvironment: "auto" }), // "auto" is also the default
+  host: localHost({ sandbox: "auto" }), // "auto" is also the default
   model,
   runtime: { python: false, javascript: false },
 });
@@ -868,10 +1167,10 @@ The rules that follow from that:
 
 `classifyCommand(script, options)` decides, **before anything executes**,
 whether a shell script can run on Tier-0. It is the escalation signal
-`tieredExecutionEnvironment` acts on; on its own it never runs anything.
+`tieredSandbox` acts on; on its own it never runs anything.
 
 ```ts
-import { classifyCommand, detectEmulationGap } from "little-harness";
+import { classifyCommand, detectEmulationGap } from "@little-stack/harness/sandbox";
 
 classifyCommand("rm -rf build && cargo build");
 // {
@@ -921,21 +1220,21 @@ invisible to both layers, and Tier-0 returns a wrong-but-plausible result.
 
 ### Tiered execution
 
-`tieredExecutionEnvironment(options)` is an execution-environment factory that
-presents **one** runtime to the harness while owning a Tier-0 adapter and a
+`tieredSandbox(options)` is a sandbox factory that
+presents **one** sandbox to the harness while owning a Tier-0 adapter and a
 lazily-provisioned higher tier behind it, switching between them mid-turn. It is
-opt-in: pass it as `executionEnvironment`; nothing about `"auto"` (the
+opt-in: pass it as `localHost({ sandbox })`; nothing about `"auto"` (the
 default), `"in-process"`, or `"subprocess"` changes. Pass
 `tier0: subprocessSandbox()` to keep the hardened Tier-0 adapter — `tier0`
 defaults to in-process just-bash.
 
 ```ts
-import { localHost, subprocessSandbox, tieredExecutionEnvironment } from "little-harness";
+import { localHost, subprocessSandbox, tieredSandbox } from "@little-stack/harness";
 
 localHost({
-  executionEnvironment: tieredExecutionEnvironment({
-    tier0: subprocessSandbox(),        // defaults to in-process just-bash
-    nextTier: myRealExecutionEnvironment, // any HarnessExecutionEnvironmentFactory
+  sandbox: tieredSandbox({
+    tier0: subprocessSandbox(),        // defaults to justBashSandbox() (in-process)
+    nextTier: myRealSandbox,           // any HarnessSandboxFactory
     policy: { denyCommands: ["docker"] },
   }),
 });
@@ -948,7 +1247,10 @@ traced by the single `createShellRuntime` wrapped around both tiers, so all tier
 emit identical `harness.runtime.command.*` events. Escalation is reported
 out-of-band on `harness.runtime.tier.escalated` /
 `harness.runtime.tier.unavailable` (and `harness.runtime.command.denied`), which
-carry the classification reasons and never reach the prompt.
+carry the classification reasons and never reach the prompt. When the turn's
+sandbox is disposed, one `harness.runtime.usage` event records the tier the turn
+reached, the commands per tier and the active tier's `usage()`
+(`HarnessSandboxUsage`), which is what LittleDB prices compute on.
 
 Two signals move a turn up a tier:
 
@@ -982,7 +1284,7 @@ way, on every tier.
 
 ### Environment teardown
 
-The turn disposes its execution environment in a `finally` block, before the MCP
+The turn disposes its sandbox in a `finally` block, before the MCP
 gateway closes. Disposal is where an environment does its last real work — reaping
 a sandbox child, closing a remote session, syncing a sandbox workspace back to the
 host — so a failure there is data loss and must be visible. It is reported as one
@@ -996,7 +1298,7 @@ sandbox writing the session directory back at dispose — should bracket that wr
 the way the `bash` tool does, so the trace records the same file events:
 
 ```ts
-import { snapshotTrackedMounts, emitTrackedMountFileChanges } from "little-harness";
+import { snapshotTrackedMounts, emitTrackedMountFileChanges } from "@little-stack/harness/sandbox";
 
 const before = await snapshotTrackedMounts(workspace);
 await syncSandboxWorkspaceBack();
@@ -1007,12 +1309,12 @@ await emitTrackedMountFileChanges({ workspace, before, emit, files });
 so rewriting identical bytes emits nothing. It emits `harness.file.created`,
 `harness.file.updated`, and `harness.file.deleted` for `trackChanges` mounts only.
 
-`tieredExecutionEnvironment` already does this for you: it brackets its own
+`tieredSandbox` already does this for you: it brackets its own
 disposal with the same diff, so a higher tier that writes to a mount at teardown
 is reported without the tier itself doing anything (a turn that never escalated
 skips the bracket — there is no higher tier to have written). A sub-tier cannot
 do it —
-`tieredExecutionEnvironment` hands every sub-tier the workspace with
+`tieredSandbox` hands every sub-tier the workspace with
 `trackChanges` stripped, so only the tiered runtime still knows which mounts the
 host asked to track.
 
@@ -1026,5 +1328,50 @@ host asked to track.
 - Keep skill directories small enough to stage into the session workspace.
 - Do not pass a raw `defineWorkflow(...)` result to `workflows`; wrap it with `asHarnessWorkflow(workflow, { definitionIdentity })`.
 - Do not expect a workflow tool to hand the model its typed output; it returns `outputSummary` (at most 4096 characters).
-- Do not treat `executionEnvironment: "in-process"` (Tier-0 just-bash in the host process) as an isolation boundary.
+- Do not treat `sandbox: "in-process"` (Tier-0 just-bash in the host process) as an isolation boundary.
 - Custom tools that read `callerRunIdentity`, `sequenceIndex`, `modelStepId`, or a workflow `signal` read them from the AI SDK 7 `context` execute option (formerly `experimental_context`).
+
+
+## Persistent turn budgets and provider fences
+
+`turnLimits.accounting` defaults to `"run"`, preserving per-run limits. Opt into
+`"logical-turn"` with `maxSteps`, `maxCostUsd` and the app's trusted `price` function
+for one allowance across approval parks/resumes/restarts. The generic Harness owns
+`orchestration.turnBudgets`; its opaque `budgetRef` is saved with each continuation.
+The initial trusted `runId` plus session identify the origin. Keep accounting mode
+and limits stable through every resume. Concrete V2/V3/V4 model handles and dynamic
+`prepareStep.model` overrides are metered at actual provider invocation boundaries.
+
+Each real SDK-visible provider invocation first durably reserves a unique occurrence.
+A reservation does not prove that the provider was called or billed. Known valid
+response usage is priced using the response-reported model identity when supplied
+(and otherwise the configured model); the chosen identity is saved in `pricedModel`. It is settled once before the response/stream finish is delivered.
+Replayed completed responses and tool effects incur no invented model charge; genuine
+reinvocations do count again. A count-only budget (no `maxCostUsd`) may continue
+after an unknown response: every retained reservation still consumes one step,
+and it is never rewritten as zero usage or zero cost. This permits SDK retries
+after a transient provider error without resetting the step allowance.
+With a cost ceiling, any pending reservation or unknown usage/pricing stops with
+typed `BudgetStateUnavailable`, not `CostLimitExceeded`. An HTTP status or
+`APICallError.isRetryable` is not a zero-usage certificate; transport failures,
+aborts and partial streams likewise retain unknown spend. Missing or corrupt
+accounting stops both modes. No automatic refund or allowance reset follows an uncertain call.
+A host may opt in to `turnLimits.refusedBeforeEffect(error, { provider, modelId })`: asked
+only when the provider call itself rejects (never for an abort, an error inside a begun
+stream, or a stream without usage), a `true` settles the reservation as `refused`
+(`refusal: "host-attested"`, no usage, no cost, still one step). A throwing hook counts as
+`false`, and a ledger without `refuse` keeps the attempt held. Approved parked
+tool replay is allowed at a reached limit; the next provider call is refused.
+
+The dollar limit is an after-response threshold, not a hard prepaid spend cap: a
+crossing call can finish, and provider-internal retries/billing remain opaque.
+Deadlines remain per run. Standard file storage fsyncs budget writes and origin
+journals before acknowledging them; memory is instance-only. Custom five-method
+stores work per run; logical mode requires optional `writeJsonDurable` with durable
+acknowledgement semantics. Private single-process file roots are required; use a
+transactional store for distributed writers. Whole-storage rollback is not detected.
+
+`generateHarness`, `streamHarness` and `resumeParked` accept an additive trusted async
+`beforeInvocation` fence. Its rejection blocks actual provider entry; record failures
+and cancellation are checked again after awaiting it. Aliases with the fence are
+refused; pass concrete model handles. `onEvent` remains observational.

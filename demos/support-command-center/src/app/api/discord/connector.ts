@@ -3,7 +3,7 @@ import {
   loadChatSdkConnector,
   type LoadChatSdkConnectorOptions,
   type LoadedChatSdkConnector,
-} from "little-harness/connectors/runtime";
+} from "@little-stack/harness/connectors/runtime";
 import discordConnector, {
   type SupportDiscordExtraBody,
 } from "../../../../agents/support/connectors/discord/connector";

@@ -36,8 +36,18 @@ const traceContentRefSchema = z
     mediaType: z.string().min(1).optional(),
     redacted: z.boolean().optional(),
     redactionReason: z.string().min(1).optional(),
+    unavailableReason: z.literal("storage_limit").optional(),
+    storageLimitBytes: z.number().int().nonnegative().optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((value, ctx) => {
+    if (value.unavailableReason === "storage_limit" && (value.captured || value.contentRef !== undefined || value.truncated !== true || value.storageLimitBytes === undefined || value.bytes === undefined || value.bytes <= value.storageLimitBytes)) {
+      ctx.addIssue({ code: "custom", message: "Unavailable trace content must describe an over-limit value without a contentRef." });
+    }
+    if (value.storageLimitBytes !== undefined && value.unavailableReason !== "storage_limit") {
+      ctx.addIssue({ code: "custom", message: "storageLimitBytes requires unavailableReason storage_limit." });
+    }
+  });
 
 const traceFileDiffSchema = z.discriminatedUnion("available", [
   z
@@ -247,6 +257,31 @@ const runtimeTierMetadataSchema = z
 const runtimeTierUnavailableMetadataSchema = runtimeTierMetadataSchema.extend({
   detail: z.string().min(1),
 });
+// One per turn with a shell sandbox: the tier it reached, the commands per tier and the
+// sandbox's own account of the infrastructure it used (see `HarnessRuntimeUsage`).
+const runtimeUsageMetadataSchema = z
+  .object({
+    tier: z.enum(["tier-0", "next-tier"]),
+    commands: z.object({
+      tier0: z.number().int().nonnegative(),
+      nextTier: z.number().int().nonnegative(),
+      denied: z.number().int().nonnegative(),
+    }),
+    escalations: z.number().int().nonnegative(),
+    sandbox: z
+      .object({
+        provider: z.string().min(1),
+        instanceType: z.string().min(1).optional(),
+        vcpu: z.number().nonnegative().optional(),
+        memoryGiB: z.number().nonnegative().optional(),
+        diskGB: z.number().nonnegative().optional(),
+        activeMs: z.number().nonnegative(),
+        awakeMs: z.number().nonnegative().optional(),
+        costUsd: z.number().nonnegative().optional(),
+      })
+      .passthrough(),
+  })
+  .passthrough();
 const fileBinaryMetadataSchema = z
   .object({
     bytes: z.number().int().nonnegative(),
@@ -358,6 +393,8 @@ const persistentDirLoadedMetadataSchema = persistentDirMetadataSchema
     durationMs: z.number().nonnegative(),
     fileCount: z.number().int().nonnegative(),
     files: z.array(fileEntrySchema),
+    /** Set when `canWrite` made the dir read-only for this turn. */
+    readOnly: z.literal(true).optional(),
   })
   .passthrough();
 const persistentDirCommitMetadataSchema = persistentDirMetadataSchema
@@ -433,6 +470,8 @@ function metadataSchemaFor(type: HarnessTraceEventType): z.ZodTypeAny {
       return runtimeTierMetadataSchema;
     case "harness.runtime.tier.unavailable":
       return runtimeTierUnavailableMetadataSchema;
+    case "harness.runtime.usage":
+      return runtimeUsageMetadataSchema;
     case "harness.runtime.error":
     // Turn teardown reports the same envelope shape as any other runtime error.
     case "harness.runtime.dispose.failed":

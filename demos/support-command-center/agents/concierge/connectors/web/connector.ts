@@ -1,4 +1,4 @@
-import { webRichConnector, type WebRichUser } from "little-harness/connectors/runtime";
+import { webRichConnector, type WebRichUser } from "@little-stack/harness/connectors/runtime";
 import { CONCIERGE_SESSION_ID_HEADER, conciergeSessionId } from "../shared/session-id";
 
 export type ConciergeWebUser = WebRichUser;

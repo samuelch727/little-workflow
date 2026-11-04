@@ -12,6 +12,7 @@ describe("persistent dir commit", () => {
       const stores: unknown[] = [];
       const prepared = await preparePersistentDirs({
         hostPaths,
+        roots: session.paths,
         session,
         extraBody: { userId: "u1" },
         persistentDirs: [
@@ -39,6 +40,59 @@ describe("persistent dir commit", () => {
     });
   });
 
+  it("mounts a dir read-only and skips its store for a turn whose canWrite says no", async () => {
+    await withTempDir(async (dir) => {
+      const hostPaths = resolveLocalHostPaths({ dataDir: dir }, dir);
+      const session = await new LocalSessionStore(hostPaths).getOrCreate({ id: "chat" });
+      const stores: string[] = [];
+      const events: any[] = [];
+      const prepare = (role: string) =>
+        preparePersistentDirs({
+          hostPaths,
+          roots: session.paths,
+          session,
+          extraBody: { role },
+          persistentDirs: [
+            {
+              harnessDir: "/persistent/company",
+              canWrite: async ({ extraBody }) => (extraBody as { role: string }).role === "underwriter",
+              load: () => ({ "rule.md": "24 months" }),
+              store: ({ extraBody }) => {
+                stores.push((extraBody as { role: string }).role);
+              },
+            },
+            { harnessDir: "/persistent/me", store: () => {} },
+          ],
+        });
+
+      const officer = await prepare("officer");
+      await officer.load({ emit: async (event) => void events.push(event) });
+      expect(session.getReadOnlyPersistentDirs()).toEqual(["/persistent/company"]);
+      await expect(session.files.writeText("/persistent/company/rule.md", "12 months")).rejects.toThrow(
+        "Persistent Dir is read-only",
+      );
+      await session.files.writeText("/persistent/me/style.md", "bullets");
+      const status = await officer.commit();
+      expect(status).toMatchObject({
+        status: "succeeded",
+        commits: [
+          { harnessDir: "/persistent/company", status: "skipped" },
+          { harnessDir: "/persistent/me", status: "succeeded" },
+        ],
+      });
+      expect(stores).toEqual([]);
+      expect(events.find((event) => event.metadata.harnessDir === "/persistent/company").metadata.readOnly).toBe(true);
+      expect(events.find((event) => event.metadata.harnessDir === "/persistent/me").metadata.readOnly).toBeUndefined();
+
+      const underwriter = await prepare("underwriter");
+      await underwriter.load();
+      expect(session.getReadOnlyPersistentDirs()).toEqual([]);
+      await session.files.writeText("/persistent/company/rule.md", "12 months");
+      await underwriter.commit();
+      expect(stores).toEqual(["underwriter"]);
+    });
+  });
+
   it("emits Persistent Dir load and commit metadata for trace inspection", async () => {
     await withTempDir(async (dir) => {
       const hostPaths = resolveLocalHostPaths({ dataDir: dir }, dir);
@@ -46,6 +100,7 @@ describe("persistent dir commit", () => {
       const events: any[] = [];
       const prepared = await preparePersistentDirs({
         hostPaths,
+        roots: session.paths,
         session,
         persistentDirs: [
           {
@@ -128,6 +183,7 @@ describe("persistent dir commit", () => {
       let called = false;
       const prepared = await preparePersistentDirs({
         hostPaths,
+        roots: session.paths,
         session,
         persistentDirs: [
           {
@@ -160,6 +216,7 @@ describe("persistent dir commit", () => {
       const session = await new LocalSessionStore(hostPaths).getOrCreate({ id: "chat" });
       const prepared = await preparePersistentDirs({
         hostPaths,
+        roots: session.paths,
         session,
         persistentDirs: [
           {

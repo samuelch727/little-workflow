@@ -1,0 +1,7 @@
+{
+  "title": "LittleDB",
+  "description": "Traces, versions and experiments · private source",
+  "icon": "Database",
+  "pages": ["index", "harness", "workflow", "memory", "feedback", "experiments", "guardrails"],
+  "root": true
+}

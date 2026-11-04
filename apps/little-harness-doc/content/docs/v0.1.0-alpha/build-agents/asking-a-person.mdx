@@ -1,0 +1,241 @@
+---
+title: Asking A Person
+description: Let the agent ask a person a question without stopping, and continue the turn when the answer comes.
+---
+
+An answer from a person can take minutes or days. With `humanInput`, the agent
+asks with the `ask_person` tool, which returns at once, so the agent keeps working
+on whatever does not need the answer. When it does need the answer, it calls
+`await_tasks`: if the person has answered, it gets the answer; if not, the turn
+ends as `parked`. Your app sends the question out, records the reply with
+`answerInputRequest`, and `resumeParked` continues the turn from where it stopped.
+
+```text
+agent: ask_person -> { status: "asked", taskId }   (returns at once)
+agent: ...keeps working...
+agent: await_tasks([taskId])  -> turn parks
+you:   deliver(request)       -> Slack, email, your own inbox
+you:   answerInputRequest()   -> the reply is recorded
+you:   resumeParked()         -> the turn continues; await_tasks returns the answer
+```
+
+## Turn It On
+
+```ts
+import { createHarness, localHost } from "@little-stack/harness";
+
+const harness = createHarness({
+  host: localHost({ dataDir: "./data" }),
+  model,
+  system:
+    "You pre-approve loans. When the policy does not cover a case, ask the underwriter.",
+  humanInput: {
+    deliver: async (request) => {
+      await slack.chat.postMessage({
+        channel: "#underwriting",
+        text: request.question,
+        metadata: { sessionId: request.sessionId, requestId: request.requestId },
+      });
+    },
+  },
+});
+```
+
+`humanInput: true` turns it on with the defaults. It needs a host with durable
+services, such as `localHost`.
+
+| Option | What it does |
+| --- | --- |
+| `deliver(request, { session })` | Sends a new question to a person. Called once per question. When it throws, the question still stands and the agent is told sending it failed. |
+| `toolName` | The tool's name. Default `ask_person`. |
+| `description` | The tool's description: tell the agent when to ask, and whom. |
+| `tool` | Set `false` to leave the tool out, so only your own tools can ask (see [below](#ask-from-your-own-tool)). |
+
+Your app decides how the question reaches a person and who may answer it. The
+harness records the question and the answer; it does not send messages or check
+who answered.
+
+## What The Agent Sends
+
+`ask_person` takes:
+
+| Field | Meaning |
+| --- | --- |
+| `question` | The question, with what the person needs to answer it. |
+| `options` | Choices, as `{ id, label }`. The answer comes back as the chosen `id`. At most 20. |
+| `allowFreeform` | Also accept a written answer when `options` are given. |
+| `to` | Who should answer, if the instructions name someone. Passed to `deliver`; the harness does not route on it. |
+| `answerSchema` | A JSON Schema for a structured answer, returned as `value`. |
+
+It returns `{ status: "asked", taskId }`. The question is a task like any other
+background task, so `list_tasks`, `get_task` and `cancel_task` work on it, and
+`await_tasks` returns it with its answer:
+
+```json
+{
+  "status": "satisfied",
+  "tasks": [{
+    "taskId": "task_3",
+    "kind": "input",
+    "question": "APP-1008 has a 47% debt-to-income ratio. Approve?",
+    "status": "answered",
+    "answer": { "option": "approve", "text": "Fine with the co-signer." },
+    "answeredBy": "dana@lender.example",
+    "answeredAt": "2026-10-14T09:12:03.000Z"
+  }]
+}
+```
+
+## Answer And Continue
+
+When the reply comes in, record it and continue the turns that were waiting:
+
+```ts
+import { answerInputRequest, resumeParked } from "@little-stack/harness";
+
+// In the handler that receives the underwriter's reply.
+await answerInputRequest({
+  harness,
+  sessionId,
+  requestId,
+  answer: { option: "approve", text: "Fine with the co-signer." },
+  answeredBy: "dana@lender.example",
+});
+
+await resumeParked({
+  harness,
+  onResult: async (result, turn) => {
+    if (result.status === "completed") await notifyApplicant(turn.sessionId, result.text);
+  },
+});
+```
+
+An answer has an `option` (one of the question's option ids), `text`, a `value`
+(checked against `answerSchema`), or `option` with `text` as a note.
+`answerInputRequest` refuses a second answer, an answer to a cancelled question,
+and an answer that does not fit the question. It returns the question with its
+new status. If the process stopped while it was recording an answer, call it again
+with the same answer to finish; a different answer is refused.
+
+`listInputRequests({ harness, sessionId? })` lists the questions still waiting,
+oldest first, for an inbox page or a reminder. Pass `status: "all"` to include
+answered and cancelled ones.
+
+`resumeParked` continues every turn whose wait is over, up to `limit` (default
+10), and returns `{ resumed, failed }`. Each turn continues as a
+`generateHarness` turn, with the system prompt and conversation saved when it
+parked, and `await_tasks` returning what it waited for. A turn that failed to
+continue, for example because the model call failed, stays queued; `willRetry`
+says so. A call after `retryDelayMs` (default 15 seconds, doubling after each
+failure) tries it again, and after `maxAttempts` failed tries (default 5) it is
+dropped; `attempts` counts them. Each try runs again the steps the turn took
+before it failed, so a tool with side effects can run more than once, unless the
+turn has a session log: pass `sessionLog` (a session log for each queue record),
+or give the harness one. Each continued turn then runs as the run `resumeId` of
+its queue record, and a try replays the steps and tool calls that finished; a
+call that started and never finished runs again with the same `toolCallId`. The
+agent server does this for you, with a file for each continued turn. Pass
+`sessionId` to continue one session's turns only, or `resumeId` to continue one
+queued turn.
+
+## Ask From Your Own Tool
+
+A tool can ask too, through `ask` in its execution context. It returns at once
+with the question's `status`. Asking the same question again in the session
+returns the same question, with its answer once there is one, so the tool can ask
+on its first call and act on its next:
+
+```ts
+import { harnessToolContext } from "@little-stack/harness";
+import { tool } from "ai";
+import { z } from "zod";
+
+const sendEmail = tool({
+  description: "Email the applicant. A loan officer approves each email first.",
+  inputSchema: z.object({ to: z.string(), subject: z.string(), body: z.string() }),
+  execute: async (input, options) => {
+    const approval = await harnessToolContext(options).ask!({
+      question: `Send "${input.subject}" to ${input.to}?\n\n${input.body}`,
+      options: [{ id: "send", label: "Send" }, { id: "hold", label: "Hold" }],
+    });
+    if (approval.status === "waiting") {
+      return { status: "waiting_for_approval", taskId: approval.taskId };
+    }
+    if (approval.answer?.option !== "send") return { status: "held" };
+    await mailer.send(input);
+    return { status: "sent" };
+  },
+});
+```
+
+The agent sees `waiting_for_approval`, calls `await_tasks` with the `taskId`, and
+once the officer answers, calls `send_email` again and gets `sent`. Pass
+`ask(question, { key })` to decide what counts as the same question, for example
+to ask the same words again as a new question. With `humanInput: { tool: false }`
+your tools can ask but the agent cannot.
+
+## Wait Inside The Tool
+
+Pass `wait: true` and the tool waits for the answer itself, with no
+`await_tasks` call from the agent. While the question has no answer, `ask`
+returns `status: "parked"` and an `output`; return that from the tool, and the
+turn pauses after this step:
+
+```ts
+const sendEmail = tool({
+  description: "Email the applicant. A loan officer approves each email first.",
+  inputSchema: z.object({ to: z.string(), subject: z.string(), body: z.string() }),
+  execute: async (input, options) => {
+    const approval = await harnessToolContext(options).ask!(
+      {
+        question: `Send "${input.subject}" to ${input.to}?\n\n${input.body}`,
+        options: [{ id: "send", label: "Send" }, { id: "hold", label: "Hold" }],
+      },
+      { key: `email-${options.toolCallId}`, wait: true },
+    );
+    if (approval.status === "parked") return approval.output;
+    if (approval.answer?.option !== "send") return { status: "held" };
+    await mailer.send(input);
+    return { status: "sent" };
+  },
+});
+```
+
+Once every question the step waits on has an answer, `resumeParked` continues
+the turn by running the same tool call again: the same `toolCallId` and input,
+with the `extraBody` you pass to `resumeParked`. This time `ask` returns the
+answer, and the agent sees only the tool's final result, `sent` or `held`. Other
+calls in the same step keep their results and don't run again.
+
+The tool runs from the top a second time, so make it safe to run again up to its
+`ask`: read before you write, or key any write on `options.toolCallId`. A call
+waits once. In its second run, a new question with `wait` fails the call, and
+the agent can call the tool again. `wait` works only in a tool the agent called.
+
+## When Nobody Answers
+
+`await_tasks` takes `maxWaitMs`. Once it passes, `resumeParked` continues the turn
+with `status: "timed_out"` and the task ids still `pending`; the question stays
+open, and a later answer is recorded as usual. Time-outs are checked when
+`resumeParked` runs, so call it on a timer if your agents set `maxWaitMs`.
+
+## Good To Know
+
+- A turn that parked while streaming continues as a `generateHarness` turn.
+  Send its reply from `onResult`.
+- The continued turn does not keep the first turn's `extraBody` or `output`. Pass
+  `extraBody` to `resumeParked`; an Input Type's `output` is used again.
+- If the process stops while `resumeParked` is continuing a turn, that turn is
+  not tried again. Through the agent server's resume route it can be: see
+  [Continuing Turns From Your App](/docs/v0.1.0-alpha/build-agents/serving-agents#continuing-turns-from-your-app).
+- `answerInputRequest` takes the question's `requestId`, or the `key` a tool
+  asked it with. The same answer twice succeeds once and changes nothing, so a
+  retry is safe; a different second answer is refused.
+- Questions and saved conversations are kept as JSON under the session's data dir
+  (`results/`).
+
+## See Also
+
+- [Tools](/docs/v0.1.0-alpha/build-agents/tools): `harnessToolContext`.
+- [generateHarness](/docs/v0.1.0-alpha/reference/generate-harness#returns): the parked result.
+- [createHarness](/docs/v0.1.0-alpha/reference/create-harness#humaninput): the `humanInput` option.

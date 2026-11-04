@@ -12,7 +12,7 @@ const MAX_EVENT_CHARACTERS = 24_000;
 
 /**
  * Read ONE run from the littleDB engine: `GET {engineUrl}/runs/{runId}` — the same route
- * `@little-workflow/littledb`'s own `loadRun` calls, returning `{ summary, events }`.
+ * `@little-stack/littledb`'s own `loadRun` calls, returning `{ summary, events }`.
  *
  * This is the drill-down, and it is what a rejected citation is fixed from: the exact user
  * turn lives in these events, character for character.

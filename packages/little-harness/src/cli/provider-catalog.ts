@@ -419,7 +419,7 @@ export function renderAgentSource(options: {
     }`;
 
   if (provider.renderMode === "openai-compatible") {
-    return `import { createHarness, localHost } from "little-harness";
+    return `import { createHarness, localHost } from "@little-stack/harness";
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 
 const baseURL = process.env.OPENAI_COMPATIBLE_BASE_URL;
@@ -444,7 +444,7 @@ export default createHarness({
   }
 
   if (provider.renderMode === "open-responses") {
-    return `import { createHarness, localHost } from "little-harness";
+    return `import { createHarness, localHost } from "@little-stack/harness";
 import { createOpenResponses } from "@ai-sdk/open-responses";
 
 const url = process.env.OPEN_RESPONSES_URL;
@@ -467,7 +467,7 @@ export default createHarness({
 `;
   }
 
-  return `import { createHarness, localHost } from "little-harness";
+  return `import { createHarness, localHost } from "@little-stack/harness";
 import { ${provider.exportName} } from "${provider.importModule}";
 
 // ${installComment}

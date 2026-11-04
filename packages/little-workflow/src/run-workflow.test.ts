@@ -6,26 +6,52 @@ import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import {
+  createToolRegistry,
+  localWorld,
+  output,
+  skill,
+  runOrchestration,
+  runWorkflow as runWorkflowPublic,
+  readWorkflowVersion,
+  gradeRun,
+  listRunGrades,
+  RunFailedError,
+  model,
+} from "./index.js";
+import type {
+  InferWorkflowOutput,
+  RunResult,
+  SuperviseDecision,
+  SuperviseOuterLoopState,
+} from "./index.js";
+import type {
+  RunWorkflowRequest,
+} from "./entries/internals.js";
+import type {
+  LwirWorkflow,
+} from "./entries/lwir.js";
+import {
   appendEvent,
   createWorkflowHarness,
   createLittleWorkflow,
-  createToolRegistry,
   executeWorkflowVersion,
   readArtifact,
-  localWorld,
   listEvents,
-  output,
+  readOuterLoopManifest,
   readStoredWorkflowVersion,
   registerStoredWorkflowVersion,
   sha256Digest,
   getWorkflowDefinitionHash,
-  skill,
-  runWorkflow as runWorkflowPublic,
-  RunFailedError,
   workflowHarness,
   writeOuterLoopManifest,
   writeArtifact,
-} from "./index.js";
+} from "./entries/internals.js";
+import type {
+  Harness,
+  HarnessTask,
+  RuntimeToolHandler,
+  WorkflowRunTarget,
+} from "./entries/internals.js";
 import { runWorkflowWithLegacyPlannerAdapter } from "./runtime.js";
 import { materializeRunStateFromEvents } from "./run-state.js";
 import { runReport } from "./run-report.js";
@@ -39,19 +65,6 @@ import {
   concreteInputStructure,
   concreteInputStructureHash,
 } from "./workflow-version-reuse.js";
-import type {
-  Harness,
-  HarnessTask,
-  InferWorkflowOutput,
-  LwirWorkflow,
-  RunResult,
-  RunWorkflowOptions,
-  RuntimeToolHandler,
-  SuperviseDecision,
-  SuperviseOuterLoopState,
-  WorkflowRunTarget,
-} from "./index.js";
-import { model } from "./index.js";
 import { cleanupTempDirs, workerScopedTempPrefix } from "./test-temp.js";
 
 const tempDirs: string[] = [];
@@ -111,6 +124,18 @@ const ticketWorkflow = createLittleWorkflow({
   globalTools: ["summarize"],
 } as unknown as Parameters<typeof createLittleWorkflow>[0]);
 
+// The same workflow with an optional field, so a later run can send an input of another shape. A
+// changed input shape is one of the things that sends a saved plan back to the planner for review.
+const ticketInputSchemaWithPriority = {
+  ...ticketInputSchema,
+  properties: { ...ticketInputSchema.properties, priority: { type: "string" } },
+};
+
+const ticketWorkflowWithPriority = createLittleWorkflow({
+  ...ticketWorkflow,
+  inputSchema: ticketInputSchemaWithPriority,
+} as unknown as Parameters<typeof createLittleWorkflow>[0]);
+
 const multiStepToolRegistry = createToolRegistry();
 multiStepToolRegistry.register("extract", {
   description: "Extract ticket context.",
@@ -141,7 +166,10 @@ function singleToolLwir(): LwirWorkflow {
   return singleToolLwirWithStepId("summarize");
 }
 
-function singleToolLwirWithStepId(stepId: string): LwirWorkflow {
+function singleToolLwirWithStepId(
+  stepId: string,
+  inputSchema: LwirWorkflow["input"]["schema"] = ticketInputSchema,
+): LwirWorkflow {
   return {
     apiVersion: "littleworkflow.dev/v0.1",
     kind: "Workflow",
@@ -150,7 +178,7 @@ function singleToolLwirWithStepId(stepId: string): LwirWorkflow {
       version: "0.1.0-alpha",
       description: "Summarize a ticket.",
     },
-    input: { schema: ticketInputSchema },
+    input: { schema: inputSchema },
     output: { schema: ticketOutputSchema },
     permissions: { tools: ["summarize"], models: [], secrets: [], network: [] },
     steps: [
@@ -300,7 +328,7 @@ function plannerFor(lwir: LwirWorkflow): PlannerAdapter {
 }
 
 type RunWorkflowLegacyPlannerOptions<TWorkflow extends WorkflowRunTarget> =
-  RunWorkflowOptions<TWorkflow> & {
+  RunWorkflowRequest<TWorkflow> & {
     readonly planner?: PlannerAdapter;
   };
 
@@ -423,6 +451,40 @@ async function writeRunLockOwner(dataDir: string, runId: string, pid: number) {
   await writeFile(join(lockDir, "owner.json"), JSON.stringify({ pid }), "utf8");
 }
 
+function outerLoopLockDir(dataDir: string, outerLoopId: string) {
+  return join(dataDir, "locks", sha256Digest({ outerLoopId }).replace(/[^A-Za-z0-9_-]/gu, "_"));
+}
+
+async function writeOuterLoopLockOwner(dataDir: string, outerLoopId: string, pid: number) {
+  const lockDir = outerLoopLockDir(dataDir, outerLoopId);
+  await mkdir(lockDir, { recursive: true });
+  await writeFile(join(lockDir, "owner.json"), JSON.stringify({ pid }), "utf8");
+}
+
+/** ticketWorkflow with a planner harness that drafts singleToolLwir and the given supervise. */
+function outerLoopTicketWorkflow(
+  supervise: (state: SuperviseOuterLoopState) => Promise<SuperviseDecision>,
+  onPlan?: () => void,
+) {
+  return createLittleWorkflow({
+    ...ticketWorkflow,
+    planner: {
+      model: { provider: "test", modelId: "planner-harness" },
+      harness: {
+        harnessId: "plannerHarness@1.0.0",
+        run: async (task: HarnessTask) => {
+          if (task.kind !== "plan") {
+            return { kind: "delegate_to_default" };
+          }
+          onPlan?.();
+          return { kind: "plan", lwir: singleToolLwir() };
+        },
+      },
+      supervise,
+    },
+  });
+}
+
 /** Build a ToolRegistry with the "summarize" tool using ticketWorkflow's descriptor + the given handler. */
 function ticketRegistryWith(summarize: RuntimeToolHandler) {
   const registry = createToolRegistry();
@@ -459,17 +521,17 @@ function multiStepRegistryWith(
 }
 
 describe("runWorkflow integration", () => {
-  it("planner_reviewed reuses an existing successful WorkflowVersion when the planner chooses reuse_unchanged", async () => {
+  it("planner_reviewed reuses an existing successful WorkflowVersion when the planner reviews a new input shape and chooses reuse_unchanged", async () => {
     const world = await tempWorld();
     const firstInput = { ticketId: "TIN-12", body: "Cannot export invoices." };
-    const secondInput = { ticketId: "TIN-13", body: "Cannot import receipts." };
+    const secondInput = { ticketId: "TIN-13", body: "Cannot import receipts.", priority: "high" };
     const plannerRequests: Array<Parameters<PlannerAdapter["draft"]>[0]> = [];
     let firstWorkflowVersionId = "";
     const planner: PlannerAdapter = {
       draft: vi.fn(async (request) => {
         plannerRequests.push(request);
         if (plannerRequests.length === 1) {
-          return singleToolLwir();
+          return singleToolLwirWithStepId("summarize", ticketInputSchemaWithPriority);
         }
         return {
           kind: "reuse_unchanged",
@@ -485,7 +547,7 @@ describe("runWorkflow integration", () => {
 
     const first = await runWorkflow({
       world,
-      workflows: ticketWorkflow,
+      workflows: ticketWorkflowWithPriority,
       input: firstInput,
       planner,
       tools: ticketRegistryWith(summarize),
@@ -495,7 +557,7 @@ describe("runWorkflow integration", () => {
     firstWorkflowVersionId = first.workflowVersionId;
     const second = await runWorkflow({
       world,
-      workflows: ticketWorkflow,
+      workflows: ticketWorkflowWithPriority,
       input: secondInput,
       planner,
       tools: ticketRegistryWith(summarize),
@@ -526,6 +588,368 @@ describe("runWorkflow integration", () => {
         candidateBriefHash: expect.stringMatching(/^sha256:[0-9a-f]{64}$/u),
         resultingWorkflowVersionId: first.workflowVersionId,
       }));
+    expect(second.plan).toEqual({
+      kind: "kept",
+      plannerCalled: true,
+      workflowVersionId: first.workflowVersionId,
+      previousWorkflowVersionId: first.workflowVersionId,
+      rationale: "The existing plan still matches this input.",
+    });
+  });
+
+  it("planner_reviewed keeps the WorkflowVersion without a planner call when nothing the planner reads changed", async () => {
+    const world = await tempWorld();
+    const inputs = [
+      { ticketId: "TIN-12", body: "Cannot export invoices." },
+      { ticketId: "TIN-13", body: "Cannot import receipts." },
+      { ticketId: "TIN-14", body: "Cannot sync contacts." },
+    ];
+    const planner: PlannerAdapter = {
+      draft: vi.fn(async () => singleToolLwir()),
+    };
+    const summarize = vi.fn<RuntimeToolHandler>((toolInput) => {
+      const typed = toolInput as { ticketId: string; body: string };
+      return { summary: `${typed.ticketId}:${typed.body}` };
+    });
+
+    const results = [];
+    for (const [index, input] of inputs.entries()) {
+      results.push(await runWorkflow({
+        world,
+        workflows: ticketWorkflow,
+        input,
+        planner,
+        tools: ticketRegistryWith(summarize),
+        runId: `run_planner_reviewed_keep_${index}`,
+        workflowVersionReuseStrategy: "planner_reviewed",
+      }));
+    }
+
+    expect(planner.draft).toHaveBeenCalledTimes(1);
+    const [first, second, third] = results;
+    expect(first?.plan).toEqual({
+      kind: "drafted",
+      plannerCalled: true,
+      workflowVersionId: first?.workflowVersionId,
+    });
+    expect(third?.plan).toEqual({
+      kind: "kept",
+      plannerCalled: false,
+      workflowVersionId: first?.workflowVersionId,
+      previousWorkflowVersionId: first?.workflowVersionId,
+      rationale: expect.stringMatching(/^Kept without a planner call/u),
+    });
+    expect(second?.workflowVersionId).toBe(first?.workflowVersionId);
+    expect(third?.workflowVersionId).toBe(first?.workflowVersionId);
+    expect(third?.output).toEqual({ summary: "TIN-14:Cannot sync contacts." });
+    for (const kept of [second, third]) {
+      const types = kept?.events.map((event) => event.type) ?? [];
+      expect(types[0]).toBe("OrchestrationRequested");
+      expect(types).not.toContain("PlannerStarted");
+      expect(types.indexOf("PlannerReuseDecisionRecorded")).toBeLessThan(types.indexOf("RunStarted"));
+    }
+    expect(third?.events.find((event) => event.type === "PlannerReuseDecisionRecorded")?.payload)
+      .toEqual(expect.objectContaining({
+        decisionKind: "reuse_unchanged",
+        candidateWorkflowVersionId: first?.workflowVersionId,
+        rationale: expect.stringMatching(/^Kept without a planner call/u),
+        acknowledgedWarnings: [],
+        inputHash: sha256Digest(inputs[2]),
+        resultingWorkflowVersionId: first?.workflowVersionId,
+      }));
+
+    // A changed description is something the planner reads, so it reviews the candidate again.
+    const changedWorkflow = createLittleWorkflow({
+      ...ticketWorkflow,
+      description: "Summarize a ticket in one line.",
+    } as unknown as Parameters<typeof createLittleWorkflow>[0]);
+    await runWorkflow({
+      world,
+      workflows: changedWorkflow,
+      input: inputs[0],
+      planner,
+      tools: ticketRegistryWith(summarize),
+      runId: "run_planner_reviewed_keep_changed",
+      workflowVersionReuseStrategy: "planner_reviewed",
+    });
+    expect(planner.draft).toHaveBeenCalledTimes(2);
+  });
+
+  it("planner_reviewed keeps a plan without a planner call after the planner reviewed a change and kept it", async () => {
+    const world = await tempWorld();
+    let firstWorkflowVersionId = "";
+    const planner: PlannerAdapter = {
+      draft: vi.fn(async () =>
+        firstWorkflowVersionId === ""
+          ? singleToolLwir()
+          : {
+              kind: "reuse_unchanged" as const,
+              workflowVersionId: firstWorkflowVersionId,
+              rationale: "The new description does not change the plan.",
+              acknowledgedWarnings: ["description changed"],
+            }
+      ),
+    };
+    const summarize = vi.fn<RuntimeToolHandler>((toolInput) => {
+      const typed = toolInput as { ticketId: string; body: string };
+      return { summary: `${typed.ticketId}:${typed.body}` };
+    });
+    const run = (workflows: typeof ticketWorkflow, index: number) =>
+      runWorkflow({
+        world,
+        workflows,
+        input: { ticketId: `TIN-${index}`, body: "Cannot export invoices." },
+        planner,
+        tools: ticketRegistryWith(summarize),
+        runId: `run_keep_after_review_${index}`,
+      });
+
+    const first = await run(ticketWorkflow, 1);
+    firstWorkflowVersionId = first.workflowVersionId;
+    const changedWorkflow = createLittleWorkflow({
+      ...ticketWorkflow,
+      description: "Summarize a ticket in one line.",
+    } as unknown as Parameters<typeof createLittleWorkflow>[0]) as typeof ticketWorkflow;
+    const reviewed = await run(changedWorkflow, 2);
+    const kept = await run(changedWorkflow, 3);
+
+    expect(planner.draft).toHaveBeenCalledTimes(2);
+    expect(reviewed.plan).toEqual(expect.objectContaining({ kind: "kept", plannerCalled: true }));
+    expect(kept.plan).toEqual(expect.objectContaining({
+      kind: "kept",
+      plannerCalled: false,
+      workflowVersionId: first.workflowVersionId,
+    }));
+    expect(kept.events.find((event) => event.type === "PlannerReuseDecisionRecorded")?.payload)
+      .toEqual(expect.objectContaining({ acknowledgedWarnings: ["description changed"] }));
+
+    // Changing the definition again sends it back to the planner.
+    await run(createLittleWorkflow({
+      ...ticketWorkflow,
+      description: "Summarize a ticket in two lines.",
+    } as unknown as Parameters<typeof createLittleWorkflow>[0]) as typeof ticketWorkflow, 4);
+    expect(planner.draft).toHaveBeenCalledTimes(3);
+  });
+
+  it("a fail grade sends the plan back to the planner with the reason, once", async () => {
+    const world = await tempWorld();
+    const plannerRequests: Array<Parameters<PlannerAdapter["draft"]>[0]> = [];
+    let firstWorkflowVersionId = "";
+    let answer: "adapt" | "keep" = "keep";
+    const planner: PlannerAdapter = {
+      draft: vi.fn(async (request) => {
+        plannerRequests.push(request);
+        if (firstWorkflowVersionId === "") {
+          return singleToolLwirWithStepId("summarize");
+        }
+        const warnings = [...(request.messages.system ?? "").matchAll(/^- (run \S+ was graded fail \(grade_[^)]+\))$/gmu)]
+          .map((match) => match[1] as string);
+        return answer === "keep"
+          ? {
+              kind: "reuse_unchanged" as const,
+              workflowVersionId: firstWorkflowVersionId,
+              rationale: "The input was wrong, not the plan.",
+              acknowledgedWarnings: warnings,
+            }
+          : {
+              kind: "adapt" as const,
+              baseWorkflowVersionId: firstWorkflowVersionId,
+              rationale: "Summaries must name the ticket first.",
+              lwir: singleToolLwirWithStepId("summarize_named"),
+            };
+      }),
+    };
+    const summarize = vi.fn<RuntimeToolHandler>((toolInput) => {
+      const typed = toolInput as { ticketId: string; body: string };
+      return { summary: `${typed.ticketId}:${typed.body}` };
+    });
+    const run = (index: number) =>
+      runWorkflow({
+        world,
+        workflows: ticketWorkflow,
+        input: { ticketId: `TIN-${index}`, body: "Cannot export invoices." },
+        planner,
+        tools: ticketRegistryWith(summarize),
+        runId: `run_graded_${index}`,
+      });
+
+    const first = await run(1);
+    firstWorkflowVersionId = first.workflowVersionId;
+    const second = await run(2);
+    expect(second.plan.plannerCalled).toBe(false);
+
+    const grade = await gradeRun(world, second.runId, {
+      verdict: "fail",
+      reason: "The summary dropped the customer's name.",
+      gradedBy: "support-lead",
+    });
+    expect(grade).toEqual(expect.objectContaining({
+      runId: second.runId,
+      workflowId: ticketWorkflow.id,
+      workflowVersionId: first.workflowVersionId,
+      verdict: "fail",
+    }));
+    expect(await listRunGrades(world, { workflowVersionId: first.workflowVersionId })).toEqual([grade]);
+    expect(await listRunGrades(world, { runId: first.runId })).toEqual([]);
+
+    // The next run goes to the planner, which reads the grade and keeps the plan.
+    const reviewed = await run(3);
+    expect(planner.draft).toHaveBeenCalledTimes(2);
+    const brief = plannerRequests[1]?.messages.system ?? "";
+    expect(brief).toContain("## Feedback");
+    expect(brief).toContain("graded fail by support-lead: The summary dropped the customer's name.");
+    expect(reviewed.plan).toEqual(expect.objectContaining({
+      kind: "kept",
+      plannerCalled: true,
+      rationale: "The input was wrong, not the plan.",
+    }));
+
+    // That grade has been weighed, so the plan is kept without a planner call again.
+    const kept = await run(4);
+    expect(planner.draft).toHaveBeenCalledTimes(2);
+    expect(kept.plan.plannerCalled).toBe(false);
+
+    // A new fail grade goes back to the planner, which adapts the plan this time.
+    await gradeRun(world, kept.runId, { verdict: "fail", reason: "Still no name." });
+    answer = "adapt";
+    const adapted = await run(5);
+    expect(planner.draft).toHaveBeenCalledTimes(3);
+    expect(adapted.plan).toEqual(expect.objectContaining({
+      kind: "adapted",
+      previousWorkflowVersionId: first.workflowVersionId,
+    }));
+    expect(adapted.workflowVersionId).not.toBe(first.workflowVersionId);
+    // The adapted plan has no grades, so it is kept without a planner call.
+    const afterAdapt = await run(6);
+    expect(planner.draft).toHaveBeenCalledTimes(3);
+    expect(afterAdapt.workflowVersionId).toBe(adapted.workflowVersionId);
+  });
+
+  it("gradeRun refuses an unknown run, a run with no plan and a bad verdict", async () => {
+    const world = await tempWorld();
+    await expect(gradeRun(world, "run_missing", { verdict: "fail" })).rejects.toThrow(/no run 'run_missing'/u);
+    await expect(gradeRun(world, "../escape", { verdict: "fail" })).rejects.toThrow(/Invalid run id/u);
+    await expect(
+      gradeRun(world, "run_missing", { verdict: "bad" as unknown as "fail" }),
+    ).rejects.toThrow(/verdict must be "pass" or "fail"/u);
+  });
+
+  it("a changed policy sends the plan back to the planner, which sees the new policy", async () => {
+    const world = await tempWorld();
+    let firstWorkflowVersionId = "";
+    const plannerRequests: Array<Parameters<PlannerAdapter["draft"]>[0]> = [];
+    const planner: PlannerAdapter = {
+      draft: vi.fn(async (request) => {
+        plannerRequests.push(request);
+        return firstWorkflowVersionId === ""
+          ? singleToolLwir()
+          : {
+              kind: "reuse_unchanged" as const,
+              workflowVersionId: firstWorkflowVersionId,
+              rationale: "The plan already fetches everything the policy checks.",
+              acknowledgedWarnings: ["policy changed"],
+            };
+      }),
+    };
+    const summarize = vi.fn<RuntimeToolHandler>(() => ({ summary: "done" }));
+    const withPolicy = (policy: string) =>
+      createLittleWorkflow({ ...ticketWorkflow, policy } as unknown as Parameters<typeof createLittleWorkflow>[0]) as
+        typeof ticketWorkflow;
+    const run = (policy: string, index: number) =>
+      runWorkflow({
+        world,
+        workflows: withPolicy(policy),
+        input: { ticketId: `TIN-${index}`, body: "Cannot export invoices." },
+        planner,
+        tools: ticketRegistryWith(summarize),
+        runId: `run_policy_change_${index}`,
+      });
+
+    firstWorkflowVersionId = (await run("Escalate refunds over $100.", 1)).workflowVersionId;
+    await run("Escalate refunds over $100.", 2);
+    expect(planner.draft).toHaveBeenCalledTimes(1);
+
+    const reviewed = await run("Escalate refunds over $50.", 3);
+    expect(planner.draft).toHaveBeenCalledTimes(2);
+    expect(plannerRequests[1]?.messages.system).toContain("- policy changed");
+    expect(reviewed.plan).toEqual(expect.objectContaining({ kind: "kept", plannerCalled: true }));
+    await run("Escalate refunds over $50.", 4);
+    expect(planner.draft).toHaveBeenCalledTimes(2);
+  });
+
+  it("planner_reviews_each_run asks the planner on every run even when nothing the planner reads changed", async () => {
+    const world = await tempWorld();
+    const inputs = [
+      { ticketId: "TIN-12", body: "Cannot export invoices." },
+      { ticketId: "TIN-13", body: "Cannot import receipts." },
+    ];
+    let firstWorkflowVersionId = "";
+    const planner: PlannerAdapter = {
+      draft: vi.fn(async () =>
+        firstWorkflowVersionId === ""
+          ? singleToolLwir()
+          : {
+              kind: "reuse_unchanged" as const,
+              workflowVersionId: firstWorkflowVersionId,
+              rationale: "Same task, same plan.",
+            }
+      ),
+    };
+    const summarize = vi.fn<RuntimeToolHandler>((toolInput) => {
+      const typed = toolInput as { ticketId: string; body: string };
+      return { summary: `${typed.ticketId}:${typed.body}` };
+    });
+
+    const first = await runWorkflow({
+      world,
+      workflows: ticketWorkflow,
+      input: inputs[0],
+      planner,
+      tools: ticketRegistryWith(summarize),
+      runId: "run_planner_reviews_each_run_first",
+      workflowVersionReuseStrategy: "planner_reviews_each_run",
+    });
+    firstWorkflowVersionId = first.workflowVersionId;
+    const second = await runWorkflow({
+      world,
+      workflows: ticketWorkflow,
+      input: inputs[1],
+      planner,
+      tools: ticketRegistryWith(summarize),
+      runId: "run_planner_reviews_each_run_second",
+      workflowVersionReuseStrategy: "planner_reviews_each_run",
+    });
+
+    expect(planner.draft).toHaveBeenCalledTimes(2);
+    expect(second.events.map((event) => event.type)).toContain("PlannerStarted");
+    expect(second.plan).toEqual({
+      kind: "kept",
+      plannerCalled: true,
+      workflowVersionId: first.workflowVersionId,
+      previousWorkflowVersionId: first.workflowVersionId,
+      rationale: "Same task, same plan.",
+    });
+  });
+
+  it("reads the plan a run executed with readWorkflowVersion", async () => {
+    const world = await tempWorld();
+    const summarize = vi.fn<RuntimeToolHandler>(() => ({ summary: "done" }));
+    const result = await runWorkflow({
+      world,
+      workflows: ticketWorkflow,
+      input: { ticketId: "TIN-12", body: "Cannot export invoices." },
+      planner: plannerFor(singleToolLwirWithStepId("summarize_ticket")),
+      tools: ticketRegistryWith(summarize),
+      runId: "run_read_workflow_version",
+    });
+
+    const stored = await readWorkflowVersion(world, result.plan.workflowVersionId);
+    expect(stored.workflowVersionId).toBe(result.workflowVersionId);
+    expect(stored.workflowId).toBe(singleToolLwirWithStepId("summarize_ticket").metadata.name);
+    expect(stored.lwir.steps.map((step) => step.id)).toEqual(["summarize_ticket"]);
+    await expect(readWorkflowVersion(world, "wfver_missing")).rejects.toThrow(
+      /No WorkflowVersion 'wfver_missing'.*Pass the world the run used/u,
+    );
   });
 
   it("keeps direct executeWorkflowVersion permissive for SDK locks with worker harness metadata", async () => {
@@ -1200,13 +1624,13 @@ describe("runWorkflow integration", () => {
   it("rejects reuse_unchanged when the planner selects a candidate that was not briefed", async () => {
     const world = await tempWorld();
     const firstInput = { ticketId: "TIN-12", body: "Cannot export invoices." };
-    const secondInput = { ticketId: "TIN-13", body: "Cannot import receipts." };
+    const secondInput = { ticketId: "TIN-13", body: "Cannot import receipts.", priority: "high" };
     const thirdInput = { ticketId: "TIN-14", body: "Cannot sync contacts." };
     const plannerRequests: Array<Parameters<PlannerAdapter["draft"]>[0]> = [];
     const planner: PlannerAdapter = {
       draft: vi.fn(async (request) => {
         plannerRequests.push(request);
-        return singleToolLwirWithStepId(`summarize_${plannerRequests.length}`);
+        return singleToolLwirWithStepId(`summarize_${plannerRequests.length}`, ticketInputSchemaWithPriority);
       }),
     };
     const summarize = vi.fn<RuntimeToolHandler>((toolInput) => {
@@ -1215,7 +1639,7 @@ describe("runWorkflow integration", () => {
     });
     const first = await runWorkflow({
       world,
-      workflows: ticketWorkflow,
+      workflows: ticketWorkflowWithPriority,
       input: firstInput,
       planner,
       tools: ticketRegistryWith(summarize),
@@ -1224,7 +1648,7 @@ describe("runWorkflow integration", () => {
     });
     const second = await runWorkflow({
       world,
-      workflows: ticketWorkflow,
+      workflows: ticketWorkflowWithPriority,
       input: secondInput,
       planner,
       tools: ticketRegistryWith(summarize),
@@ -1245,7 +1669,7 @@ describe("runWorkflow integration", () => {
     await expect(
       runWorkflow({
         world,
-        workflows: ticketWorkflow,
+        workflows: ticketWorkflowWithPriority,
         input: thirdInput,
         planner: reusePlanner,
         tools: ticketRegistryWith(summarize),
@@ -1260,15 +1684,15 @@ describe("runWorkflow integration", () => {
   it("planner_reviewed adapts from the briefed WorkflowVersion and records the decision before registration", async () => {
     const world = await tempWorld();
     const firstInput = { ticketId: "TIN-12", body: "Cannot export invoices." };
-    const secondInput = { ticketId: "TIN-13", body: "Cannot import receipts." };
-    const planner = plannerFor(singleToolLwirWithStepId("summarize_original"));
+    const secondInput = { ticketId: "TIN-13", body: "Cannot import receipts.", priority: "high" };
+    const planner = plannerFor(singleToolLwirWithStepId("summarize_original", ticketInputSchemaWithPriority));
     const summarize = vi.fn<RuntimeToolHandler>((toolInput) => {
       const typed = toolInput as { ticketId: string; body: string };
       return { summary: `${typed.ticketId}:${typed.body}` };
     });
     const first = await runWorkflow({
       world,
-      workflows: ticketWorkflow,
+      workflows: ticketWorkflowWithPriority,
       input: firstInput,
       planner,
       tools: ticketRegistryWith(summarize),
@@ -1280,13 +1704,13 @@ describe("runWorkflow integration", () => {
         kind: "adapt",
         baseWorkflowVersionId: first.workflowVersionId,
         rationale: "The prior plan is close but needs a fresh step id.",
-        lwir: singleToolLwirWithStepId("summarize_adapted"),
+        lwir: singleToolLwirWithStepId("summarize_adapted", ticketInputSchemaWithPriority),
       })),
     };
 
     const second = await runWorkflow({
       world,
-      workflows: ticketWorkflow,
+      workflows: ticketWorkflowWithPriority,
       input: secondInput,
       planner: adaptPlanner,
       tools: ticketRegistryWith(summarize),
@@ -1310,6 +1734,13 @@ describe("runWorkflow integration", () => {
         candidateBriefHash: expect.stringMatching(/^sha256:[0-9a-f]{64}$/u),
         resultingWorkflowVersionId: second.workflowVersionId,
       }));
+    expect(second.plan).toEqual({
+      kind: "adapted",
+      plannerCalled: true,
+      workflowVersionId: second.workflowVersionId,
+      previousWorkflowVersionId: first.workflowVersionId,
+      rationale: "The prior plan is close but needs a fresh step id.",
+    });
   });
 
   it("repairs a partial adapt decision log without replanning or duplicating the decision", async () => {
@@ -1393,7 +1824,7 @@ describe("runWorkflow integration", () => {
     const planner: PlannerAdapter = {
       draft: vi.fn(async (request) => {
         plannerRequests.push(request);
-        return singleToolLwirWithStepId(`summarize_${plannerRequests.length}`);
+        return singleToolLwirWithStepId(`summarize_${plannerRequests.length}`, ticketInputSchemaWithPriority);
       }),
     };
     const summarize = vi.fn<RuntimeToolHandler>((toolInput) => {
@@ -1402,7 +1833,7 @@ describe("runWorkflow integration", () => {
     });
     const first = await runWorkflow({
       world,
-      workflows: ticketWorkflow,
+      workflows: ticketWorkflowWithPriority,
       input: { ticketId: "TIN-12", body: "Cannot export invoices." },
       planner,
       tools: ticketRegistryWith(summarize),
@@ -1411,8 +1842,8 @@ describe("runWorkflow integration", () => {
     });
     const second = await runWorkflow({
       world,
-      workflows: ticketWorkflow,
-      input: { ticketId: "TIN-13", body: "Cannot import receipts." },
+      workflows: ticketWorkflowWithPriority,
+      input: { ticketId: "TIN-13", body: "Cannot import receipts.", priority: "high" },
       planner,
       tools: ticketRegistryWith(summarize),
       runId: "run_reuse_adapt_non_briefed_second",
@@ -1430,7 +1861,7 @@ describe("runWorkflow integration", () => {
           kind: "adapt",
           baseWorkflowVersionId: attemptedBaseWorkflowVersionId,
           rationale: "Try to adapt from an older unbriefed candidate.",
-          lwir: singleToolLwirWithStepId("summarize_invalid_adapt"),
+          lwir: singleToolLwirWithStepId("summarize_invalid_adapt", ticketInputSchemaWithPriority),
         };
       }),
     };
@@ -1438,7 +1869,7 @@ describe("runWorkflow integration", () => {
     await expect(
       runWorkflow({
         world,
-        workflows: ticketWorkflow,
+        workflows: ticketWorkflowWithPriority,
         input: { ticketId: "TIN-14", body: "Cannot sync contacts." },
         planner: adaptPlanner,
         tools: ticketRegistryWith(summarize),
@@ -1455,14 +1886,15 @@ describe("runWorkflow integration", () => {
   it("planner_reviewed drafts fresh and records the decision before registration", async () => {
     const world = await tempWorld();
     const input = { ticketId: "TIN-12", body: "Cannot export invoices." };
-    const planner = plannerFor(singleToolLwirWithStepId("summarize_original"));
+    const secondInput = { ...input, priority: "high" };
+    const planner = plannerFor(singleToolLwirWithStepId("summarize_original", ticketInputSchemaWithPriority));
     const summarize = vi.fn<RuntimeToolHandler>((toolInput) => {
       const typed = toolInput as { body: string };
       return { summary: typed.body };
     });
     const first = await runWorkflow({
       world,
-      workflows: ticketWorkflow,
+      workflows: ticketWorkflowWithPriority,
       input,
       planner,
       tools: ticketRegistryWith(summarize),
@@ -1473,14 +1905,14 @@ describe("runWorkflow integration", () => {
       draft: vi.fn(async () => ({
         kind: "draft_fresh",
         rationale: "The old plan is not worth reusing.",
-        lwir: singleToolLwirWithStepId("summarize_fresh"),
+        lwir: singleToolLwirWithStepId("summarize_fresh", ticketInputSchemaWithPriority),
       })),
     };
 
     const second = await runWorkflow({
       world,
-      workflows: ticketWorkflow,
-      input,
+      workflows: ticketWorkflowWithPriority,
+      input: secondInput,
       planner: freshPlanner,
       tools: ticketRegistryWith(summarize),
       runId: "run_reuse_draft_fresh_second",
@@ -1495,8 +1927,8 @@ describe("runWorkflow integration", () => {
       .toEqual(expect.objectContaining({
         decisionKind: "draft_fresh",
         rationale: "The old plan is not worth reusing.",
-        inputHash: sha256Digest(input),
-        inputStructure: concreteInputStructure(input),
+        inputHash: sha256Digest(secondInput),
+        inputStructure: concreteInputStructure(secondInput),
         candidateBriefHash: expect.stringMatching(/^sha256:[0-9a-f]{64}$/u),
         resultingWorkflowVersionId: second.workflowVersionId,
       }));
@@ -1941,7 +2373,7 @@ describe("runWorkflow integration", () => {
     const aiLoop = {
       generate: vi
         .fn()
-        .mockResolvedValueOnce({ output: { lwir: singleToolLwirWithStepId("summarize_first") } })
+        .mockResolvedValueOnce({ output: { lwir: singleToolLwirWithStepId("summarize_first", ticketInputSchemaWithPriority) } })
         .mockResolvedValueOnce({
           toolCalls: [
             {
@@ -1960,28 +2392,24 @@ describe("runWorkflow integration", () => {
             },
           ],
         })
-        .mockResolvedValueOnce({ output: { lwir: singleToolLwirWithStepId("summarize_second") } }),
+        .mockResolvedValueOnce({ output: { lwir: singleToolLwirWithStepId("summarize_second", ticketInputSchemaWithPriority) } }),
     };
     const workflowWithBashPlanner = createLittleWorkflow({
-      ...ticketWorkflow,
+      ...ticketWorkflowWithPriority,
       planner: {
         model: { provider: "test", modelId: "planner-harness" },
         harness: createWorkflowHarness({ aiLoop }),
       },
     });
 
-    const first = await runWorkflowPublic({
+    const first = await runWorkflowPublic(workflowWithBashPlanner, { ticketId: "TIN-12", body: "Cannot export invoices." }, {
       world,
-      workflows: workflowWithBashPlanner,
-      input: { ticketId: "TIN-12", body: "Cannot export invoices." },
       tools: ticketRegistryWith(summarize),
       runId: "run_reuse_mount_first",
       workflowVersionReuseStrategy: "planner_reviewed",
     });
-    const second = await runWorkflowPublic({
+    const second = await runWorkflowPublic(workflowWithBashPlanner, { ticketId: "TIN-13", body: "Cannot import receipts.", priority: "high" }, {
       world,
-      workflows: workflowWithBashPlanner,
-      input: { ticketId: "TIN-13", body: "Cannot import receipts." },
       tools: ticketRegistryWith(summarize),
       runId: "run_reuse_mount_second",
       workflowVersionReuseStrategy: "planner_reviewed",
@@ -2033,10 +2461,8 @@ describe("runWorkflow integration", () => {
       },
     });
 
-    const result = await runWorkflowPublic({
+    const result = await runWorkflowPublic(workflowWithPlannerHarness, { ticketId: "TIN-13", body: "Missing permissions." }, {
       world,
-      workflows: workflowWithPlannerHarness,
-      input: { ticketId: "TIN-13", body: "Missing permissions." },
       tools: ticketRegistryWith(summarize),
       maxOuterCycles: 3,
       outerLoopId: "ol_public_planner_supervise",
@@ -2091,10 +2517,8 @@ describe("runWorkflow integration", () => {
       },
     } as unknown as Parameters<typeof createLittleWorkflow>[0]);
 
-    const result = await runWorkflowPublic({
+    const result = await runWorkflowPublic(workflowWithRemoteSkills, { ticketId: "TIN-13", body: "Missing permissions." }, {
       world,
-      workflows: workflowWithRemoteSkills,
-      input: { ticketId: "TIN-13", body: "Missing permissions." },
       tools: ticketToolRegistry,
       runId: "run_public_remote_skill_soft_fail",
     });
@@ -2171,10 +2595,8 @@ describe("runWorkflow integration", () => {
       },
     });
 
-    const result = await runWorkflowPublic({
+    const result = await runWorkflowPublic(workflowWithPlannerHarness, { ticketId: "TIN-13", body: "Missing permissions." }, {
       world,
-      workflows: workflowWithPlannerHarness,
-      input: { ticketId: "TIN-13", body: "Missing permissions." },
       tools: ticketRegistryWith(summarize),
       maxOuterCycles: 3,
       outerLoopId: "ol_public_always_fresh_overrides_workflow_reuse",
@@ -2217,10 +2639,8 @@ describe("runWorkflow integration", () => {
 
     const releaseTimer = setTimeout(() => releasePlan.resolve(), 50);
     await expect(
-      runWorkflowPublic({
+      runWorkflowPublic(workflowWithPlannerHarness, { ticketId: "TIN-13", body: "Missing permissions." }, {
         world,
-        workflows: workflowWithPlannerHarness,
-        input: { ticketId: "TIN-13", body: "Missing permissions." },
         tools: ticketRegistryWith(summarize),
         maxOuterCycles: 2,
         outerLoopId: "ol_public_planner_timeout",
@@ -2266,10 +2686,8 @@ describe("runWorkflow integration", () => {
     controller.abort(new Error("cancel before run"));
 
     await expect(
-      runWorkflowPublic({
+      runWorkflowPublic(workflowWithPlannerHarness, { ticketId: "TIN-13", body: "Missing permissions." }, {
         world,
-        workflows: workflowWithPlannerHarness,
-        input: { ticketId: "TIN-13", body: "Missing permissions." },
         tools: ticketRegistryWith(summarize),
         maxOuterCycles: 2,
         outerLoopId: "ol_public_planner_cancelled",
@@ -2312,10 +2730,8 @@ describe("runWorkflow integration", () => {
     });
 
     await expect(
-      runWorkflowPublic({
+      runWorkflowPublic(workflowWithPlannerHarness, { ticketId: "TIN-13", body: "Missing permissions." }, {
         world,
-        workflows: workflowWithPlannerHarness,
-        input: { ticketId: "TIN-13", body: "Missing permissions." },
         tools: ticketRegistryWith(summarize),
         maxOuterCycles: 2,
         outerLoopId: "ol_public_supervise_timeout",
@@ -2334,10 +2750,8 @@ describe("runWorkflow integration", () => {
     const summarize = vi.fn<RuntimeToolHandler>(() => ({ summary: "unused" }));
 
     await expect(
-      runWorkflowPublic({
+      runWorkflowPublic(ticketWorkflow, { ticketId: "TIN-13", body: "Missing permissions." }, {
         world,
-        workflows: ticketWorkflow,
-        input: { ticketId: "TIN-13", body: "Missing permissions." },
         tools: ticketRegistryWith(summarize),
         runId: "run_workflow_reject_legacy_top_level_planner",
       }),
@@ -2386,10 +2800,8 @@ describe("runWorkflow integration", () => {
       result: { kind: "done", finalOutput: { summary: "from-manifest" } },
     });
 
-    const result = await runWorkflowPublic({
+    const result = await runWorkflowPublic(workflowWithPlannerHarness, { ticketId: "TIN-13", body: "Missing permissions." }, {
       world,
-      workflows: workflowWithPlannerHarness,
-      input: { ticketId: "TIN-13", body: "Missing permissions." },
       tools,
       maxOuterCycles: 3,
       outerLoopId,
@@ -2425,10 +2837,8 @@ describe("runWorkflow integration", () => {
       result: { kind: "done", finalOutput: { summary: "from-manifest-no-harness" } },
     });
 
-    const result = await runWorkflowPublic({
+    const result = await runWorkflowPublic(ticketWorkflow, { ticketId: "TIN-13", body: "Missing permissions." }, {
       world,
-      workflows: ticketWorkflow,
-      input: { ticketId: "TIN-13", body: "Missing permissions." },
       tools,
       maxOuterCycles: 3,
       outerLoopId,
@@ -2444,10 +2854,8 @@ describe("runWorkflow integration", () => {
     const summarize = vi.fn<RuntimeToolHandler>(() => ({ summary: "unused" }));
 
     await expect(
-      runWorkflowPublic({
+      runWorkflowPublic(ticketWorkflow, { ticketId: "TIN-13", body: "Missing permissions." }, {
         world,
-        workflows: ticketWorkflow,
-        input: { ticketId: "TIN-13", body: "Missing permissions." },
         tools: ticketRegistryWith(summarize),
         maxOuterCycles: 3,
         outerLoopId: "ol_public_missing_manifest_without_supervise",
@@ -2484,10 +2892,8 @@ describe("runWorkflow integration", () => {
     });
 
     await expect(
-      runWorkflowPublic({
+      runWorkflowPublic(ticketWorkflow, { ticketId: "TIN-13", body: "Missing permissions." }, {
         world,
-        workflows: ticketWorkflow,
-        input: { ticketId: "TIN-13", body: "Missing permissions." },
         tools,
         maxOuterCycles: 3,
         outerLoopId,
@@ -2517,10 +2923,8 @@ describe("runWorkflow integration", () => {
     });
 
     await expect(
-      runWorkflowPublic({
+      runWorkflowPublic(ticketWorkflow, { ticketId: "TIN-13", body: "Missing permissions." }, {
         world,
-        workflows: ticketWorkflow,
-        input: { ticketId: "TIN-13", body: "Missing permissions." },
         tools,
         maxOuterCycles: 3,
         outerLoopId,
@@ -2531,6 +2935,282 @@ describe("runWorkflow integration", () => {
       message: expect.stringContaining("outer_loop_manifest_corrupt"),
     });
 
+    expect(summarize).not.toHaveBeenCalled();
+  });
+
+  it("serializes concurrent same-ID outer loops so both callers return the one committed decision", async () => {
+    const world = await tempWorld();
+    const summarize = vi.fn<RuntimeToolHandler>((input) => ({ summary: (input as { body: string }).body }));
+    const firstSuperviseEntered = deferred<void>();
+    const releaseFirstSupervise = deferred<void>();
+    let superviseCalls = 0;
+    const supervise = vi.fn(async (): Promise<SuperviseDecision> => {
+      superviseCalls += 1;
+      if (superviseCalls === 1) {
+        firstSuperviseEntered.resolve();
+        await releaseFirstSupervise.promise;
+        return { kind: "done", finalOutput: { summary: "first-supervisor" } };
+      }
+      return { kind: "done", finalOutput: { summary: "second-supervisor" } };
+    });
+    const workflow = outerLoopTicketWorkflow(supervise);
+    const input = { ticketId: "TIN-13", body: "Missing permissions." };
+    const outerLoopId = "ol_public_concurrent_supervise";
+    const options = { world, tools: ticketRegistryWith(summarize), maxOuterCycles: 2, outerLoopId };
+
+    // A finishes its cycle and holds its supervisor; B starts with the same loop.
+    const first = runWorkflowPublic(workflow, input, options);
+    await firstSuperviseEntered.promise;
+    const second = runWorkflowPublic(workflow, input, options);
+    // Give B time to replay the finished cycle and supervise it, if nothing stops it.
+    await Promise.race([
+      second.catch(() => undefined),
+      new Promise((resolve) => setTimeout(resolve, 250)),
+    ]);
+    releaseFirstSupervise.resolve();
+    const [firstResult, secondResult] = await Promise.all([first, second]);
+
+    expect(supervise).toHaveBeenCalledTimes(1);
+    expect(summarize).toHaveBeenCalledTimes(1);
+    expect(firstResult.output).toEqual({ summary: "first-supervisor" });
+    expect(secondResult.output).toEqual(firstResult.output);
+    expect(secondResult.runId).toBe(firstResult.runId);
+    const committed = (await listEvents(world, firstResult.runId))
+      .filter((event) => event.type === "OuterLoopCycleCompleted");
+    expect(committed).toHaveLength(1);
+    expect(committed[0]?.payload.supervise).toEqual({ kind: "done", finalOutput: firstResult.output });
+    const manifest = await readOuterLoopManifest(world, outerLoopId);
+    expect(manifest?.result).toEqual(committed[0]?.payload.supervise);
+    expect(manifest?.pendingCycleRunId).toBeUndefined();
+  });
+
+  it("returns the committed outer-loop decision when another writer recorded the cycle first", async () => {
+    const world = await tempWorld();
+    const summarize = vi.fn<RuntimeToolHandler>((input) => ({ summary: (input as { body: string }).body }));
+    const outerLoopId = "ol_public_committed_decision_wins";
+    const supervise = vi.fn(async (state: SuperviseOuterLoopState): Promise<SuperviseDecision> => {
+      // Another writer (one that bypassed the fence) commits its decision while this one runs.
+      const cycle = state.cycles[state.cycles.length - 1]!;
+      await appendEvent(world, cycle.runId, {
+        type: "OuterLoopCycleCompleted",
+        payload: {
+          outerLoopId,
+          cycleNumber: cycle.cycleNumber,
+          supervise: { kind: "done", finalOutput: { summary: "committed-supervisor" } },
+        },
+      });
+      return { kind: "done", finalOutput: { summary: "late-supervisor" } };
+    });
+
+    const result = await runWorkflowPublic(
+      outerLoopTicketWorkflow(supervise),
+      { ticketId: "TIN-13", body: "Missing permissions." },
+      { world, tools: ticketRegistryWith(summarize), maxOuterCycles: 2, outerLoopId },
+    );
+
+    expect(result.output).toEqual({ summary: "committed-supervisor" });
+    const committed = (await listEvents(world, result.runId))
+      .filter((event) => event.type === "OuterLoopCycleCompleted");
+    expect(committed).toHaveLength(1);
+    const manifest = await readOuterLoopManifest(world, outerLoopId);
+    expect(manifest?.result).toEqual({ kind: "done", finalOutput: { summary: "committed-supervisor" } });
+  });
+
+  it("waits for an outer loop held by another live caller and honors the timeout", async () => {
+    const world = await tempWorld();
+    const summarize = vi.fn<RuntimeToolHandler>(() => ({ summary: "should not run" }));
+    const supervise = vi.fn(async (): Promise<SuperviseDecision> => ({
+      kind: "done",
+      finalOutput: { summary: "unused" },
+    }));
+    const outerLoopId = "ol_public_live_lock";
+    await writeOuterLoopLockOwner(world.dataDir, outerLoopId, process.pid);
+
+    await expect(
+      runWorkflowPublic(outerLoopTicketWorkflow(supervise), { ticketId: "TIN-13", body: "Missing permissions." }, {
+        world,
+        tools: ticketRegistryWith(summarize),
+        maxOuterCycles: 2,
+        outerLoopId,
+        timeout: 200,
+      }),
+    ).rejects.toMatchObject({
+      name: "RunFailedError",
+      causeCode: "timeout",
+    });
+
+    expect(summarize).not.toHaveBeenCalled();
+    expect(supervise).not.toHaveBeenCalled();
+    await expect(readOuterLoopManifest(world, outerLoopId)).resolves.toBeUndefined();
+  });
+
+  it("recovers stale outer-loop locks left by a dead process", async () => {
+    const world = await tempWorld();
+    const summarize = vi.fn<RuntimeToolHandler>((input) => ({ summary: (input as { body: string }).body }));
+    const supervise = vi.fn(async (): Promise<SuperviseDecision> => ({
+      kind: "done",
+      finalOutput: { summary: "after-stale-lock" },
+    }));
+    const outerLoopId = "ol_public_stale_lock";
+    await writeOuterLoopLockOwner(world.dataDir, outerLoopId, 999_999_999);
+
+    const result = await runWorkflowPublic(
+      outerLoopTicketWorkflow(supervise),
+      { ticketId: "TIN-13", body: "Missing permissions." },
+      { world, tools: ticketRegistryWith(summarize), maxOuterCycles: 2, outerLoopId },
+    );
+
+    expect(result.output).toEqual({ summary: "after-stale-lock" });
+    expect(supervise).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects a completed outer loop resumed with different input", async () => {
+    const world = await tempWorld();
+    const summarize = vi.fn<RuntimeToolHandler>((input) => ({
+      summary: `processed:${(input as { body: string }).body}`,
+    }));
+    const supervise = vi.fn(async (state: SuperviseOuterLoopState): Promise<SuperviseDecision> => ({
+      kind: "done",
+      finalOutput: state.cycles[state.cycles.length - 1]!.output,
+    }));
+    const workflow = outerLoopTicketWorkflow(supervise);
+    const outerLoopId = "ol_public_changed_input_done";
+    const options = { world, tools: ticketRegistryWith(summarize), maxOuterCycles: 2, outerLoopId };
+
+    const first = await runWorkflowPublic(workflow, { ticketId: "TIN-13", body: "A" }, options);
+    expect(first.output).toEqual({ summary: "processed:A" });
+
+    await expect(
+      runWorkflowPublic(workflow, { ticketId: "TIN-13", body: "B" }, options),
+    ).rejects.toMatchObject({
+      name: "RunFailedError",
+      causeCode: "runtime_config_error",
+      message: expect.stringContaining("runtime_config_error: outer_loop_input_mismatch"),
+    });
+
+    const replayed = await runWorkflowPublic(workflow, { ticketId: "TIN-13", body: "A" }, options);
+    expect(replayed.output).toEqual(first.output);
+    expect(replayed.runId).toBe(first.runId);
+    expect(summarize).toHaveBeenCalledTimes(1);
+    expect(supervise).toHaveBeenCalledTimes(1);
+    expect((await readOuterLoopManifest(world, outerLoopId))?.inputHash)
+      .toBe(sha256Digest({ ticketId: "TIN-13", body: "A" }));
+  });
+
+  it("rejects changed input before starting the next outer-loop cycle", async () => {
+    const world = await tempWorld();
+    const summarize = vi.fn<RuntimeToolHandler>((input) => ({
+      summary: `processed:${(input as { body: string }).body}`,
+    }));
+    const controller = new AbortController();
+    const supervise = vi.fn(async (state: SuperviseOuterLoopState): Promise<SuperviseDecision> =>
+      state.cycles.length === 1
+        ? { kind: "continue", promptNote: "Try again." }
+        : { kind: "done", finalOutput: state.cycles[state.cycles.length - 1]!.output });
+    let plans = 0;
+    // Stop the first caller once cycle 1 is committed: it is cancelled while planning cycle 2.
+    const workflow = outerLoopTicketWorkflow(supervise, () => {
+      plans += 1;
+      if (plans === 2) {
+        controller.abort();
+      }
+    });
+    const outerLoopId = "ol_public_changed_input_between_cycles";
+    const options = { world, tools: ticketRegistryWith(summarize), maxOuterCycles: 3, outerLoopId };
+
+    await expect(
+      runWorkflowPublic(workflow, { ticketId: "TIN-13", body: "A" }, { ...options, signal: controller.signal }),
+    ).rejects.toMatchObject({ name: "RunFailedError", causeCode: "cancelled" });
+    expect(summarize).toHaveBeenCalledTimes(1);
+    // Model a kill between cycles: cycle 1 is committed and cycle 2 has not started.
+    const { pendingCycleRunId: _pendingCycleRunId, ...betweenCycles } =
+      (await readOuterLoopManifest(world, outerLoopId))!;
+    await writeOuterLoopManifest(world, outerLoopId, betweenCycles);
+
+    await expect(
+      runWorkflowPublic(workflow, { ticketId: "TIN-13", body: "B" }, options),
+    ).rejects.toMatchObject({
+      name: "RunFailedError",
+      causeCode: "runtime_config_error",
+      message: expect.stringContaining("runtime_config_error: outer_loop_input_mismatch"),
+    });
+    expect(summarize).toHaveBeenCalledTimes(1);
+    expect(supervise).toHaveBeenCalledTimes(1);
+
+    const resumed = await runWorkflowPublic(workflow, { ticketId: "TIN-13", body: "A" }, options);
+    expect(resumed.output).toEqual({ summary: "processed:A" });
+    expect(summarize).toHaveBeenCalledTimes(2);
+    expect(supervise).toHaveBeenCalledTimes(2);
+  });
+
+  it("derives the input identity of an older outer-loop manifest from its cycle events", async () => {
+    const world = await tempWorld();
+    const summarize = vi.fn<RuntimeToolHandler>((input) => ({
+      summary: `processed:${(input as { body: string }).body}`,
+    }));
+    const supervise = vi.fn(async (state: SuperviseOuterLoopState): Promise<SuperviseDecision> => ({
+      kind: "done",
+      finalOutput: state.cycles[state.cycles.length - 1]!.output,
+    }));
+    const workflow = outerLoopTicketWorkflow(supervise);
+    const outerLoopId = "ol_public_legacy_manifest_input";
+    const options = { world, tools: ticketRegistryWith(summarize), maxOuterCycles: 2, outerLoopId };
+    const first = await runWorkflowPublic(workflow, { ticketId: "TIN-13", body: "A" }, options);
+    // Rewrite the manifest as an older version wrote it: no input identity.
+    const { inputHash: _inputHash, ...legacy } = (await readOuterLoopManifest(world, outerLoopId))!;
+    await writeOuterLoopManifest(world, outerLoopId, legacy);
+
+    await expect(
+      runWorkflowPublic(workflow, { ticketId: "TIN-13", body: "B" }, options),
+    ).rejects.toMatchObject({
+      name: "RunFailedError",
+      causeCode: "runtime_config_error",
+      message: expect.stringContaining("runtime_config_error: outer_loop_input_mismatch"),
+    });
+
+    const replayed = await runWorkflowPublic(workflow, { ticketId: "TIN-13", body: "A" }, options);
+    expect(replayed.output).toEqual(first.output);
+    expect((await readOuterLoopManifest(world, outerLoopId))?.inputHash)
+      .toBe(sha256Digest({ ticketId: "TIN-13", body: "A" }));
+  });
+
+  it("accepts and records the input of an older outer-loop manifest whose cycles have no events", async () => {
+    const world = await tempWorld();
+    const summarize = vi.fn<RuntimeToolHandler>(() => ({ summary: "unused" }));
+    const tools = ticketRegistryWith(summarize);
+    const outerLoopId = "ol_public_legacy_manifest_no_events";
+    await writeOuterLoopManifest(world, outerLoopId, {
+      outerLoopId,
+      goal: {
+        workflowDefinitionHash: getWorkflowDefinitionHash(ticketWorkflow, tools),
+        description: ticketWorkflow.description ?? ticketWorkflow.id,
+      },
+      maxCycles: 3,
+      cycles: [
+        {
+          cycleNumber: 1,
+          runId: "run_public_legacy_manifest_no_events_cycle_1",
+          workflowVersionId: "wfver_replayed",
+          status: "completed",
+          output: { summary: "cached-output" },
+        },
+      ],
+      result: { kind: "done", finalOutput: { summary: "from-manifest" } },
+    });
+    const options = { world, tools, maxOuterCycles: 3, outerLoopId };
+
+    const result = await runWorkflowPublic(ticketWorkflow, { ticketId: "TIN-13", body: "A" }, options);
+    expect(result.output).toEqual({ summary: "from-manifest" });
+    expect((await readOuterLoopManifest(world, outerLoopId))?.inputHash)
+      .toBe(sha256Digest({ ticketId: "TIN-13", body: "A" }));
+
+    await expect(
+      runWorkflowPublic(ticketWorkflow, { ticketId: "TIN-13", body: "B" }, options),
+    ).rejects.toMatchObject({
+      name: "RunFailedError",
+      causeCode: "runtime_config_error",
+      message: expect.stringContaining("runtime_config_error: outer_loop_input_mismatch"),
+    });
     expect(summarize).not.toHaveBeenCalled();
   });
 
@@ -2554,14 +3234,12 @@ describe("runWorkflow integration", () => {
     });
 
     await expect(
-      runWorkflowPublic({
+      runWorkflowPublic(workflowWithPlannerHarness, { ticketId: "TIN-13", body: "Missing permissions." }, {
         world,
-        workflows: workflowWithPlannerHarness,
-        input: { ticketId: "TIN-13", body: "Missing permissions." },
         planner: plannerFor(singleToolLwir()),
         tools: ticketRegistryWith(summarize),
         runId: "run_workflow_reject_legacy_top_level_planner_with_workflow_planner",
-      } as unknown as RunWorkflowOptions<typeof workflowWithPlannerHarness>),
+      } as never),
     ).rejects.toThrow(/top-level planner/u);
 
     expect(summarize).not.toHaveBeenCalled();
@@ -2592,10 +3270,8 @@ describe("runWorkflow integration", () => {
     } as unknown as Parameters<typeof createLittleWorkflow>[0]);
 
     await expect(
-      runWorkflowPublic({
+      runWorkflowPublic(workflowWithoutModels, { ticketId: "TIN-13", body: "Missing models." }, {
         world,
-        workflows: workflowWithoutModels,
-        input: { ticketId: "TIN-13", body: "Missing models." },
         tools: ticketRegistryWith(summarize),
         runId: "run_workflow_reject_missing_models",
       }),
@@ -2672,6 +3348,7 @@ describe("runWorkflow integration", () => {
         await ctx.durability.append({
           type: "harness.model.responded",
           runId: ctx.session.runId,
+          appendIdempotencyKey: "run-workflow-test:model-responded:turn-1",
           payload: {
             turn: 1,
             response: {
@@ -2948,7 +3625,7 @@ describe("runWorkflow integration", () => {
     });
 
     await expect(
-      runWorkflowPublic({
+      runOrchestration({
         world,
         workflows: [workflowWithPlannerHarness],
         orchestrator: {
@@ -2957,6 +3634,7 @@ describe("runWorkflow integration", () => {
         },
         input: { request: "run one summarized workflow" },
         tools: ticketRegistryWith(summarize),
+        // @ts-expect-error maxOuterCycles is not an orchestration option; the runtime rejects it too.
         maxOuterCycles: 2,
       }),
     ).rejects.toMatchObject({
@@ -6505,6 +7183,44 @@ describe("P1.5 — planner declares model in permissions; runtime receives model
     const state = materializeRunStateFromEvents("run_real_provider_id_pricing", result.events);
     expect(state.steps.summarize?.usage.costUsd).toBeCloseTo(0.00196, 12);
     expect(runReport(state).hasUnpricedCalls).toBe(false);
+  });
+
+  it("prices an ai.generate step whose model exposes provider as a getter, as AI SDK model classes do", async () => {
+    // @ai-sdk/anthropic and the other providers define `provider` as a getter on the model
+    // class, so it is not an own property of the instance. Reading only own properties
+    // recorded these calls as provider "runtime", and every ai.generate step ran unpriced.
+    class GetterProviderModel {
+      readonly modelId = "deepseek-v4-flash";
+      get provider() {
+        return "deepseek.chat";
+      }
+    }
+    const world = await tempWorld();
+    const aiLoop = {
+      generate: vi.fn(async () => ({
+        output: { summary: "stub summary" },
+        usage: { inputTokens: 10_000, outputTokens: 2_000 },
+      })),
+    };
+    const aiWorkflow = createLittleWorkflow({
+      id: "p1-5.ai-generate-getter",
+      description: "Single ai.generate step with model.fast slot.",
+      inputSchema: aiInputSchema,
+      output: output.object({ schema: aiOutputSchema }),
+      models: [model(new GetterProviderModel(), { id: "model.fast" })],
+      worker: { harness: createWorkflowHarness({ aiLoop }) },
+    } as unknown as Parameters<typeof createLittleWorkflow>[0]);
+
+    const result = await runWorkflow({
+      world,
+      workflows: aiWorkflow,
+      input: { text: "hello world" },
+      planner: plannerFor(aiGenerateLwir()),
+      runId: "run_getter_provider_pricing",
+    });
+
+    expect(result.usage.costUsd).toBeCloseTo(0.00196, 12);
+    expect(result.usage.unpricedCalls).toBe(0);
   });
 
   it("blocks reuse_unchanged when a candidate model slot is no longer available", async () => {

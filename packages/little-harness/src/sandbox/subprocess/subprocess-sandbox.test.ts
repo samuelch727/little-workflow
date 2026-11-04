@@ -9,15 +9,15 @@ import { z } from "zod";
 import { localHost, localSessionWorkspace } from "../../local-host/index.js";
 import { LocalSessionStore } from "../../local-host/session-store.js";
 import { resolveLocalHostPaths } from "../../local-host/paths.js";
-import { createJustBashRuntime } from "../../runtime/just-bash-runtime.js";
+import { justBashSandbox } from "../../runtime/just-bash-runtime.js";
 import { withTempDir } from "../../test/temp.js";
-import type { HarnessExecutionEnvironmentFactory, HarnessRuntime } from "../../types.js";
+import type { HarnessSandboxFactory, HarnessSandbox } from "../../types.js";
 import { subprocessSandbox } from "./subprocess-sandbox.js";
 
 const packageRoot = path.resolve(fileURLToPath(new URL(".", import.meta.url)), "../../..");
 
 type SubprocessDiagnostics = { pid: number; envKeys: readonly string[] };
-type DiagnosableRuntime = HarnessRuntime & {
+type DiagnosableRuntime = HarnessSandbox & {
   __subprocessDiagnostics(): Promise<SubprocessDiagnostics>;
 };
 
@@ -32,11 +32,11 @@ beforeAll(() => {
 describe("subprocessSandbox", () => {
   it("runs shell commands in a separate process against the shared workspace", async () => {
     await withTempDir(async (dir) => {
-      const host = localHost({ dataDir: dir, executionEnvironment: subprocessSandbox() });
+      const host = localHost({ dataDir: dir, sandbox: subprocessSandbox() });
       const session = await host.sessions.getOrCreate({ id: "subprocess" });
       await session.files.writeText("/session/input.txt", "hello");
       const prepared = await host.prepareTurn({ session, turnId: "turn_1", persistentDirs: [] });
-      const runtime = await prepared.createRuntime({});
+      const runtime = await prepared.createSandbox({});
       const shell = runtime.shellTool() as any;
 
       const result = await shell.execute(
@@ -57,11 +57,11 @@ describe("subprocessSandbox", () => {
 
   it("proxies js-exec tool calls back to the parent process tools", async () => {
     await withTempDir(async (dir) => {
-      const host = localHost({ dataDir: dir, executionEnvironment: subprocessSandbox() });
+      const host = localHost({ dataDir: dir, sandbox: subprocessSandbox() });
       const session = await host.sessions.getOrCreate({ id: "subprocess-tools" });
       const events: any[] = [];
       const prepared = await host.prepareTurn({ session, turnId: "turn_1", persistentDirs: [] });
-      const runtime = await prepared.createRuntime({
+      const runtime = await prepared.createSandbox({
         tools: {
           add: tool({
             description: "Add two numbers.",
@@ -104,10 +104,10 @@ describe("subprocessSandbox", () => {
 
   it("is what localHost's \"auto\" mode picks for a turn that can execute code", async () => {
     await withTempDir(async (dir) => {
-      const host = localHost({ dataDir: dir, executionEnvironment: "auto" });
+      const host = localHost({ dataDir: dir, sandbox: "auto" });
       const session = await host.sessions.getOrCreate({ id: "auto-subprocess" });
       const prepared = await host.prepareTurn({ session, turnId: "turn_1", persistentDirs: [] });
-      const runtime = (await prepared.createRuntime({})) as DiagnosableRuntime;
+      const runtime = (await prepared.createSandbox({})) as DiagnosableRuntime;
 
       const result = await (runtime.shellTool() as any).execute({ command: "echo auto" }, {});
       expect(result).toMatchObject({ exitCode: 0, stdout: "auto\n" });
@@ -119,10 +119,10 @@ describe("subprocessSandbox", () => {
 
   it("is skipped by \"auto\" when the turn can neither execute code nor reach the network", async () => {
     await withTempDir(async (dir) => {
-      const host = localHost({ dataDir: dir, executionEnvironment: "auto" });
+      const host = localHost({ dataDir: dir, sandbox: "auto" });
       const session = await host.sessions.getOrCreate({ id: "auto-in-process" });
       const prepared = await host.prepareTurn({ session, turnId: "turn_1", persistentDirs: [] });
-      const runtime = await prepared.createRuntime({
+      const runtime = await prepared.createSandbox({
         runtime: { python: false, javascript: false },
       });
 
@@ -138,11 +138,11 @@ describe("subprocessSandbox", () => {
 
   it("attributes proxied tool calls to the shell call that made them under concurrency", async () => {
     await withTempDir(async (dir) => {
-      const host = localHost({ dataDir: dir, executionEnvironment: subprocessSandbox() });
+      const host = localHost({ dataDir: dir, sandbox: subprocessSandbox() });
       const session = await host.sessions.getOrCreate({ id: "subprocess-scope" });
       const events: any[] = [];
       const prepared = await host.prepareTurn({ session, turnId: "turn_1", persistentDirs: [] });
-      const runtime = await prepared.createRuntime({
+      const runtime = await prepared.createSandbox({
         tools: {
           add: tool({
             description: "Add two numbers.",
@@ -180,11 +180,11 @@ describe("subprocessSandbox", () => {
 
   it("emits workspace file-change events from the parent process", async () => {
     await withTempDir(async (dir) => {
-      const host = localHost({ dataDir: dir, executionEnvironment: subprocessSandbox() });
+      const host = localHost({ dataDir: dir, sandbox: subprocessSandbox() });
       const session = await host.sessions.getOrCreate({ id: "subprocess-events" });
       const events: any[] = [];
       const prepared = await host.prepareTurn({ session, turnId: "turn_1", persistentDirs: [] });
-      const runtime = await prepared.createRuntime({
+      const runtime = await prepared.createSandbox({
         emit: async (event) => {
           events.push(event);
         },
@@ -209,7 +209,7 @@ describe("subprocessSandbox", () => {
   });
 
   it("emits event traces identical to the in-process runtime", async () => {
-    const run = async (factory: HarnessExecutionEnvironmentFactory, dir: string, id: string) => {
+    const run = async (factory: HarnessSandboxFactory, dir: string, id: string) => {
       const session = await new LocalSessionStore(resolveLocalHostPaths({ dataDir: dir }, dir))
         .getOrCreate({ id });
       const events: any[] = [];
@@ -225,12 +225,29 @@ describe("subprocessSandbox", () => {
       await shell.execute({ command: "printf data > /session/notes.txt" }, { toolCallId: "call_2" });
       await shell.execute({ command: "printf out > /artifacts/result.txt" }, { toolCallId: "call_3" });
       await shell.execute({ command: "false" }, { toolCallId: "call_4" });
+      await shell.execute({ command: "rm /session/notes.txt" }, { toolCallId: "call_5" });
+      await shell.execute({ command: "printf data > /session/notes.txt" }, { toolCallId: "call_6" });
+      await shell.execute({ command: "rm /session/notes.txt" }, { toolCallId: "call_7" });
+      const repeatedDeletes = events.filter((event) =>
+        event.type === "harness.file.deleted" && event.metadata?.path === "/session/notes.txt");
+      expect(repeatedDeletes).toHaveLength(2);
+      expect(new Set(repeatedDeletes.map((event) => event.occurrenceId)).size).toBe(2);
       await runtime.dispose?.();
       return events;
     };
-    const normalize = (events: any[]) =>
-      JSON.parse(
-        JSON.stringify(events, (key, value) => {
+    const normalize = (events: any[]) => {
+      const occurrences = new Map<string, string>();
+      const withStableOccurrences = events.map((event) => {
+        if (typeof event.occurrenceId !== "string") return event;
+        let normalized = occurrences.get(event.occurrenceId);
+        if (normalized === undefined) {
+          normalized = `occurrence-${occurrences.size + 1}`;
+          occurrences.set(event.occurrenceId, normalized);
+        }
+        return { ...event, occurrenceId: normalized };
+      });
+      return JSON.parse(
+        JSON.stringify(withStableOccurrences, (key, value) => {
           if (key === "durationMs") {
             return 0;
           }
@@ -242,10 +259,11 @@ describe("subprocessSandbox", () => {
           return value;
         }),
       );
+    };
 
     await withTempDir(async (inProcessDir) => {
       await withTempDir(async (subprocessDir) => {
-        const inProcess = await run(createJustBashRuntime, inProcessDir, "parity");
+        const inProcess = await run(justBashSandbox(), inProcessDir, "parity");
         const subprocess = await run(subprocessSandbox(), subprocessDir, "parity");
         expect(normalize(subprocess)).toEqual(normalize(inProcess));
       });
@@ -282,10 +300,10 @@ describe("subprocessSandbox", () => {
 
   it("recovers from a worker crash: next command respawns, dispose returns promptly", async () => {
     await withTempDir(async (dir) => {
-      const host = localHost({ dataDir: dir, executionEnvironment: subprocessSandbox() });
+      const host = localHost({ dataDir: dir, sandbox: subprocessSandbox() });
       const session = await host.sessions.getOrCreate({ id: "subprocess-crash" });
       const prepared = await host.prepareTurn({ session, turnId: "turn_1", persistentDirs: [] });
-      const runtime = (await prepared.createRuntime({})) as DiagnosableRuntime;
+      const runtime = (await prepared.createSandbox({})) as DiagnosableRuntime;
       const shell = runtime.shellTool() as any;
 
       const first = await shell.execute({ command: "echo alive" }, {});
@@ -311,10 +329,10 @@ describe("subprocessSandbox", () => {
 
   it("survives a command sent while the worker is dying (no EPIPE crash, promise settles)", async () => {
     await withTempDir(async (dir) => {
-      const host = localHost({ dataDir: dir, executionEnvironment: subprocessSandbox() });
+      const host = localHost({ dataDir: dir, sandbox: subprocessSandbox() });
       const session = await host.sessions.getOrCreate({ id: "subprocess-epipe" });
       const prepared = await host.prepareTurn({ session, turnId: "turn_1", persistentDirs: [] });
-      const runtime = (await prepared.createRuntime({})) as DiagnosableRuntime;
+      const runtime = (await prepared.createSandbox({})) as DiagnosableRuntime;
       const shell = runtime.shellTool() as any;
 
       await shell.execute({ command: "echo alive" }, {});
@@ -334,12 +352,12 @@ describe("subprocessSandbox", () => {
 
   it("never delivers a dead worker's tool result to its successor", async () => {
     await withTempDir(async (dir) => {
-      const host = localHost({ dataDir: dir, executionEnvironment: subprocessSandbox() });
+      const host = localHost({ dataDir: dir, sandbox: subprocessSandbox() });
       const session = await host.sessions.getOrCreate({ id: "subprocess-stale-tool" });
       const gates: Array<(value: unknown) => void> = [];
       let toolCalls = 0;
       const prepared = await host.prepareTurn({ session, turnId: "turn_1", persistentDirs: [] });
-      const runtime = (await prepared.createRuntime({
+      const runtime = (await prepared.createSandbox({
         tools: {
           gate: tool({
             description: "Resolves when the test releases it.",

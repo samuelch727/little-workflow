@@ -8,7 +8,7 @@ working SDK in local development without Docker, Postgres, Redis, object
 storage, a managed account, or a separate daemon.
 
 ```ts
-import { createHarness, localHost } from "little-harness";
+import { createHarness, localHost } from "@little-stack/harness";
 
 const harness = createHarness({
   host: localHost({ dataDir: ".little-harness" }),
@@ -74,18 +74,21 @@ The next call with the same `session` resumes the same local folder. Calls that
 omit `session` still get a generated session folder for debugging, but the host
 can mark it as ephemeral in `status.json`.
 
-## Execution Environment
+## Sandbox
 
-Local Host runs each turn's `bash` tool in the execution environment selected by
-`executionEnvironment`. The default, `"auto"`, uses the subprocess sandbox for any
+Local Host runs each turn's `bash` tool in the sandbox selected by its `sandbox`
+option. The default, `"auto"`, uses the subprocess sandbox for any
 turn that can run Python or JavaScript or reach the network, and in-process
 just-bash only for turns with all three off:
 
 ```ts
-localHost({ executionEnvironment: "auto" }); // the default
-localHost({ executionEnvironment: "in-process" }); // trusted read-only tools only
-localHost({ executionEnvironment: subprocessSandbox({ initTimeoutMs: 10_000 }) });
+localHost({ sandbox: "auto" }); // the default
+localHost({ sandbox: "in-process" }); // trusted read-only tools only
+localHost({ sandbox: subprocessSandbox({ initTimeoutMs: 10_000 }) });
 ```
+
+> **UNRELEASED:** published `0.2.0-alpha.0` names this option `executionEnvironment`. See
+> [Alpha Migrations](/docs/v0.1.0-alpha/reference/alpha-migrations#one-name-per-concept).
 
 See [Execution Environments](/docs/v0.1.0-alpha/runtime/execution-environments).
 
@@ -94,7 +97,7 @@ See [Execution Environments](/docs/v0.1.0-alpha/runtime/execution-environments).
 Local Host supports the same Persistent Dir contract as any other host.
 
 ```ts
-import { localDir } from "little-harness";
+import { localDir } from "@little-stack/harness";
 
 const harness = createHarness({
   host: localHost(),

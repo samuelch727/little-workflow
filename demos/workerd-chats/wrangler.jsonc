@@ -1,0 +1,9 @@
+// For `pnpm dev` (wrangler dev) and `pnpm build`, which bundles src/worker.ts into
+// dist/worker.js for workerd.capnp. Nothing here deploys to Cloudflare.
+{
+  "name": "workerd-chats",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-10-01",
+  "durable_objects": { "bindings": [{ "name": "CHAT", "class_name": "Chat" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Chat"] }]
+}

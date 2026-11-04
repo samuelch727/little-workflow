@@ -9,7 +9,7 @@
   },
   "dependencies": {
     "ai": "^7.0.126",
-    "little-harness": "workspace:*",
+    "@little-stack/harness": "workspace:*",
     "zod": "^4.4.3"
   }
 }

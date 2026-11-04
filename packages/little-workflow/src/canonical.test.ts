@@ -9,7 +9,7 @@ type CanonicalApi = {
 };
 
 async function loadCanonicalApi(): Promise<Partial<CanonicalApi>> {
-  return import("./index.js") as Promise<Partial<CanonicalApi>>;
+  return import("./entries/internals.js") as Promise<Partial<CanonicalApi>>;
 }
 
 const HEX_64 = /^[0-9a-f]{64}$/;
@@ -428,7 +428,7 @@ describe("canonical json", () => {
 
     try {
       vi.resetModules();
-      const { canonicalJson } = (await import("./index.js")) as Partial<
+      const { canonicalJson } = (await import("./entries/internals.js")) as Partial<
         CanonicalApi
       >;
       expect(() => canonicalJson?.(subtle)).toThrow(TypeError);
@@ -458,7 +458,7 @@ describe("canonical json", () => {
 
     try {
       vi.resetModules();
-      const { canonicalJson } = (await import("./index.js")) as Partial<
+      const { canonicalJson } = (await import("./entries/internals.js")) as Partial<
         CanonicalApi
       >;
       const originalPrototype = Object.getPrototypeOf(webcrypto);
@@ -496,7 +496,7 @@ describe("canonical json", () => {
 
     try {
       vi.resetModules();
-      const { canonicalJson } = (await import("./index.js")) as Partial<
+      const { canonicalJson } = (await import("./entries/internals.js")) as Partial<
         CanonicalApi
       >;
       const originalPrototype = Object.getPrototypeOf(subtle);
@@ -573,7 +573,7 @@ describe("canonical json", () => {
 
     try {
       vi.resetModules();
-      const { canonicalJson } = (await import("./index.js")) as Partial<
+      const { canonicalJson } = (await import("./entries/internals.js")) as Partial<
         CanonicalApi
       >;
       callsBeforeHash = getterCalls;
@@ -605,7 +605,7 @@ describe("canonical json", () => {
 
     try {
       vi.resetModules();
-      await expect(import("./index.js")).resolves.toBeDefined();
+      await expect(import("./entries/internals.js")).resolves.toBeDefined();
     } finally {
       if (descriptor === undefined) {
         delete (globalThis as unknown as Record<string, unknown>).process;
@@ -641,7 +641,7 @@ describe("canonical json", () => {
 
     try {
       vi.resetModules();
-      const { canonicalJson } = (await import("./index.js")) as Partial<
+      const { canonicalJson } = (await import("./entries/internals.js")) as Partial<
         CanonicalApi
       >;
       expect(() => canonicalJson?.({ a: 1 })).toThrow(TypeError);
@@ -665,7 +665,7 @@ describe("canonical json", () => {
 
     try {
       vi.resetModules();
-      const { canonicalJson } = (await import("./index.js")) as Partial<
+      const { canonicalJson } = (await import("./entries/internals.js")) as Partial<
         CanonicalApi
       >;
       expect(() => canonicalJson?.({ a: 1 })).toThrow(TypeError);
@@ -699,7 +699,7 @@ describe("canonical json", () => {
 
     try {
       vi.resetModules();
-      const { canonicalJson } = (await import("./index.js")) as Partial<
+      const { canonicalJson } = (await import("./entries/internals.js")) as Partial<
         CanonicalApi
       >;
       const value: Record<string, unknown> = { a: 1 };
@@ -742,7 +742,7 @@ describe("canonical json", () => {
 
     try {
       vi.resetModules();
-      const { canonicalJson } = (await import("./index.js")) as Partial<
+      const { canonicalJson } = (await import("./entries/internals.js")) as Partial<
         CanonicalApi
       >;
       const value = new Intl.DateTimeFormat("en-US");
@@ -783,7 +783,7 @@ describe("canonical json", () => {
 
     try {
       vi.resetModules();
-      const { canonicalJson } = (await import("./index.js")) as Partial<
+      const { canonicalJson } = (await import("./entries/internals.js")) as Partial<
         CanonicalApi
       >;
       const originalPrototype = Object.getPrototypeOf(value);
@@ -822,7 +822,7 @@ describe("canonical json", () => {
 
     try {
       vi.resetModules();
-      const { canonicalJson } = (await import("./index.js")) as Partial<
+      const { canonicalJson } = (await import("./entries/internals.js")) as Partial<
         CanonicalApi
       >;
       const originalPrototype = Object.getPrototypeOf(value);
@@ -857,7 +857,7 @@ describe("canonical json", () => {
 
     try {
       vi.resetModules();
-      const { canonicalJson } = (await import("./index.js")) as Partial<
+      const { canonicalJson } = (await import("./entries/internals.js")) as Partial<
         CanonicalApi
       >;
       const originalPrototype = Object.getPrototypeOf(value);
@@ -892,7 +892,7 @@ describe("canonical json", () => {
 
     try {
       vi.resetModules();
-      const { canonicalJson } = (await import("./index.js")) as Partial<
+      const { canonicalJson } = (await import("./entries/internals.js")) as Partial<
         CanonicalApi
       >;
       const originalPrototype = Object.getPrototypeOf(value);
@@ -926,7 +926,7 @@ describe("canonical json", () => {
 
     try {
       vi.resetModules();
-      const { canonicalJson } = (await import("./index.js")) as Partial<
+      const { canonicalJson } = (await import("./entries/internals.js")) as Partial<
         CanonicalApi
       >;
       const originalPrototype = Object.getPrototypeOf(value);
@@ -965,7 +965,7 @@ describe("canonical json", () => {
 
     try {
       vi.resetModules();
-      const { canonicalJson } = (await import("./index.js")) as Partial<
+      const { canonicalJson } = (await import("./entries/internals.js")) as Partial<
         CanonicalApi
       >;
       const value = new WebAssembly.Memory({ initial: 1 });
@@ -1003,7 +1003,7 @@ describe("canonical json", () => {
 
     try {
       vi.resetModules();
-      const { canonicalJson } = (await import("./index.js")) as Partial<
+      const { canonicalJson } = (await import("./entries/internals.js")) as Partial<
         CanonicalApi
       >;
       expect(canonicalJson?.({})).toBe("{}");
@@ -1019,7 +1019,7 @@ describe("canonical json", () => {
   it("does not invoke patched intrinsics after module load", async () => {
     vi.resetModules();
     const { canonicalJson, sha256Digest, sha256Hex } = (await import(
-      "./index.js"
+      "./entries/internals.js"
     )) as Partial<CanonicalApi>;
     const cryptoModule = await import("node:crypto");
     const { syncBuiltinESMExports } = await import("node:module");
@@ -1719,7 +1719,7 @@ describe("canonical json", () => {
 
   it("does not let inherited array indexes affect canonical output", async () => {
     vi.resetModules();
-    const { canonicalJson } = (await import("./index.js")) as Partial<
+    const { canonicalJson } = (await import("./entries/internals.js")) as Partial<
       CanonicalApi
     >;
     const descriptor = Object.getOwnPropertyDescriptor(Array.prototype, "0");
@@ -1757,7 +1757,7 @@ describe("canonical json", () => {
 
   it("does not use inherited descriptor value properties", async () => {
     vi.resetModules();
-    const { canonicalJson } = (await import("./index.js")) as Partial<
+    const { canonicalJson } = (await import("./entries/internals.js")) as Partial<
       CanonicalApi
     >;
     const descriptor = Object.getOwnPropertyDescriptor(Object.prototype, "value");

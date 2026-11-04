@@ -1,20 +1,17 @@
-import { createHash } from "node:crypto";
-import { mkdirSync } from "node:fs";
-import {
-  mkdir,
-  open,
-  readFile,
-  rename,
-  stat,
-} from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
-import Database from "better-sqlite3";
+import { createHash, randomUUID } from "node:crypto";
+import { join, posix, resolve } from "node:path";
 import type { LocalWorld } from "./authoring.js";
 import { canonicalJson, sha256Digest } from "./canonical.js";
 import type { UsageTotals } from "./pricing.js";
 import { materializeRunStateFromEvents } from "./run-state.js";
 import { stripUndefined } from "./strip-undefined.js";
 import type { World } from "./world-port.js";
+import type { EventStorage } from "./event-storage.js";
+import { sqliteEventStorage } from "./event-storage-sqlite.js";
+import { filesystemEventStorage } from "./event-storage-filesystem.js";
+import { runFilesFor } from "./run-files.js";
+import { virtualDataDir, virtualStorageKey } from "./storage-identity.js";
+import type { IFileSystem } from "just-bash";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -66,6 +63,9 @@ export type EventType =
 export type EventInput = {
   readonly type: EventType;
   readonly occurrenceId?: string;
+  /** Present for Harness Session appends; generic Workflow facts remain keyless. */
+  readonly appendIdempotencyKey?: string;
+  readonly canonicalRequestDigest?: string;
   readonly payload: JsonRecord;
 };
 
@@ -75,6 +75,8 @@ export type EventRef = {
   readonly sequence: number;
   readonly type: EventType;
   readonly occurrenceId?: string;
+  readonly appendIdempotencyKey?: string;
+  readonly canonicalRequestDigest?: string;
 };
 
 export type EventEnvelope = EventRef & {
@@ -199,129 +201,26 @@ const RUN_ID_PATTERN = /^run_[A-Za-z0-9_-]{1,80}$/u;
 const ARTIFACT_ID_PATTERN = /^art_[A-Za-z0-9_-]{1,80}$/u;
 const writeChains = new Map<string, Promise<unknown>>();
 
-// ── Embedded WAL event store ────────────────────────────────────────
-//
-// The event log moved from per-run append-only JSONL (with a per-event fsync) to
-// an embedded better-sqlite3 database in WAL mode with `synchronous=NORMAL`.
-// Durability: in WAL + NORMAL, every committed transaction is fsynced to the
-// write-ahead log, so a committed append survives an application crash. (An OS
-// kernel crash / power loss may lose the very last commits not yet checkpointed —
-// the documented WAL+NORMAL tradeoff, the same envelope JSONL+fsync gave once the
-// OS write cache is in play.) `appendEvent`'s promise resolves only AFTER the
-// synchronous transaction commits, so a resolved append is durable.
-//
-// One cached connection per resolved `dataDir`; schema init is idempotent.
+function worldPath(world: Pick<World, "dataDir" | "files">, ...parts: string[]): string {
+  // Next 15's build tracer mistakes a conditional path callee for a thenable.
+  if (world.files === undefined) return join(world.dataDir, ...parts);
+  return posix.join(world.dataDir, ...parts);
+}
 
-type EventRow = {
-  readonly event_id: string;
-  readonly type: string;
-  readonly occurrence_id: string | null;
-  readonly recorded_at: string;
-  readonly payload: string;
-  readonly sequence: number;
-};
-
-type EventStore = {
-  readonly db: Database.Database;
-  readonly insert: Database.Statement<[string, number, string, string, string | null, string, string]>;
-  readonly maxSequence: Database.Statement<[string]>;
-  readonly selectAll: Database.Statement<[string]>;
-  readonly selectRunIds: Database.Statement<[]>;
-  readonly deleteAfter: Database.Statement<[string, number]>;
-};
-
-const eventStores = new Map<string, EventStore>();
-
-function eventStoreFor(world: LocalWorld): EventStore {
-  const eventsDir = join(world.dataDir, "events");
-  const key = resolve(eventsDir);
-  const existing = eventStores.get(key);
-  if (existing !== undefined) {
-    return existing;
-  }
-  // The DB file lives in the same `events/` directory the JSONL logs used, so a
-  // single dataDir remains self-contained. Synchronous mkdir keeps connection
-  // setup atomic with respect to the per-run write chain.
-  mkdirSync(eventsDir, { recursive: true });
-  const db = new Database(join(key, "events.db"));
-  db.pragma("journal_mode = WAL");
-  db.pragma("synchronous = NORMAL");
-  db.exec(
-    `CREATE TABLE IF NOT EXISTS events (
-       run_id TEXT NOT NULL,
-       sequence INTEGER NOT NULL,
-	       event_id TEXT NOT NULL,
-	       type TEXT NOT NULL,
-	       occurrence_id TEXT,
-	       recorded_at TEXT NOT NULL,
-	       payload TEXT NOT NULL,
-	       PRIMARY KEY (run_id, sequence)
-	     );`,
-  );
-  ensureOptionalColumn(db, "events", "occurrence_id", "TEXT");
-  const store: EventStore = {
-    db,
-    insert: db.prepare(
-      `INSERT INTO events (run_id, sequence, event_id, type, occurrence_id, recorded_at, payload)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    ),
-    maxSequence: db.prepare(
-      `SELECT MAX(sequence) AS maxSequence FROM events WHERE run_id = ?`,
-    ),
-    selectAll: db.prepare(
-      `SELECT event_id, type, occurrence_id, recorded_at, payload, sequence
-       FROM events WHERE run_id = ? ORDER BY sequence ASC`,
-    ),
-    selectRunIds: db.prepare(
-      `SELECT DISTINCT run_id FROM events ORDER BY run_id ASC`,
-    ),
-    deleteAfter: db.prepare(`DELETE FROM events WHERE run_id = ? AND sequence > ?`),
-  };
-  eventStores.set(key, store);
-  return store;
+function eventStorageFor(world: LocalWorld): EventStorage {
+  return world.files === undefined
+    ? sqliteEventStorage(world.dataDir)
+    : filesystemEventStorage(world.files, world.dataDir);
 }
 
 function eventChainKey(world: LocalWorld, runId: string): string {
-  return `events:${resolve(world.dataDir)}:${runId}`;
+  return world.files === undefined
+    ? `events:${resolve(world.dataDir)}:${runId}`
+    : virtualStorageKey(world.files, world.dataDir, `events:${runId}`);
 }
 
-function ensureOptionalColumn(
-  db: Database.Database,
-  table: string,
-  column: string,
-  definition: string,
-): void {
-  const columns = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ readonly name?: unknown }>;
-  if (columns.some((entry) => entry.name === column)) {
-    return;
-  }
-  db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
-}
-
-/**
- * TEST-ONLY. Closes and forgets all cached event-store connections so the next
- * access reopens the DB from disk. Lets durability tests prove that committed
- * events survive a fresh process-equivalent reopen (a closed+reopened
- * connection reads the WAL-checkpointed state from disk, not in-memory cache).
- */
-export function closeEventStoresForTest(): void {
-  for (const store of eventStores.values()) {
-    store.db.close();
-  }
-  eventStores.clear();
-}
-
-function rowToEnvelope(runId: RunId, row: EventRow): EventEnvelope {
-  return deepFreeze({
-    eventId: row.event_id,
-    runId,
-	    sequence: row.sequence,
-	    type: row.type as EventType,
-	    ...(row.occurrence_id === null ? {} : { occurrenceId: row.occurrence_id }),
-	    recordedAt: row.recorded_at,
-	    payload: JSON.parse(row.payload) as JsonRecord,
-	  });
-}
+/** Close the disk adapter's cached connections; filesystem Worlds have no cache. */
+export { closeSQLiteEventStoresForTest as closeEventStoresForTest } from "./event-storage-sqlite.js";
 
 export async function appendEvent(
   world: LocalWorld,
@@ -329,37 +228,77 @@ export async function appendEvent(
   event: EventInput,
 ): Promise<EventEnvelope> {
   validateRunId(runId);
+  assertAppendIdempotencyPair(event);
   return withWriteChain(eventChainKey(world, runId), async () => {
-    const store = eventStoreFor(world);
+    const store = eventStorageFor(world);
+    if (event.appendIdempotencyKey !== undefined) {
+      const existing = await store.findByIdempotency(runId, event.appendIdempotencyKey);
+      if (existing !== undefined) {
+        if (existing.canonicalRequestDigest !== event.canonicalRequestDigest) {
+          throw new EventAppendIdempotencyConflictError(
+            runId,
+            event.appendIdempotencyKey,
+          );
+        }
+        return deepFreeze(existing);
+      }
+    }
     // Artifact-reference invariant is checked BEFORE persistence so a rejected
     // append never consumes a sequence number (see "rejected append" guarantee).
     await assertReferencedArtifactsExist(world, runId, event);
-    const maxRow = store.maxSequence.get(runId) as { maxSequence: number | null };
-    const sequence = (maxRow.maxSequence ?? 0) + 1;
+    const sequence = await store.maxSequence(runId) + 1;
     const envelope: EventEnvelope = {
       eventId: eventIdFor(runId, sequence, event),
       runId,
 	      sequence,
 	      type: event.type,
 	      ...(event.occurrenceId === undefined ? {} : { occurrenceId: event.occurrenceId }),
+	      ...(event.appendIdempotencyKey === undefined
+          ? {}
+          : { appendIdempotencyKey: event.appendIdempotencyKey }),
+	      ...(event.canonicalRequestDigest === undefined
+          ? {}
+          : { canonicalRequestDigest: event.canonicalRequestDigest }),
 	      recordedAt: new Date().toISOString(),
 	      payload: canonicalClone(event.payload),
     };
-    // Synchronous commit: better-sqlite3 runs the INSERT inside an implicit
-    // transaction that fsyncs the WAL (synchronous=NORMAL) before `run()`
-    // returns. The per-run write chain serializes reads+writes, so the
-    // MAX(sequence) read above and this INSERT cannot interleave.
-    store.insert.run(
-      runId,
-	      sequence,
-	      envelope.eventId,
-	      envelope.type,
-	      envelope.occurrenceId ?? null,
-	      envelope.recordedAt,
-	      JSON.stringify(envelope.payload),
-	    );
+    // The shared per-run chain includes receipt lookup, artifact validation,
+    // sequence allocation and publication, regardless of the storage adapter.
+    await store.insert(envelope);
     return deepFreeze(envelope);
   });
+}
+
+export class EventAppendIdempotencyConflictError extends Error {
+  readonly runId: string;
+  readonly appendIdempotencyKey: string;
+
+  constructor(runId: string, appendIdempotencyKey: string) {
+    super(`Append key ${appendIdempotencyKey} was already used with another request in ${runId}.`);
+    this.name = "EventAppendIdempotencyConflictError";
+    this.runId = runId;
+    this.appendIdempotencyKey = appendIdempotencyKey;
+  }
+}
+
+function assertAppendIdempotencyPair(event: EventInput): void {
+  if ((event.appendIdempotencyKey === undefined) !== (event.canonicalRequestDigest === undefined)) {
+    throw new TypeError(
+      "appendIdempotencyKey and canonicalRequestDigest must be supplied together",
+    );
+  }
+  if (event.appendIdempotencyKey !== undefined) {
+    if (
+      Buffer.byteLength(event.appendIdempotencyKey, "utf8") < 16 ||
+      Buffer.byteLength(event.appendIdempotencyKey, "utf8") > 256 ||
+      event.appendIdempotencyKey.includes("\0")
+    ) {
+      throw new TypeError("appendIdempotencyKey is invalid");
+    }
+    if (!/^sha256:[a-f0-9]{64}$/u.test(event.canonicalRequestDigest!)) {
+      throw new TypeError("canonicalRequestDigest is invalid");
+    }
+  }
 }
 
 async function assertReferencedArtifactsExist(
@@ -391,9 +330,7 @@ export async function listEvents(
   runId: RunId,
 ): Promise<readonly EventEnvelope[]> {
   validateRunId(runId);
-  const store = eventStoreFor(world);
-  const rows = store.selectAll.all(runId) as EventRow[];
-  return rows.map((row) => rowToEnvelope(runId, row));
+  return (await eventStorageFor(world).list(runId)).map(event => deepFreeze(event));
 }
 
 /**
@@ -414,16 +351,12 @@ export async function truncateEventLogForTest(
 ): Promise<void> {
   validateRunId(runId);
   await withWriteChain(eventChainKey(world, runId), async () => {
-    const store = eventStoreFor(world);
-    store.deleteAfter.run(runId, keepThroughSequence);
+    await eventStorageFor(world).deleteAfter(runId, keepThroughSequence);
   });
 }
 
 export async function listRunIds(world: LocalWorld): Promise<readonly RunId[]> {
-  const store = eventStoreFor(world);
-  const rows = store.selectRunIds.all() as Array<{ readonly run_id: string }>;
-  return rows
-    .map((row) => row.run_id)
+  return (await eventStorageFor(world).listRunIds())
     .filter((runId): runId is RunId => RUN_ID_PATTERN.test(runId));
 }
 
@@ -435,7 +368,10 @@ export async function writeArtifact(
   const encoded = encodeArtifactPayload(input.payload);
   const payloadHash = sha256Bytes(encoded.bytes);
   const artifactId = artifactIdFor(input, encoded.encoding, payloadHash);
-  return withWriteChain(`artifact:${resolve(world.dataDir)}:${artifactId}`, () =>
+  const key = world.files === undefined
+    ? `artifact:${resolve(world.dataDir)}:${artifactId}`
+    : virtualStorageKey(world.files, world.dataDir, `artifact:${artifactId}`);
+  return withWriteChain(key, () =>
     writeArtifactLocked(world, input, encoded, payloadHash, artifactId)
   );
 }
@@ -448,8 +384,9 @@ async function writeArtifactLocked(
   artifactId: ArtifactId,
 ): Promise<ArtifactManifest> {
   const artifactRef = `artifact://${artifactId}` as ArtifactRef;
-  const manifestPath = join(world.dataDir, "artifacts", `${artifactId}.json`);
-  const existingManifest = await readArtifactManifestIfPresent(manifestPath);
+  const manifestPath = worldPath(world, "artifacts", `${artifactId}.json`);
+  const files = runFilesFor(world);
+  const existingManifest = await readArtifactManifestIfPresent(world, manifestPath);
   if (existingManifest !== undefined) {
     if (
       existingManifest.artifactId === artifactId &&
@@ -478,21 +415,21 @@ async function writeArtifactLocked(
     sizeBytes: encoded.bytes.byteLength,
     createdAt: new Date().toISOString(),
   }) as ArtifactManifest);
-  const artifactsDir = join(world.dataDir, "artifacts");
-  const blobsDir = join(artifactsDir, "blobs");
-  await ensureDirectory(artifactsDir);
-  await ensureDirectory(blobsDir);
+  const artifactsDir = worldPath(world, "artifacts");
+  const blobsDir = files.path.join(artifactsDir, "blobs");
+  await files.ensureDirectory(artifactsDir);
+  await files.ensureDirectory(blobsDir);
 
-  const blobPath = join(blobsDir, `${artifactId}.bin`);
+  const blobPath = files.path.join(blobsDir, `${artifactId}.bin`);
   const blobTempPath = `${blobPath}.tmp`;
-  await writeFileDurably(blobTempPath, encoded.bytes);
-  await rename(blobTempPath, blobPath);
-  await syncDirectory(blobsDir);
+  await files.writeFileDurably(blobTempPath, encoded.bytes);
+  await files.rename(blobTempPath, blobPath);
+  await files.syncDirectory(blobsDir);
 
   const manifestTempPath = `${manifestPath}.tmp`;
-  await writeFileDurably(manifestTempPath, `${canonicalJson(manifest)}\n`);
-  await rename(manifestTempPath, manifestPath);
-  await syncDirectory(artifactsDir);
+  await files.writeFileDurably(manifestTempPath, `${canonicalJson(manifest)}\n`);
+  await files.rename(manifestTempPath, manifestPath);
+  await files.syncDirectory(artifactsDir);
   return manifest;
 }
 
@@ -501,12 +438,13 @@ export async function readArtifact(
   ref: string,
 ): Promise<ArtifactReadResult> {
   const artifactId = artifactIdFromRef(ref);
+  const files = runFilesFor(world);
   const manifest = await readArtifactManifest(world, ref);
 
-  const blobPath = join(world.dataDir, "artifacts", "blobs", `${artifactId}.bin`);
+  const blobPath = worldPath(world, "artifacts", "blobs", `${artifactId}.bin`);
   let bytes: Buffer;
   try {
-    bytes = await readFile(blobPath);
+    bytes = Buffer.from(await files.readFile(blobPath));
   } catch (error) {
     if (isErrno(error, "ENOENT")) {
       throw new ArtifactNotFoundError(ref);
@@ -531,9 +469,9 @@ export async function readArtifactManifest(
   ref: string,
 ): Promise<ArtifactManifest> {
   const artifactId = artifactIdFromRef(ref);
-  const manifestPath = join(world.dataDir, "artifacts", `${artifactId}.json`);
+  const manifestPath = worldPath(world, "artifacts", `${artifactId}.json`);
   try {
-    const manifest = parseArtifactManifest(await readFile(manifestPath, "utf8"), ref);
+    const manifest = parseArtifactManifest(await runFilesFor(world).readFile(manifestPath, "utf8"), ref);
     assertArtifactManifestShape(manifest, ref, artifactId);
     return deepFreeze(manifest);
   } catch (error) {
@@ -545,10 +483,11 @@ export async function readArtifactManifest(
 }
 
 async function readArtifactManifestIfPresent(
+  world: LocalWorld,
   manifestPath: string,
 ): Promise<ArtifactManifest | undefined> {
   try {
-    return deepFreeze(parseArtifactManifest(await readFile(manifestPath, "utf8"), manifestPath));
+    return deepFreeze(parseArtifactManifest(await runFilesFor(world).readFile(manifestPath, "utf8"), manifestPath));
   } catch (error) {
     if (isErrno(error, "ENOENT")) {
       return undefined;
@@ -712,66 +651,6 @@ function sha256Bytes(bytes: Uint8Array): string {
   return `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
 }
 
-async function writeFileDurably(path: string, data: string | Uint8Array): Promise<void> {
-  const handle = await open(path, "w");
-  try {
-    await handle.writeFile(data);
-    await handle.sync();
-  } finally {
-    await handle.close();
-  }
-}
-
-async function ensureDirectory(path: string): Promise<void> {
-  const missingDirectories = await findMissingDirectories(path);
-  await mkdir(path, { recursive: true });
-  await syncDirectory(path);
-  await syncDirectory(dirname(path));
-  await Promise.all(
-    missingDirectories.map((directory) => syncDirectory(dirname(directory))),
-  );
-}
-
-async function syncDirectory(path: string): Promise<void> {
-  const handle = await open(path, "r");
-  try {
-    await handle.sync();
-  } finally {
-    await handle.close();
-  }
-}
-
-async function findMissingDirectories(path: string): Promise<readonly string[]> {
-  const missingDirectories: string[] = [];
-  for (const directory of directoryChain(path)) {
-    try {
-      const entry = await stat(directory);
-      if (!entry.isDirectory()) {
-        throw new WorldPathError(`Expected directory path, received file path: ${directory}`);
-      }
-    } catch (error) {
-      if (!isErrno(error, "ENOENT")) {
-        throw error;
-      }
-      missingDirectories.push(directory);
-    }
-  }
-  return missingDirectories;
-}
-
-function directoryChain(path: string): readonly string[] {
-  const directories: string[] = [];
-  let current = resolve(path);
-  while (true) {
-    directories.unshift(current);
-    const parent = dirname(current);
-    if (parent === current) {
-      return directories;
-    }
-    current = parent;
-  }
-}
-
 function withWriteChain<T>(key: string, fn: () => Promise<T>): Promise<T> {
   const previous = writeChains.get(key) ?? Promise.resolve();
   const next = previous.catch(() => undefined).then(fn);
@@ -836,20 +715,43 @@ export function createLocalWorld(config: {
   dataDir: string;
   maxConcurrentSteps?: number;
 }): World {
-  const base = {
-    kind: "local-world" as const,
+  return createWorld({
+    kind: "local-world",
     dataDir: config.dataDir,
-    ...(config.maxConcurrentSteps !== undefined
-      ? { maxConcurrentSteps: config.maxConcurrentSteps }
-      : {}),
-  };
+    ...(config.maxConcurrentSteps === undefined ? {} : { maxConcurrentSteps: config.maxConcurrentSteps }),
+  });
+}
+
+export type VirtualWorldOptions = {
+  fs: IFileSystem;
+  dataDir?: string;
+  maxConcurrentSteps?: number;
+};
+
+/**
+ * One process owns this filesystem namespace. Persistence and atomic publication
+ * are inherited from fs; bare InMemoryFs is not durable across process restarts.
+ */
+export function virtualWorld(options: VirtualWorldOptions): World {
+  if (options?.fs === undefined || options.fs === null) {
+    throw new TypeError("virtualWorld requires a filesystem.");
+  }
+  return createWorld({
+    kind: "virtual-world",
+    files: options.fs,
+    dataDir: virtualDataDir(options.dataDir ?? "/"),
+    ...(options.maxConcurrentSteps === undefined ? {} : { maxConcurrentSteps: options.maxConcurrentSteps }),
+  });
+}
+
+function createWorld(base: Pick<World, "kind" | "dataDir" | "files" | "maxConcurrentSteps">): World {
   return {
     ...base,
-    appendEvent: (runId, event) => appendEvent(base as never, runId, event),
-    listEvents: (runId) => listEvents(base as never, runId),
-    writeArtifact: (input) => writeArtifact(base as never, input),
-    readArtifact: (ref) => readArtifact(base as never, ref),
-    readArtifactManifest: (ref) => readArtifactManifest(base as never, ref),
+    appendEvent: (runId, event) => appendEvent(base as LocalWorld, runId, event),
+    listEvents: (runId) => listEvents(base as LocalWorld, runId),
+    writeArtifact: (input) => writeArtifact(base as LocalWorld, input),
+    readArtifact: (ref) => readArtifact(base as LocalWorld, ref),
+    readArtifactManifest: (ref) => readArtifactManifest(base as LocalWorld, ref),
   };
 }
 
@@ -871,6 +773,12 @@ export type OuterLoopManifest = {
     readonly description: string;
   };
   readonly maxCycles: number;
+  /**
+   * `sha256Digest` of the loop's input. A resumed call with different input is
+   * rejected. Absent from manifests written before it existed; the outer-loop
+   * scheduler backfills it on the next resume.
+   */
+  readonly inputHash?: string;
   readonly cycles: ReadonlyArray<OuterLoopCycleSummary>;
   readonly result?: { readonly kind: "done"; readonly finalOutput: unknown };
   /**
@@ -885,7 +793,7 @@ export type OuterLoopManifest = {
 const OUTER_LOOP_ID_PATTERN = /^ol_[A-Za-z0-9_-]{1,80}$/u;
 
 function outerLoopManifestPath(world: LocalWorld, outerLoopId: string): string {
-  return join(world.dataDir, "outer-loops", `${outerLoopId}.json`);
+  return worldPath(world, "outer-loops", `${outerLoopId}.json`);
 }
 
 export async function writeOuterLoopManifest(
@@ -897,12 +805,13 @@ export async function writeOuterLoopManifest(
     throw new WorldPathError(`Invalid outer-loop id: ${outerLoopId}`);
   }
   const manifestPath = outerLoopManifestPath(world, outerLoopId);
-  const outerLoopsDir = join(world.dataDir, "outer-loops");
-  await ensureDirectory(outerLoopsDir);
+  const outerLoopsDir = worldPath(world, "outer-loops");
+  const files = runFilesFor(world);
+  await files.ensureDirectory(outerLoopsDir);
   const tmpPath = `${manifestPath}.tmp`;
-  await writeFileDurably(tmpPath, `${canonicalJson(manifest)}\n`);
-  await rename(tmpPath, manifestPath);
-  await syncDirectory(outerLoopsDir);
+  await files.writeFileDurably(tmpPath, `${canonicalJson(manifest)}\n`);
+  await files.rename(tmpPath, manifestPath);
+  await files.syncDirectory(outerLoopsDir);
 }
 
 export async function readOuterLoopManifest(
@@ -914,7 +823,7 @@ export async function readOuterLoopManifest(
   }
   const manifestPath = outerLoopManifestPath(world, outerLoopId);
   try {
-    const text = await readFile(manifestPath, "utf8");
+    const text = await runFilesFor(world).readFile(manifestPath, "utf8");
     return JSON.parse(text) as OuterLoopManifest;
   } catch (error) {
     if (isErrno(error, "ENOENT")) {
@@ -922,4 +831,109 @@ export async function readOuterLoopManifest(
     }
     throw error;
   }
+}
+
+// ── Run pins ──────────────────────────────────────────────────────────────────
+
+/**
+ * The version a run started on, for workflows whose definition is chosen per run
+ * (`versionedHarnessWorkflow`). Written once, before the run's first event, and
+ * never replaced, so a run that resumes after a crash rebuilds the same workflow
+ * even if the live version changed in between.
+ */
+export type RunPin<C = unknown> = {
+  readonly schemaVersion: 1;
+  readonly runId: string;
+  readonly content: C;
+  /** What the version source handed back to name this version again, e.g. LittleDB's version id. */
+  readonly version?: unknown;
+  /**
+   * Hash of every other field. It catches a damaged or hand-edited pin; it does not
+   * authenticate one, since whoever can rewrite the pin can rewrite the hash.
+   */
+  readonly pinHash: string;
+};
+
+const RUN_PIN_KEYS = new Set(["schemaVersion", "runId", "content", "version", "pinHash"]);
+
+function runPinPath(world: Pick<World, "dataDir" | "files">, runId: string): string {
+  return worldPath(world, "run-pins", `${runId}.json`);
+}
+
+function runPinHash(pin: Omit<RunPin, "pinHash">): string {
+  return sha256Digest({
+    schemaVersion: pin.schemaVersion,
+    runId: pin.runId,
+    content: pin.content,
+    ...(pin.version === undefined ? {} : { version: pin.version }),
+  });
+}
+
+/**
+ * Records `pin` for its run unless one is already there, and returns the stored
+ * pin and whether this call wrote it: when two processes start the same run,
+ * both run the first one written.
+ */
+export async function writeRunPin<C>(
+  world: Pick<World, "dataDir" | "files">,
+  pin: { readonly runId: string; readonly content: C; readonly version?: unknown },
+): Promise<{ readonly pin: RunPin<C>; readonly written: boolean }> {
+  validateRunId(pin.runId);
+  const pinsDir = worldPath(world, "run-pins");
+  const files = runFilesFor(world);
+  await files.ensureDirectory(pinsDir);
+  const pinPath = runPinPath(world, pin.runId);
+  const tmpPath = `${pinPath}.${randomUUID()}.tmp`;
+  const stored = stripUndefined({ schemaVersion: 1 as const, ...pin });
+  await files.writeFileDurably(tmpPath, `${canonicalJson({ ...stored, pinHash: runPinHash(stored) })}\n`);
+  let written = true;
+  try {
+    // `link` fails if the pin exists, so the first pin written is never replaced.
+    await files.link(tmpPath, pinPath);
+  } catch (error) {
+    if (!isErrno(error, "EEXIST")) throw error;
+    written = false;
+  } finally {
+    await files.rm(tmpPath, { force: true });
+  }
+  await files.syncDirectory(pinsDir);
+  const found = await readRunPin<C>(world, pin.runId);
+  if (found === undefined) {
+    throw new WorldPathError(`Run pin for '${pin.runId}' was not written.`);
+  }
+  return { pin: found, written };
+}
+
+/** The run's pin, or `undefined` if it has none. Throws if the pin is unreadable or altered. */
+export async function readRunPin<C>(
+  world: Pick<World, "dataDir" | "files">,
+  runId: string,
+): Promise<RunPin<C> | undefined> {
+  validateRunId(runId);
+  let text: string;
+  try {
+    text = await runFilesFor(world).readFile(runPinPath(world, runId), "utf8");
+  } catch (error) {
+    if (isErrno(error, "ENOENT")) {
+      return undefined;
+    }
+    throw error;
+  }
+  let pin: unknown;
+  try {
+    pin = JSON.parse(text);
+  } catch {
+    throw new Error(`Run pin for '${runId}' is not valid JSON.`);
+  }
+  if (
+    !isRecord(pin) ||
+    pin.schemaVersion !== 1 ||
+    pin.runId !== runId ||
+    !("content" in pin) ||
+    Object.keys(pin).some((key) => !RUN_PIN_KEYS.has(key)) ||
+    pin.pinHash !== runPinHash(pin as Omit<RunPin, "pinHash">)
+  ) {
+    throw new Error(`Run pin for '${runId}' does not match its hash.`);
+  }
+  return pin as RunPin<C>;
 }

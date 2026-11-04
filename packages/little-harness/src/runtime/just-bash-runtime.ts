@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { copyFile, cp, mkdir, readdir, rm, stat } from "node:fs/promises";
-import { Bash, MountableFs, ReadWriteFs, type BashOptions, type ExecOptions, type IFileSystem } from "just-bash";
+import { copyFile, cp, mkdir, readdir, readFile, rm, stat } from "node:fs/promises";
+import { Bash, MountableFs, type BashOptions, type ExecOptions, type IFileSystem } from "just-bash";
 import type {
   BashExecResult,
   BufferEncoding,
@@ -13,12 +13,14 @@ import type {
 } from "just-bash";
 import * as path from "node:path";
 import { HarnessInputError } from "../errors.js";
+import { snapshotFolder } from "../files/diff.js";
 import { normalizeHarnessPrefix } from "../files/path-policy.js";
 import { resolveTraceOptions } from "../trace/options.js";
 import type { ResolvedHarnessTraceOptions } from "../trace/types.js";
 import type {
-  CreateExecutionEnvironmentOptions,
-  HarnessRuntime,
+  CreateSandboxOptions,
+  HarnessSandboxFactory,
+  HarnessSandbox,
   HarnessRuntimeMount,
   HarnessRuntimeOptions,
   HarnessWorkspaceMount,
@@ -27,24 +29,14 @@ import type {
 } from "../types.js";
 import { createShellRuntime } from "./shell-runtime.js";
 import { createRuntimeToolBridge, type RuntimeToolBridge } from "./tool-bridge.js";
+import { hasJustBashNodeBuild, justBashNodeExport } from "./just-bash-builds.js";
+import { SubtreeFs } from "./subtree-fs.js";
 
 type DirentEntry = Awaited<ReturnType<NonNullable<IFileSystem["readdirWithFileTypes"]>>>[number];
 type ReadFileOption = Parameters<IFileSystem["readFile"]>[1];
 type WriteFileOption = Parameters<IFileSystem["writeFile"]>[2];
 type RuntimeShellInput = { command: string; cwd?: string; timeoutMs?: number };
 type RuntimeShellExecutionInput = RuntimeShellInput & { cwd: string; env: Record<string, string> };
-
-export type CreateJustBashRuntimeOptions<TExtraBody = unknown> =
-  CreateExecutionEnvironmentOptions<TExtraBody>;
-
-/**
- * @deprecated Identity passthrough kept for compatibility — pass the plain
- * `runtime: { ... }` options object instead. Not to be confused with
- * `createJustBashRuntime`, the in-process execution-environment factory.
- */
-export function justBashRuntime(options: HarnessRuntimeOptions = {}): HarnessRuntimeOptions {
-  return options;
-}
 
 /**
  * Assembles the just-bash virtual filesystem for a workspace spec: canonical mounts (with
@@ -60,9 +52,13 @@ export async function buildWorkspaceFs(
   for (const mount of workspace.mounts) {
     workspaceMounts.set(trimTrailingSlash(mount.mountPath), mount);
   }
+  // A mount's backingPath is a directory on disk, or a folder of the workspace's own
+  // filesystem when the host keeps the workspace in one (virtualHost).
+  const open = (backingPath: string): IFileSystem =>
+    workspace.filesystem === undefined ? diskFs(backingPath) : new SubtreeFs(workspace.filesystem, backingPath);
   const agentsMount = workspaceMounts.get("/.agents");
   const agentsFs = agentsMount
-    ? new PolicyFs(new ReadWriteFs({ root: agentsMount.backingPath }), {
+    ? new PolicyFs(open(agentsMount.backingPath), {
         mountPoint: "/.agents",
         readOnly: true,
       })
@@ -77,8 +73,8 @@ export async function buildWorkspaceFs(
     // from the default working directory.
     const base: IFileSystem =
       mountPath === "/session" && agentsFs !== undefined
-        ? new SessionFs(new ReadWriteFs({ root: mount.backingPath }), agentsFs)
-        : new ReadWriteFs({ root: mount.backingPath });
+        ? new SessionFs(open(mount.backingPath), agentsFs)
+        : open(mount.backingPath);
     if (mount.mode === "ro" || mount.getReadOnlyPrefixes !== undefined) {
       fs.mount(
         mountPath,
@@ -98,7 +94,9 @@ export async function buildWorkspaceFs(
     fs.mount("/.agents", agentsFs);
   }
   const runtimeMounts = agentsMount
-    ? await materializeAgentsRuntimeMounts(agentsMount.backingPath, runtimeDescriptorMounts)
+    ? workspace.filesystem === undefined
+      ? await materializeAgentsRuntimeMounts(agentsMount.backingPath, runtimeDescriptorMounts)
+      : await copyAgentsRuntimeMounts(workspace.filesystem, agentsMount.backingPath, runtimeDescriptorMounts)
     : runtimeDescriptorMounts;
   await mountRuntimeDescriptors(fs, runtimeMounts);
   return fs;
@@ -152,17 +150,43 @@ export function bashOptionsForRuntime(
   return bashOptions;
 }
 
-export async function createJustBashRuntime(
-  options: CreateJustBashRuntimeOptions,
-): Promise<HarnessRuntime> {
+/** What the prompt says on just-bash's browser build, which cannot run these commands. */
+const BROWSER_BUILD_HINT = "python3, node (js-exec), sqlite3, tar, yq and xan are not available in this shell.";
+
+/**
+ * The in-process just-bash sandbox: Tier-0 just-bash embedded in the host process. Fast (no
+ * process spawn) but a compatibility layer for trusted tool patterns, not an isolation boundary;
+ * prefer `subprocessSandbox()` (or `localHost()`'s `"auto"` default) for untrusted commands.
+ *
+ * Like every sandbox builder it is always called and returns the per-turn factory:
+ * `localHost({ sandbox: justBashSandbox() })`, `tieredSandbox({ tier0: justBashSandbox() })`.
+ */
+export function justBashSandbox<TExtraBody = unknown>(): HarnessSandboxFactory<TExtraBody> {
+  return startJustBashSandbox;
+}
+
+async function startJustBashSandbox(
+  options: CreateSandboxOptions<any>,
+): Promise<HarnessSandbox> {
   const workspace = options.workspace;
   const fs = await buildWorkspaceFs(workspace, options.mounts ?? []);
 
+  // just-bash's browser build (workerd, browsers) has no Python or JavaScript runner, and no
+  // sqlite3, tar, yq or xan. Switch the runners off instead of offering commands that fail,
+  // and tell the model.
+  const nodeBuild = hasJustBashNodeBuild();
+  const runtime: HarnessRuntimeOptions | undefined = nodeBuild
+    ? options.runtime
+    : { ...options.runtime, python: false, javascript: false };
   const traceOptions = options.traceOptions ?? resolveTraceOptions(undefined, undefined);
   const toolBridgeScope = new AsyncLocalStorage<JsonObject>();
-  const toolBridge = createEnvironmentToolBridge(options, traceOptions, () => toolBridgeScope.getStore());
-  const bash = new Bash(bashOptionsForRuntime(fs, workspace.workingDir, options.runtime, {
-    javascript: javascriptConfig(options.runtime?.javascript, toolBridge),
+  const toolBridge = createEnvironmentToolBridge(
+    runtime === undefined ? options : { ...options, runtime },
+    traceOptions,
+    () => toolBridgeScope.getStore(),
+  );
+  const bash = new Bash(bashOptionsForRuntime(fs, workspace.workingDir, runtime, {
+    javascript: javascriptConfig(runtime?.javascript, toolBridge),
     defenseInDepth: defenseInDepthForAdapter("in-process"),
   }));
   let currentCwd = workspace.workingDir;
@@ -171,11 +195,14 @@ export async function createJustBashRuntime(
   return createShellRuntime({
     workspace,
     toolBridge,
-    runtime: options.runtime,
+    runtime,
+    ...(nodeBuild ? {} : { hints: [BROWSER_BUILD_HINT] }),
     emit: options.emit,
     emitToolEvents: options.emitToolEvents,
     traceOptions,
     files: options.files,
+    tier: "tier-0",
+    provider: "just-bash",
     async execute(input, context) {
       const executionInput: RuntimeShellExecutionInput = {
         ...input,
@@ -199,7 +226,7 @@ export async function createJustBashRuntime(
  * Shared by every execution-environment adapter so tool exposure cannot drift.
  */
 export function createEnvironmentToolBridge<TExtraBody>(
-  options: CreateExecutionEnvironmentOptions<TExtraBody>,
+  options: CreateSandboxOptions<TExtraBody>,
   traceOptions: ResolvedHarnessTraceOptions,
   runtimeScope: () => JsonObject | undefined,
 ): RuntimeToolBridge | undefined {
@@ -303,8 +330,8 @@ async function mountRuntimeDescriptors(
     const resolved = await resolveRuntimeMount(mount);
     const delegate =
       resolved.kind === "file"
-        ? new SingleFileFs(new ReadWriteFs({ root: resolved.rootDir }), resolved.fileName)
-        : new ReadWriteFs({ root: resolved.rootDir });
+        ? new SingleFileFs(diskFs(resolved.rootDir), resolved.fileName)
+        : diskFs(resolved.rootDir);
 
     fs.mount(
       resolved.mountAt,
@@ -316,6 +343,52 @@ async function mountRuntimeDescriptors(
           }),
     );
   }
+}
+
+/** just-bash's disk filesystem over `root`; only the Node build has one. */
+function diskFs(root: string): IFileSystem {
+  const ReadWriteFs = justBashNodeExport("ReadWriteFs");
+  if (ReadWriteFs === undefined) {
+    throw new HarnessInputError(
+      "A workspace on disk needs Node: this runtime loaded just-bash's browser build, which has no disk filesystem. Keep the workspace in a just-bash filesystem with virtualHost() instead.",
+      { root },
+    );
+  }
+  return new ReadWriteFs({ root });
+}
+
+/**
+ * The workspace-filesystem twin of {@link materializeAgentsRuntimeMounts}: copies each
+ * `/.agents/...` runtime mount from disk into the workspace's /.agents folder.
+ */
+async function copyAgentsRuntimeMounts(
+  filesystem: IFileSystem,
+  agentsRoot: string,
+  mounts: readonly HarnessRuntimeMount[],
+): Promise<readonly HarnessRuntimeMount[]> {
+  const remaining: HarnessRuntimeMount[] = [];
+  for (const mount of mounts) {
+    const relativeAgentsPath = relativeAgentsMountPath(mount.mountPath);
+    if (relativeAgentsPath === undefined) {
+      remaining.push(mount);
+      continue;
+    }
+    const targetPath = path.posix.join(agentsRoot, relativeAgentsPath);
+    const backingStat = await stat(mount.backingPath).catch(() => undefined);
+    await filesystem.rm(targetPath, { recursive: true, force: true });
+    if (backingStat?.isFile() === true || (backingStat === undefined && !hasTrailingSlash(mount.mountPath))) {
+      await filesystem.mkdir(path.posix.dirname(targetPath), { recursive: true });
+      await filesystem.writeFile(targetPath, await readFile(mount.backingPath));
+      continue;
+    }
+    await filesystem.mkdir(targetPath, { recursive: true });
+    for (const [file, content] of Object.entries(await snapshotFolder(mount.backingPath))) {
+      const filePath = path.posix.join(targetPath, file);
+      await filesystem.mkdir(path.posix.dirname(filePath), { recursive: true });
+      await filesystem.writeFile(filePath, content);
+    }
+  }
+  return remaining;
 }
 
 async function materializeAgentsRuntimeMounts(

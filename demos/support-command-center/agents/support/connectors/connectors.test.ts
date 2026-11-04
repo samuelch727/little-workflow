@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import { discoverConnectors, loadConnectorToolExtensions } from "little-harness/connectors";
+import { discoverConnectors, loadConnectorToolExtensions } from "@little-stack/harness/connectors";
 import { describe, expect, test } from "vitest";
 import discord from "./discord/connector";
 import webRich from "./web-rich/connector";
@@ -145,6 +145,7 @@ describe("connector discovery showcase", () => {
   test("discovers only the nested demo connectors", async () => {
     await expect(discoverConnectors(agentDir)).resolves.toEqual([
       expect.objectContaining({ id: "discord", kind: "chat-sdk" }),
+      expect.objectContaining({ id: "email", kind: "chat-sdk" }),
       expect.objectContaining({ id: "web-rich", kind: "web-rich" }),
     ]);
   });

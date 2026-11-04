@@ -90,7 +90,7 @@ For every LWIR step, the runtime:
 1. Constructs a `WorkerManifest` (harness id, workflow definition hash, workflow version id, step config hash, model slot, skills, tools).
 2. Calls `worker.harness.run({ kind: "execute_step", step, stepInput, stepContext }, ctx)`.
 3. The harness emits `harness.session.started` (carrying the manifest + manifest hash) before doing any work.
-4. The harness does its work (agent loop for `ai.generate`; direct execute for `code.run` / `tool.call` / `decision`).
+4. The harness does its work (one model call for `ai.generate`; direct execute for `code.run` / `tool.call` / `decision`).
 5. The harness emits `harness.session.completed` (with output + usage) or `harness.session.failed`.
 6. The runtime validates output against the step's output schema, writes the artifact, appends `StepCompleted` or `StepFailed`.
 
@@ -127,21 +127,21 @@ The worker harness (`workflowHarness` or custom) dispatches internally by step t
 
 | `step.uses` | Worker behavior | Model in loop? |
 |---|---|---|
-| `ai.generate` | Agent loop via AI SDK `streamText` / `generateText` — model + tools + bash | Yes |
+| `ai.generate` | One AI SDK `streamText` / `generateText` call — model only, no tools or bash | Yes |
 | `code.run` | **Not executed by the default harness — see below.** A custom harness receives `{input, tools}` | No |
 | `tool.call` | Direct invocation of the named tool from `ctx.tools` | No |
 | `decision` | Pure expression evaluation against step context | No |
 | `parallel` | Orchestrated by the LWIR scheduler, not the harness | — |
 
-### `ai.generate` steps — agent loop
+### `ai.generate` steps — one model call
 
-For AI steps, the worker harness runs an agent loop:
+For AI steps, the default worker harness makes a single model call:
 
-1. Assembles system prompt: dev-supplied worker system + SDK addendum + skill frontmatter list + memory/scratch mount descriptions.
-2. Passes `ctx.tools` (step's `with.tools` allowlist subset) + bash to the agent.
-3. Per turn: emits `harness.model.called` → invokes model → emits `harness.model.responded`.
-4. Per tool call by the model: emits `harness.tool_call.started(caller: "model")` → invokes tool → emits `harness.tool_call.succeeded, harness.tool_call.failed`.
-5. Continues until the model produces a terminal output matching the step's output contract.
+1. Assembles the system prompt: the worker's system prompt and skill list, then the step's `with.system` after a blank line.
+2. Builds one user message: the step's `with.prompt`, then `Input:` and the resolved step input. The runtime resolves `{{ ... }}` expressions in `with.prompt` and `with.system` before the harness sees the step.
+3. Offers the model no tools and no bash. The call is one turn and nothing executes a tool the model asks for, so tool use in a workflow is an explicit `tool.call` step. A custom `worker.harness` still receives `ctx.tools`.
+4. Emits `harness.model.called` → invokes the model → emits `harness.model.responded`.
+5. Returns the output; the runtime validates it against the step's output contract.
 
 ### `code.run` steps — the worker-harness contract
 
@@ -232,7 +232,7 @@ After the LWIR loop exits cleanly:
 
 1. Resolves the final step (last step whose output matches the workflow's output schema).
 2. Reads the final step's `outputRef` and rehydrates the payload.
-3. Validates against the workflow's `outputSchema`.
+3. Validates against the workflow's output schema.
 4. Appends `RunCompleted` with `output`, `outputRef`, `terminalStepPath`.
 
 Non-recoverable errors append `RunFailed` with a structured error envelope and `causeCode`.

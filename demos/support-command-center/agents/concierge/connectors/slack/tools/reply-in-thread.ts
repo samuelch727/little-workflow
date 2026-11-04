@@ -1,5 +1,5 @@
 import { tool } from "ai";
-import { tryHarnessToolContext } from "little-harness/connectors/runtime";
+import { tryHarnessToolContext } from "@little-stack/harness/connectors/runtime";
 import { z } from "zod";
 import { recordThreadReply } from "../channel-log";
 import type { ConciergeSlackExtraBody } from "../connector";

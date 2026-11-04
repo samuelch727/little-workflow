@@ -5,7 +5,7 @@ import {
   buildRunWorkflowOptions,
   createLittleWorkflow,
   inlineToolRegistryFor,
-  type ErgonomicRunWorkflowOptions,
+  type RunWorkflowOptions,
   type RunResult,
   type WorkflowDefinition,
 } from "../authoring.js";
@@ -23,11 +23,10 @@ import type {
   HarnessWorkflow,
   HarnessWorkflowDefinitionIdentity,
   HarnessWorkflowInputSchema,
-} from "little-harness";
+} from "@little-stack/harness";
 
 export type WorkflowExecutionMode = "inline" | "durable";
 export type WorkflowSourceIdentity = string;
-export type LoadedWorkflowRunOptions = ErgonomicRunWorkflowOptions;
 
 export type LoadWorkflowOptions = {
   readonly workspaceRoot?: string | URL;
@@ -55,7 +54,7 @@ export type LoadedWorkflow<TInput = unknown, TOutput = unknown> = HarnessWorkflo
     readonly toolFiles: readonly string[];
     readonly skillDirs: readonly string[];
   };
-  run(input: TInput, options?: LoadedWorkflowRunOptions): Promise<RunResult<TOutput>>;
+  run(input: TInput, options?: RunWorkflowOptions): Promise<RunResult<TOutput>>;
 };
 
 type WorkflowModuleExport = WorkflowDefinition | LoadedWorkflow;
@@ -167,7 +166,7 @@ export async function loadWorkflow<TInput = unknown, TOutput = unknown>(
       toolFiles: discoveredTools.modulePaths,
       skillDirs: discoveredSkills.skillDirs,
     },
-    run(input: TInput, runOptions?: LoadedWorkflowRunOptions) {
+    run(input: TInput, runOptions?: RunWorkflowOptions) {
       const { tools: runTools, ...rest } = runOptions ?? {};
       return runWorkflowCore(
         buildRunWorkflowOptions(workflow, input, {

@@ -23,11 +23,11 @@ await files.write("/session/user-input/msg_123/report.pdf", stream, {
 });
 ```
 
-Tool authors can type the injected context with the exported
-`HarnessToolExecutionContext` type:
+Tool authors read the injected context, typed, with `harnessToolContext(options)`. Its type
+parameter types `extraBody`:
 
 ```ts
-import type { HarnessToolExecutionContext } from "little-harness";
+import { harnessToolContext } from "@little-stack/harness";
 import { tool } from "ai";
 import { z } from "zod";
 
@@ -38,10 +38,8 @@ type RequestContext = {
 const queryAccounts = tool({
   description: "Query account rows visible to the current user.",
   inputSchema: z.object({ query: z.string() }),
-  execute: async (
-    input,
-    ctx: HarnessToolExecutionContext<RequestContext>,
-  ) => {
+  execute: async (input, options) => {
+    const ctx = harnessToolContext<RequestContext>(options);
     const rows = await accountDb.query({
       query: input.query,
       userId: ctx.extraBody?.userId,

@@ -7,6 +7,43 @@ import { withTempDir } from "../test/temp.js";
 import { createEventedFileWriter } from "./evented-file-writer.js";
 
 describe("createEventedFileWriter", () => {
+  it("allocates a distinct stable occurrence for repeated identical mutations", async () => {
+    await withTempDir(async (dir) => {
+      const paths: LocalHostPaths = {
+        dataDir: dir,
+        projectRoot: dir,
+        sessionsDir: `${dir}/sessions`,
+        persistentDir: `${dir}/persistent`,
+        locksDir: `${dir}/locks`,
+      };
+      const base = createLocalFileWriter(sessionPaths(paths, "chat_identical"));
+      const events: Array<Omit<HarnessEvent, "timestamp" | "sessionId">> = [];
+      const files = createEventedFileWriter(
+        base,
+        async (event) => {
+          events.push(event);
+        },
+        { defaultSource: "tool", traceOptions: resolveTraceOptions(undefined, undefined) },
+      );
+
+      await files.writeText("/session/repeated.txt", "same bytes");
+      await files.writeText("/session/repeated.txt", "same bytes");
+      await files.writeText("/session/repeated.txt", "same bytes");
+
+      const updates = events.filter((event) => event.type === "harness.file.updated");
+      expect(updates).toHaveLength(2);
+      expect(updates.every((event) => typeof event.occurrenceId === "string")).toBe(true);
+      expect(new Set(updates.map((event) => event.occurrenceId)).size).toBe(2);
+      for (const updated of updates) {
+        const projections = events.filter((event) => event.occurrenceId === updated.occurrenceId);
+        expect(projections.map((event) => event.type)).toEqual([
+          "harness.file.updated",
+          "harness.file.written_by_tool",
+        ]);
+      }
+    });
+  });
+
   it("emits before after metadata and bounded text diffs for file updates", async () => {
     await withTempDir(async (dir) => {
       const paths: LocalHostPaths = {

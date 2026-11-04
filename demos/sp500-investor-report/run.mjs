@@ -13,13 +13,13 @@ import { pathToFileURL } from "node:url";
 import * as ai from "ai";
 import { Output, streamText } from "ai";
 import {
-  createWorkflowHarness,
-  createLittleWorkflow,
   createToolRegistry,
+  defineWorkflow,
   localWorld,
   model,
   runWorkflow,
-} from "little-workflow";
+} from "@little-stack/workflow";
+import { createWorkflowHarness } from "@little-stack/workflow/internals";
 import { assertUnzipAvailable, loadCompanyDossiers } from "./dataset.mjs";
 import { renderStubCompanyReport, renderStubFinalMarkdown } from "./markdown.mjs";
 import { resolveDeepseekModel } from "./provider-client.mjs";
@@ -170,13 +170,13 @@ export async function runDemo({
           };
         }
 
-        const stepSystem = typeof step.with?.system === "string" ? step.with.system : undefined;
+        // `system` already ends with the step's with.system, and the runtime has filled in the
+        // prompt's {{ }} templates, so both go to the model as they are.
         const prompt = typeof step.with?.prompt === "string" ? step.with.prompt : "";
-        const mergedSystem = [system, stepSystem].filter(Boolean).join("\n\n") || undefined;
         const result = await runWorkerLiveCall({
           model: stepModel,
-          system: mergedSystem,
-          prompt: renderPromptTemplate(prompt, input),
+          system: system || undefined,
+          prompt: prompt.length > 0 ? prompt : `Use this input JSON:\n${safeJson(input)}`,
           outputMode: step.output?.mode ?? "text",
           signal,
           timeout: modelCallTimeoutMs,
@@ -197,18 +197,18 @@ export async function runDemo({
     id: "model.worker",
     description: "DeepSeek v4 pro worker model for S&P 500 investor reports.",
   });
-  const workflow = createLittleWorkflow({
+  const workflow = defineWorkflow({
     id: workflowId,
     description:
       "Given a ZIP of S&P 500 top-company SEC reports, output Markdown investor reports and recommended stocks.",
-    inputSchema: fixedLwir.input.schema,
+    input: fixedLwir.input.schema,
     output: { kind: "text" },
     models: [workerSlot],
     planner: {
       model: aiSdkModel,
       harness: plannerHarness,
     },
-    globalTools: ["sp500.unzip_company_dossiers"],
+    tools: ["sp500.unzip_company_dossiers"],
     worker: { harness: workerHarness },
   });
 
@@ -232,15 +232,9 @@ export async function runDemo({
     maxConcurrentSteps: 6,
   });
 
-  const result = await runWorkflow({
+  const input = { archivePath, limit, recommendationCount, riskProfile };
+  const result = await runWorkflow(workflow, input, {
     world,
-    workflows: workflow,
-    input: {
-      archivePath,
-      limit,
-      recommendationCount,
-      riskProfile,
-    },
     tools,
     runId: `run_demo_sp500_investor_${variant}_${Date.now()}`,
   });
@@ -301,46 +295,6 @@ function renderStubStep({ stepId, input }) {
     });
   }
   throw new Error(`No stub renderer for step '${stepId}'.`);
-}
-
-function renderPromptTemplate(prompt, input) {
-  const fallback = `Use this input JSON:\n${safeJson(input)}`;
-  if (typeof prompt !== "string" || prompt.length === 0) {
-    return fallback;
-  }
-  const rendered = prompt.replace(/\{\{\s*input\.([^{}]+)\s*\}\}/gu, (_whole, path) => {
-    const value = readPath(input, path.trim());
-    return value === undefined ? "" : safeScalar(value);
-  });
-  if (rendered.includes("{{") || rendered.includes("}}")) {
-    return fallback;
-  }
-  return rendered;
-}
-
-function readPath(root, rawPath) {
-  const normalized = rawPath
-    .replace(/\[(\d+)\]/gu, ".$1")
-    .replace(/\[['"]([^'"]+)['"]\]/gu, ".$1");
-  const segments = normalized.split(".").filter(Boolean);
-  let current = root;
-  for (const segment of segments) {
-    if (current === null || typeof current !== "object") {
-      return undefined;
-    }
-    if (!Object.hasOwn(current, segment)) {
-      return undefined;
-    }
-    current = current[segment];
-  }
-  return current;
-}
-
-function safeScalar(value) {
-  if (typeof value === "string") return value;
-  if (typeof value === "number" || typeof value === "boolean") return String(value);
-  if (value === null) return "null";
-  return safeJson(value);
 }
 
 function safeJson(value) {

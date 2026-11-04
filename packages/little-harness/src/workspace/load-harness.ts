@@ -1,7 +1,8 @@
 import type { Dirent } from "node:fs";
 import { readdir, readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
-import type { Harness } from "../types.js";
+import type { Harness, HarnessHost } from "../types.js";
+import { HARNESS_AGENT_GROUP_TOOL_NAMES } from "../agents/tools.js";
 import { discoverSkills } from "./discover-skills.js";
 import { discoverTools } from "./discover-tools.js";
 import { discoverWorkflows } from "./discover-workflows.js";
@@ -39,13 +40,21 @@ async function readInstructions(agentDir: string): Promise<string | undefined> {
   }
 }
 
+export type LoadHarnessOptions = {
+  /**
+   * Run the folder's agent on this host instead of the one `agent.ts` configured, for example
+   * `localHost({ dataDir })` in a test or a script. The harness's sessions come from this host.
+   */
+  host?: HarnessHost;
+};
+
 /**
  * Load an agent folder into a runnable {@link Harness}. Imports `<agentDir>/agent.ts` (a plain
  * `createHarness(...)` default export), auto-discovers `tools/` and `skills/`, applies
  * `instructions.md` as the system prompt when `agent.ts` omits `system`, and shallow-merges the
  * discovered tools/skills into the harness config (inline tools win name collisions).
  */
-export async function loadHarness(agentDir: string): Promise<Harness> {
+export async function loadHarness(agentDir: string, options: LoadHarnessOptions = {}): Promise<Harness> {
   const base = await importDefault<Harness>(join(agentDir, "agent.ts"));
   const [tools, skills, workflows] = await Promise.all([
     discoverTools(agentDir),
@@ -60,12 +69,15 @@ export async function loadHarness(agentDir: string): Promise<Harness> {
     discoveredToolNames: Object.keys(tools),
     taskControlToolNames: HARNESS_TASK_CONTROL_TOOL_NAMES,
     workflowInspectionToolNames: HARNESS_WORKFLOW_INSPECTION_TOOL_NAMES,
+    agentGroupToolNames: base.config.agents ? HARNESS_AGENT_GROUP_TOOL_NAMES : [],
     workflows: mergedWorkflows,
   });
   return {
     ...base,
+    ...(options.host === undefined ? {} : { sessions: options.host.sessions }),
     config: {
       ...base.config,
+      ...(options.host === undefined ? {} : { host: options.host }),
       ...(system === undefined ? {} : { system }),
       tools: { ...tools, ...base.config.tools },
       skills: [...base.config.skills, ...skills],

@@ -17,7 +17,7 @@ The script prints:
 ## Run
 
 ```bash
-pnpm --filter little-workflow build
+pnpm --filter @little-stack/workflow build
 pnpm --filter kill-resume demo
 ```
 

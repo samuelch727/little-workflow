@@ -1,0 +1,127 @@
+---
+title: How they fit
+description: LittleDB is the product, Little Harness and Little Workflow are the SDK, and workspaces are where an agent's work lives. What each owns and how they connect.
+---
+
+The Little stack is three things that fit together.
+
+- **LittleDB** is the product. It records what your agents and workflows do as
+  traces, scores them (code checks, AI judges, people, and what your users
+  said), and improves them: a reviewer reads the traces and proposes a change,
+  LittleDB tests the change on your own past conversations, checks it against
+  your guardrails, and puts it live or asks a person. LittleDB is private
+  source for now, and Harness and Workflow run fully without it.
+- **Little Harness** and **Little Workflow** are the SDK. You build agents with
+  Harness, and bounded, durable jobs with Workflow. LittleDB traces both and
+  improves both. Most projects start and stay with Harness; Workflow is
+  optional.
+- **Workspaces** are where an agent's work lives: each user's own folder, kept
+  between visits and ready when they return. Managed workspaces come with
+  LittleDB's hosted service; the self-hosted path is Little Compute. See
+  [Workspaces](#workspaces) below.
+
+| Piece | Owns | Status |
+| --- | --- | --- |
+| [LittleDB](/docs/littledb) | Traces, scores and user feedback; versions of agents and workflows; the review loop that proposes, tests and ships changes | Private source |
+| [Little Harness](/docs/harness) | Agent sessions, tools, skills, files and artifacts, traces, Persistent Dirs, the folder tier of a workspace | npm `0.2.0-alpha.0` |
+| [Little Workflow](/docs/workflow) | Workflows an agent designs: validated, versioned, durable runs with replay | npm `0.2.0-alpha.1` |
+| Workspaces, managed | Each user's workspace held by LittleDB: the Harness folder tier for most turns, a container that wakes on demand and sleeps after ten idle minutes | Part of LittleDB's hosted service; private |
+| Workspaces, self-hosted ([Little Compute](/docs/compute)) | The same workspace on rootless Podman, with durable Tasks, fork and merge-back | Unpublished source; control plane frozen |
+
+```txt
+your app or the CLI
+  -> Little Harness (agent runtime)
+       -> workflows option -> Little Workflow (optional; depends on Harness)
+       -> workspace: folder tier in process, a container when a command needs one
+            managed: LittleDB's hosted service   self-hosted: Little Compute
+       -> onEvent, feedback, eval worker -> LittleDB
+       <- resolve (which version to run)  <- LittleDB
+```
+
+The same agent folder (`agent.ts`, with `tools/`, `skills/` and workflows
+beside it) runs unchanged on a laptop or a Podman box today, and on the managed
+tier as it lands; only the sandbox builder differs. That portability, the merge-back of parallel
+children's work into one workspace, and the loop from real user outcomes back
+into the agent's configuration are what the stack is for. The runtime
+underneath is deliberately thin.
+
+## Start with Harness
+
+A Harness agent needs a host, a model, instructions and tools. Little Harness
+creates a private workspace per session, stores large outputs as artifacts,
+records a trace, and returns a result. See
+[What Little Harness Is](/docs/harness).
+
+An agent can live in an agent folder (`agent.ts`, with `tools/` and `skills/`
+beside it). The `little-harness` CLI loads that folder, and so can your app
+through [`loadHarness()`](/docs/harness/v0.1.0-alpha/build-agents/agent-folders).
+Projects created by [`little setup`](/docs/get-started/setup) use the same agent
+definitions for the CLI and for the generated web route.
+
+## Add Workflow for bounded, durable jobs
+
+Use Little Workflow when a job must stay inside declared limits, survive a crash,
+and be replayed or inspected step by step. An agent designs the workflow; Little
+Workflow validates it into an immutable version and runs it durably. The
+`@little-stack/workflow` package depends on `@little-stack/harness`, and its planner, worker
+and fixer roles run in a harness.
+
+To let a Harness agent decide when to run a workflow, adapt it with
+`asHarnessWorkflow` and pass it to `createHarness({ workflows })`. The canonical
+guide is
+[Compose With Little Harness](/docs/workflow/v0.1.0-alpha/authoring/compose-with-harness).
+
+## Send it to LittleDB
+
+LittleDB is one service, reached with one URL and one API key. Its client
+resolves which version of an agent or workflow to run, sends Harness turns and
+Workflow runs as traces, forwards what your users said, puts agent-made
+workflows behind review, and runs LittleDB's experiments in your app. That is
+how the loop closes: real outcomes come back as a better version of the agent.
+See [LittleDB](/docs/littledb).
+
+## Workspaces
+
+A workspace is one user's folder and the shell over it. Most turns run on the
+**folder tier**: Harness Tier-0 just-bash over the user's files, in process, in
+milliseconds, with the command classifier deciding before anything runs. A
+command that needs a real machine (git, a package manager, a build, tests, a
+long-running process) escalates to a **container** that is attached to the same
+workspace and sleeps again after ten idle minutes. The workspace, not the
+container, is the source of truth; the container is borrowed.
+
+Two ways to run one:
+
+- **Managed** with LittleDB's hosted service (private for now): LittleDB holds
+  each user's workspace, the Harness folder tier runs for most turns, and a
+  container wakes only when a command needs it. Each turn reports its tier and
+  infrastructure cost to LittleDB.
+- **Self-hosted** with [Little Compute](/docs/compute) on rootless Podman: the
+  same workspace with durable Tasks, fork, and merge-back of parallel children's
+  work. Little Compute's control plane is frozen as of 2026-10-23; what is merged
+  keeps working, and nothing new is added to it.
+
+In Harness terms both are a sandbox: the folder tier is `justBashSandbox()`, and
+the container is the `nextTier` of
+[`tieredSandbox()`](/docs/harness/v0.1.0-alpha/runtime/execution-tiers). On a
+laptop the same agent runs with Tier-0 alone or a local Podman as the next tier.
+Little Workflow does not depend on either workspace engine.
+
+## Runs on your machine
+
+- Harness sessions, traces and artifacts are stored by the
+  [Local Host](/docs/harness/v0.1.0-alpha/runtime/local-host) in a folder you
+  choose.
+- Workflow runs are recorded by [Local World](/docs/workflow/v0.1.0-alpha/running/local-world)
+  in an embedded SQLite store on disk.
+- A self-hosted workspace runs on rootless Podman; see
+  [Self-hosting](/docs/compute/self-hosting). It is not publicly installable yet.
+- LittleDB is optional. Its dev mode must not be exposed to untrusted
+  networks; see [LittleDB](/docs/littledb).
+
+## Sessions, runs and tasks
+
+A **Harness Session** is one agent conversation or job. A **Workflow Run** is
+one durable execution of a workflow version. A **Compute Task** is one unit of
+agent work that a self-hosted workspace schedules, with retry **Attempts** that
+use **Sandbox Leases** for isolated execution. See the [Glossary](/docs/glossary).

@@ -1,6 +1,6 @@
 import type {
   HarnessWorkflowDefinitionIdentity,
-  HarnessWorkflowInheritance,
+  HarnessWorkflowInheritancePolicy,
 } from "../workflows.js";
 
 export type WorkflowReserveInput = {
@@ -25,7 +25,7 @@ export type WorkflowReserveInput = {
   readonly memoryScope: "cross-session" | "session" | "none";
   readonly workflowSetMemoryKey?: string;
   readonly workflowSetDefinitionIdentities: readonly HarnessWorkflowDefinitionIdentity[];
-  readonly inheritance: HarnessWorkflowInheritance;
+  readonly inheritance: HarnessWorkflowInheritancePolicy;
   readonly source?: "static" | "dynamic";
   readonly purpose?: string;
   readonly dynamicPlan?: unknown;

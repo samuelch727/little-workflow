@@ -1,48 +1,42 @@
 import { once } from "node:events";
-import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 
 /**
- * A stand-in littleDB stack: the control plane's config-resolve and outcomes endpoints, and
- * the engine's trace ingest. Two real HTTP servers, so `@little-workflow/littledb`'s client
- * goes over the wire exactly as it would against the live stack — no fetch monkey-patching,
- * and the wire contract (`ResolveConfigResponseSchema` is zod-parsed with no fallback) is
- * genuinely exercised.
+ * A stand-in LittleDB: the `/v1` endpoints the demo uses, on a real HTTP server, so
+ * `@little-stack/littledb` goes over the wire exactly as it would against the real thing.
  *
  * What it makes checkable is the thing the demo most needs to be true and cannot see from
  * inside: that a `--gate` run sends NOTHING. The stub records every request, so a test can
- * assert zero outcomes and zero ingest calls rather than trusting a flag.
+ * assert zero ingest calls rather than trusting a flag.
  *
- * The bootstrap prompt is echoed back as the resolved config's prompt, which is also how the
- * real control plane behaves on the first resolve for a harness+channel — so a test can prove
- * `SUPPORT_PROMPT_FILE` really is what the agent ran on.
+ * The bootstrap is echoed back as the resolved content, which is also how LittleDB behaves
+ * on the first resolve for a harness, so a test can prove `SUPPORT_PROMPT_FILE` really is
+ * what the agent ran on.
  */
 
-export type CapturedResolve = { harnessId: string; channel: string; bootstrapPrompt: string };
-export type CapturedOutcome = { runId: string; status: string; detail?: string; metadata?: unknown };
+export const STUB_API_KEY = "ldb_stub_key";
+
+export type CapturedResolve = { slug: string; channel: string; stickyKey?: string; bootstrapSystem: string };
+export type CapturedScore = { traceId: string; name: string; value?: number; comment?: string; source?: string };
+export type ClaimedRun = Record<string, unknown> & { runId: string; traceId: string };
 
 export type StubLittleDb = {
-  readonly controlPlaneUrl: string;
-  readonly engineUrl: string;
+  readonly url: string;
   readonly resolves: CapturedResolve[];
-  readonly outcomes: CapturedOutcome[];
-  /** Trace-event envelopes the reporter pushed to the engine. */
-  readonly ingests: unknown[];
-  readonly evalRuns: unknown[];
-  /** The config version handed out next. Bump it to simulate a promotion. */
-  configVersionId: string;
+  /** Ingest bodies, as sent. */
+  readonly ingests: Array<{ traces?: Array<Record<string, unknown>>; spans?: Array<Record<string, unknown>>; scores?: CapturedScore[] }>;
+  readonly scores: CapturedScore[];
+  readonly datasets: Array<{ id: string; name: string; subject?: string }>;
+  readonly items: Array<{ datasetId: string; input: unknown; expected?: unknown; metadata?: Record<string, unknown>; split?: string }>;
+  readonly proposals: Array<Record<string, unknown>>;
+  /** Runs the next claim hands out. */
+  readonly pendingRuns: ClaimedRun[];
+  readonly completions: Array<{ runId: string; body: Record<string, unknown> }>;
+  /** Requests without the right API key. */
+  readonly unauthorized: string[];
   close(): Promise<void>;
 };
-
-async function listen(
-  handler: (req: IncomingMessage, res: ServerResponse) => void,
-): Promise<{ server: Server; url: string }> {
-  const server = createServer(handler);
-  server.listen(0, "127.0.0.1");
-  await once(server, "listening");
-  const { port } = server.address() as AddressInfo;
-  return { server, url: `http://127.0.0.1:${port}` };
-}
 
 function json(res: ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, { "content-type": "application/json" });
@@ -57,100 +51,92 @@ async function readBody(req: IncomingMessage): Promise<Record<string, unknown>> 
 }
 
 export async function startStubLittleDb(): Promise<StubLittleDb> {
-  const resolves: CapturedResolve[] = [];
-  const outcomes: CapturedOutcome[] = [];
-  const ingests: unknown[] = [];
-  const evalRuns: unknown[] = [];
-  const state = { configVersionId: "cfgv_001" };
+  const state: Omit<StubLittleDb, "url" | "close"> = {
+    resolves: [],
+    ingests: [],
+    scores: [],
+    datasets: [],
+    items: [],
+    proposals: [],
+    pendingRuns: [],
+    completions: [],
+    unauthorized: [],
+  };
 
-  const engine = await listen((req, res) => {
+  const server = createServer((req, res) => {
     void (async () => {
       const url = new URL(req.url ?? "/", "http://127.0.0.1");
-      if (req.method === "GET" && url.pathname === "/") {
-        json(res, 200, { ok: true });
-        return;
+      const path = url.pathname;
+      if (req.method === "GET" && path === "/healthz") return json(res, 200, { ok: true });
+      if (req.headers.authorization !== `Bearer ${STUB_API_KEY}`) {
+        state.unauthorized.push(`${req.method} ${path}`);
+        return json(res, 401, { error: { code: "unauthorized", message: "Bad API key." } });
       }
-      if (req.method === "POST" && url.pathname === "/ingest") {
-        const body = await readBody(req);
-        ingests.push(body);
-        json(res, 200, { ok: true });
-        return;
-      }
-      if (req.method === "POST" && url.pathname === "/harness/eval-runs") {
-        evalRuns.push(await readBody(req));
-        json(res, 200, { ok: true });
-        return;
-      }
-      json(res, 404, { error: `unexpected engine request ${req.method} ${url.pathname}` });
-    })();
-  });
+      const body = req.method === "GET" ? {} : await readBody(req);
 
-  const controlPlane = await listen((req, res) => {
-    void (async () => {
-      const url = new URL(req.url ?? "/", "http://127.0.0.1");
-      if (req.method === "GET" && url.pathname === "/") {
-        json(res, 200, { ok: true });
-        return;
-      }
-      if (req.method === "POST" && url.pathname === "/api/config/resolve") {
-        const body = (await readBody(req)) as {
-          harnessId?: string;
-          channel?: string;
-          bootstrapConfig?: { prompt?: string };
-        };
-        resolves.push({
-          harnessId: body.harnessId ?? "",
-          channel: body.channel ?? "",
-          bootstrapPrompt: body.bootstrapConfig?.prompt ?? "",
+      if (req.method === "POST" && path === "/v1/resolve") {
+        const bootstrap = (body.bootstrap ?? {}) as { system?: string; model?: string };
+        state.resolves.push({
+          slug: String(body.slug),
+          channel: String(body.channel ?? "production"),
+          ...(typeof body.stickyKey === "string" ? { stickyKey: body.stickyKey } : {}),
+          bootstrapSystem: bootstrap.system ?? "",
         });
-        json(res, 200, {
-          configVersionId: state.configVersionId,
+        return json(res, 200, {
+          subjectId: `sub_${String(body.slug)}`,
+          versionId: "ver_001",
+          number: 1,
+          status: "live",
+          mode: "live",
+          content: { system: bootstrap.system ?? "", model: bootstrap.model ?? "deepseek-v4-flash" },
           channel: body.channel ?? "production",
-          staleConfig: false,
-          config: {
-            prompt: body.bootstrapConfig?.prompt ?? "",
-            skills: [],
-            toolManifest: null,
-            modelSlot: "deepseek-v4-flash",
-            sampling: {},
-            hyperparams: {},
-            memoryPolicy: null,
-          },
         });
-        return;
       }
-      if (req.method === "POST" && url.pathname === "/api/outcomes") {
-        outcomes.push((await readBody(req)) as CapturedOutcome);
-        json(res, 200, { ok: true });
-        return;
+      if (req.method === "POST" && path === "/v1/ingest") {
+        state.ingests.push(body as StubLittleDb["ingests"][number]);
+        state.scores.push(...(((body.scores as CapturedScore[] | undefined) ?? [])));
+        return json(res, 200, { ok: true });
       }
-      json(res, 404, { error: `unexpected control-plane request ${req.method} ${url.pathname}` });
-    })();
+      if (req.method === "GET" && path === "/v1/datasets") return json(res, 200, { datasets: state.datasets });
+      if (req.method === "POST" && path === "/v1/datasets") {
+        const dataset = { id: `dst_${state.datasets.length + 1}`, name: String(body.name), ...(typeof body.subject === "string" ? { subject: body.subject } : {}) };
+        state.datasets.push(dataset);
+        return json(res, 201, { dataset });
+      }
+      const items = /^\/v1\/datasets\/([^/]+)\/items$/u.exec(path);
+      if (req.method === "POST" && items !== null) {
+        const added = (body.items as StubLittleDb["items"]).map((item) => ({ ...item, datasetId: items[1]! }));
+        state.items.push(...added);
+        return json(res, 201, { added: added.length, ids: added.map((_, i) => `itm_${i}`), holdout: added.filter((i) => i.split === "holdout").length });
+      }
+      if (req.method === "POST" && path === "/v1/proposals") {
+        state.proposals.push(body);
+        return json(res, 201, { proposal: { id: "prp_1", status: "open", kind: "prompt", risk: "low", candidateVersionId: "ver_002" } });
+      }
+      if (req.method === "POST" && path === "/v1/worker/claim") {
+        return json(res, 200, { runs: state.pendingRuns.splice(0, Number(body.limit ?? 4)) });
+      }
+      const complete = /^\/v1\/worker\/runs\/([^/]+)\/complete$/u.exec(path);
+      if (req.method === "POST" && complete !== null) {
+        state.completions.push({ runId: complete[1]!, body });
+        return json(res, 200, { run: { id: complete[1], status: body.error === undefined ? "done" : "pending" } });
+      }
+      if (req.method === "POST" && /^\/v1\/worker\/runs\/[^/]+\/heartbeat$/u.test(path)) return json(res, 200, { ok: true });
+      return json(res, 404, { error: { code: "not_found", message: `unexpected request ${req.method} ${path}` } });
+    })().catch((error: unknown) => json(res, 500, { error: { code: "internal", message: String(error) } }));
   });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const { port } = server.address() as AddressInfo;
 
   return {
-    controlPlaneUrl: controlPlane.url,
-    engineUrl: engine.url,
-    resolves,
-    outcomes,
-    ingests,
-    evalRuns,
-    get configVersionId() {
-      return state.configVersionId;
-    },
-    set configVersionId(next: string) {
-      state.configVersionId = next;
-    },
+    ...state,
+    url: `http://127.0.0.1:${port}`,
     async close() {
-      await Promise.all(
-        [controlPlane.server, engine.server].map(
-          (server) =>
-            new Promise<void>((resolve) => {
-              server.closeAllConnections?.();
-              server.close(() => resolve());
-            }),
-        ),
-      );
+      await new Promise<void>((resolve) => {
+        server.closeAllConnections?.();
+        server.close(() => resolve());
+      });
     },
   };
 }

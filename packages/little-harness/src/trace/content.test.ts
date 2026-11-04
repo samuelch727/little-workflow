@@ -1,10 +1,87 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { sha256Hex } from "../ids.js";
+import { createEventedFileWriter } from "../execution/evented-file-writer.js";
 import { localHost } from "../local-host/index.js";
 import { withTempDir } from "../test/temp.js";
 import { resolveTraceOptions } from "./options.js";
 import { captureTraceContent } from "./content.js";
 
 describe("captureTraceContent", () => {
+  it("records an unavailable full copy above the writer's byte ceiling without creating an artifact", async () => {
+    await withTempDir(async (dir) => {
+      const session = await localHost({ dataDir: dir }).sessions.getOrCreate({ id: "bounded" });
+      const write = vi.fn(session.files.writeText);
+      const emit = vi.fn(async () => {});
+      const options = resolveTraceOptions({ content: { previewBytes: 3, maxInlineBytes: 1 } }, undefined);
+      const files = createEventedFileWriter({ ...session.files, limits: { maxFileBytes: 10 }, writeText: write }, emit, { traceOptions: options });
+      const value = "界😀界😀";
+      const ref = await captureTraceContent({ value, label: "response", files, traceOptions: options });
+      expect(files.limits).toEqual({ maxFileBytes: 10 });
+      expect(ref).toEqual({ captured: false, preview: "界😀", truncated: true, bytes: 14, sha256: sha256Hex(new TextEncoder().encode(value)), mediaType: "text/plain", unavailableReason: "storage_limit", storageLimitBytes: 10 });
+      expect(new TextEncoder().encode(ref.preview).byteLength).toBe(7);
+      expect(ref.preview!.length).toBe(3);
+      expect(write).not.toHaveBeenCalled();
+      expect(emit).not.toHaveBeenCalled();
+      expect(ref).not.toHaveProperty("contentRef");
+      await expect(session.files.list("/artifacts/trace", { recursive: true })).rejects.toMatchObject({ code: "ENOENT" });
+    });
+  });
+
+  it("stores the exact ceiling, preserves sanitized hashes, and propagates unrelated write failures", async () => {
+    await withTempDir(async (dir) => {
+      const session = await localHost({ dataDir: dir }).sessions.getOrCreate({ id: "boundary" });
+      const traceOptions = resolveTraceOptions({ content: { previewBytes: 2, maxInlineBytes: 1 } }, undefined);
+      const value = "界😀";
+      const files = { ...session.files, limits: { maxFileBytes: 7 } };
+      const ref = await captureTraceContent({ value, label: "exact", files, traceOptions });
+      expect(ref.captured).toBe(true);
+      expect(ref.preview).toBe("界");
+      expect((await files.read(ref.contentRef!)).text()).toBe(value);
+      const over = await captureTraceContent({ value: `${value}x`, label: "one-byte-over", files, traceOptions });
+      expect(over).toMatchObject({ captured: false, bytes: 8, unavailableReason: "storage_limit", storageLimitBytes: 7 });
+      expect(over).not.toHaveProperty("contentRef");
+      const failure = new Error("Synthetic required storage failure");
+      for (const limits of [undefined, { maxFileBytes: 7 }]) {
+        await expect(captureTraceContent({ value, label: "fails", files: { ...files, limits, writeText: async () => { throw failure; } }, traceOptions })).rejects.toBe(failure);
+      }
+      const redacted = await captureTraceContent({ value: { safe: "visible", token: "private" }, label: "redacted", files, traceOptions });
+      expect(redacted).toMatchObject({ captured: false, redacted: true, unavailableReason: "storage_limit", sha256: sha256Hex(new TextEncoder().encode(JSON.stringify({ safe: "visible", token: "[redacted]" }, null, 2))) });
+    });
+  });
+
+  it.each(["x", "界"])("preserves the default 512-code-unit preview for %s text", async character => {
+    await withTempDir(async dir => {
+      const session = await localHost({ dataDir: dir }).sessions.getOrCreate({ id: "legacy-preview" });
+      const value = character.repeat(700);
+      const ref = await captureTraceContent({ value, label: "response", files: session.files, traceOptions: resolveTraceOptions(undefined, undefined) });
+      expect(ref.preview).toBe(character.repeat(512));
+      expect(ref.bytes).toBe(new TextEncoder().encode(value).byteLength);
+      expect(ref.sha256).toBe(sha256Hex(new TextEncoder().encode(value)));
+    });
+  });
+
+  it.each([
+    [0, ""], [1, "a"], [2, "a"], [3, "a😀"], [4, "a😀b"], [5, "a😀b"],
+  ] as const)("clips at %i code units without splitting an astral character", async (limit, expected) => {
+    await withTempDir(async dir => {
+      const session = await localHost({ dataDir: dir }).sessions.getOrCreate({ id: "surrogate-preview" });
+      const ref = await captureTraceContent({ value: "a😀b", label: "response", files: session.files, traceOptions: resolveTraceOptions({ content: { previewBytes: limit } }, undefined) });
+      expect(ref.preview).toBe(expected);
+      expect(ref.preview!.length).toBeLessThanOrEqual(limit);
+      expect(new TextDecoder().decode(new TextEncoder().encode(ref.preview))).toBe(ref.preview);
+      expect(ref.bytes).toBe(6);
+    });
+  });
+
+  it("backs off a surrogate pair split by the default boundary", async () => {
+    await withTempDir(async dir => {
+      const session = await localHost({ dataDir: dir }).sessions.getOrCreate({ id: "default-surrogate-preview" });
+      const ref = await captureTraceContent({ value: `${"a".repeat(511)}😀z`, label: "response", files: session.files, traceOptions: resolveTraceOptions(undefined, undefined) });
+      expect(ref.preview).toBe("a".repeat(511));
+      expect(ref.bytes).toBe(516);
+    });
+  });
+
   it("captures small strings inline with byte metadata", async () => {
     await withTempDir(async (dir) => {
       const session = await localHost({ dataDir: dir }).sessions.getOrCreate({ id: "chat_123" });

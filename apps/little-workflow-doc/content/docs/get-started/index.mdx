@@ -1,0 +1,30 @@
+---
+title: Get started
+description: Pick the first step that matches what you are building.
+---
+
+Most projects start with Little Harness. Little Workflow is optional. LittleDB
+(the product the SDK feeds) and the workspace engines cannot be installed yet.
+
+| You want to | Start with |
+| --- | --- |
+| Create a Node or Next.js project with an agent, or add one to an existing Next.js app | [Setup](/docs/get-started/setup) (`little setup`) |
+| Try an agent in its own workspace and chat with it from the terminal | [Harness Getting Started](/docs/harness/v0.1.0-alpha/getting-started) (`little-harness init`) |
+| Call an agent from your own route, job or worker | [Harness: Embedding in Your App](/docs/harness/v0.1.0-alpha/quickstart) |
+| Run a bounded, durable workflow directly from code | [Workflow Quickstart](/docs/workflow/v0.1.0-alpha/getting-started/quickstart) |
+| Give an agent a workflow as a tool | [Compose With Little Harness](/docs/workflow/v0.1.0-alpha/authoring/compose-with-harness) |
+
+All published paths need Node.js 22 or newer and AI SDK 7, which is a peer
+dependency of both packages.
+
+## Not installable yet
+
+- [LittleDB](/docs/littledb) is private source. Harness and Workflow work
+  without it.
+- [Workspaces](/docs/how-they-fit#workspaces) beyond your own machine: managed
+  workspaces come with LittleDB's hosted service (private for now), and the
+  self-hosted engine ([Little Compute](/docs/compute)) is documented from an
+  unpublished source checkout. Neither has an npm package.
+
+See [How they fit](/docs/how-they-fit) for what each piece owns, and
+[Releases](/docs/releases) for exact versions.

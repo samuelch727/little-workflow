@@ -1,3 +1,4 @@
+import { InMemoryFs } from "just-bash";
 import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -14,13 +15,18 @@ import {
   listEvents,
   materializeRunState,
   readArtifact,
-  truncateEventLogForTest,
   writeArtifact,
-} from "./index.js";
+} from "./entries/internals.js";
+import {
+  truncateEventLogForTest,
+  virtualWorld,
+  EventAppendIdempotencyConflictError,
+} from "./world.js";
 
 const tempDirs: string[] = [];
 
-async function tempWorld() {
+async function tempWorld(kind: "local" | "virtual") {
+  if (kind === "virtual") return virtualWorld({ fs: new InMemoryFs(), dataDir: "/test-world" });
   const dataDir = await mkdtemp(join(tmpdir(), "little-workflow-world-"));
   tempDirs.push(dataDir);
   return localWorld({ dataDir });
@@ -30,9 +36,9 @@ afterEach(async () => {
   await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
 });
 
-describe("Local World event and artifact store", () => {
+describe.each(["local", "virtual"] as const)("%s World event and artifact store", (kind) => {
   it("accepts harness event vocabulary", async () => {
-    const world = await tempWorld();
+    const world = await tempWorld(kind);
     const runId = "run_harness_events";
     const events = [
       {
@@ -115,7 +121,7 @@ describe("Local World event and artifact store", () => {
   });
 
   it("appends events in commit order and returns stable event refs", async () => {
-    const world = await tempWorld();
+    const world = await tempWorld(kind);
 
     const started = await appendEvent(world, "run_order", {
       type: "RunStarted",
@@ -143,6 +149,8 @@ describe("Local World event and artifact store", () => {
     );
 
     const events = await listEvents(world, "run_order");
+    expect(Object.isFrozen(started)).toBe(true);
+    expect(Object.isFrozen(events[0]!.payload)).toBe(true);
     expect(events).toHaveLength(3);
     expect(events.map((event) => event.eventId)).toEqual([
       started.eventId,
@@ -158,12 +166,14 @@ describe("Local World event and artifact store", () => {
   });
 
   it("surfaces only fully-committed events after an interrupted append and continues the sequence", async () => {
+    // For virtualWorld this models the filesystem's visible published prefix,
+    // not survival of a process crash; it inherits that filesystem's persistence.
     // Guarantee under test: after a crash mid-append, listEvents returns ONLY
     // the events that were durably committed (in order), and the next append
     // resumes from the correct next sequence — no corruption, no gaps, no
     // double-counting. Expressed via the medium-agnostic crash seam rather than
     // by editing the on-disk byte format.
-    const world = await tempWorld();
+    const world = await tempWorld(kind);
 
     const started = await appendEvent(world, "run_partial_tail", {
       type: "RunStarted",
@@ -202,7 +212,7 @@ describe("Local World event and artifact store", () => {
     // references a non-existent artifact and is rejected before persistence)
     // must NOT consume a sequence number. The next successful append continues
     // from where the committed log left off.
-    const world = await tempWorld();
+    const world = await tempWorld(kind);
 
     const started = await appendEvent(world, "run_rejected_append", {
       type: "RunStarted",
@@ -232,9 +242,30 @@ describe("Local World event and artifact store", () => {
     expect(events.map((event) => event.type)).toEqual(["RunStarted", "RunCompleted"]);
   });
 
-  it("isolates events and artifacts by temporary Local World directory", async () => {
-    const left = await tempWorld();
-    const right = await tempWorld();
+  it("returns an existing receipt before artifact validation and sequence allocation", async () => {
+    const world = await tempWorld(kind);
+    const artifact = await writeArtifact(world, {
+      runId: "run_receipt_order", name: "output", payload: { ok: true }, contentType: "application/json",
+    });
+    const event = {
+      type: "StepCompleted" as const,
+      appendIdempotencyKey: "receipt-key-for-world-order",
+      canonicalRequestDigest: `sha256:${"1".repeat(64)}`,
+      payload: { stepPath: "step", outputRef: artifact.artifactRef },
+    };
+    const first = await appendEvent(world, "run_receipt_order", event);
+    await writeFileForTest(world,
+      join(world.dataDir, "artifacts", "blobs", `${artifact.artifactId}.bin`), "tampered");
+    await expect(appendEvent(world, "run_receipt_order", event)).resolves.toEqual(first);
+    await expect(appendEvent(world, "run_receipt_order", {
+      ...event, canonicalRequestDigest: `sha256:${"2".repeat(64)}`,
+    })).rejects.toBeInstanceOf(EventAppendIdempotencyConflictError);
+    expect((await appendEvent(world, "run_receipt_order", { type: "RunCompleted", payload: {} })).sequence).toBe(2);
+  });
+
+  it("isolates events and artifacts by World storage namespace", async () => {
+    const left = await tempWorld(kind);
+    const right = await tempWorld(kind);
 
     await appendEvent(left, "run_same", { type: "RunStarted", payload: { side: "left" } });
     await appendEvent(right, "run_same", { type: "RunStarted", payload: { side: "right" } });
@@ -268,7 +299,7 @@ describe("Local World event and artifact store", () => {
   });
 
   it("round-trips artifact manifests and payloads", async () => {
-    const world = await tempWorld();
+    const world = await tempWorld(kind);
 
     const jsonArtifact = await writeArtifact(world, {
       runId: "run_artifacts",
@@ -338,7 +369,7 @@ describe("Local World event and artifact store", () => {
   });
 
   it("serializes concurrent duplicate artifact writes for the same ref", async () => {
-    const world = await tempWorld();
+    const world = await tempWorld(kind);
 
     const writes = await Promise.all(
       Array.from({ length: 8 }, () =>
@@ -360,7 +391,7 @@ describe("Local World event and artifact store", () => {
   });
 
   it("detects unsafe paths, unknown artifacts, and artifact hash mismatches", async () => {
-    const world = await tempWorld();
+    const world = await tempWorld(kind);
 
     await expect(
       appendEvent(world, "../run_escape", { type: "RunStarted", payload: {} }),
@@ -379,6 +410,7 @@ describe("Local World event and artifact store", () => {
       contentType: "application/json",
     });
     await writeFileForTest(
+      world,
       join(world.dataDir, "artifacts", "blobs", `${artifact.artifactId}.bin`),
       "tampered",
     );
@@ -388,7 +420,7 @@ describe("Local World event and artifact store", () => {
   });
 
   it("detects malformed artifact manifests with forged size fields", async () => {
-    const world = await tempWorld();
+    const world = await tempWorld(kind);
     const artifact = await writeArtifact(world, {
       runId: "run_manifest_shape",
       name: "payload",
@@ -397,6 +429,7 @@ describe("Local World event and artifact store", () => {
     });
 
     await writeFileForTest(
+      world,
       join(world.dataDir, "artifacts", `${artifact.artifactId}.json`),
       `${canonicalJson({
         ...artifact,
@@ -410,7 +443,7 @@ describe("Local World event and artifact store", () => {
   });
 
   it("materializes run and step views from events after artifacts are committed", async () => {
-    const world = await tempWorld();
+    const world = await tempWorld(kind);
     const artifact = await writeArtifact(world, {
       runId: "run_materialize",
       stepPath: "summarize",
@@ -502,7 +535,7 @@ describe("Local World event and artifact store", () => {
   });
 
   it("rejects step completion events that reference unwritten artifacts", async () => {
-    const world = await tempWorld();
+    const world = await tempWorld(kind);
     const otherWorldArtifact = await writeArtifact(world, {
       runId: "run_other",
       stepPath: "summarize",
@@ -553,7 +586,7 @@ describe("Local World event and artifact store", () => {
   });
 
   it("materializes retries and failed runs without re-reading artifact payloads", async () => {
-    const world = await tempWorld();
+    const world = await tempWorld(kind);
 
     await appendEvent(world, "run_retry", { type: "RunStarted", payload: {} });
     await appendEvent(world, "run_retry", {
@@ -603,7 +636,7 @@ describe("Local World event and artifact store", () => {
   });
 
   it("materializes outputRef-only step artifacts and special step paths safely", async () => {
-    const world = await tempWorld();
+    const world = await tempWorld(kind);
     const artifact = await writeArtifact(world, {
       runId: "run_output_ref_only",
       stepPath: "__proto__",
@@ -635,7 +668,7 @@ describe("Local World event and artifact store", () => {
   });
 
   it("returns no events for missing runs and rejects missing materialized state", async () => {
-    const world = await tempWorld();
+    const world = await tempWorld(kind);
 
     await expect(listEvents(world, "run_missing")).resolves.toEqual([]);
     await expect(materializeRunState(world, "run_missing")).rejects.toBeInstanceOf(
@@ -644,7 +677,11 @@ describe("Local World event and artifact store", () => {
   });
 });
 
-async function writeFileForTest(path: string, value: string): Promise<void> {
+async function writeFileForTest(world: { files?: import("just-bash").IFileSystem }, path: string, value: string): Promise<void> {
+  if (world.files !== undefined) {
+    await world.files.writeFile(path, value);
+    return;
+  }
   const { writeFile } = await import("node:fs/promises");
   await writeFile(path, value);
 }

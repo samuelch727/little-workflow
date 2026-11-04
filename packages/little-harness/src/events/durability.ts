@@ -23,11 +23,23 @@ export type ModelReplay<TResponse = unknown> =
   | { readonly kind: "inflight"; readonly turn: number; readonly callId: string }
   | { readonly kind: "completed"; readonly turn: number; readonly callId: string; readonly response: TResponse };
 
+/** `callId` on every match: the recorded call it came from. */
 export type ToolReplay =
   | { readonly kind: "none" }
   | { readonly kind: "inflight"; readonly callId: string }
-  | { readonly kind: "completed"; readonly result: unknown }
-  | { readonly kind: "failed"; readonly error: unknown };
+  | { readonly kind: "completed"; readonly result: unknown; readonly callId?: string }
+  | { readonly kind: "failed"; readonly error: unknown; readonly callId?: string };
+
+/** Which recorded call a lookup may match, beyond its tool, arguments and step. */
+export type ToolReplayIdentity = {
+  /**
+   * The call's own id. A recorded call with this id is this call: a continued turn runs its
+   * waiting calls again under their ids, so two calls with the same arguments stay apart.
+   */
+  readonly callId?: string;
+  /** Recorded calls already matched to other calls of this run, which this one never takes. */
+  readonly claimed?: ReadonlySet<string>;
+};
 
 export function canonicalJson(value: unknown): string {
   return serializeCanonical(value, "$", new WeakSet<object>());
@@ -173,6 +185,7 @@ export function findSingleCompletedModelReplay<TResponse = unknown>(
 export function findToolReplay(
   events: readonly DurableHarnessEvent[],
   candidate: HarnessToolCallHashInput,
+  identity: ToolReplayIdentity = {},
 ): ToolReplay {
   const replayHash = hashHarnessToolCall(candidate);
   const legacyReplayHash =
@@ -193,6 +206,28 @@ export function findToolReplay(
     })
     .sort((left, right) => left.sequence - right.sequence);
 
+  const own = identity.callId === undefined
+    ? []
+    : started.filter((event) => stringProperty(event.payload, "callId") === identity.callId);
+  if (own.length > 0) {
+    return replayOfStarted(events, own);
+  }
+  // No record under its own id (a model step called again gives new ids): the latest matching
+  // call that no other call of this run has taken.
+  const claimed = identity.claimed;
+  return replayOfStarted(
+    events,
+    claimed === undefined
+      ? started
+      : started.filter((event) => !claimed.has(stringProperty(event.payload, "callId") ?? "")),
+  );
+}
+
+/** The outcome of the latest of these starts of one call, in sequence order. */
+function replayOfStarted(
+  events: readonly DurableHarnessEvent[],
+  started: readonly DurableHarnessEvent[],
+): ToolReplay {
   if (started.length === 0) {
     return { kind: "none" };
   }
@@ -214,10 +249,10 @@ export function findToolReplay(
       stringProperty(event.payload, "callId") === callId
     );
     if (succeeded !== undefined && succeeded.payload.resultUndefined === true) {
-      return { kind: "completed", result: undefined };
+      return { kind: "completed", result: undefined, callId };
     }
     if (succeeded !== undefined && Object.hasOwn(succeeded.payload, "result")) {
-      return { kind: "completed", result: succeeded.payload.result };
+      return { kind: "completed", result: succeeded.payload.result, callId };
     }
     const failed = events.find((event) =>
       event.sequence > current.sequence &&
@@ -226,7 +261,7 @@ export function findToolReplay(
       stringProperty(event.payload, "callId") === callId
     );
     if (failed !== undefined && Object.hasOwn(failed.payload, "error")) {
-      return { kind: "failed", error: failed.payload.error };
+      return { kind: "failed", error: failed.payload.error, callId };
     }
     if (index === started.length - 1) {
       return { kind: "inflight", callId };

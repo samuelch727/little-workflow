@@ -1,6 +1,7 @@
 import type { LocalWorld } from "./authoring.js";
 import { sha256Digest } from "./canonical.js";
 import { validateLwir, type LwirWorkflow } from "./lwir.js";
+import { listRunGrades, type RunGrade } from "./run-grades.js";
 import { readStoredWorkflowVersion } from "./workflow-version-store.js";
 import { listRunIds, type EventEnvelope } from "./world.js";
 
@@ -13,6 +14,14 @@ export type PlannerReuseCandidate = {
   readonly planningDefinitionSnapshot?: unknown;
   readonly planningDefinitionSnapshotHash?: string;
   readonly priorOutput?: unknown;
+  /** Grades on runs of this version, oldest first. A `"fail"` grade sends the plan back for review. */
+  readonly grades?: readonly RunGrade[];
+  /** When the candidate run kept this version: what it was kept against. */
+  readonly lastKept?: {
+    readonly planningDefinitionSnapshotHash: string;
+    readonly inputStructureHash: string;
+    readonly acknowledgedWarnings: readonly string[];
+  };
 };
 
 export type PlannerReuseDecision =
@@ -61,8 +70,28 @@ export async function selectPlannerReuseCandidates(
     }
   }
 
-  const selected = [...newestByWorkflowVersion.values()];
+  const gradesByVersion = new Map<string, RunGrade[]>();
+  for (const grade of await listRunGrades(world)) {
+    gradesByVersion.set(grade.workflowVersionId, [...gradesByVersion.get(grade.workflowVersionId) ?? [], grade]);
+  }
+  const selected = [...newestByWorkflowVersion.values()].map((candidate) => {
+    const grades = gradesByVersion.get(candidate.workflowVersionId);
+    return grades === undefined ? candidate : { ...candidate, grades };
+  });
   return options.limit === undefined ? selected : selected.slice(0, Math.max(0, options.limit));
+}
+
+/** The newest few `"fail"` grades on a candidate: each one is a warning the planner must weigh. */
+const MAX_FAILED_GRADES_IN_BRIEF = 5;
+
+function failedGrades(candidate: PlannerReuseCandidate): readonly RunGrade[] {
+  return (candidate.grades ?? [])
+    .filter((grade) => grade.verdict === "fail")
+    .slice(-MAX_FAILED_GRADES_IN_BRIEF);
+}
+
+function failedGradeWarning(grade: RunGrade): string {
+  return `run ${grade.runId} was graded fail (${grade.gradeId})`;
 }
 
 export function buildReuseBrief(options: {
@@ -71,10 +100,14 @@ export function buildReuseBrief(options: {
   readonly mountedRoot: string;
 }): { readonly text: string; readonly briefHash: string; readonly warnings: readonly string[] } {
   const basePath = `${options.mountedRoot.replace(/\/+$/u, "")}/${options.candidate.workflowVersionId}`;
-  const warnings = planningSnapshotWarnings(
-    options.candidate.planningDefinitionSnapshot,
-    options.currentPlanningDefinitionSnapshot,
-  );
+  const failed = failedGrades(options.candidate);
+  const warnings = [
+    ...planningSnapshotWarnings(
+      options.candidate.planningDefinitionSnapshot,
+      options.currentPlanningDefinitionSnapshot,
+    ),
+    ...failed.map(failedGradeWarning),
+  ];
   const text = [
     `# Planner Reuse Candidate`,
     ``,
@@ -105,6 +138,31 @@ export function buildReuseBrief(options: {
         ? ["- none"]
         : warnings.map((warning) => `- ${warning}`)
     ),
+    ``,
+    ...(failed.length === 0
+      ? []
+      : [
+          `## Feedback`,
+          ``,
+          `Runs of this plan were graded fail. Change the plan so it would not fail the same way, or keep it and say in the rationale why the failure did not come from the plan:`,
+          ...failed.map((grade) =>
+            `- ${grade.runId}, graded fail${grade.gradedBy === undefined ? "" : ` by ${grade.gradedBy}`}: ${
+              grade.reason ?? "no reason given"
+            }`
+          ),
+          ``,
+        ]),
+    `## Your Answer`,
+    ``,
+    `A candidate plan is on offer, so answer with ONE decision object instead of bare LWIR.`,
+    `Return ONLY the JSON, no prose or markdown fences. Pick one:`,
+    `- Keep the candidate as is: {"kind": "reuse_unchanged", "workflowVersionId": "${options.candidate.workflowVersionId}", ` +
+      `"rationale": "<why it still fits this input>"${
+        warnings.length === 0 ? "" : `, "acknowledgedWarnings": ${JSON.stringify(warnings)}`
+      }}`,
+    `- Change it: {"kind": "adapt", "baseWorkflowVersionId": "${options.candidate.workflowVersionId}", ` +
+      `"rationale": "<what you changed and why>", "lwir": <the complete changed LWIR>}`,
+    `- Start over: {"kind": "draft_fresh", "rationale": "<why the candidate does not fit>", "lwir": <a complete new LWIR>}`,
     ``,
   ].join("\n");
   return { text, briefHash: sha256Digest(text), warnings };
@@ -160,12 +218,14 @@ async function candidateForRun(
   }
 
   const lock = isRecord(workflowVersion.lock) ? workflowVersion.lock : undefined;
+  const lastKept = keptAgainst(events, workflowVersionId);
   return {
     workflowVersionId,
     runId,
     workflowId,
     completedAt: completed.recordedAt,
     workflowVersion,
+    ...(lastKept === undefined ? {} : { lastKept }),
     ...(Object.hasOwn(completed.payload, "output") ? { priorOutput: completed.payload.output } : {}),
     ...(lock !== undefined && Object.hasOwn(lock, "planningDefinitionSnapshot")
       ? { planningDefinitionSnapshot: lock.planningDefinitionSnapshot }
@@ -173,6 +233,28 @@ async function candidateForRun(
     ...(typeof lock?.planningDefinitionSnapshotHash === "string"
       ? { planningDefinitionSnapshotHash: lock.planningDefinitionSnapshotHash }
       : {}),
+  };
+}
+
+function keptAgainst(
+  events: readonly EventEnvelope[],
+  workflowVersionId: string,
+): PlannerReuseCandidate["lastKept"] {
+  const decision = lastEventOfType(events, "PlannerReuseDecisionRecorded")?.payload;
+  if (
+    decision?.decisionKind !== "reuse_unchanged" ||
+    decision.resultingWorkflowVersionId !== workflowVersionId ||
+    typeof decision.planningDefinitionSnapshotHash !== "string" ||
+    !isRecord(decision.inputStructure)
+  ) {
+    return undefined;
+  }
+  return {
+    planningDefinitionSnapshotHash: decision.planningDefinitionSnapshotHash,
+    inputStructureHash: sha256Digest(decision.inputStructure),
+    acknowledgedWarnings: Array.isArray(decision.acknowledgedWarnings)
+      ? decision.acknowledgedWarnings.filter((warning): warning is string => typeof warning === "string")
+      : [],
   };
 }
 
@@ -362,6 +444,12 @@ function planningSnapshotWarnings(
     "description changed",
     planningDescription(prior),
     planningDescription(current),
+  );
+  pushStringChangeWarning(
+    warnings,
+    "policy changed",
+    nestedString(prior, ["policy"]),
+    nestedString(current, ["policy"]),
   );
   pushStringChangeWarning(
     warnings,

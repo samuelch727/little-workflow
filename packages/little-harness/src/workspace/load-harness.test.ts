@@ -50,6 +50,21 @@ it("merges discovered tools and applies the instructions.md fallback", async () 
   expect(harness.config.system).toBe("You are support.");
 });
 
+it("runs the folder's agent on the host passed to loadHarness", async () => {
+  const root = await tmp();
+  const agent = join(root, "agents", "support");
+  await mkdir(agent, { recursive: true });
+  await writeFile(join(agent, "agent.ts"), AGENT_TS("Hi."));
+  const { localHost } = await import("../local-host/index.js");
+  const host = localHost({ dataDir: join(root, ".override") });
+
+  const harness = await loadHarness(agent, { host });
+
+  expect(harness.config.host).toBe(host);
+  expect(harness.sessions).toBe(host.sessions);
+  expect(harness.config.system).toBe("Hi.");
+});
+
 it("merges discovered workflows", async () => {
   const agent = join(await tmp(), "agents", "support");
   await mkdir(join(agent, "workflows"), { recursive: true });
@@ -71,13 +86,14 @@ it("merges discovered workflows", async () => {
   expect(harness.config.workflows?.map((workflow) => workflow.id)).toEqual(["candidate.review"]);
 });
 
-it("rejects discovered tool names that use the generated workflow launcher prefix", async () => {
+it("loads ordinary discovered start tools when no generated launcher collides", async () => {
   const agent = join(await tmp(), "agents", "support");
   await mkdir(join(agent, "tools"), { recursive: true });
   await writeFile(join(agent, "agent.ts"), AGENT_TS(null));
   await writeFile(join(agent, "tools", "start_candidate_review.ts"), TOOL_TS);
 
-  await expect(loadHarness(agent)).rejects.toThrow(/reserved start_/i);
+  const harness = await loadHarness(agent);
+  expect(harness.config.tools).toHaveProperty("start_candidate_review");
 });
 
 it("rejects a discovered tool whose name collides with the reserved runtime bash tool", async () => {
@@ -100,6 +116,15 @@ it("rejects a discovered tool whose name is not a valid model-tool identifier", 
   // a valid model-tool id. createHarness rejects such inline names via HARNESS_TOOL_NAME, so the
   // folder-discovery path must too — failing fast at load instead of late at the provider.
   await writeFile(join(agent, "tools", "my.tool.ts"), TOOL_TS);
+
+  await expect(loadHarness(agent)).rejects.toThrow(/reserved or invalid/i);
+});
+
+it("rejects a discovered checkpoint tool at load even when checkpoints are disabled", async () => {
+  const agent = join(await tmp(), "agents", "support");
+  await mkdir(join(agent, "tools"), { recursive: true });
+  await writeFile(join(agent, "agent.ts"), AGENT_TS(null));
+  await writeFile(join(agent, "tools", "checkpoint.ts"), TOOL_TS);
 
   await expect(loadHarness(agent)).rejects.toThrow(/reserved or invalid/i);
 });

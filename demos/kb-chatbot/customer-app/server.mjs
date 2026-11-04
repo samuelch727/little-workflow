@@ -3,7 +3,7 @@
 // One small HTTP server: serves the chat page and bridges it onto the same
 // chat-sdk connector the Slack path uses (simulateInbound + reaction events),
 // so everything a customer does here — chat, file upload, 👍/👎 — flows through
-// the real harness, the real littleDB reporter, and the real outcome sink.
+// the real harness, the real LittleDB tracer, and the real outcome sink.
 import { createServer } from "node:http";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -14,7 +14,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const demoRoot = join(here, "..");
 process.chdir(demoRoot); // little-harness's module loader roots jiti at cwd
 
-const { createTestChat, createTestThread, createTestMessage } = await import("little-harness/connectors");
+const { createTestChat, createTestThread, createTestMessage } = await import("@little-stack/harness/connectors");
 
 // The shipped test double lacks onReaction (LIT-47 #3); same subclass the driver uses.
 const Base = createTestChat();
@@ -88,4 +88,4 @@ const server = createServer(async (req, res) => {
 });
 
 const PORT = Number(process.env.PORT || 3100);
-server.listen(PORT, () => console.log(`Northwind Helpdesk on http://localhost:${PORT}  littleDB: ${process.env.LITTLEDB_URL ? "wired" : "off"}`));
+server.listen(PORT, () => console.log(`Northwind Helpdesk on http://localhost:${PORT}  LittleDB: ${process.env.LITTLEDB_URL ? "wired" : "off"}`));

@@ -6,7 +6,7 @@ import { convertToModelMessages } from "ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createHarness } from "../create-harness.js";
 import { HarnessInputError } from "../errors.js";
-import type { StreamHarnessFinished } from "../execution/result.js";
+import type { StreamHarnessTurnFinished } from "../execution/result.js";
 import { localHost } from "../local-host/index.js";
 import { aggregateLocalOutcomes } from "../trace/inspect.js";
 import { stageChatMessages } from "../execution/stage-message.js";
@@ -121,7 +121,7 @@ class FakeChatWithoutReactions extends FakeChat {
   override onReaction = undefined as never;
 }
 
-function streamResult(text = "ok", finished: Promise<StreamHarnessFinished> = finishedResult()) {
+function streamResult(text = "ok", finished: Promise<StreamHarnessTurnFinished> = finishedResult()) {
   return {
     text: Promise.resolve(text),
     output: Promise.resolve(text),
@@ -134,7 +134,7 @@ function streamResult(text = "ok", finished: Promise<StreamHarnessFinished> = fi
   };
 }
 
-function finishedResult(): Promise<StreamHarnessFinished> {
+function finishedResult(): Promise<StreamHarnessTurnFinished> {
   return Promise.resolve({
     session: {} as any,
     artifacts: [],
@@ -249,7 +249,7 @@ describe("loadChatSdkConnector", () => {
       `import { extendTool } from ${JSON.stringify(toolExtensionsPath)};
        export default extendTool({} as any, { description: "Slack reaction tool." });`,
     );
-    const calls: Array<{ connector: unknown; connectorTools: unknown }> = [];
+    const calls: Array<{ connector: unknown; connectorTools: unknown; trigger: unknown }> = [];
 
     await loadChatSdkConnector({
       agentDir: agent,
@@ -261,12 +261,16 @@ describe("loadChatSdkConnector", () => {
         calls.push({
           connector: options.connector,
           connectorTools: options.connectorTools,
+          trigger: options.trigger,
         });
         return streamResult();
       },
     });
 
     await FakeChat.last!.directHandlers[0]!(thread(), message("m1", "hi", false, "slack:U1"));
+
+    // Traces show the turn as a message on this platform, from its author.
+    expect(calls[0]?.trigger).toEqual({ kind: "message", source: "slack", from: "sam" });
 
     expect(calls[0]?.connector).toEqual({
       id: "slack",
@@ -416,7 +420,7 @@ describe("loadChatSdkConnector", () => {
          session: () => "slack:mirror"
        });`,
     );
-    const finished = Promise.reject(new Error("finished failed")) as Promise<StreamHarnessFinished>;
+    const finished = Promise.reject(new Error("finished failed")) as Promise<StreamHarnessTurnFinished>;
     finished.catch(() => {});
     const deliver = vi.fn(async () => {});
     const loaded = await loadChatSdkConnector({

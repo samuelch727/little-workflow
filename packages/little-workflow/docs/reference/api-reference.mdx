@@ -5,7 +5,17 @@ description: The minimal authoring + runtime surface that ships with v0.1.0-alph
 
 Alpha exposes the front door, tool registry, a one-shot runner, the Little Harness adapter (`asHarnessWorkflow`, `loadWorkflow`), cost reporting, harness primitives, and skill/memory configuration. Pipelines (`chainWorkflows`, `transform`), skill packs, plugins, and a long-lived runtime object are not part of the alpha API (see the [Roadmap](/docs/v0.1.0-alpha/roadmap)). `createRuntime` is not exported.
 
-Every import below comes from `little-workflow`, which requires Node.js 22+ and takes `ai` (`^7.0.0`) as a peer dependency.
+The package requires Node.js 22+ and takes `ai` (`^7.0.0`) as a peer dependency. It has these entry points:
+
+| Import | Exports |
+| --- | --- |
+| `@little-stack/workflow` | `defineWorkflow`, `model`, `skill`, `output`, `createToolRegistry`, `runWorkflow`, `runOrchestration` *(deprecated)*, `localWorld`, `readWorkflowVersion`, `gradeRun`, `listRunGrades`, `replayRun`, `RunFailedError`, `isRunFailedError`, `asHarnessWorkflow`, `loadWorkflow`, `dynamicWorkflows`, and their types |
+| `@little-stack/workflow/lwir` | `validateLwir`, `assertValidLwir`, `LwirValidationError`, `registerWorkflowVersion`, and the LWIR types |
+| `@little-stack/workflow/eval` | Eval-set validation, hashing and storage |
+| `@little-stack/workflow/scaffold` | The generators behind `little setup` and `little init` |
+| `@little-stack/workflow/internals` | **Unstable**, no semver guarantees: the lower-level `createLittleWorkflow`, the runtime (`runWorkflowCycle`, `executeWorkflowVersion`), world storage functions (`listEvents`, `materializeRunState`, ...), harness plumbing (`workflowHarness`, `createWorkflowHarness`, `Harness`), manifests, pricing and run reports |
+
+Imports below come from `@little-stack/workflow` unless they name another entry point.
 
 For the implementation contract behind these exports, see [SDK Implementation Spec](/docs/v0.1.0-alpha/internals/sdk-implementation).
 
@@ -14,7 +24,7 @@ For the implementation contract behind these exports, see [SDK Implementation Sp
 Tools are registered using AI SDK's `tool()` helper and collected in a `ToolRegistry`. The `WorkflowDefinition` references them by name; the compiler reads descriptors to build the `WorkflowVersion` lock; the runtime reads handlers at step lease.
 
 ```ts
-import { createToolRegistry } from "little-workflow";
+import { createToolRegistry } from "@little-stack/workflow";
 import { tool } from "ai";
 import { z } from "zod";
 
@@ -55,7 +65,7 @@ The registry is mutable (new tools may be registered at any time) but immutable 
 
 ### MCP integration
 
-The preferred path is declarative MCP on `runWorkflow({ mcp })`. Little Workflow asks Little Harness to resolve configured servers into ordinary gateway tools and guide skills.
+The preferred path is declarative MCP on `runWorkflow(workflow, input, { mcp })`. Little Workflow asks Little Harness to resolve configured servers into ordinary gateway tools and guide skills.
 
 Manual attachment remains available for callers that already manage MCP client lifetime. The MCP client lives in AI SDK 7's companion package `@ai-sdk/mcp` (not the `ai` core), so install it explicitly: `pnpm add @ai-sdk/mcp`.
 
@@ -74,46 +84,59 @@ const atlasTools = await atlasClient.tools();
 tools.attachMcpTools(atlasTools, { prefix: "atlas" });
 // registry now includes: parsePdf, lookupCustomer, atlas.search, atlas.fetch, …
 
-await runWorkflow({ world, workflows, input, tools });
+await runWorkflow(workflow, input, { tools });
 await atlasClient.close();
 ```
 
-The declarative gateway tools are normally `mcp_list_tools` and `mcp_call_tool`; include those names in workflow `globalTools` when worker steps need MCP access.
+The declarative gateway tools are normally `mcp_list_tools` and `mcp_call_tool`; include those names in the workflow's `tools` when worker steps need MCP access.
 
 ## Authoring
 
 ```ts
 defineWorkflow(definition);
-createLittleWorkflow(definition);
 model(aiSdkModel, metadata?);
 skill(pathOrUrl, options?);
 asHarnessWorkflow(workflow, { definitionIdentity, executionMode?, ...runDefaults });
 loadWorkflow(folder, options?);
 ```
 
-The default `workflowHarness` is also re-exported at the top level (its source is `harness/index.js`); see [`workflowHarness`](#workflowharness).
+### `defineWorkflow`
 
-### `createLittleWorkflow`
+Defines a workflow. Plain `input`/`output` schemas, one `model` or several `models`, an optional `planner`, a fixed `plan`, and the workflow's `tools` are normalized into the shape the runtime runs (model slots, a planner config, an output mode and the declared tool names). The schema types flow through, so `runWorkflow(workflow, input).output` is typed.
 
 ```ts
-import {
-  createLittleWorkflow,
-  model,
-  skill,
-} from "little-workflow";
+import { defineWorkflow, runWorkflow } from "@little-stack/workflow";
+import { anthropic } from "@ai-sdk/anthropic";
+import { z } from "zod";
+
+const reviewApplicants = defineWorkflow({
+  id: "applicants.review",
+  input: z.object({ role: z.string(), applicants: z.array(z.object({ id: z.string(), resume: z.string() })) }),
+  output: z.array(z.object({ id: z.string(), score: z.number(), decision: z.enum(["advance", "reject", "maybe"]) })),
+  model: anthropic("claude-sonnet-4-6"),
+});
+
+const result = await runWorkflow(reviewApplicants, { role: "Staff Engineer", applicants });
+result.output; // typed — no cast
+```
+
+The full config, with several model slots, a planner config, a sandbox policy and memory mounts:
+
+```ts
+import { defineWorkflow, model, skill } from "@little-stack/workflow";
 import { openai } from "@ai-sdk/openai";
 
-const candidateReview = createLittleWorkflow({
+const candidateReview = defineWorkflow({
   // Identity
   id: "candidate.review",
   description: "Review one candidate against a job description.",
 
-  // I/O schemas (Zod or JSON Schema)
-  inputSchema: z.object({
+  // I/O schemas (Zod, Standard Schema or JSON Schema)
+  input: z.object({
     jobDescription: z.string(),
     candidate: z.object({ id: z.string(), resume: z.string() }),
   }),
-  outputSchema: z.object({
+  output: z.object({
     passed: z.boolean(),
     reasoning: z.string(),
   }),
@@ -127,7 +150,7 @@ const candidateReview = createLittleWorkflow({
     // slot ids: "gpt-4o-mini" (first wins), "gpt-4o-mini-<animal>" (second)
   ],
 
-  // Planner — required; harness defaults to the SDK workflowHarness
+  // Planner — optional; defaults to the first model. Its harness defaults to the SDK workflowHarness
   planner: {
     model: openai("gpt-5"),        // raw AI SDK model or ModelSlot
     system: "You design candidate-review workflows.",
@@ -150,8 +173,8 @@ const candidateReview = createLittleWorkflow({
     },
   },
 
-  // Tool registry references
-  globalTools: ["parsePdf", "lookupCustomer"],
+  // Names of tools the run supplies (runWorkflow(..., { tools })); or AI SDK tools keyed by name
+  tools: ["parsePdf", "lookupCustomer"],
 
   // Memory mount config — optional; defaults shown
   memory: {
@@ -162,61 +185,46 @@ const candidateReview = createLittleWorkflow({
 });
 ```
 
-### `defineWorkflow`
-
-The eve-style front door over [`createLittleWorkflow`](#createlittleworkflow). Takes a single `model`, plain `input`/`output` schemas, and inline `tools` keyed by name, then normalizes them into the fully-specified shape the runtime already expects — a `models` tuple, a synthesized `planner`, an inferred output mode, and a `globalTools` list built from the inline tools. The engine is unchanged; you just skip the boilerplate. For the same plumbing written by hand, see [`createLittleWorkflow`](#createlittleworkflow).
-
-```ts
-import { defineWorkflow, runWorkflow } from "little-workflow";
-import { anthropic } from "@ai-sdk/anthropic";
-import { z } from "zod";
-
-const reviewApplicants = defineWorkflow({
-  id: "applicants.review",
-  input: z.object({ role: z.string(), applicants: z.array(z.object({ id: z.string(), resume: z.string() })) }),
-  output: z.array(z.object({ id: z.string(), score: z.number(), decision: z.enum(["advance", "reject", "maybe"]) })),
-  model: anthropic("claude-sonnet-4-6"),
-});
-
-const result = await runWorkflow(reviewApplicants, { role: "Staff Engineer", applicants });
-result.output; // typed — no cast
-```
-
 #### `defineWorkflow` options
-
-| Field | Required | Type | Notes |
-| --- | --- | --- | --- |
-| `id` | yes | `string` | Stable identifier; hashed into `WorkflowDefinitionHash` |
-| `description` | recommended | `string` | Shown to the planner/orchestrator |
-| `input` | recommended | Zod or JSON Schema | Plain schema, mapped onto `inputSchema`; validated at run start |
-| `output` | recommended | Zod/JSON Schema or `OutputMode` | Plain schema (array/object/text inferred) or an explicit `output.*` mode |
-| `model` | yes | `AiSdkModel` | One model for the worker(s); wrapped into a one-slot `models` tuple |
-| `planner` | no | `AiSdkModel` or `PlannerConfig` | Bare model (lifted into a `PlannerConfig`) or a full `PlannerConfig`; defaults to `model` |
-| `tools` | no | `Record<string, AiSdkTool>` | Inline AI SDK tools keyed by name; built into a registry and exposed via `globalTools` |
-
-`worker`, `memory`, `bash`, and `label` are also accepted and pass straight through to the underlying `createLittleWorkflow` definition.
-
-Returns the defined workflow — a normal `WorkflowDefinition` whose `input`/`output` schema types flow through to results (the returned `DefinedWorkflow<>` type is internal and is not a public named import), plus a typed `.run(input, options?)` method that runs the workflow with the world defaulted to `localWorld()` and the inline tools auto-wired. Run it with either the two-arg [`runWorkflow(def, input, options?)`](#runworkflow--polymorphic-entry-point) form or `def.run(input, options?)`; both return `RunResult<TOutput>` with a typed `.output` (no cast).
-
-### `WorkflowDefinition` field reference
 
 | Field | Required | Type | Notes |
 | --- | --- | --- | --- |
 | `id` | yes | `string` | Stable identifier; hashed into `WorkflowDefinitionHash` |
 | `description` | recommended | `string` | Shown to the planner, and used as the tool description by `asHarnessWorkflow` |
 | `label` | no | `string` | Human-readable run label; defaults to the workflow id. `RunWorkflowOptions.label` overrides it per run |
-| `inputSchema` | recommended | Zod or JSON Schema | Validated at run start; must fit the [LWIR schema subset](/docs/v0.1.0-alpha/reference/lwir-reference#schema-subset) |
-| `output` | recommended | `OutputMode` | Output mode (`text`, `object`, `array`, `choice`, `json`); see [Output Modes](#output-modes) |
-| `outputSchema` | no | Zod or JSON Schema | Older alternative to `output`; validated on workflow output |
-| `suggestedInputSchema` | no | Zod or JSON Schema | A schema hint shown to the planner; not used to validate input |
-| `models` | yes (≥ 1) | `ModelSlot[]` | Execution model options planner can reference in LWIR `step.with.model` |
-| `planner` | yes | `PlannerConfig` | See below |
+| `input` | recommended | Zod, Standard Schema, or JSON Schema | Validated at run start; must fit the [LWIR schema subset](/docs/v0.1.0-alpha/reference/lwir-reference#schema-subset) |
+| `suggestedInput` | no | Zod or JSON Schema | A schema hint shown to the planner; not used to validate input |
+| `output` | recommended | schema or `OutputMode` | Plain schema (array/object/text inferred) or an explicit `output.*` mode; see [Output Modes](#output-modes) |
+| `model` | one of `model`, `models`, `plan` | `AiSdkModel` or `ModelSlot` | One execution model |
+| `models` | one of `model`, `models`, `plan` | `ModelSlot[]` (≥ 1) | Execution model options the planner can reference in LWIR `step.with.model`. Not with `model` |
+| `policy` | no | `string` | Rules the runtime adds, word for word, to the system prompt of every `ai.generate` step. Shown to the planner; a change sends a saved plan back for review |
+| `planner` | no | `AiSdkModel`, `ModelSlot`, or `PlannerConfig` | A bare model is lifted into a `PlannerConfig`; defaults to the first model |
+| `plan` | no | `{ steps }` or `LwirWorkflow` | A fixed plan that replaces the planner; no model needed unless a step calls one. Not with `planner` |
+| `tools` | no | `Record<string, AiSdkTool>`, `ToolRegistry`, or `string[]` | Tools the plan may call. Inline tools are wired into runs automatically; named tools must be supplied by the run |
+| `toolSelection` | no | `"planner_selected" \| "all" \| "explicit_only"` | Recorded in the capability manifest; default `"planner_selected"`. `"explicit_only"` keeps the plan from referencing the declared tools |
+| `workflowVersionReuseStrategy` | no | `"planner_reviewed" \| "planner_reviews_each_run" \| "always_fresh"` | Default `"planner_reviewed"`: a prior compiled version is kept without a planner call when nothing the planner reads changed, and otherwise shown to the planner, which may reuse it. `"planner_reviews_each_run"` shows it to the planner on every run, for inputs whose values change the plan. `"always_fresh"` always plans anew |
 | `worker` | no | `WorkerConfig` | Defaults to the SDK `workflowHarness` |
-| `bash` | no | `BashCapabilities` | Role-scoped Bash tool sandbox; network is off by default |
-| `globalTools` | no | `string[]` | Tool registry ids the workflow's LWIR can reference |
-| `toolSelection` | no | `"planner_selected" \| "all" \| "explicit_only"` | Recorded in the capability manifest; default `"planner_selected"`. `"explicit_only"` keeps the plan from referencing `globalTools` |
 | `memory` | no | `MemoryConfig` | Defaults to `{ workflow: "rw", org: "ro" }` |
-| `workflowVersionReuseStrategy` | no | `"planner_reviewed" \| "always_fresh"` | Default `"planner_reviewed"`: the planner is shown a prior compiled version it may reuse. `"always_fresh"` always plans anew |
+| `bash` | no | `BashCapabilities` | Role-scoped Bash tool sandbox; network is off by default |
+
+Returns a `DefinedWorkflow<TInput, TOutput>`: the workflow definition, whose `input`/`output` schema types flow through to results, plus a typed `.run(input, options?)` method. `workflow.run(input, options)` and [`runWorkflow(workflow, input, options)`](#runworkflow) are the same call; both return `RunResult<TOutput>` with a typed `.output` (no cast).
+
+A fixed plan, which needs no model:
+
+```ts
+const input = z.object({ value: z.string() });
+
+const echo = defineWorkflow({
+  id: "starter_echo",
+  input,
+  tools: { echo: tool({ inputSchema: input, execute: async ({ value }) => ({ echoed: value }) }) },
+  plan: {
+    steps: [
+      { id: "echo", uses: "tool.call", with: { tool: "echo", args: { value: "{{ input.value }}" } }, output: { mode: "json", schema: true } },
+    ],
+  },
+});
+```
 
 ### `PlannerConfig`
 
@@ -245,7 +253,7 @@ type WorkerConfig = {
   readonly skills?: readonly Skill[];
   readonly skillMaxRisk?: SkillRiskLevel;
   readonly skillOidcToken?: SkillOidcToken;
-  readonly tools?: ToolSet;                 // merged with globalTools
+  readonly tools?: ToolSet;                 // merged with the workflow's tools
 };
 ```
 
@@ -384,15 +392,15 @@ Remote Git skill loading is best-effort during role startup: unavailable reposit
 
 ### `workflowHarness`
 
-The default `Harness` exported value. Wraps AI SDK's agent loop with Little Workflow concerns: system prompt assembly, tool exposure, per-turn event recording, durability checks, memory/scratch/skill mounts, and cancellation. Little Workflow uses it automatically when `planner.harness`, `worker.harness`, or `orchestrator.harness` is omitted; pass a custom harness only when you need to substitute the runtime.
+The default `Harness`, exported from `@little-stack/workflow/internals`. Wraps AI SDK's agent loop with Little Workflow concerns: system prompt assembly, tool exposure, per-turn event recording, durability checks, memory/scratch/skill mounts, and cancellation. Little Workflow uses it automatically when `planner.harness`, `worker.harness`, or `orchestrator.harness` is omitted; pass a custom harness only when you need to substitute the runtime.
 
 ### `dynamicWorkflows()`
 
-Enables **model-authored one-shot plans** on a Little Harness agent. Pass the result to `createHarness({ dynamicWorkflows })`. The helper returns `{ enabled: true, factory, exclude?, limits? }`, injecting the plan-lowering factory that turns an agent-authored step-DAG into a frozen LWIR workflow and runs it once. It lives in `little-workflow` (not `little-harness`) because the lowering factory depends on Little Workflow internals, and `little-harness` cannot import them without a circular dependency — so a bare `true` on the harness cannot work; `dynamicWorkflows()` is the injection point.
+Enables **model-authored one-shot plans** on a Little Harness agent. Pass the result to `createHarness({ dynamicWorkflows })`. The helper returns `{ enabled: true, factory, exclude?, limits? }`, injecting the plan-lowering factory that turns an agent-authored step-DAG into a frozen LWIR workflow and runs it once. It lives in `@little-stack/workflow` (not `@little-stack/harness`) because the lowering factory depends on Little Workflow internals, and `@little-stack/harness` cannot import them without a circular dependency — so a bare `true` on the harness cannot work; `dynamicWorkflows()` is the injection point.
 
 ```ts
-import { createHarness } from "little-harness";
-import { dynamicWorkflows } from "little-workflow";
+import { createHarness } from "@little-stack/harness";
+import { dynamicWorkflows } from "@little-stack/workflow";
 
 createHarness({
   host,
@@ -406,6 +414,18 @@ createHarness({
 ```
 
 The agent gets `run_ad_hoc_plan` and `search_authored_plans` tools. A plan may only reference capabilities the agent already has (enforced as `capability_not_allowed`), is frozen + replay-proof, runs inline, and is persisted for cross-run recall. See the Little Harness guide, *Letting an agent author its own workflow*, for the full behavior.
+
+Two more options put the workflows an agent defines with `define_workflow` under the host's control:
+
+- **`registry`** — `{ defined?, resolve? }` hooks (`AgentWorkflowRegistry` from `@little-stack/harness`). `defined(record, { sessionId, turnId })` runs after a revision is stored and may return a `note` for the agent and `metadata` for the run `runWith` starts; `resolve(records, { sessionId, turnId })` runs when a turn starts and returns the workflows that turn offers. Without one, every stored definition is offered, in every session.
+- **`world`** — a `World`, or a function of a `DynamicWorkflowWorldContext` (`kind`, `workflowId`, `handle`, `runId`, `dataDir`, `sessionId`, `turnId`, `toolCallId`, and for a defined workflow its `definition`, `revision` and registry `metadata`) that returns one, for agent-defined workflow and one-shot plan runs. Default: `localWorld` in the harness's stores. Both types are exported.
+
+```ts
+dynamicWorkflows({
+  registry: { resolve: (records) => records.filter((record) => approved.has(record.handle)) },
+  world: (run) => tracingWorld(localWorld({ dataDir: run.dataDir }), run),
+});
+```
 
 ## Output Modes
 
@@ -422,60 +442,45 @@ type OutputMode<T> =
 
 ## Runtime
 
-### `runWorkflow` — polymorphic entry point
+### `runWorkflow`
 
 ```ts
-import { runWorkflow, localWorld } from "little-workflow";
-
-// ── Single workflow ──
-const result = await runWorkflow({
-  world: localWorld({ dataDir: ".little-workflow" }),
-  workflows: candidateReview,                     // single WorkflowDefinition
-  input: { jobDescription, candidate },
-  tools,
-});
-
-// ── DEPRECATED: multiple workflows (orchestration) — see the note below ──
-const result2 = await runWorkflow({
-  world: localWorld({ dataDir: ".little-workflow" }),
-  workflows: [candidateReview, candidateScoring], // array → orchestrator required
-  input: { jobDescription, candidates: [...] },
-  tools,
-  orchestrator: {
-    model: openai("gpt-5"),
-    system: "Orchestrate candidate evaluation. For batch work, plan once + run many.",
-    skills: [skill("./skills/batch-fan-out/")],
-  },
-});
+function runWorkflow<TWorkflow extends WorkflowDefinition>(
+  workflow: TWorkflow,
+  input: InferWorkflowInput<TWorkflow>,
+  options?: RunWorkflowOptions,
+): Promise<RunResult<InferWorkflowOutput<TWorkflow>>>;
 ```
 
-`runWorkflow` is overloaded. Alongside the power-user options object above, it accepts an ergonomic two-arg form for a workflow defined with [`defineWorkflow`](#defineworkflow):
-
 ```ts
-// ── Ergonomic two-arg form ──
-const result = await runWorkflow(reviewApplicants, {
-  role: "Staff Engineer",
-  applicants,
-});                                               // world → localWorld(); inline tools auto-wired
+import { localWorld, runWorkflow } from "@little-stack/workflow";
 
-// Equivalent, via the defined workflow's own method:
+const result = await runWorkflow(reviewApplicants, { role: "Staff Engineer", applicants });
+//                                                  world → localWorld(); inline tools wired in
+
+const custom = await runWorkflow(candidateReview, { jobDescription, candidate }, {
+  world: localWorld({ dataDir: ".little-workflow-reviews" }),
+  tools,
+  timeout: "10m",
+});
+
+// The same call, via the defined workflow's own method:
 const same = await reviewApplicants.run({ role: "Staff Engineer", applicants });
 ```
 
-`runWorkflow(def, input, options?)` defaults `world` to `localWorld()` and passes the definition's inline tool registry, so a typical run needs no `world` or `tools` plumbing. The third `options?` argument is the same `RunWorkflowOptions` below, minus `workflows`/`input` and with an optional `world` to override the default. `def.run(input, options?)` is identical. Both forms return `RunResult<TOutput>` with a typed `.output`, `.runId`, and `.usage` — see [`RunResult`](/docs/v0.1.0-alpha/running/run-a-workflow#return-shape) for the full shape.
+`runWorkflow` runs one workflow. `world` defaults to `localWorld()` and `tools` to the tools declared inline on the workflow, so a typical run needs no plumbing. `workflow.run(input, options?)` is identical. Both return `RunResult<TOutput>` with a typed `.output`, `.runId`, `.usage` and `.plan` (whether the plan was drafted, kept, adapted or fixed, and whether the planner model was called) — see [`RunResult`](/docs/v0.1.0-alpha/running/run-a-workflow#return-shape) for the full shape. A failed run rejects with a `RunFailedError`; see [Error Types](#error-types).
+
+Passing an array throws a `TypeError`: compose several workflows with `asHarnessWorkflow` + `createHarness({ workflows })`, or use the deprecated `runOrchestration`.
 
 ### `RunWorkflowOptions`
 
 ```ts
-type RunWorkflowOptions<W extends RunTarget> = {
-  readonly world: LocalWorld;
-  readonly workflows: W;                          // WorkflowDefinition | readonly WorkflowDefinition[]
-  readonly input: unknown;
-  readonly tools?: ToolRegistry;
+type RunWorkflowOptions = {
+  readonly world?: World;                         // default localWorld()
+  readonly tools?: ToolRegistry;                  // default: the workflow's inline tools
   readonly mcp?: HarnessMcpConfig;                // declarative MCP servers → gateway tools
   readonly bash?: BashCapabilities;               // run-level Bash sandbox default
   readonly permissions?: ToolPermissions;         // allow/deny/ask gate over tool calls
-  readonly orchestrator?: OrchestratorConfig;     // DEPRECATED; required (type-level) iff workflows is array
 
   // Outer loop
   readonly maxOuterCycles?: number;               // default 1 (no outer loop); requires planner.supervise when > 1
@@ -486,28 +491,49 @@ type RunWorkflowOptions<W extends RunTarget> = {
   readonly signal?: AbortSignal;
   readonly timeout?: number | string;
   readonly maxAttempts?: number;
-  readonly maxConcurrentSubRuns?: number;         // DEPRECATED; orchestrator only; default 10
 
   // Labels, progress, reuse
   readonly label?: string;                        // overrides the definition's label (default: workflow id)
   readonly tags?: readonly string[];              // free-form tags for filtering runs
+  readonly trigger?: RunTrigger;                  // how the run started, on its RunStarted event
   readonly progress?: (event: WorkflowRunProgressEvent) => void | Promise<void>; // { currentStep?, lastEvent? }
   readonly workflowVersionReuseStrategy?: WorkflowVersionReuseStrategy; // overrides the definition's
 };
+
+type RunTrigger = {
+  readonly kind: string;        // "api", "schedule", "webhook", "harness", or your own word
+  readonly source?: string;     // a route, a schedule id, a harness slug
+  readonly from?: string;       // who asked, as the channel names them
+  readonly label?: string;      // a short label for people
+  readonly sessionId?: string;  // kind "harness": the session, turn and tool call that started the run
+  readonly turnId?: string;
+  readonly toolCallId?: string;
+};
 ```
 
-TypeScript enforces `orchestrator` is required when `workflows` is an array, and forbidden when it is a single definition.
+See [Run A Workflow → Options](/docs/v0.1.0-alpha/running/run-a-workflow#options) for what each field does. The planner and models are not run options: set them on `defineWorkflow`.
 
-> **`orchestrator` is deprecated.** The array-of-workflows + `orchestrator` form selects the orchestrator composition surface, which is being retired in favour of `asHarnessWorkflow` + `createHarness({ workflows })`. `runWorkflow` with a single workflow is **not** deprecated. See [Compose With Little Harness](/docs/v0.1.0-alpha/authoring/compose-with-harness).
+### `runOrchestration` *(deprecated)*
 
-See [Run A Workflow → Options](/docs/v0.1.0-alpha/running/run-a-workflow#options) for what each field does.
+```ts
+import { runOrchestration } from "@little-stack/workflow";
 
-### Removed from `RunWorkflowOptions` vs prior alpha tip
+const result = await runOrchestration({
+  workflows: [candidateReview, candidateScoring],
+  input: { jobDescription, candidates: [...] },
+  tools,
+  orchestrator: {
+    model: openai("gpt-5"),
+    system: "Orchestrate candidate evaluation. For batch work, plan once + run many.",
+    skills: [skill("./skills/batch-fan-out/")],
+  },
+  maxConcurrentSubRuns: 10,                       // default 10
+});
+```
 
-- ❌ `planner` — workflow's own `planner` config is the source of truth
-- ❌ `models` — declared at workflow level; no top-level model registry override
-- ❌ `ai` — `RuntimeAiAdapter` is gone; worker harness owns AI step execution
-- ❌ `codeRunner` — `RuntimeCodeRunner` is gone; worker harness owns `code.run` execution
+`RunOrchestrationOptions` is `RunWorkflowOptions` without the outer-loop fields, plus `workflows` (a non-empty array), `input`, `orchestrator` (required), and `maxConcurrentSubRuns`.
+
+> **Deprecated.** The orchestrator composition surface is being retired in favour of `asHarnessWorkflow` + `createHarness({ workflows })`. `runWorkflow` is **not** deprecated. See [Compose With Little Harness](/docs/v0.1.0-alpha/authoring/compose-with-harness).
 
 ### `OrchestratorConfig`
 
@@ -539,6 +565,46 @@ localWorld({ dataDir: ".little-workflow", maxConcurrentSteps: 8 });
 
 `maxConcurrentSteps` caps total in-flight step attempts across all parallel groups and serial steps in a run. Effective concurrency = `min(group.maxConcurrency, world.maxConcurrentSteps - in-flight)`. Default `undefined` (no cap).
 
+### `readWorkflowVersion`
+
+```ts
+function readWorkflowVersion(world: World, workflowVersionId: string): Promise<StoredWorkflowPlan>;
+
+type StoredWorkflowPlan = {
+  readonly workflowVersionId: string;
+  readonly workflowId: string;
+  readonly lwir: LwirWorkflow;   // the plan; its steps are what the run executed
+};
+```
+
+Reads the plan a run executed from the world the run used. Pass `result.workflowVersionId` or `result.plan.workflowVersionId`. An id the world does not hold rejects with an error naming the directory it looked in. Validate or inspect the LWIR with [`@little-stack/workflow/lwir`](/docs/v0.1.0-alpha/reference/lwir-reference).
+
+### `gradeRun` and `listRunGrades`
+
+```ts
+function gradeRun(world: World, runId: string, grade: GradeRunInput): Promise<RunGrade>;
+function listRunGrades(
+  world: World,
+  filter?: { runId?: string; workflowVersionId?: string },
+): Promise<readonly RunGrade[]>;
+
+type GradeRunInput = {
+  readonly verdict: "pass" | "fail";
+  readonly reason?: string;      // the planner reads it when it reviews the plan
+  readonly gradedBy?: string;
+};
+
+type RunGrade = GradeRunInput & {
+  readonly gradeId: string;
+  readonly runId: string;
+  readonly workflowId: string;
+  readonly workflowVersionId: string; // the plan the graded run executed
+  readonly gradedAt: string;
+};
+```
+
+`gradeRun` records whether a finished run did its job. A `"fail"` grade sends the plan that run executed back to the planner on the next run, with the reason, instead of keeping it without a planner call; see [Grading Runs](/docs/v0.1.0-alpha/running/run-a-workflow#grading-runs). It rejects a run id the world does not hold and a run that never got a plan. `listRunGrades` returns grades oldest first.
+
 ## Little Harness Composition
 
 The supported way to compose workflows. See [Compose With Little Harness](/docs/v0.1.0-alpha/authoring/compose-with-harness) for the guide.
@@ -547,11 +613,11 @@ The supported way to compose workflows. See [Compose With Little Harness](/docs/
 
 ```ts
 function asHarnessWorkflow(
-  workflow: WorkflowDefinition<any, any>,   // a defineWorkflow or createLittleWorkflow result, no cast
+  workflow: WorkflowDefinition<any, any>,   // a defineWorkflow result, no cast
   options: HarnessWorkflowAdapterOptions,
 ): HarnessWorkflow;                          // pass to createHarness({ workflows }) from little-harness
 
-type HarnessWorkflowAdapterOptions = ErgonomicRunWorkflowOptions & {   // run defaults: tools, mcp, timeout, world, …
+type HarnessWorkflowAdapterOptions = Omit<RunWorkflowOptions, "trigger"> & {   // run defaults: tools, mcp, timeout, world, …
   readonly definitionIdentity: string | { readonly notApplicable: true; readonly reason?: string }; // required
   readonly executionMode?: "inline" | "durable";                       // default "inline"
   readonly allowUntypedInput?: boolean;
@@ -559,7 +625,7 @@ type HarnessWorkflowAdapterOptions = ErgonomicRunWorkflowOptions & {   // run de
 };
 ```
 
-Throws when `definitionIdentity` is missing. The workflow becomes one tool named from its id (`billing.refund` → `billing_refund`). A call returns `{ status, runId, outputSummary?, outputPath? }`, or `{ status, runId, causeCode, message, outputSummary? }` on failure or cancellation. `outputSummary` is a deterministic rendering of the output capped at 4,096 characters, not the typed output object. Runs land in `<dataDir>/sessions/<session>/workflows` unless you pass `world`.
+Throws when `definitionIdentity` is missing. The workflow becomes one tool named from its id (`billing.refund` → `billing_refund`). A call returns `{ status, runId, outputSummary?, outputPath? }`, or `{ status, runId, causeCode, message, outputSummary? }` on failure or cancellation. `outputSummary` is a deterministic rendering of the output capped at 4,096 characters, not the typed output object. Runs land in `<dataDir>/sessions/<session>/workflows` unless you pass `world`. Each run records `{ kind: "harness", sessionId, turnId, toolCallId }`, the tool call that started it, as its `trigger`.
 
 ### `loadWorkflow`
 
@@ -583,7 +649,13 @@ A `LoadedWorkflow` is a `HarnessWorkflow` with a derived `definitionIdentity`, p
 `RunResult.usage` carries real dollars (`costUsd`), and the same figures are available per step from the event log:
 
 ```ts
-import { formatRunReport, localWorld, materializeRunState, priceModelCall, runReport } from "little-workflow";
+import { localWorld } from "@little-stack/workflow";
+import {
+  formatRunReport,
+  materializeRunState,
+  priceModelCall,
+  runReport,
+} from "@little-stack/workflow/internals";
 
 const report = runReport(await materializeRunState(localWorld(), result.runId));
 console.log(formatRunReport(report));      // the `little report --table` rendering
@@ -598,7 +670,7 @@ Rates come from the bundled [model registry](/docs/v0.1.0-alpha/authoring/ai-sdk
 
 ## Harness Contract
 
-Custom harnesses implement one method:
+Custom harnesses implement one method. The `Harness` types come from `@little-stack/workflow/internals`:
 
 ```ts
 type Harness = {
@@ -756,6 +828,25 @@ type RunFailedCauseCode =
 ```
 
 `outerLoopId` and `lastCycleOutput` are populated only on `outer_loop_exhausted` failures. `failedStepPath` is populated on `max_visits_exceeded`.
+
+### `isRunFailedError`
+
+```ts
+function isRunFailedError(value: unknown): value is RunFailedError;
+```
+
+Narrows a caught error to `RunFailedError`. Prefer it to `instanceof RunFailedError` or a check on `err.name`: it also recognizes the error thrown by another copy of the package, such as a workflow folder loaded with `loadWorkflow`.
+
+```ts
+import { isRunFailedError, runWorkflow } from "@little-stack/workflow";
+
+try {
+  await runWorkflow(workflow, input);
+} catch (err) {
+  if (!isRunFailedError(err)) throw err;
+  console.error(err.runId, err.causeCode, err.failedStepPath);
+}
+```
 
 ## Policy Types
 

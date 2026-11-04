@@ -9,7 +9,7 @@ Little Workflow uses content-addressed identity at every layer. This page covers
 
 ### `WorkflowDefinitionHash`
 
-A stable hash of the workflow's identity-bearing fields at authoring time. Computed once when `createLittleWorkflow({...})` is called; cached on the definition.
+A stable hash of the workflow's identity-bearing fields at authoring time. Computed once when `defineWorkflow({...})` is called; cached on the definition.
 
 ```ts
 type WorkflowDefinitionSnapshot = {
@@ -65,7 +65,7 @@ Unchanged: `sha256(canonicalJson(LWIR))`. Computed per planner draft. Two compil
 ### Relationship
 
 ```text
-WorkflowDefinition  (createLittleWorkflow)
+WorkflowDefinition  (defineWorkflow)
         ↓ hash once
 WorkflowDefinitionHash  (stable)
         ↓ run with input

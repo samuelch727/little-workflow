@@ -12,8 +12,32 @@ import {
   toOrchestrationRequest,
   type PlannerAdapter,
 } from "./compiler.js";
-import { createLittleWorkflow, createToolRegistry, model, output, resolveSkills, skill, validateLwir, type Harness, type JsonValue, type LwirWorkflow } from "./index.js";
+import {
+  createToolRegistry,
+  model,
+  output,
+  skill,
+} from "./index.js";
+import {
+  validateLwir,
+} from "./entries/lwir.js";
+import type {
+  LwirWorkflow,
+} from "./entries/lwir.js";
+import {
+  createLittleWorkflow,
+  resolveSkills,
+} from "./entries/internals.js";
+import type {
+  Harness,
+  JsonValue,
+} from "./entries/internals.js";
 import { hashHarnessManifest, plannerManifest } from "./manifests.js";
+import {
+  getPlanningDefinitionSnapshot,
+  getWorkflowDefinitionHash,
+  getWorkflowDefinitionSnapshot,
+} from "./workflow-definition-hash.js";
 
 // A planner that never returns valid LWIR — forces the deterministic fallback so
 // we can prove a bare workflow (no planner prompt) still compiles, keylessly.
@@ -224,6 +248,83 @@ describe("less-guidance compilation: the equipped planner", () => {
     expect(ctx).toContain("lookupOrder");
     expect(ctx).toContain("orderId"); // the tool's input schema is shown, not just the name
     expect(ctx).toContain("look up an order by id"); // and its description
+  });
+
+  it("buildPlanningContext tells the planner to copy a stated policy word for word and add no rules", () => {
+    const wf = createLittleWorkflow({
+      id: "lending.decide",
+      description: "Decide an application. Policy: approve when score >= 680.",
+      output: output.object({ schema: objSchema({ ok: { type: "boolean" } }, ["ok"]) }),
+      models: [workerSlot],
+      planner: dummyPlanner,
+    } as unknown as Parameters<typeof createLittleWorkflow>[0]);
+    const ctx = buildPlanningContext(toOrchestrationRequest(wf, { input: {}, requestId: "orq_policy" }));
+    expect(ctx).toContain("copy them word for word");
+    expect(ctx).toContain("do not invent a cut-off the description does not state");
+  });
+
+  it("buildPlanningContext shows a workflow policy and says the runtime adds it to every ai.generate step", () => {
+    const base = {
+      id: "lending.decide",
+      description: "Decide an application.",
+      output: output.object({ schema: objSchema({ ok: { type: "boolean" } }, ["ok"]) }),
+      models: [workerSlot],
+      planner: dummyPlanner,
+    };
+    const withPolicy = createLittleWorkflow({
+      ...base,
+      policy: "Approve when score >= 680. Refer anything else.",
+    } as unknown as Parameters<typeof createLittleWorkflow>[0]);
+    const ctx = buildPlanningContext(toOrchestrationRequest(withPolicy, { input: {}, requestId: "orq_policy_field" }));
+    expect(ctx).toContain("The runtime adds it, word for word, to the system prompt of every ai.generate step");
+    expect(ctx).toContain("Approve when score >= 680. Refer anything else.");
+
+    const without = createLittleWorkflow(base as unknown as Parameters<typeof createLittleWorkflow>[0]);
+    expect(buildPlanningContext(toOrchestrationRequest(without, { input: {}, requestId: "orq_no_policy" })))
+      .not.toContain("This workflow has a policy");
+    // A workflow without a policy keeps its definition and planning hashes.
+    expect(getPlanningDefinitionSnapshot(without)).not.toHaveProperty("policy");
+    expect(getWorkflowDefinitionSnapshot(without)).not.toHaveProperty("policy");
+    expect(getPlanningDefinitionSnapshot(withPolicy)).toHaveProperty("policy", "Approve when score >= 680. Refer anything else.");
+    expect(getWorkflowDefinitionHash(withPolicy)).not.toBe(getWorkflowDefinitionHash(without));
+  });
+
+  it("buildPlanningContext tells the planner a kept plan is reused, so input values go through {{ input.* }}", () => {
+    const wf = createLittleWorkflow({
+      id: "stocks.brief",
+      description: "Write a brief about a ticker.",
+      output: output.object({ schema: objSchema({ ok: { type: "boolean" } }, ["ok"]) }),
+      models: [workerSlot],
+      planner: dummyPlanner,
+    } as unknown as Parameters<typeof createLittleWorkflow>[0]);
+    const ctx = buildPlanningContext(toOrchestrationRequest(wf, { input: { ticker: "AAPL" }, requestId: "orq_reuse" }));
+    expect(ctx).toContain("reused for later runs whose input has the same shape");
+    expect(ctx).toContain("never copy a value from this run's input");
+  });
+
+  it("buildPlanningContext shows a tool's output schema when it has one, so steps.<id>.output.<field> uses real fields", () => {
+    const tools = createToolRegistry({
+      lookupOrder: {
+        description: "look up an order by id",
+        inputSchema: objSchema({ orderId: { type: "string" } }, ["orderId"]),
+        outputSchema: objSchema({ refundable: { type: "boolean" } }, ["refundable"]),
+        execute: async () => ({ refundable: true }),
+      },
+      notify: { description: "notify the customer", inputSchema: objSchema({ text: { type: "string" } }, ["text"]), execute: async () => ({}) },
+    });
+    const wf = createLittleWorkflow({
+      id: "billing.refund",
+      description: "refund",
+      output: output.object({ schema: objSchema({ ok: { type: "boolean" } }, ["ok"]) }),
+      models: [workerSlot],
+      globalTools: ["lookupOrder", "notify"],
+      planner: dummyPlanner,
+    } as unknown as Parameters<typeof createLittleWorkflow>[0]);
+    const lines = buildPlanningContext(toOrchestrationRequest(wf, { input: {}, tools, requestId: "orq_out" })).split("\n");
+    const lookupLine = lines.find((line) => line.includes("- lookupOrder"));
+    expect(lookupLine).toMatch(/; input schema: \{.*"orderId".*\}; output schema: \{.*"refundable".*\}$/u);
+    // A tool with no output schema keeps the input-only line.
+    expect(lines.find((line) => line.includes("- notify"))).not.toContain("output schema");
   });
 
   it("synthesizeReferenceLwir maps tool args from the tool's input schema, not the whole input", () => {

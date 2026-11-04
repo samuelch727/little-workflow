@@ -1,4 +1,4 @@
-export const appName = 'Little Workflow';
+export const appName = 'Little documentation';
 export const docsRoute = '/docs';
 export const docsImageRoute = '/og/docs';
 export const docsContentRoute = '/llms.mdx/docs';

@@ -47,6 +47,23 @@ describe("lowerAdHocPlan", () => {
     }
   });
 
+  it("adds the needs a plan left out when a step reads another step's output", () => {
+    const result = lower({
+      steps: [
+        { id: "fetch", uses: "tool.call", tool: "docs.search", with: { q: "{{ input.query }}" } },
+        { id: "sum", uses: "ai.generate", model: "default", prompt: "Summarize: {{ steps.fetch.output }}", output: { mode: "text" } },
+      ],
+      output: { from: "sum" },
+    });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.lwir.steps.find((s) => s.id === "sum")!.needs).toEqual(["fetch"]);
+      // The same plan with the need written out lowers to the same version.
+      const written = lower(planInput);
+      expect(written.ok && written.version.hash).toBe(result.version.hash);
+    }
+  });
+
   it("rejects a plan whose lowered LWIR fails validateLwir", () => {
     // ai.generate referencing a model not in referenced.models -> validateLwir model.disallowed
     const bad = {

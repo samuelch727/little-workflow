@@ -1,7 +1,11 @@
-import { describe, expect, it, vi } from "vitest";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { tool } from "ai";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
-import { validateHarnessWorkflowExecution } from "little-harness";
-import { defineWorkflow, model } from "./authoring.js";
+import { validateHarnessWorkflowExecution } from "@little-stack/harness/internals";
+import { defineWorkflow, localWorld, model } from "./authoring.js";
 import { RunFailedError } from "./runtime.js";
 import {
   asHarnessWorkflow,
@@ -18,6 +22,11 @@ function workflow() {
     model: model({ provider: "test", modelId: "planner" } as never),
   });
 }
+
+const dirs: string[] = [];
+afterEach(async () => {
+  await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+});
 
 function harnessContext(overrides: Record<string, unknown> = {}) {
   return {
@@ -132,6 +141,30 @@ describe("asHarnessWorkflow", () => {
         status: "failed",
         causeCode: "unsupported_protocol",
       });
+  });
+
+  it("records the harness tool call that started the run on its RunStarted", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "lw-harness-trigger-"));
+    dirs.push(dataDir);
+    const echoInput = z.object({ value: z.string() });
+    const echo = defineWorkflow({
+      id: "demo.echo",
+      input: echoInput,
+      tools: { echo: tool({ description: "Echo a value.", inputSchema: echoInput, execute: async ({ value }) => ({ value }) }) },
+      plan: {
+        steps: [{ id: "echo", uses: "tool.call", with: { tool: "echo", args: { value: "{{ input.value }}" } }, output: { mode: "json", schema: true } }],
+      },
+    });
+    const adapted = asHarnessWorkflow(echo, { definitionIdentity: "sha256:test-echo" });
+
+    const execution = await adapted.runForHarness(
+      { value: "hi" },
+      harnessContext({ persistence: { dataDir }, reservedRunId: "run_triggered" }) as never,
+    );
+
+    expect(execution).toMatchObject({ status: "completed", runId: "run_triggered" });
+    const started = (await localWorld({ dataDir }).listEvents("run_triggered")).find((event) => event.type === "RunStarted");
+    expect(started?.payload.trigger).toEqual({ kind: "harness", sessionId: "sess_1", turnId: "turn_1", toolCallId: "tool_1" });
   });
 
   it("fails closed when a detached start is requested for an inline workflow", async () => {

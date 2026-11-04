@@ -2,16 +2,18 @@ import { spawn } from "node:child_process";
 import { realpath } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
-import { planSetup, type SetupOptions } from "./setup-plan.js";
-import { applySetupPlan, readText, rollbackSetup } from "./setup-transaction.js";
+import { planSetup, SETUP_DEFAULTS, type ResolvedSetupOptions, type SetupOptions } from "./setup-plan.js";
+import { applySetupPlan, readText, recoverSetup } from "./setup-transaction.js";
 
 type Io = { cwd?: string; stdout?: (text: string) => void | Promise<void>; stderr?: (text: string) => void | Promise<void>; isTTY?: boolean };
 export const setupUsage = `Usage: little setup [directory] [options]
 
-Templates: --template node | next | existing-next
-  --here                    Add Little to the current Next.js project
+Target: a directory, or --here for the current directory.
+  --here                    Use the current directory as the target
+  --template <name>         node (default), next, or existing-next (add Little to the
+                            Next.js app in the target)
   --workflow                Wire a durable, keyless Workflow example into Harness
-  --provider <id>           Harness scaffold provider (default: openai)
+  --provider <id>           Harness catalog provider for the live model (default: openai)
   --model <id>              Provider model (defaults to its catalog choice)
   --package-manager <name>  npm, pnpm, or Yarn Classic (detect existing lockfile)
   --route <path>            Chat route (default: api/little/chat)
@@ -31,14 +33,14 @@ Existing Next: TypeScript App Router with explicit moduleResolution "bundler".
 New templates: one repo, agent definitions shared by the CLI and web entrypoint.
 Compute is unqualified; LittleDB is unpublished. Neither is installed.
 Examples:
-  npx little-workflow@alpha setup my-app --template next --workflow --yes --install --allow-native-build --verify
-  npx little-workflow@alpha setup agents --template node --yes --install --verify
-  npx little-workflow@alpha setup --here --plan
+  npx @little-stack/workflow@alpha setup my-app --template next --workflow --yes --install --allow-native-build --verify
+  npx @little-stack/workflow@alpha setup agents --template node --yes --install --verify
+  npx @little-stack/workflow@alpha setup --here --template existing-next --plan
 `;
 
-type Parsed = { dir?: string; options: SetupOptions; plan: boolean; yes: boolean; install: boolean; verify: boolean; native: boolean; here: boolean; rollback: boolean; help: boolean; compute: boolean; explicitTemplate: boolean; noInstall: boolean };
+type Parsed = { dir?: string; options: Omit<ResolvedSetupOptions, "model" | "packageManager"> & Pick<SetupOptions, "model" | "packageManager">; plan: boolean; yes: boolean; install: boolean; verify: boolean; native: boolean; here: boolean; rollback: boolean; help: boolean; compute: boolean; explicitTemplate: boolean; noInstall: boolean };
 function parseArgs(args: readonly string[]): Parsed {
-  const result: Parsed = { options: { template: "node", provider: "openai", workflow: false, route: "api/little/chat", page: "little" }, plan: false, yes: false, install: false, verify: false, native: false, here: false, rollback: false, help: false, compute: false, explicitTemplate: false, noInstall: false };
+  const result: Parsed = { options: { ...SETUP_DEFAULTS }, plan: false, yes: false, install: false, verify: false, native: false, here: false, rollback: false, help: false, compute: false, explicitTemplate: false, noInstall: false };
   const fields: Record<string, keyof SetupOptions> = { "--template": "template", "--provider": "provider", "--model": "model", "--package-manager": "packageManager", "--route": "route", "--page": "page" };
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]!;
@@ -64,7 +66,6 @@ function parseArgs(args: readonly string[]): Parsed {
     else result.dir = arg;
   }
   if (result.here && result.dir) throw new Error("Choose a directory or --here, not both.");
-  if (result.here && !result.explicitTemplate) result.options.template = "existing-next";
   if (!["node", "next", "existing-next"].includes(result.options.template)) throw new Error("Template must be node, next, or existing-next.");
   if (result.options.packageManager && !["npm", "pnpm", "yarn"].includes(result.options.packageManager)) throw new Error("Package manager must be npm, pnpm, or yarn.");
   return result;
@@ -84,14 +85,15 @@ export async function setupCommand(args: readonly string[], io: Io = {}): Promis
       const readline = createInterface({ input: process.stdin, output: process.stdout });
       try {
         if (!parsed.here && !parsed.dir) parsed.dir = (await readline.question("Project directory [little-app]: ")).trim() || "little-app";
-        if (!parsed.explicitTemplate && !parsed.here) {
-          const answer = (await readline.question("Template: Next.js app or standalone Node agent [next/node; next]: ")).trim();
-          parsed.options.template = answer === "node" ? "node" : "next";
+        if (!parsed.explicitTemplate) {
+          const answer = (await readline.question("Template: new Next.js app, standalone Node agent, or add to the existing Next.js app in the target [next/node/existing-next; next]: ")).trim() || "next";
+          if (!["node", "next", "existing-next"].includes(answer)) throw new Error("Template must be node, next, or existing-next.");
+          parsed.options.template = answer as ResolvedSetupOptions["template"];
         }
         parsed.options.workflow = parsed.options.workflow || (await readline.question("Add Little Workflow's durable keyless example? [y/N]: ")).toLowerCase() === "y";
         parsed.options.provider = (await readline.question(`Live provider (any Harness catalog id) [${parsed.options.provider}]: `)).trim() || parsed.options.provider;
         parsed.options.model = (await readline.question(`Live model [${parsed.options.model ?? "catalog default"}]: `)).trim() || parsed.options.model;
-        if (!parsed.here && !parsed.options.packageManager) {
+        if (parsed.options.template !== "existing-next" && !parsed.options.packageManager) {
           const manager = (await readline.question("Package manager [npm/pnpm/yarn; npm]: ")).trim() || "npm";
           if (!["npm", "pnpm", "yarn"].includes(manager)) throw new Error("Package manager must be npm, pnpm, or yarn.");
           parsed.options.packageManager = manager as SetupOptions["packageManager"];
@@ -100,13 +102,19 @@ export async function setupCommand(args: readonly string[], io: Io = {}): Promis
       } finally { readline.close(); }
     }
     const root = resolve(io.cwd ?? process.cwd(), parsed.here ? "." : parsed.dir ?? ".");
+    if (!parsed.dir && !parsed.here) throw new Error("Provide a project directory or --here. Use --help for examples.");
     if (parsed.rollback) {
-      const retained = await rollbackSetup(root);
-      if (retained.length) throw new Error(`Rollback preserved edited files: ${retained.join(", ")}. Recover the remaining journal manually.`);
-      await out("Recovered unchanged CLI-owned files; dependencies, caches and user edits were preserved.\n");
+      const recovery = await recoverSetup(root);
+      if (recovery.retained.length) throw new Error(`Rollback preserved edited files: ${recovery.retained.join(", ")}. Recover the remaining journal manually.`);
+      if (recovery.status === "nothing-to-recover") {
+        await out(`No setup transaction found in ${root}; nothing to recover.\n`);
+      } else if (recovery.status === "completed-cleanup") {
+        await out("Completed cleanup of the committed setup; generated project files were preserved.\n");
+      } else {
+        await out("Recovered unchanged CLI-owned files; dependencies, caches and user edits were preserved.\n");
+      }
       return 0;
     }
-    if (!parsed.dir && !parsed.here) throw new Error("Provide a project directory or --here. Use --help for examples.");
     const plan = await planSetup(root, parsed.options);
     await out(`${JSON.stringify({ root: plan.root, options: plan.options, files: plan.files.map(f => ({ path: f.path, action: f.before === null ? "create" : "merge", ...(f.path === "package.json" ? { before: f.before && JSON.parse(f.before), after: JSON.parse(f.after) } : {}) })), warnings: plan.warnings, conflicts: plan.conflicts }, null, 2)}\n`);
     if (parsed.plan) return plan.conflicts.length ? 1 : 0;

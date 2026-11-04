@@ -1,7 +1,13 @@
 import { createHash } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { MockLanguageModelV4 } from "ai/test";
+import { describe, expect, it, vi } from "vitest";
 import { hashHarnessPrompt } from "../events/durability.js";
-import type { PersistedDurableHarnessEvent } from "../events/occurrence.js";
+import {
+  canonicalHarnessEventRequestDigest,
+  createHarnessAppendIdempotencyKey,
+  type DurableHarnessEventInput,
+  type PersistedDurableHarnessEvent,
+} from "../events/occurrence.js";
 import {
   createWorkflowHarness,
   runWorkflowHarnessWithSession,
@@ -586,7 +592,7 @@ describe("workflowHarness", () => {
     expect(Object.keys(seenTools ?? {})).toHaveLength(0);
   });
 
-  it("still offers tools to a free-text (non-structured) ai.generate step", async () => {
+  it("does not offer workflow tools to a free-text ai.generate step either (nothing executes the call)", async () => {
     let seenTools: Record<string, unknown> | undefined;
     const harness = createWorkflowHarness({
       aiLoop: {
@@ -600,27 +606,31 @@ describe("workflowHarness", () => {
     await harness.run(
       {
         kind: "execute_step",
-        step: { id: "research", uses: "ai.generate", with: { model: "worker" } },
+        step: { id: "letter", uses: "ai.generate", with: { model: "worker" } },
         stepInput: { data: "x" },
-        stepContext: { stepPath: "research", visitIndex: 0 },
+        stepContext: { stepPath: "letter", visitIndex: 0 },
       },
-      workflowHarnessTestContext({ tools: { lookupOrder: { execute: async () => ({ ok: true }) } } }),
+      workflowHarnessTestContext({
+        tools: { recordDecision: { execute: async () => ({ ok: true }) } },
+      }),
     );
 
-    expect(Object.keys(seenTools ?? {})).toContain("lookupOrder");
+    // ai.generate is a single model call: a tool call the model makes here is never executed and
+    // only ends the step with empty text. Side effects belong in explicit tool.call steps.
+    expect(seenTools).toEqual({});
   });
 
-  it("exposes ctx.bash to ai.generate model loops", async () => {
+  it("keeps ctx.bash out of ai.generate steps but offers it to planner tasks", async () => {
     const events: RecordedEvent[] = [];
-    let seenTools: Record<string, unknown> | undefined;
+    const seenTools: Record<string, Record<string, unknown>> = {};
     const harness = createWorkflowHarness({
       aiLoop: {
-        generate: async ({ tools }) => {
-          seenTools = tools;
-          return {
-            output: "done",
-            usage: { inputTokens: 1, outputTokens: 1 },
-          };
+        generate: async ({ tools, step }) => {
+          const isPlan = (step as { kind?: unknown } | undefined)?.kind === "plan";
+          seenTools[isPlan ? "plan" : "draft"] = tools;
+          return isPlan
+            ? { output: { lwir: { steps: [] } } }
+            : { output: "done", usage: { inputTokens: 1, outputTokens: 1 } };
         },
       },
     });
@@ -638,11 +648,61 @@ describe("workflowHarness", () => {
       },
       ctx,
     );
+    await harness.run(
+      {
+        kind: "plan",
+        workflowSnapshot: {
+          id: "test.workflow",
+          description: "Test workflow",
+          inputSchema: true,
+          outputSchema: true,
+          workflowDefinitionHash: "sha256:test",
+        },
+        input: {},
+      },
+      ctx,
+    );
 
-    expect(Object.keys(seenTools ?? {})).toContain("bash");
+    expect(seenTools.draft).toEqual({});
     const modelCalled = events.find((event) => event.type === "harness.model.called");
-    expect((modelCalled?.payload.request as { tools?: Array<{ toolName?: string }> } | undefined)?.tools)
-      .toEqual(expect.arrayContaining([expect.objectContaining({ toolName: "bash" })]));
+    expect((modelCalled?.payload.request as { tools?: unknown[] } | undefined)?.tools).toEqual([]);
+    expect(Object.keys(seenTools.plan ?? {})).toContain("bash");
+  });
+
+  it("appends an ai.generate step's with.system after the worker system", async () => {
+    const events: RecordedEvent[] = [];
+    let seenSystem: string | undefined;
+    const harness = createWorkflowHarness({
+      aiLoop: {
+        generate: async ({ system }) => {
+          seenSystem = system;
+          return { text: "ok" };
+        },
+      },
+    });
+
+    await runWorkflowHarnessWithSession(
+      harness,
+      {
+        kind: "execute_step",
+        step: {
+          id: "underwrite",
+          uses: "ai.generate",
+          with: { model: "worker", system: "You are a cautious underwriter." },
+        },
+        stepInput: { applicant: "A-1" },
+        stepContext: { stepPath: "underwrite", visitIndex: 0 },
+      },
+      workflowHarnessTestContext({
+        system: "Worker system.",
+        durability: recordDurability(events),
+      }),
+    );
+
+    expect(seenSystem).toBe("Worker system.\n\nYou are a cautious underwriter.");
+    const modelCalled = events.find((event) => event.type === "harness.model.called");
+    expect((modelCalled?.payload.request as { system?: string } | undefined)?.system)
+      .toBe("Worker system.\n\nYou are a cautious underwriter.");
   });
 
   it("does not backfill prior model usage into sessions that emit no model responses", async () => {
@@ -1069,10 +1129,12 @@ describe("workflowHarness", () => {
 
   it("includes mounted skills in model-like prompts without dropping task system messages", async () => {
     let seenSystem: string | undefined;
+    let seenMessages: readonly unknown[] = [];
     const harness = createWorkflowHarness({
       aiLoop: {
-        generate: async ({ system }) => {
+        generate: async ({ system, messages }) => {
           seenSystem = system;
+          seenMessages = messages;
           return { output: { lwir: { steps: [] } } };
         },
       },
@@ -1107,6 +1169,9 @@ describe("workflowHarness", () => {
     expect(seenSystem).toContain("<name>planner-guide</name>");
     expect(seenSystem).toContain("<read>cat .agents/skills/planner-guide/SKILL.md</read>");
     expect(seenSystem?.match(/<available_skills>/gu)).toHaveLength(1);
+    // The planning instructions travel once, in the system prompt, not again in the user message.
+    expect(JSON.stringify(seenMessages)).not.toContain("Planner-specific instructions.");
+    expect(JSON.stringify(seenMessages)).toContain("TIN-8");
   });
 
   it("unwraps planner aiLoop outputs shaped as { lwir }", async () => {
@@ -1183,12 +1248,60 @@ describe("workflowHarness", () => {
     expect(calls).toHaveLength(1);
     expect(calls[0]).toMatchObject({
       model: { provider: "test", modelId: "test-model" },
-      output: { mode: "object" },
+      output: { mode: "text" },
     });
     expect(events.map((event) => event.type)).toEqual([
       "harness.model.called",
       "harness.model.responded",
     ]);
+  });
+
+  it("sends a failed planner tool call to an AI SDK model as an error tool result", async () => {
+    const calls: Array<{ readonly messages?: readonly unknown[] }> = [];
+    const aiSdkModule = {
+      generateText: async (request: { readonly messages?: readonly unknown[] }) => {
+        calls.push(request);
+        return calls.length === 1
+          ? { text: "", toolCalls: [{ toolName: "bash", toolCallId: "call_1", input: {} }] }
+          : { text: JSON.stringify({ steps: [{ id: "draft", uses: "ai.generate" }] }) };
+      },
+      Output: { text: () => ({ mode: "text" }) },
+      jsonSchema: (schema: unknown) => ({ wrapped: schema }),
+    };
+    const harness = createWorkflowHarness({ aiSdkModule });
+
+    await harness.run(
+      {
+        kind: "plan",
+        workflowSnapshot: {
+          id: "test.workflow",
+          description: "Test workflow",
+          inputSchema: true,
+          outputSchema: true,
+          workflowDefinitionHash: "sha256:test",
+        },
+        input: { ticketId: "TIN-8" },
+      },
+      workflowHarnessTestContext({
+        tools: {
+          bash: {
+            execute: async () => {
+              throw new Error("bash needs a `cmd`.");
+            },
+          },
+        },
+      }),
+    );
+
+    expect(calls[1]?.messages?.at(-1)).toEqual({
+      role: "tool",
+      content: [{
+        type: "tool-result",
+        toolCallId: "call_1",
+        toolName: "bash",
+        output: { type: "error-text", value: "Error: bash needs a `cmd`." },
+      }],
+    });
   });
 
   it("continues planner model-like tasks after tool calls", async () => {
@@ -1250,6 +1363,225 @@ describe("workflowHarness", () => {
       turn: 1,
       callIndex: 1,
     });
+  });
+
+  it("hands a failed planner tool call back to the model instead of failing the plan", async () => {
+    const events: RecordedEvent[] = [];
+    const seenMessages: unknown[][] = [];
+    const generate = async ({ messages }: { readonly messages: readonly unknown[] }) => {
+      seenMessages.push([...messages]);
+      if (seenMessages.length === 1) {
+        return {
+          toolCalls: [
+            { toolName: "bash", args: { command: "ls" }, toolCallId: "call_bad_args" },
+            { toolName: "read_file", args: { path: "a.txt" }, toolCallId: "call_made_up" },
+          ],
+        };
+      }
+      return { output: { lwir: { steps: [{ id: "draft", uses: "ai.generate" }] } } };
+    };
+    const harness = createWorkflowHarness({ aiLoop: { generate } });
+
+    const result = await harness.run(
+      {
+        kind: "plan",
+        workflowSnapshot: {
+          id: "test.workflow",
+          description: "Test workflow",
+          inputSchema: true,
+          outputSchema: true,
+          workflowDefinitionHash: "sha256:test",
+        },
+        input: { ticketId: "TIN-8" },
+      },
+      workflowHarnessTestContext({
+        durability: recordDurability(events),
+        tools: {
+          bash: {
+            execute: async (args: { readonly cmd?: unknown }) => {
+              if (typeof args.cmd !== "string") throw new TypeError("bash needs a string `cmd`.");
+              return { stdout: "", exitCode: 0 };
+            },
+          },
+        },
+      }),
+    );
+
+    expect(result).toEqual({ kind: "plan", lwir: { steps: [{ id: "draft", uses: "ai.generate" }] } });
+    expect(events.map((event) => event.type)).toContain("harness.tool_call.failed");
+    expect(seenMessages[1]?.at(-1)).toEqual({
+      role: "tool",
+      content: [
+        {
+          toolName: "bash",
+          toolCallId: "call_bad_args",
+          result: "TypeError: bash needs a string `cmd`.",
+          isError: true,
+        },
+        {
+          toolName: "read_file",
+          toolCallId: "call_made_up",
+          result: "There is no tool named 'read_file'. Available tools: bash.",
+          isError: true,
+        },
+      ],
+    });
+  });
+
+  it("runs the tools of an AI SDK planner turn that ends in tool calls with empty text", async () => {
+    const events: RecordedEvent[] = [];
+    const commands: unknown[] = [];
+    const model = new MockLanguageModelV4({
+      provider: "test",
+      modelId: "planner",
+      doStream: [
+        mockModelStream([
+          { type: "tool-call", toolCallId: "call_1", toolName: "bash", input: JSON.stringify({ cmd: "cat /planner/reuse/v1/lwir.json" }) },
+          { type: "finish", finishReason: { unified: "tool-calls", raw: "tool_use" }, usage: mockModelUsage },
+        ]),
+        mockModelTextStream(JSON.stringify({ steps: [{ id: "draft", uses: "ai.generate" }] })),
+      ],
+    });
+    const ctx = workflowHarnessTestContext({
+      durability: recordDurability(events),
+      model: { slotId: "planner", providerId: "test", modelId: "planner", model },
+    }) as WorkflowHarnessContext & { bash: unknown };
+    ctx.bash = {
+      inputSchema: { type: "object", properties: { cmd: { type: "string" } }, required: ["cmd"] },
+      execute: async (input: unknown) => {
+        commands.push(input);
+        return { stdout: "{}", stderr: "", exitCode: 0 };
+      },
+    };
+
+    const result = await createWorkflowHarness().run(harnessPlanTask(), ctx);
+
+    expect(result).toEqual({ kind: "plan", lwir: { steps: [{ id: "draft", uses: "ai.generate" }] } });
+    expect(commands).toEqual([{ cmd: "cat /planner/reuse/v1/lwir.json" }]);
+    expect(model.doStreamCalls).toHaveLength(2);
+    expect(events.map((event) => event.type)).toEqual([
+      "harness.model.called",
+      "harness.model.responded",
+      "harness.tool_call.started",
+      "harness.tool_call.succeeded",
+      "harness.model.called",
+      "harness.model.responded",
+    ]);
+  });
+
+  it("asks an AI SDK planner for text and reads the LWIR out of a fenced reply", async () => {
+    const lwir = { apiVersion: "littleworkflow.dev/v0.1", kind: "Workflow", steps: [{ id: "draft", uses: "ai.generate" }] };
+    const model = new MockLanguageModelV4({
+      provider: "test",
+      modelId: "planner",
+      doStream: mockModelTextStream(`Here is the plan.\n\n\`\`\`json\n${JSON.stringify(lwir, null, 2)}\n\`\`\``),
+    });
+
+    const result = await createWorkflowHarness().run(
+      harnessPlanTask(),
+      workflowHarnessTestContext({ model: { slotId: "planner", providerId: "test", modelId: "planner", model } }),
+    );
+
+    expect(result).toEqual({ kind: "plan", lwir });
+    // An open object schema sent as native structured output only admits `{}` on Claude.
+    expect(model.doStreamCalls).toHaveLength(1);
+    expect(model.doStreamCalls[0]?.responseFormat?.type).not.toBe("json");
+  });
+
+  it("keeps a planner's adapt decision whole instead of unwrapping its lwir", async () => {
+    const decision = {
+      kind: "adapt",
+      baseWorkflowVersionId: "wfv_1",
+      rationale: "Add a letter step.",
+      lwir: { steps: [{ id: "draft", uses: "ai.generate" }] },
+    };
+    const harness = createWorkflowHarness({ aiLoop: { generate: async () => ({ text: JSON.stringify(decision) }) } });
+
+    await expect(harness.run(harnessPlanTask(), workflowHarnessTestContext())).resolves.toEqual({
+      kind: "plan",
+      lwir: decision,
+    });
+  });
+
+  it("returns a planner reply with no JSON in it as text for the validator to reject", async () => {
+    const harness = createWorkflowHarness({ aiLoop: { generate: async () => ({ text: "I could not plan this." }) } });
+
+    await expect(harness.run(harnessPlanTask(), workflowHarnessTestContext())).resolves.toEqual({
+      kind: "plan",
+      lwir: "I could not plan this.",
+    });
+  });
+
+  it("throws the model's own error from an AI SDK planner call instead of returning an empty draft", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const events: RecordedEvent[] = [];
+      const model = new MockLanguageModelV4({
+        provider: "test",
+        modelId: "planner",
+        doStream: async () => {
+          throw new Error("529 overloaded_error");
+        },
+      });
+
+      await expect(
+        createWorkflowHarness().run(
+          harnessPlanTask(),
+          workflowHarnessTestContext({
+            durability: recordDurability(events),
+            model: { slotId: "planner", providerId: "test", modelId: "planner", model },
+          }),
+        ),
+      ).rejects.toThrow("529 overloaded_error");
+      expect(events.map((event) => event.type)).toEqual(["harness.model.called", "harness.model.failed"]);
+      expect(consoleError).not.toHaveBeenCalled();
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it("sends no system prompt for an ai.generate step that has none", async () => {
+    const model = new MockLanguageModelV4({ provider: "test", modelId: "worker", doStream: mockModelTextStream("Dear Ana,") });
+
+    await createWorkflowHarness().run(
+      {
+        kind: "execute_step",
+        step: { id: "letter", uses: "ai.generate", with: { model: "worker", prompt: "Write the letter." }, output: { mode: "text" } },
+        stepInput: { applicantName: "Ana" },
+        stepContext: { stepPath: "letter", visitIndex: 0 },
+      },
+      workflowHarnessTestContext({ model: { slotId: "worker", providerId: "test", modelId: "worker", model } }),
+    );
+
+    // Anthropic rejects an empty system block ("text content blocks must be non-empty").
+    expect(model.doStreamCalls).toHaveLength(1);
+    expect(model.doStreamCalls[0]?.prompt.filter((message) => message.role === "system")).toEqual([]);
+  });
+
+  it("throws an AI SDK error stream part from an ai.generate step even after partial text", async () => {
+    const model = new MockLanguageModelV4({
+      provider: "test",
+      modelId: "worker",
+      doStream: mockModelStream([
+        { type: "text-start", id: "0" },
+        { type: "text-delta", id: "0", delta: "partial" },
+        { type: "error", error: new Error("stream reset by provider") },
+      ]),
+    });
+
+    await expect(
+      createWorkflowHarness().run(
+        {
+          kind: "execute_step",
+          step: { id: "draft", uses: "ai.generate", with: { model: "worker" }, output: { mode: "text" } },
+          stepInput: { prompt: "Draft." },
+          stepContext: { stepPath: "draft", visitIndex: 0 },
+        },
+        workflowHarnessTestContext({
+          model: { slotId: "worker", providerId: "test", modelId: "worker", model },
+        }),
+      ),
+    ).rejects.toThrow("stream reset by provider");
   });
 
   it("adds deterministic subRunId to workflow run tool started events before execution", async () => {
@@ -1316,6 +1648,46 @@ describe("workflowHarness", () => {
   });
 });
 
+const mockModelUsage = {
+  inputTokens: { total: 1, noCache: 1, cacheRead: 0, cacheWrite: 0 },
+  outputTokens: { total: 1, text: 1, reasoning: 0 },
+};
+
+function mockModelStream(parts: readonly unknown[]) {
+  return {
+    stream: new ReadableStream({
+      start(controller) {
+        controller.enqueue({ type: "stream-start", warnings: [] });
+        for (const part of parts) controller.enqueue(part);
+        controller.close();
+      },
+    }),
+  } as never;
+}
+
+function mockModelTextStream(text: string) {
+  return mockModelStream([
+    { type: "text-start", id: "0" },
+    { type: "text-delta", id: "0", delta: text },
+    { type: "text-end", id: "0" },
+    { type: "finish", finishReason: { unified: "stop", raw: "stop" }, usage: mockModelUsage },
+  ]);
+}
+
+function harnessPlanTask() {
+  return {
+    kind: "plan" as const,
+    workflowSnapshot: {
+      id: "test.workflow",
+      description: "Test workflow",
+      inputSchema: true,
+      outputSchema: true,
+      workflowDefinitionHash: "sha256:test",
+    },
+    input: { ticketId: "TIN-8" },
+  };
+}
+
 function workflowHarnessTestContext(
   overrides: Partial<WorkflowHarnessContext> = {},
 ): WorkflowHarnessContext {
@@ -1357,7 +1729,7 @@ function recordDurability(events: RecordedEvent[]): WorkflowHarnessDurabilitySin
       events.push({
         type: event.type,
         runId: event.runId,
-        payload: event.payload,
+        payload: event.payload ?? { payloadArtifactId: event.payloadArtifactId },
         ...(event.occurrenceId === undefined ? {} : { occurrenceId: event.occurrenceId }),
       });
     },
@@ -1377,13 +1749,22 @@ function persistedEvent(
   payload: Record<string, unknown>,
   occurrenceId?: string,
 ): PersistedDurableHarnessEvent<WorkflowDurableHarnessEventType> {
-  return {
-    eventId: `evt_${sequence}`,
-    sequence,
+  const request: DurableHarnessEventInput<WorkflowDurableHarnessEventType> = {
     type,
     runId: "run_test",
-    recordedAt: "2026-06-07T00:00:00.000Z",
+    appendIdempotencyKey: createHarnessAppendIdempotencyKey({
+      runId: "run_test",
+      eventType: type,
+      logicalEventId: `fixture:${sequence}`,
+    }),
     ...(occurrenceId === undefined ? {} : { occurrenceId }),
     payload,
+  };
+  return {
+    ...request,
+    eventId: `evt_${sequence}`,
+    sequence,
+    recordedAt: "2026-06-07T00:00:00.000Z",
+    canonicalRequestDigest: canonicalHarnessEventRequestDigest(request),
   };
 }

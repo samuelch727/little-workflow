@@ -14,6 +14,7 @@ export const HARNESS_EVENT_TYPES = [
   "harness.runtime.command.denied",
   "harness.runtime.tier.escalated",
   "harness.runtime.tier.unavailable",
+  "harness.runtime.usage",
   "harness.runtime.error",
   "harness.runtime.dispose.failed",
   "harness.file.created",

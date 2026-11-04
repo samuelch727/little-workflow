@@ -113,11 +113,54 @@ it("rejects collisions with task-control and workflow-inspection tools", () => {
   ).toThrow(/collides/i);
 });
 
-it("rejects externally supplied names that use the generated launcher prefix", () => {
+it("reserves Agent Group tool names across configured, MCP, workflow, and generated launchers", () => {
+  for (const options of [
+    { configuredToolNames: ["spawn_agent"], agentGroupToolNames: ["spawn_agent"] },
+    { mcpToolNames: ["join_agent_group"], agentGroupToolNames: ["join_agent_group"] },
+    { taskControlToolNames: ["cancel_agent_group"], agentGroupToolNames: ["cancel_agent_group"] },
+    { generatedLauncherNames: ["watch_agent_group"], agentGroupToolNames: ["watch_agent_group"] },
+  ]) {
+    expect(() => resolveAgentManifest(options)).toThrow(/collides/i);
+  }
+});
+
+it("reserves checkpoint across every other tool namespace", () => {
+  for (const options of [
+    { configuredToolNames: ["checkpoint"], checkpointToolNames: ["checkpoint"] },
+    { mcpToolNames: ["checkpoint"], checkpointToolNames: ["checkpoint"] },
+    { taskControlToolNames: ["checkpoint"], checkpointToolNames: ["checkpoint"] },
+    { agentGroupToolNames: ["checkpoint"], checkpointToolNames: ["checkpoint"] },
+    { generatedLauncherNames: ["checkpoint"], checkpointToolNames: ["checkpoint"] },
+  ]) {
+    expect(() => resolveAgentManifest(options)).toThrow(/collides/i);
+  }
+});
+
+it("allows ordinary start tools without a generated launcher collision", () => {
+  const manifest = resolveAgentManifest({
+    configuredToolNames: ["start_review"],
+    discoveredToolNames: ["start_experiment"],
+    mcpToolNames: ["start_import"],
+    workflows: [workflow()],
+  });
+  expect(manifest.configuredToolNames).toEqual(["start_experiment", "start_review"]);
+  expect(manifest.mcpToolNames).toEqual(["start_import"]);
+  expect(manifest.asyncLauncherNames).toEqual(["start_candidate_review"]);
+});
+
+it("rejects actual generated launcher collisions from every external tool source", () => {
   for (const options of [
     { configuredToolNames: ["start_candidate_review"] },
     { discoveredToolNames: ["start_candidate_review"] },
     { mcpToolNames: ["start_candidate_review"] },
+  ]) {
+    expect(() => resolveAgentManifest({ ...options, workflows: [workflow()] })).toThrow(/collides/i);
+    expect(() => resolveAgentManifest({ ...options, generatedLauncherNames: ["start_candidate_review"] })).toThrow(/collides/i);
+  }
+});
+
+it("reserves the launcher prefix for workflow handles and runtime controls", () => {
+  for (const options of [
     { taskControlToolNames: ["start_candidate_review"] },
     { workflowInspectionToolNames: ["start_candidate_review"] },
     { workflows: [workflow("start.candidate")] },

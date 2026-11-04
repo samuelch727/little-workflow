@@ -1,3 +1,4 @@
+import type { IFileSystem } from "just-bash";
 import { readdir, readFile, stat } from "node:fs/promises";
 import * as path from "node:path";
 import { sha256Hex } from "../ids.js";
@@ -8,6 +9,31 @@ export type FolderSnapshot = Record<string, Uint8Array>;
 export async function snapshotFolder(root: string): Promise<FolderSnapshot> {
   const snapshot: FolderSnapshot = {};
   await collect(root, "", snapshot);
+  return snapshot;
+}
+
+/**
+ * {@link snapshotFolder} for a folder of a just-bash filesystem: every file under `root`,
+ * keyed by its path relative to `root` with "/" separators. A missing folder is empty.
+ */
+export async function snapshotFs(fs: IFileSystem, root: string): Promise<FolderSnapshot> {
+  const snapshot: FolderSnapshot = {};
+  if (!(await fs.exists(root))) {
+    return snapshot;
+  }
+  const walk = async (dir: string, relative: string): Promise<void> => {
+    for (const name of [...(await fs.readdir(dir))].sort()) {
+      const full = path.posix.join(dir, name);
+      const next = relative ? `${relative}/${name}` : name;
+      const stat = await fs.lstat(full);
+      if (stat.isDirectory) {
+        await walk(full, next);
+      } else if (stat.isFile) {
+        snapshot[next] = await fs.readFileBuffer(full);
+      }
+    }
+  };
+  await walk(root, "");
   return snapshot;
 }
 

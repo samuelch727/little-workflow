@@ -7,7 +7,7 @@ import {
   resolveProvider,
   scaffoldAgent,
   scaffoldDependencyVersions,
-} from "little-harness/scaffold";
+} from "@little-stack/harness/scaffold";
 
 type InitWorkflowProjectOptions = {
   readonly projectName?: string;
@@ -45,7 +45,7 @@ type LittleWorkflowManifest = {
 };
 
 const DEFAULT_WORKFLOW_NAME = "candidate-review";
-const DEFAULT_PROVIDER = "deepseek";
+const DEFAULT_PROVIDER = "openai";
 const PNPM_VERSION = "pnpm@10.27.0";
 // The Local World event store's native binding; pnpm 10 skips dependency build scripts
 // unless they are allow-listed, which leaves `require("better-sqlite3")` failing at run time.
@@ -156,7 +156,7 @@ export async function addHarnessToWorkflowProject(
   options: AddHarnessOptions,
 ): Promise<string[]> {
   if (options.workflowName !== undefined && options.newWorkflowName !== undefined) {
-    throw new Error("Choose either --workflow or --new-workflow, not both.");
+    throw new Error("Choose either --workflow-name or --new-workflow, not both.");
   }
   const agentName = options.agentName ?? "support";
   assertSafeWorkflowName(agentName);
@@ -272,12 +272,12 @@ async function updatePackageJson(
   const versions = scaffoldDependencyVersions();
   const dependencies = {
     ...(existing.dependencies ?? {}),
-    "little-workflow": littleWorkflowVersionRange(),
+    "@little-stack/workflow": littleWorkflowVersionRange(),
     ai: versions.ai,
     zod: versions.zod,
   };
   if (options.includeHarness) {
-    dependencies["little-harness"] = versions.littleHarness;
+    dependencies["@little-stack/harness"] = versions.littleHarness;
   }
   const providerPackage = providerDependency(provider);
   if (providerPackage !== undefined) {
@@ -364,7 +364,7 @@ async function writeWorkflowShim(
   }
   const workflowDir = await workflowDirFromManifest(root, workflowName);
   const workflowUrl = relative(dirname(shimPath), workflowDir).split(/[\\/]+/u).join("/");
-  await writeFile(shimPath, `import { loadWorkflow } from "little-workflow";
+  await writeFile(shimPath, `import { loadWorkflow } from "@little-stack/workflow";
 
 export default await loadWorkflow(
   new URL("${workflowUrl}", import.meta.url),
@@ -397,48 +397,28 @@ async function exists(path: string): Promise<boolean> {
 function workflowSource(workflowName: string, providerId: string, modelId: string): string {
   const provider = resolveProvider(providerId);
   const id = workflowName.replace(/-/gu, ".");
-  const inputSchema = {
-    type: "object",
-    properties: { value: { type: "string" } },
-    required: ["value"],
-    additionalProperties: false,
-  };
-  return `import { createLittleWorkflow, model } from "little-workflow";
+  return `import { defineWorkflow } from "@little-stack/workflow";
 import { ${provider.exportName} } from "${provider.importModule}";
+import { z } from "zod";
 
-export default createLittleWorkflow({
+export default defineWorkflow({
   id: ${JSON.stringify(id)},
   description: ${JSON.stringify(`Starter workflow for ${workflowName}.`)},
-  inputSchema: ${JSON.stringify(inputSchema, null, 4).replace(/^/gmu, "  ").trimStart()},
-  models: [model(${provider.exportName}(${JSON.stringify(modelId)}))],
-  globalTools: ["echo"],
-  planner: {
-    model: ${provider.exportName}(${JSON.stringify(modelId)}),
-    system: "Create a short plan that calls the echo tool.",
-    harness: {
-      harnessId: "starter-workflow-planner@1.0.0",
-      async run() {
-        return {
-          kind: "plan",
-          lwir: {
-            apiVersion: "littleworkflow.dev/v0.1",
-            kind: "Workflow",
-            metadata: { name: ${JSON.stringify(id)} },
-            input: { schema: ${JSON.stringify(inputSchema, null, 14).replace(/^/gmu, "            ").trimStart()} },
-            output: { schema: true },
-            permissions: { models: [], tools: ["echo"], secrets: [], network: [] },
-            steps: [
-              {
-                id: "echo",
-                uses: "tool.call",
-                with: { tool: "echo", args: {} },
-                output: { mode: "json", schema: true },
-              },
-            ],
-          },
-        };
+  input: z.object({ value: z.string() }),
+  model: ${provider.exportName}(${JSON.stringify(modelId)}),
+  // tools/echo.ts in this folder supplies the echo tool.
+  tools: ["echo"],
+  // A fixed plan runs as written, without a model call. Delete \`plan\` to let a planner draft
+  // the steps with \`model\` and the instructions in instructions.md.
+  plan: {
+    steps: [
+      {
+        id: "echo",
+        uses: "tool.call",
+        with: { tool: "echo", args: {} },
+        output: { mode: "json", schema: true },
       },
-    },
+    ],
   },
 });
 `;

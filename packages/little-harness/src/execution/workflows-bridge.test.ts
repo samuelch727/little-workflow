@@ -1,3 +1,4 @@
+import { assertCompletedTurn } from "../test/completed-turn.js";
 import { join } from "node:path";
 import { jsonSchema, tool } from "ai";
 import { MockLanguageModelV3 } from "ai/test";
@@ -182,6 +183,7 @@ it("runs the workflow when the agent calls its full-id tool and returns compact 
     });
     // The workflow summary flows back as compact tool metadata for the agent.
     expect(secondPrompt).toContain("REFUND_SENTINEL_7");
+    assertCompletedTurn(result);
     expect(result.text).toBe("Your refund is processed.");
   });
 });
@@ -262,9 +264,16 @@ it("passes configured tool allowlists into workflow context capabilities", async
       session: "refund-capabilities",
     });
 
-    expect(receivedCapabilities).toMatchObject({
-      tools: { lookup_order: lookupOrder },
+    // The workflow gets the configured tool, with an execute that adds the step context.
+    const passed = (receivedCapabilities as { tools: Record<string, typeof lookupOrder> }).tools;
+    expect(Object.keys(passed)).toEqual(["lookup_order"]);
+    expect(passed.lookup_order).toMatchObject({
+      description: lookupOrder.description,
+      inputSchema: lookupOrder.inputSchema,
     });
+    await expect(
+      passed.lookup_order!.execute!({ orderId: "O-9" }, { toolCallId: "step", messages: [], context: {} } as never),
+    ).resolves.toEqual({ status: "found" });
   });
 });
 
@@ -312,7 +321,7 @@ it("rejects MCP tools that collide with workflow handles before the model turn",
   });
 });
 
-it("rejects MCP tools that use the generated workflow launcher prefix before the model turn", async () => {
+it("rejects MCP tools that collide with a generated workflow launcher before the model turn", async () => {
   await withTempDir(async (dir) => {
     const model = new MockLanguageModelV3({
       provider: "test",
@@ -352,6 +361,6 @@ it("rejects MCP tools that use the generated workflow launcher prefix before the
       workflows: [candidate],
     });
 
-    await expect(generateHarness({ harness, type: "job", input: {} })).rejects.toThrow(/reserved start_/i);
+    await expect(generateHarness({ harness, type: "job", input: {} })).rejects.toThrow(/collides/i);
   });
 });

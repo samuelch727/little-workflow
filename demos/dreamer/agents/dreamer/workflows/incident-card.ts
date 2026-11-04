@@ -1,5 +1,4 @@
-import { asHarnessWorkflow, defineWorkflow } from "little-workflow";
-import type { WorkflowDefinition } from "little-workflow";
+import { asHarnessWorkflow, defineWorkflow } from "@little-stack/workflow";
 import type { LanguageModel } from "ai";
 import { z } from "zod";
 import { dreamerModel } from "../env";
@@ -69,13 +68,8 @@ export function createIncidentCardWorkflow(model: LanguageModel, planner?: unkno
   });
 }
 
-// The `as unknown as WorkflowDefinition` cast is NOT incidental: `defineWorkflow` returns a
-// `DefinedWorkflow<TInput, TOutput>` whose type brand is invariant, so it does not assign to
-// the un-parameterized `WorkflowDefinition` that `asHarnessWorkflow` takes. The SDK's own
-// `loadWorkflow` writes exactly the same cast
-// (packages/little-workflow/src/workspace/load-workflow.ts).
 export default asHarnessWorkflow(
-  createIncidentCardWorkflow(dreamerModel()) as unknown as WorkflowDefinition,
+  createIncidentCardWorkflow(dreamerModel()),
   {
     executionMode: "inline",
     // Inline, demo-local, and never resumed across a definition change, so there is no

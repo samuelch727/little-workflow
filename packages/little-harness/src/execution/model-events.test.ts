@@ -2,9 +2,10 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import { createLocalFileWriter } from "../files/file-writer.js";
 import { sessionPaths, type LocalHostPaths } from "../local-host/paths.js";
+import { canonicalHarnessEventRequestDigest } from "../events/occurrence.js";
 import { withTempDir } from "../test/temp.js";
 import { resolveTraceOptions } from "../trace/options.js";
-import { modelRespondedMetadata, toolRefsForDurableRequest } from "./model-events.js";
+import { modelRespondedEventData, modelRespondedMetadata, toolRefsForDurableRequest } from "./model-events.js";
 
 const ticketSchema = {
   type: "object",
@@ -35,6 +36,48 @@ function aiSdkSchemaFor(schema: unknown): unknown {
 }
 
 describe("modelRespondedMetadata", () => {
+  it("persists AI SDK tool calls without their internal raw-input symbol", async () => {
+    await withTempDir(async (dir) => {
+      const paths: LocalHostPaths = {
+        dataDir: dir,
+        projectRoot: dir,
+        sessionsDir: `${dir}/sessions`,
+        persistentDir: `${dir}/persistent`,
+        locksDir: `${dir}/locks`,
+      };
+      const call = {
+        type: "tool-call",
+        toolCallId: "call_1",
+        toolName: "lookup",
+        input: { query: "alpha" },
+      };
+      Object.defineProperty(call, Symbol("ai-sdk-tool-call-input-schema-input"), {
+        value: { query: "before schema transformation" },
+      });
+      const event = await modelRespondedEventData({
+        callId: "model_1",
+        stepNumber: 1,
+        model: { provider: "test", modelId: "tool-model" },
+        result: { toolCalls: [call] },
+        text: "",
+        files: createLocalFileWriter(sessionPaths(paths, "chat_123")),
+        traceOptions: resolveTraceOptions(undefined, undefined),
+      });
+      expect(event.payload.response).toEqual({ text: "", toolCalls: [{
+        type: "tool-call",
+        toolCallId: "call_1",
+        toolName: "lookup",
+        input: { query: "alpha" },
+      }] });
+      expect(() => canonicalHarnessEventRequestDigest({
+        type: "harness.model.responded",
+        runId: "run_1",
+        appendIdempotencyKey: "model_response_append_1",
+        payload: event.payload,
+      })).not.toThrow();
+    });
+  });
+
   it("captures provider-exposed reasoning, tool calls, sources, and generated file metadata", async () => {
     await withTempDir(async (dir) => {
       const paths: LocalHostPaths = {

@@ -4,22 +4,28 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
-  createWorkflowHarness,
-  createLittleWorkflow,
   createToolRegistry,
-  getWorkflowDefinitionHash,
-  listEvents,
   localWorld,
   model,
   output,
-  runWorkflow,
-  sha256Digest,
+  runOrchestration,
   skill,
-  type ExecuteStepTask,
-  type Harness,
-  type HarnessContext,
-  type LwirWorkflow,
 } from "./index.js";
+import type {
+  LwirWorkflow,
+} from "./entries/lwir.js";
+import {
+  createWorkflowHarness,
+  createLittleWorkflow,
+  getWorkflowDefinitionHash,
+  listEvents,
+  sha256Digest,
+} from "./entries/internals.js";
+import type {
+  ExecuteStepTask,
+  Harness,
+  HarnessContext,
+} from "./entries/internals.js";
 import { cleanupTempDirs, workerScopedTempPrefix } from "./test-temp.js";
 
 const tempDirs: string[] = [];
@@ -41,6 +47,7 @@ async function appendTestExecuteStepEvent(
   await ctx.durability.append({
     type,
     runId: ctx.session.runId,
+    appendIdempotencyKey: `orchestrator-memory-test:${type}:${task.stepContext.stepPath}:${task.stepContext.visitIndex}`,
     payload: {
       runId: ctx.session.runId,
       stepId: task.step.id,
@@ -60,6 +67,7 @@ async function appendCodeToolCallEvent(
   await ctx.durability.append({
     type,
     runId: ctx.session.runId,
+    appendIdempotencyKey: `orchestrator-memory-test:${type}:code-call-1`,
     payload: {
       caller: "code",
       callIndex: 1,
@@ -434,7 +442,7 @@ describe("harness + orchestrator + memory acceptance", () => {
     const stableHash = getWorkflowDefinitionHash(alphaWorkflow, tools);
     expect(getWorkflowDefinitionHash(alphaWorkflow, tools)).toBe(stableHash);
 
-    const result = await runWorkflow({
+    const result = await runOrchestration({
       world,
       workflows: [alphaWorkflow, betaWorkflow],
       orchestrator: {

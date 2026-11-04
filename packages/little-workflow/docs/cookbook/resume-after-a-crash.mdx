@@ -12,26 +12,21 @@ This recipe is lifted from [`demos/kill-resume`](https://github.com/samuelch727/
 The Local World backs its event log with SQLite (WAL), so the log survives a process kill. Give the run a stable id you can reuse on resume:
 
 ```ts
-import {
-  createLittleWorkflow,
-  createToolRegistry,
-  createWorkflowHarness,
-  localWorld,
-  runWorkflow,
-} from "little-workflow";
+import { localWorld, runWorkflow } from "@little-stack/workflow";
 
 const dataDir = "./.little-workflow-world"; // same dir across runs
 const runId = "run_candidate_review_2026_07_08"; // stable across resume
 
-const result = await runWorkflow({
+// `workflow` is a workflow whose steps include a `parallel` fan-out.
+const input = {
+  candidates: [
+    { id: "fast-a", score: 1 },
+    { id: "slow-b", score: 2 },
+  ],
+};
+
+const result = await runWorkflow(workflow, input, {
   world: localWorld({ dataDir }),
-  workflows: workflow, // a workflow whose steps include a `parallel` fan-out
-  input: {
-    candidates: [
-      { id: "fast-a", score: 1 },
-      { id: "slow-b", score: 2 },
-    ],
-  },
   runId,
   tools,
 });

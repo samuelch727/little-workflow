@@ -17,7 +17,7 @@ so whatever breaks is a real SDK finding.
 ## Run
 
 ```bash
-pnpm --filter little-workflow build
+pnpm --filter @little-stack/workflow build
 
 # keyless deterministic smoke run
 pnpm --filter ticket-factory demo:stub        # default 20 tickets

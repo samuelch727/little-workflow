@@ -3,7 +3,7 @@ title: Roadmap
 description: Where Little Workflow is headed after the alpha — framed as direction, not shipped versions.
 ---
 
-The alpha (currently `0.2.0-alpha.0`) is the minimum implementation that proves the thesis: a developer-supplied control plane compiles to validated LWIR and executes durably enough for a local development loop. Everything below is **direction**, not a shipped release. Dates and version numbers are deliberately omitted — the shape of the work is what matters.
+The alpha (currently `0.2.0-alpha.1`) is the minimum implementation that proves the thesis: a developer-supplied control plane compiles to validated LWIR and executes durably enough for a local development loop. Everything below is **direction**, not a shipped release. Dates and version numbers are deliberately omitted — the shape of the work is what matters.
 
 ## Composition on the Harness surface
 
@@ -35,7 +35,7 @@ Moving beyond the single-process Local World:
 
 - Sharded fan-out and tree reducers for large parallel workloads (alpha caps a parallel step at 100 branches).
 - Live OpenRouter model-registry sync (alpha ships a bundled registry).
-- **Dreaming** — consolidating memory and outcomes across many sessions into proposed improvements. It is not part of the `little-workflow` package. It exists today only in the littleDB service and the [`demos/`](https://github.com/samuelch727/little-workflow/tree/main/demos) that use it (`dreamer`, `kb-chatbot`), and littleDB is not public yet.
+- **Dreaming** — consolidating memory and outcomes across many sessions into proposed improvements. It is not part of the `@little-stack/workflow` package. It exists today only in the LittleDB service (its reviewer and proposals) and the [`demos/`](https://github.com/samuelch727/little-workflow/tree/main/demos) that use it (`kb-chatbot`, `support-desk`), and LittleDB is not public yet.
 - Streaming harness-session events to `runWorkflow` callers (alpha sessions stream internally; the caller receives final output and an optional `progress` callback).
 
 ## Enterprise authoring and inspection

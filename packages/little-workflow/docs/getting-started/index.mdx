@@ -3,9 +3,9 @@ title: Overview
 description: What Little Workflow is, how it moves from developer intent to durable execution, and where to start.
 ---
 
-Little Workflow is a TypeScript library for AI-generated work that must be bounded, durable, inspectable, and replayable. You describe a goal, inputs, schemas, a model, tools, skills, and safety rules; an AI agent running in a structured **Harness** designs the workflow graph, executes the steps, and self-recovers from code failures — all observable via a unified event log, all durable via per-step memoization.
+Little Workflow is a TypeScript library for AI-generated work that must be bounded, durable, inspectable, and replayable. You describe a goal, inputs, schemas, a model, tools, skills, and safety rules; an AI agent running in a structured **Harness** designs the workflow graph and executes the steps — all observable via a unified event log, all durable via per-step memoization. A failed `code.run` step can be repaired by the Fixer, but the default worker harness does not run `code.run` steps; see the [Quickstart](/docs/v0.1.0-alpha/getting-started/quickstart).
 
-The alpha is the minimum implementation that proves the thesis: a developer-supplied control plane compiles to validated LWIR and executes durably enough for a local development loop. These docs track the current alpha release, `0.2.0-alpha.0`. The `v0.1.0-alpha` URL path is kept so existing links keep working. The package requires Node.js 22+ and AI SDK 7 (`ai` is a peer dependency).
+The alpha is the minimum implementation that proves the thesis: a developer-supplied control plane compiles to validated LWIR and executes durably enough for a local development loop. These docs track the current alpha release, `0.2.0-alpha.1`. The `v0.1.0-alpha` URL path is kept so existing links keep working. The package requires Node.js 22+ and AI SDK 7 (`ai` is a peer dependency).
 
 ## The pipeline
 
@@ -46,7 +46,7 @@ See [How It Works](/docs/v0.1.0-alpha/foundations) for the full mental model.
 
 - Local World only — SQLite/WAL event storage, artifact manifests, and local run locks.
 - The LWIR step types `ai.generate`, `code.run`, `tool.call`, `decision`, `parallel`; expressions, validator, and repair loop. `code.run` compiles, but the default worker harness refuses to execute it; it needs a worker harness you supply.
-- AI SDK `tool({...})` as the canonical tool primitive; MCP via `runWorkflow({ mcp })` gateway tools.
+- AI SDK `tool({...})` as the canonical tool primitive; MCP via the `mcp` run option (`runWorkflow(workflow, input, { mcp })`) gateway tools.
 - Composition with Little Harness: `asHarnessWorkflow` and `loadWorkflow` expose workflows to an agent as typed tools.
 - Real USD cost per run, step, and session from a bundled model registry (`result.usage.costUsd`, `little report`).
 - A CLI: `init`, `add`, `validate`, `run`, `test`, `events`, `replay`, `report`.

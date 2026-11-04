@@ -1,0 +1,133 @@
+---
+title: Setup Recovery
+description: Recovering an interrupted little setup run, published behavior and the unreleased recoverSetup() API.
+---
+
+`little setup` journals its writes so an interrupted run can be recovered. This
+page covers the published recovery API and CLI in `little-workflow@0.2.0-alpha.1`
+(the package name before the `@little-stack` scope),
+and the UNRELEASED changes in the current source.
+
+> **UNRELEASED review preview.** `recoverSetup()` and the CLI changes marked
+> UNRELEASED below exist only in the current source. No npm version includes
+> them yet, and no version number has been assigned to them.
+
+## Published in `0.2.0-alpha.1`
+
+`little-workflow/scaffold` exports `planSetup()`, `applySetupPlan()` and
+`rollbackSetup()`. Call `rollbackSetup()` with the project root:
+
+```ts
+import { rollbackSetup } from "little-workflow/scaffold";
+
+const retained: string[] = await rollbackSetup("/path/to/my-app");
+```
+
+It returns the paths it preserved because they were edited during recovery. An
+empty array does not tell you what happened: it is returned both when no setup
+journal was found and when recovery finished cleanly.
+
+On the CLI, `little setup --rollback` with no directory and no `--here`
+recovers the current directory. When nothing was preserved, it prints one
+generic success line, including when it found no setup journal there.
+
+## UNRELEASED: `recoverSetup()`
+
+```ts
+// Exported from "@little-stack/workflow/scaffold" in the unreleased source.
+function recoverSetup(root: string): Promise<SetupRecoveryResult>;
+
+type SetupRecoveryResult = {
+  status: "nothing-to-recover" | "rolled-back" | "completed-cleanup" | "manual-recovery-required";
+  retained: string[];
+};
+```
+
+| `status` | Meaning |
+| --- | --- |
+| `nothing-to-recover` | No setup journal was found in `root`. Nothing changed. |
+| `rolled-back` | An uncommitted setup was undone: CLI-owned files that were still unchanged were restored. |
+| `completed-cleanup` | The journal was already committed (installation and verification had succeeded), so recovery finished its cleanup and kept the generated project files. It does not undo a committed setup. |
+| `manual-recovery-required` | Recovery preserved files it could not safely restore. `retained` lists them, and the journal is kept for manual recovery. |
+
+`recoverSetup()` can throw for an invalid journal or a still-running installer.
+Stop the installer before you recover.
+
+`recoverSetup()` also accepts a second options argument with one field,
+`allowOwnProcess`. The setup CLI sets it when a failed apply rolls back the
+journal its own process wrote. Application code should call
+`recoverSetup(root)` only, and must not use the option to recover while an
+installer is still running.
+
+A caller that handles every outcome:
+
+```ts
+import { recoverSetup } from "@little-stack/workflow/scaffold";
+
+const recovery = await recoverSetup("/path/to/my-app");
+switch (recovery.status) {
+  case "nothing-to-recover":
+    console.log("No interrupted setup in this directory.");
+    break;
+  case "rolled-back":
+    console.log("Interrupted setup undone.");
+    break;
+  case "completed-cleanup":
+    console.log("Setup had completed; cleanup finished and project files were kept.");
+    break;
+  case "manual-recovery-required":
+    console.error(`Edited files were preserved: ${recovery.retained.join(", ")}`);
+    console.error("Inspect .little/setup-transaction.json and finish recovery by hand.");
+    process.exitCode = 1;
+    break;
+}
+```
+
+`rollbackSetup()` is no longer exported in the unreleased source. Call
+`recoverSetup()` and read `retained` instead.
+
+## UNRELEASED: planning and applying
+
+`planSetup(root, options?)` fills in the defaults itself, so every option is
+optional: `template` defaults to `"node"`, `provider` to `"openai"`,
+`workflow` to `false`, `route` to `"api/little/chat"` and `page` to `"little"`.
+The returned plan carries the resolved options. `applySetupPlan(plan, options?)`
+takes one option, `complete`, a callback that runs after every file is placed and
+before the transaction commits (the CLI installs and verifies there); a throw
+rolls the files back.
+
+```ts
+import { applySetupPlan, planSetup } from "@little-stack/workflow/scaffold";
+
+const plan = await planSetup("/path/to/my-app", { template: "next", workflow: true });
+if (plan.conflicts.length === 0) await applySetupPlan(plan);
+```
+
+## UNRELEASED: CLI recovery
+
+In the current source, `little setup --rollback`:
+
+- needs a project directory or `--here`; it no longer defaults to the current
+  directory;
+- is named exactly by the interrupted-setup error, which prints the recovery
+  command with the real project directory, shell-quoted;
+- prints a different message for each of the four outcomes above;
+- exits with an error for `manual-recovery-required`.
+
+```bash
+# UNRELEASED CLI, built from the current source. `npx little-workflow@alpha`
+# resolves to the published 0.2.0-alpha.1 behavior described above.
+little setup my-app --rollback
+# or, from inside that directory:
+little setup --here --rollback
+```
+
+## Migration
+
+These steps apply when you move to the unreleased SDK:
+
+- Replace `rollbackSetup(root)` with `recoverSetup(root)`. Check `status`, so
+  "no journal found" is not mistaken for a completed recovery; the old return
+  value is `retained`.
+- Scripts that run `little setup --rollback` without a directory must pass the
+  project directory or `--here`. Passing it already works with `0.2.0-alpha.1`.

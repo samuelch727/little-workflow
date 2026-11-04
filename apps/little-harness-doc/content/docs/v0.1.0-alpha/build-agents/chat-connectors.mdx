@@ -48,9 +48,9 @@ at build time. Pick the subpath by which helpers you need, not by hoping to avoi
 
 | Import path | Contains | Use it for |
 |---|---|---|
-| `little-harness/connectors/runtime` | Descriptors, loaders, session registry, tool-context helpers, tool-UI types — everything **except** the discovery helpers | Server route bundles. Omitting the discovery helpers means a bundler never statically sees the connector-module dynamic-import machinery, so it does not try to trace your `connector.*`/tool files through this subpath. |
-| `little-harness/connectors` | Everything above **plus** `discoverConnectors` / `loadConnectorDescriptor` / `loadConnectorToolExtensions` | Build scripts, tests, or CLIs that enumerate connectors. A value import statically pulls the discovery module (and its connector-module traversal) into the graph. |
-| `little-harness/connectors/discovery` | Just the discovery helpers | Explicitly importing filesystem discovery without the rest of the surface. |
+| `@little-stack/harness/connectors/runtime` | Descriptors, loaders, session registry, tool-context helpers, tool-UI types — everything **except** the discovery helpers | Server route bundles. Omitting the discovery helpers means a bundler never statically sees the connector-module dynamic-import machinery, so it does not try to trace your `connector.*`/tool files through this subpath. |
+| `@little-stack/harness/connectors` | Everything above **plus** `discoverConnectors` / `loadConnectorDescriptor` / `loadConnectorToolExtensions` | Build scripts, tests, or CLIs that enumerate connectors. A value import statically pulls the discovery module (and its connector-module traversal) into the graph. |
+| `@little-stack/harness/connectors/discovery` | Just the discovery helpers | Explicitly importing filesystem discovery without the rest of the surface. |
 
 The practical difference between the two main subpaths is the discovery surface, not `node:fs`: only
 `/connectors` statically links the filesystem connector-discovery helpers, so only it makes a bundler
@@ -69,7 +69,7 @@ adapters. Install `chat` and the adapter packages in the app that hosts the rout
 // agents/support/connectors/slack/connector.ts
 import { createSlackAdapter } from "@chat-adapter/slack";
 import { createRedisState } from "@chat-adapter/state-redis";
-import { chatSdkConnector } from "little-harness/connectors/runtime";
+import { chatSdkConnector } from "@little-stack/harness/connectors/runtime";
 
 export default chatSdkConnector({
   userName: "support",
@@ -86,7 +86,7 @@ export default chatSdkConnector({
 ```ts
 // app/api/slack/route.ts
 import { waitUntil } from "@vercel/functions";
-import { loadChatSdkConnector } from "little-harness/connectors/runtime";
+import { loadChatSdkConnector } from "@little-stack/harness/connectors/runtime";
 
 const supportSlack = await loadChatSdkConnector({
   agentDir: "agents/support",
@@ -125,7 +125,7 @@ Telegram, Discord, Teams, and other Chat SDK adapters use the same connector sha
 // agents/support/connectors/telegram/connector.ts
 import { createRedisState } from "@chat-adapter/state-redis";
 import { createTelegramAdapter } from "@chat-adapter/telegram";
-import { chatSdkConnector } from "little-harness/connectors/runtime";
+import { chatSdkConnector } from "@little-stack/harness/connectors/runtime";
 
 export default chatSdkConnector({
   userName: "support",
@@ -134,6 +134,10 @@ export default chatSdkConnector({
   triggers: { directMessage: true },
 });
 ```
+
+Email works the same way. `emailConnector(...)` builds a Chat SDK connector that gives the agent its
+own address, so mail sent to it starts a run and the reply goes back in the same thread. It adds sender
+checks, loop protection, and quote removal that email needs. See [Email Connector](/docs/v0.1.0-alpha/build-agents/email-connector).
 
 ## Attachments
 
@@ -227,7 +231,7 @@ SDK platform.
 // agents/support/connectors/web-text/connector.ts
 import { createRedisState } from "@chat-adapter/state-redis";
 import { createWebAdapter } from "@chat-adapter/web";
-import { chatSdkConnector } from "little-harness/connectors/runtime";
+import { chatSdkConnector } from "@little-stack/harness/connectors/runtime";
 
 export default chatSdkConnector({
   userName: "support",
@@ -243,7 +247,7 @@ export default chatSdkConnector({
 
 ```ts
 // app/api/chat/route.ts
-import { loadChatSdkConnector } from "little-harness/connectors/runtime";
+import { loadChatSdkConnector } from "@little-stack/harness/connectors/runtime";
 
 const supportWebText = await loadChatSdkConnector({
   agentDir: "agents/support",
@@ -268,7 +272,7 @@ including typed tool output parts.
 
 ```ts
 // agents/support/connectors/web-rich/connector.ts
-import { webRichConnector } from "little-harness/connectors/runtime";
+import { webRichConnector } from "@little-stack/harness/connectors/runtime";
 
 export default webRichConnector({
   authenticate: async (request) => {
@@ -283,7 +287,7 @@ export default webRichConnector({
 
 ```ts
 // app/api/chat/route.ts
-import { loadWebRichConnector } from "little-harness/connectors/runtime";
+import { loadWebRichConnector } from "@little-stack/harness/connectors/runtime";
 
 const supportWeb = await loadWebRichConnector({
   agentDir: "agents/support",
@@ -335,7 +339,7 @@ Three things make mirroring work without any manual registry calls:
 // agents/support/connectors/slack/connector.ts
 import { createSlackAdapter } from "@chat-adapter/slack";
 import { createRedisState } from "@chat-adapter/state-redis";
-import { chatSdkConnector } from "little-harness/connectors/runtime";
+import { chatSdkConnector } from "@little-stack/harness/connectors/runtime";
 
 export default chatSdkConnector({
   userName: "support",
@@ -351,7 +355,7 @@ export default chatSdkConnector({
 
 ```ts
 // agents/support/connectors/web-rich/connector.ts
-import { webRichConnector } from "little-harness/connectors/runtime";
+import { webRichConnector } from "@little-stack/harness/connectors/runtime";
 
 export default webRichConnector({
   authenticate: async (request) => {
@@ -366,7 +370,7 @@ export default webRichConnector({
 
 ```ts
 // app/api/chat/route.ts — web-rich takes over, keeps Slack mirrored
-import { loadWebRichConnector } from "little-harness/connectors/runtime";
+import { loadWebRichConnector } from "@little-stack/harness/connectors/runtime";
 
 const supportWeb = await loadWebRichConnector({
   agentDir: "agents/support",
@@ -433,7 +437,7 @@ import {
   chatSdkEndpointId,
   webRichEndpointId,
   listSessionConnectors,
-} from "little-harness/connectors/runtime";
+} from "@little-stack/harness/connectors/runtime";
 
 const session = await harness.sessions.getOrCreate({ id: "support:user_1" });
 
@@ -504,7 +508,7 @@ casts, full autocomplete on `ctx.extraBody` and `ctx.connector.endpoint`:
 // agents/support/connectors/slack/tools/post-to-channel.ts
 import { tool } from "ai";
 import { z } from "zod";
-import { harnessToolContext } from "little-harness/connectors/runtime";
+import { harnessToolContext } from "@little-stack/harness/connectors/runtime";
 
 type SupportExtraBody = { slack: SlackClient };
 
@@ -548,7 +552,7 @@ export default tool({
 ```ts
 // agents/support/connectors/slack/tools/add-reaction.ts
 import addReaction from "../../../tools/add-reaction";
-import { extendTool, harnessToolContext } from "little-harness/connectors/runtime";
+import { extendTool, harnessToolContext } from "@little-stack/harness/connectors/runtime";
 
 type SupportExtraBody = { slack: SlackClient };
 
@@ -636,7 +640,7 @@ modules so runtime tool discovery stays automatic.
 ```ts
 // agents/support/ui/types.ts
 import type { UIMessage } from "ai";
-import type { ToolOutputPart, ToolUI } from "little-harness/connectors";
+import type { ToolOutputPart, ToolUI } from "@little-stack/harness/connectors";
 
 export type LookupOrderTool = typeof import("../tools/lookup-order").default;
 
@@ -754,7 +758,7 @@ descriptor's `tools`, instead of a string id:
 
 ```ts
 import supportWebRich from "../../agents/support/connectors/web-rich/connector";
-import { loadWebRichConnector } from "little-harness/connectors/runtime";
+import { loadWebRichConnector } from "@little-stack/harness/connectors/runtime";
 
 const supportWeb = await loadWebRichConnector({
   agentDir: "agents/support",
@@ -790,7 +794,7 @@ module-level variable.
 
 Chat SDK connectors run end to end without a real platform. `loadChatSdkConnector` accepts a
 `createChat` constructor, and the loaded connector exposes `simulateInbound` to push a synthetic
-message through the real run pipeline. `little-harness/connectors/runtime` ships test doubles that
+message through the real run pipeline. `@little-stack/harness/connectors/runtime` ships test doubles that
 satisfy the Chat SDK structural types with zero casts:
 
 - `createTestChat({ adapterName? })` — a `ChatSdkChatConstructor` with no-op webhooks and recorded
@@ -807,7 +811,7 @@ import {
   createTestChat,
   createTestThread,
   createTestMessage,
-} from "little-harness/connectors/runtime";
+} from "@little-stack/harness/connectors/runtime";
 import supportSlack from "../agents/support/connectors/slack/connector";
 
 const connector = await loadChatSdkConnector({

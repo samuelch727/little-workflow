@@ -2,18 +2,25 @@ import { tool } from "ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import {
-  createLittleWorkflow,
   createToolRegistry,
-  executeWorkflowVersion,
   localWorld,
   model,
   output,
-  readStoredWorkflowVersion,
+  runOrchestration,
   runWorkflow,
-  type Harness,
-  type HarnessContext,
-  type LwirWorkflow,
 } from "./index.js";
+import type {
+  LwirWorkflow,
+} from "./entries/lwir.js";
+import {
+  createLittleWorkflow,
+  executeWorkflowVersion,
+  readStoredWorkflowVersion,
+} from "./entries/internals.js";
+import type {
+  Harness,
+  HarnessContext,
+} from "./entries/internals.js";
 import { cleanupTempDirs, workerScopedTempPrefix } from "./test-temp.js";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -23,8 +30,8 @@ const mcpResolverMock = vi.hoisted(() => ({
   resolveHarnessMcpGateway: vi.fn(),
 }));
 
-vi.mock("little-harness", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("little-harness")>()),
+vi.mock("@little-stack/harness/internals", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@little-stack/harness/internals")>()),
   resolveHarnessMcpGateway: mcpResolverMock.resolveHarnessMcpGateway,
 }));
 
@@ -156,7 +163,9 @@ describe("runWorkflow MCP integration", () => {
       harnessId: "plannerHarness@1.0.0",
       run: vi.fn<Harness["run"]>(async (task, ctx) => {
         plannerContexts.push(ctx);
-        expect(Object.keys(ctx.tools).sort()).toEqual(["mcp_call_tool", "mcp_list_tools"]);
+        // Planning is offered no workflow tools, MCP gateway tools included: they run from the
+        // plan's tool.call steps.
+        expect(Object.keys(ctx.tools)).toEqual([]);
         expect(ctx.skills.map((entry) => entry.name)).toEqual(["figma-mcp"]);
         return task.kind === "plan" ? { kind: "plan", lwir: mcpToolLwir() } : { kind: "delegate_to_default" };
       }),
@@ -195,10 +204,8 @@ describe("runWorkflow MCP integration", () => {
       ],
     };
 
-    const result = await runWorkflow({
+    const result = await runWorkflow(workflow, { query: "alpha" }, {
       world,
-      workflows: workflow,
-      input: { query: "alpha" },
       tools: registry,
       runId: "run_mcp_single",
       mcp,
@@ -232,10 +239,8 @@ describe("runWorkflow MCP integration", () => {
       },
     } as unknown as Parameters<typeof createLittleWorkflow>[0]);
 
-    await expect(runWorkflow({
+    await expect(runWorkflow(workflow, {}, {
       world,
-      workflows: workflow,
-      input: {},
       runId: "run_mcp_failure",
       mcp: { servers: [] },
     })).rejects.toThrow(/planner failed after MCP resolution/u);
@@ -268,10 +273,8 @@ describe("runWorkflow MCP integration", () => {
       },
     } as unknown as Parameters<typeof createLittleWorkflow>[0]);
 
-    await expect(runWorkflow({
+    await expect(runWorkflow(workflow, {}, {
       world,
-      workflows: workflow,
-      input: {},
       tools: registry,
       runId: "run_mcp_collision_cleanup",
       mcp: { servers: [] },
@@ -311,10 +314,8 @@ describe("runWorkflow MCP integration", () => {
       },
     } as unknown as Parameters<typeof createLittleWorkflow>[0]);
 
-    const result = await runWorkflow({
+    const result = await runWorkflow(workflow, { query: "alpha" }, {
       world,
-      workflows: workflow,
-      input: { query: "alpha" },
       tools: createToolRegistry(),
       runId: "run_mcp_default_tool_call",
       mcp: { servers: [] },
@@ -359,20 +360,16 @@ describe("runWorkflow MCP integration", () => {
     } as unknown as Parameters<typeof createLittleWorkflow>[0]);
     const mcp = { servers: [] };
 
-    const first = await runWorkflow({
+    const first = await runWorkflow(workflow, { query: "alpha" }, {
       world,
-      workflows: workflow,
-      input: { query: "alpha" },
       tools: createToolRegistry(),
       runId: "run_mcp_completed_replay",
       mcp,
     });
 
     mcpResolverMock.resolveHarnessMcpGateway.mockRejectedValueOnce(new Error("mcp server down"));
-    const replay = await runWorkflow({
+    const replay = await runWorkflow(workflow, { query: "alpha" }, {
       world,
-      workflows: workflow,
-      input: { query: "alpha" },
       tools: createToolRegistry(),
       runId: "run_mcp_completed_replay",
       mcp,
@@ -415,10 +412,8 @@ describe("runWorkflow MCP integration", () => {
     } as unknown as Parameters<typeof createLittleWorkflow>[0]);
     const mcp = { servers: [] };
 
-    const first = await runWorkflow({
+    const first = await runWorkflow(workflow, { query: "alpha" }, {
       world,
-      workflows: workflow,
-      input: { query: "alpha" },
       tools: createToolRegistry(),
       runId: "run_mcp_direct_completed_replay",
       mcp,
@@ -472,10 +467,8 @@ describe("runWorkflow MCP integration", () => {
       },
     } as unknown as Parameters<typeof createLittleWorkflow>[0]);
 
-    const first = await runWorkflow({
+    const first = await runWorkflow(workflow, { query: "alpha" }, {
       world,
-      workflows: workflow,
-      input: { query: "alpha" },
       tools: createToolRegistry(),
       runId: "run_mcp_direct_drift_compile",
       mcp: { servers: [] },
@@ -549,20 +542,16 @@ describe("runWorkflow MCP integration", () => {
       },
     } as unknown as Parameters<typeof createLittleWorkflow>[0]);
 
-    const first = await runWorkflow({
+    const first = await runWorkflow(workflow, { query: "alpha" }, {
       world,
-      workflows: workflow,
-      input: { query: "alpha" },
       tools: createToolRegistry(),
       runId: "run_mcp_reuse_first",
       mcp: { servers: [] },
     });
     firstWorkflowVersionId = first.workflowVersionId;
 
-    await expect(runWorkflow({
+    await expect(runWorkflow(workflow, { query: "beta" }, {
       world,
-      workflows: workflow,
-      input: { query: "beta" },
       tools: createToolRegistry(),
       runId: "run_mcp_reuse_second",
       mcp: { servers: [] },
@@ -578,7 +567,9 @@ describe("runWorkflow MCP integration", () => {
     const plannerHarness = {
       harnessId: "plannerHarness@1.0.0",
       run: vi.fn<Harness["run"]>(async (task, ctx) => {
-        expect(Object.keys(ctx.tools).sort()).toEqual(["mcp_call_tool", "mcp_list_tools"]);
+        // Planning is offered no workflow tools, MCP gateway tools included: they run from the
+        // plan's tool.call steps.
+        expect(Object.keys(ctx.tools)).toEqual([]);
         expect(ctx.skills.map((entry) => entry.name)).toEqual(["figma-mcp"]);
         return task.kind === "plan" ? { kind: "plan", lwir: mcpToolLwir("support.mcp-orchestrated") } : { kind: "delegate_to_default" };
       }),
@@ -638,7 +629,7 @@ describe("runWorkflow MCP integration", () => {
       ],
     };
 
-    const result = await runWorkflow({
+    const result = await runOrchestration({
       world,
       workflows: [workflow],
       input: { query: "alpha" },

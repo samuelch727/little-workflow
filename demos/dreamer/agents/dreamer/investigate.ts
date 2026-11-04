@@ -1,6 +1,6 @@
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { generateHarness, loadHarness, type HarnessEvent, type HarnessSession } from "little-harness";
+import { generateHarness, loadHarness, type HarnessEvent, type HarnessSession } from "@little-stack/harness";
 import { investigationState, resetInvestigationState, type ProposalBody } from "./littledb-api";
 
 /**
@@ -106,6 +106,10 @@ export async function runInvestigation(
     },
   });
 
+  // The investigator never parks (no durable host), so anything but a completed turn is a bug.
+  if (result.status !== "completed") {
+    throw new Error(`investigation turn ended as ${result.status}, expected completed`);
+  }
   const state = investigationState();
   return {
     text: result.text,

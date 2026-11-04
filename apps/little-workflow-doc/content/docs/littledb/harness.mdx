@@ -1,0 +1,398 @@
+---
+title: LittleDB with Little Harness
+description: Resolve the version a session runs, send each turn as a trace, record scores, and put agent-made workflows behind review. Private source; not installable.
+---
+
+<Callout title="Private and UNRELEASED" type="warn">
+  `@little-stack/littledb` is private source and is not on npm, and it needs a
+  LittleDB server, which is not publicly available. The examples below will not
+  work for you until both are released. Everything else in Little Harness,
+  including [Outcome Capture](/docs/harness/v0.1.0-alpha/build-agents/outcomes)
+  to local traces, works without it. See [LittleDB](/docs/littledb) for status
+  and the client.
+</Callout>
+
+A Harness agent connects to LittleDB in up to four places, each optional:
+
+1. **Resolve** the version a session runs on: its system prompt and model.
+   [`db.managedHarness()`](#let-littledb-manage-the-prompt) does this and the
+   tracing in one hook.
+2. **Trace** each turn with a tracer on `onEvent`.
+3. **Score** turns: code checks, and what your users say about them.
+4. **Review** the workflows the agent defines, with a registry on `dynamicWorkflows`.
+
+All of it goes through one client: `createLittleDB({ url, apiKey })`. See
+[Connect](/docs/littledb#connect).
+
+## Trace a harness
+
+```ts
+// Private, UNRELEASED.
+import { createHarness, generateHarness, localHost } from "@little-stack/harness";
+import { createLittleDB } from "@little-stack/littledb";
+
+const db = createLittleDB({ url: process.env.LITTLEDB_URL!, apiKey: process.env.LITTLEDB_API_KEY! });
+const tracer = db.harnessTracer({ harness: "support-desk" });
+
+const harness = createHarness({
+  host: localHost({ dataDir: ".little-harness" }),
+  model,
+  system: SYSTEM_PROMPT,
+  tools: { lookup_order },
+  onEvent: tracer.onEvent,
+  // Harness previews default to 512 UTF-16 code units; previewBytes is the legacy option name.
+  trace: { content: { previewBytes: 65_536 } },
+});
+
+await generateHarness({ harness, session: sessionId, prompt });
+```
+
+Each turn becomes one trace, filed under the harness and the session:
+
+- a root span for the turn, with the user's message and the answer;
+- an `llm` span for each model call, with the prompt, the response and the token
+  usage, cache reads and cache writes split out, so LittleDB can price it;
+- a `tool` span for each tool call, with its input and output;
+- on the trace itself, `compute`: which execution tier the turn reached (`tier-0`,
+  the emulated shell over the session folder, or `next-tier`, a real execution
+  environment), the provider, the time commands were running and what the
+  sandbox reported it cost, from the Harness's `harness.runtime.usage` event.
+  LittleDB measures the Tier 0 share and the infrastructure cost per turn from it.
+
+The tracer reads Harness events as they are emitted and never waits on the
+network, so `onEvent` costs the turn nothing. What a span carries is what the
+event carried: raise `trace.content.previewBytes` on the harness to send whole
+prompts and outputs instead of previews.
+
+### A session, start to finish
+
+LittleDB shows a session as one story: how it started, each turn with its model
+and tool calls, and the workflows a tool call ran, nested under that call. Turns
+and runs stay separate traces, so each keeps its own scores.
+
+- **How a turn started.** A turn's trace carries the turn's
+  [`trigger`](/docs/harness/v0.1.0-alpha/reference/generate-harness#trigger): a
+  WhatsApp message and who sent it, an email and its subject, a schedule, an API
+  route, the terminal chat. Connectors, schedules, `little-harness start` and
+  `little-harness test` set it; pass `trigger` to `generateHarness` or
+  `streamHarness` for turns your own code starts. A turn without one shows as
+  started from your code.
+- **Workflows a tool call ran.** A workflow run a tool call started (a workflow
+  passed to `createHarness({ workflows })`, one the agent defined, or a one-shot
+  plan) records the session, turn and tool call on its `RunStarted`. When its
+  World is a `db.tracingWorld()` from the same client, the run's trace joins the
+  session and points at the turn's trace and the tool call's span. This holds
+  with `traceIdFor` or `traceId` on the tracer too. See
+  [How a run started](/docs/littledb/workflow#how-a-run-started).
+
+```ts
+// Private, UNRELEASED.
+await generateHarness({
+  harness,
+  session: sessionId,
+  prompt,
+  trigger: { kind: "webhook", source: "POST /orders", label: `Order ${orderId}` },
+});
+```
+
+The tracer sends the trigger as the event carried it, cut to LittleDB's limits.
+To keep a sender's phone number or address out of LittleDB, add `triggerFrom` to
+`trace.redaction.metadataKeys` on the harness.
+
+### Tracer options
+
+| Option | Meaning |
+| --- | --- |
+| `harness` | The harness's slug in LittleDB, the same one you resolve. Required. |
+| `resolution` | What `db.resolve()` returned for the session. Its version id goes on every trace, and a trial session's traces are marked `trial` (`holdout` for the project holdout). |
+| `resolutionFor` | `(sessionId) => resolution`, for one tracer shared by sessions on different versions. Asked when each turn begins. `managedHarness` uses it. |
+| `versionId` | The version, when you have it without a resolution. |
+| `environment` | `production` by default: `trial` or `holdout` from the resolution, and `experiment` for a turn inside an eval worker run. |
+| `userId` | Your user's id, on every trace. |
+| `traceId` | Put every turn the tracer sees in ONE trace, each turn a child of a root span. |
+| `traceIdFor` | Your own trace id per turn. The default is `turnTraceId(sessionId, turnId)`, stable across a replayed turn. |
+| `name` | The trace and root span name: `turn` by default, `session` with `traceId`. |
+| `tags`, `metadata` | Added to every trace. |
+| `captureContent` | `false` sends structure and numbers only: no prompts, messages, tool inputs or outputs. |
+
+`tracer.traceIdFor(sessionId)` returns the trace of the session's latest turn, to
+put a score on; `tracer.traceIdsFor(sessionId)` returns every trace the tracer
+wrote for the session.
+
+## Let LittleDB manage the prompt
+
+`db.managedHarness()` hands the prompt and model of a harness to LittleDB. Your
+code keeps everything else: the tools, connectors, skills and memory, and the
+first version of the prompt. Pass its `turnOptions` to `createHarness`, and each
+turn runs the version LittleDB says its session runs, traced with that version:
+
+```ts
+// Private, UNRELEASED.
+import { readFileSync } from "node:fs";
+import { anthropic } from "@ai-sdk/anthropic";
+import { createHarness, localHost } from "@little-stack/harness";
+import { littleDBFromEnv } from "@little-stack/littledb";
+import { z } from "zod";
+
+const db = littleDBFromEnv(); // offline (your bootstrap runs) when LITTLEDB_URL is unset
+
+const models = { fast: anthropic("claude-haiku-5-5"), smart: anthropic("claude-sonnet-5-5") };
+
+const support = db.managedHarness({
+  slug: "support-desk",
+  // Version 1, and what runs when LittleDB is unreachable.
+  bootstrap: { system: readFileSync("agents/support/instructions.md", "utf8"), model: "fast" },
+  // What a version may hold. LittleDB checks every candidate against it.
+  schema: z.object({ system: z.string().min(1), model: z.enum(["fast", "smart"]) }),
+  models,
+});
+
+export default createHarness({
+  host: localHost({ dataDir: ".little-harness" }),
+  model: models.fast,
+  tools: { lookup_order },
+  turnOptions: support.turnOptions,
+});
+```
+
+`turnOptions` is a Harness hook that runs once per turn, before the turn starts,
+on every path that runs one: `generateHarness`, `streamHarness`, connectors,
+schedules and `little-harness start`. So a folder agent, a Slack bot and a test
+all run the managed version without extra wiring. Options a call passes itself
+(`generateHarness({ system })`) still win.
+
+What a turn gets:
+
+- **A sticky version.** The session id is the sticky key (`stickyKey` changes it,
+  for example to a user id from `extraBody`). A session keeps its version through
+  promotions, so a conversation never switches prompts halfway, and a trial
+  keeps a session on one side.
+- **Its version on the trace.** Every turn is traced with the version it ran,
+  marked `trial` for a trial candidate and `holdout` for the project holdout.
+  `trace: false` turns tracing off; `trace: { userId, captureContent, ... }` passes
+  tracer options.
+- **The default `apply`.** A version's `system` becomes the turn's system
+  prompt, its `temperature` the temperature, and its `model` slot the model from
+  `models`. Without `models`, LittleDB's model changes are not applied (and
+  `onError` says so once). Pass `apply: (content, turn) => ({ ... })` to map
+  content your own way; it may return any per-run option, such as `activeTools`
+  or `providerOptions`.
+- **The caller.** A turn whose trigger is a workflow (`{ kind: "workflow", source:
+  "loan-desk" }`) tells LittleDB which workflow called the agent, so a fix to the
+  agent is tested inside that workflow too. `caller` overrides it.
+
+`support.session(sessionId)` returns what a session runs (its resolution,
+content and options), and `support.tracer.traceIdFor(sessionId)` the trace of its
+latest turn, for scores.
+
+### What stays in your code
+
+| In your code | In LittleDB |
+| --- | --- |
+| Tools, connectors, skills, MCP servers | The system prompt |
+| Which memories the agent mounts, and who may change them | With [managed memory](/docs/littledb/memory): the files, their history and review |
+| The model slots your app can run (`models`) | Which slot a version uses |
+| The content shape (`schema`) | Every version, its proposals, trials and rollbacks |
+| The bootstrap: version 1, and the fallback | Which version each session runs |
+
+### Editing the prompt in code
+
+The bootstrap becomes version 1 when nothing is live yet. After that, LittleDB
+compares every bootstrap it is sent with the last one it recorded from your
+code. An edit you deploy becomes a **"Changed in code" proposal**, made on the
+version your code last had and carried onto the live version by the same rebase
+LittleDB uses for its own fixes, so a refund rule you add in `instructions.md` and
+a tone fix LittleDB shipped both end up in the next version. Until that proposal
+ships, the live version keeps running, and the client logs one line naming the
+proposal (`onCodeChange` on the client replaces it). Rolling deploys are safe:
+an older bootstrap still running on some machines is ignored, not proposed.
+
+To take LittleDB's live text back into your code, run
+`littledb pull harness:support-desk --field system > agents/support/instructions.md`.
+Your code then matches the live version and nothing is proposed. Set
+`queue.codeEdits: false` in the subject's policy to have LittleDB ignore code
+edits.
+
+### The content shape
+
+`schema` (a Zod schema) says what a version may hold. LittleDB is sent it as
+JSON Schema with each resolve, and a proposal whose content does not match it
+fails before anything is spent on it (`steps.decide.model: must be one of fast,
+smart`). On the app side, a version that does not match never runs: the
+bootstrap does, the trace says so, and `onError` hears why. The same happens
+when `apply` throws, for example on a model slot `models` does not have.
+
+### Rollbacks and outages
+
+- **A rollback reaches open sessions.** Each session's answer is checked again
+  every 30 seconds (`revalidateMs` on the client). A session on a version that
+  was rolled back or pulled from its trial moves to the live version at its next
+  turn; a promotion never moves it.
+- **LittleDB down.** A resolve that fails falls back to the last live answer,
+  then to your bootstrap. After three failures in a row the client stops asking
+  for 30 seconds (`breakerFailures`, `breakerCooldownMs`), so an outage adds no
+  wait to new sessions. A trial candidate is never used as a fallback.
+- **A restart during an outage.** `lastKnownFile: ".little-harness/littledb.json"`
+  on the client keeps each subject's last live answer on disk, so a process that
+  starts while LittleDB is down runs the version that was live, not the bootstrap.
+
+### Tests
+
+`@little-stack/littledb/testing` runs LittleDB in memory. Its client speaks the
+same API, so your harness runs as it does against a server:
+
+```ts
+// Private, UNRELEASED.
+import { testLittleDB } from "@little-stack/littledb/testing";
+
+const littledb = testLittleDB();
+littledb.setLive("harness:support-desk", { system: "Refunds within 45 days.", model: "smart" });
+const support = littledb.db.managedHarness({ slug: "support-desk", bootstrap, schema, models });
+// createHarness({ ..., turnOptions: support.turnOptions }), then run turns and check
+// littledb.traces, littledb.codeProposals("harness:support-desk"), ...
+```
+
+`startTrial`, `rollback` and `setDown` drive the other cases. `littleDBFromEnv()`
+gives an offline client when `LITTLEDB_URL` is unset, so the same code runs in a
+test or on a laptop without LittleDB.
+
+### Resolve by hand
+
+`managedHarness` is `db.resolve()` plus a tracer. To wire it yourself, resolve
+once per session and pass the version's prompt and model to each run:
+
+```ts
+// Private, UNRELEASED.
+const resolution = await db.resolve({
+  kind: "harness",
+  slug: "support-desk",
+  stickyKey: sessionId,
+  bootstrap: { system: SYSTEM_PROMPT, model: "fast" },
+  schema: SupportContent, // optional: typed, checked content
+});
+const tracer = db.harnessTracer({ harness: "support-desk", resolution });
+
+await generateHarness({
+  harness,
+  session: sessionId,
+  prompt,
+  system: resolution.content!.system,
+  model: models[resolution.content!.model],
+  onEvent: tracer.onEvent,
+});
+```
+
+When LittleDB cannot answer, `resolution.fallback` says so (`last_known`,
+`bootstrap`, or `invalid` for content the schema rejected) and the content is
+the last live answer or your bootstrap. See
+[Resolve](/docs/littledb#resolve-which-version-to-run).
+
+## Scores
+
+Put a score on the trace of the turn it grades:
+
+```ts
+// Private, UNRELEASED.
+db.score({ traceId: tracer.traceIdFor(sessionId)!, name: "task_success", value: 1, source: "code" });
+```
+
+A person's reactions, and the outcomes your code reports, go to LittleDB as
+user feedback through the outcome sink:
+
+```ts
+// Private, UNRELEASED.
+const feedback = db.outcomeSink({ tracer });
+
+// chatSdkConnector({ ..., reactions: { sinks: [feedback] } })
+await reportHarnessOutcome({ session, status: "failure", detail: "Wrong refund amount.", sinks: [feedback] });
+```
+
+A thumbs up is a `success`, a thumbs down a `failure`, and removing the reaction
+withdraws it. `tracer.traceIdForTurn(sessionId, turnId)` gives the trace of a
+turn, for feedback your own UI collects. See [User feedback](/docs/littledb/feedback)
+for the mapping, `db.feedback()` and the browser handler, and
+[Outcome Capture](/docs/harness/v0.1.0-alpha/build-agents/outcomes) for how
+reactions become outcomes.
+
+## Agent-made workflows behind review
+
+With [Dynamic Workflows](/docs/harness/v0.1.0-alpha/build-agents/dynamic-workflows)
+an agent can turn recurring work into a workflow with `define_workflow`. Without
+a registry, a definition is a tool from the next turn on, in every session on
+the host. With LittleDB's registry, every definition becomes a **draft version**
+of a workflow in LittleDB, under the harness, with a **proposal** a person
+approves:
+
+```ts
+// Private, UNRELEASED.
+import { dynamicWorkflows, localWorld } from "@little-stack/workflow";
+
+const registry = db.agentWorkflowRegistry({ harness: "support-desk" }); // or support.registry
+
+createHarness({
+  // ...
+  dynamicWorkflows: dynamicWorkflows({
+    registry,
+    // Your World per run, traced with the version the turn was offered.
+    world: registry.world((run) => localWorld({ dataDir: run.dataDir })),
+  }),
+});
+```
+
+What the agent sees:
+
+- **Defining** a workflow registers it. `define_workflow` answers with a note:
+  the definition is saved as draft version N and waits for review, and until it
+  is approved only this session can use it. A definition identical to the live
+  version is not a new draft.
+- **Each turn** offers the approved (live) version of every agent-made workflow
+  of the harness, plus the drafts the session made itself, when they are newer
+  than the live version. `ownDrafts: false` offers live versions only.
+- **Approving** the proposal in LittleDB makes the version live, and every
+  session offers it from its next turn.
+- **Trials.** When LittleDB trials a candidate definition, a share of sessions
+  is offered the candidate, split the way LittleDB splits harness traffic, and a
+  session keeps what it was offered. Its runs are traced as `trial`.
+- **Redefining.** When the agent redefines a workflow, the new definition is
+  made on the version the session was offered. If LittleDB has shipped a fix
+  since, the fix is carried onto the new definition instead of being lost.
+
+`registry.world(...)` sends each run of an agent-made workflow (and of a one-shot
+plan) to LittleDB as a trace, tagged with the version it ran, in the session and
+under the tool call that started it. See
+[LittleDB with Little Workflow](/docs/littledb/workflow).
+
+### Registry options
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `harness` | | The harness slug the workflows belong to. Required. |
+| `ownDrafts` | `true` | Offer a session the drafts it defined itself. |
+| `cacheTtlMs` | `30000` | How long a fetched list of workflows is reused. |
+| `offline` | `"none"` | What to offer when LittleDB cannot be reached and no list was ever fetched: `"none"` offers the session's own definitions only; `"stored"` offers every stored definition. |
+| `timeoutMs` | `5000` | Per request. |
+
+When LittleDB cannot be reached, the registry offers the last list it fetched.
+`registry.refresh()` drops the cached list.
+
+## Experiments
+
+LittleDB plans experiments; your app runs them, with an eval worker. A worker
+run for a harness is one conversation on a candidate version, traced with the
+run's own trace id. With a managed harness, `support.evalWorker({ run })` is all
+it takes: inside `run`, a turn of the harness runs the candidate and traces into
+the run's trace, so `run` only calls `generateHarness`:
+
+```ts
+// Private, UNRELEASED.
+const worker = support.evalWorker({
+  run: async (run) => {
+    const result = await generateHarness({ harness, prompt: String(run.item?.input), session: `eval-${run.runId}` });
+    return { output: result.status === "completed" ? result.text : undefined };
+  },
+});
+void worker.start();
+```
+
+LittleDB shows a warning on an experiment whose runs no worker is asking for.
+See [Experiments](/docs/littledb/experiments).

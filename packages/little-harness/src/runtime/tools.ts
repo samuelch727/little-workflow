@@ -1,5 +1,7 @@
 import type { ToolSet } from "ai";
+import { ASK_FOR_CALL, type CallAwareAsk } from "../human-input/tool.js";
 import { sha256Hex } from "../ids.js";
+import { runWithCallerToolContext } from "./step-tools.js";
 import type {
   FileRef,
   HarnessToolExecutionContext,
@@ -14,6 +16,13 @@ const DEFAULT_OUTPUT_DIR = "/artifacts/tool-results";
 export function wrapToolsWithHarnessContext<TTools extends ToolSet, TExtraBody>(
   tools: TTools,
   ctx: HarnessToolExecutionContext<TExtraBody>,
+  modelToolPositions?: {
+    get(toolCallId: string): Readonly<{ modelStepId: string; sequenceIndex: number }> | undefined;
+  },
+  modelToolStarts?: {
+    /** Resolves once the call's durable start record is acknowledged; otherwise throws. */
+    acknowledgeToolStart(toolCallId: string | undefined, toolName: string): Promise<void>;
+  },
 ): TTools {
   const wrapped: Record<string, unknown> = {};
 
@@ -27,6 +36,29 @@ export function wrapToolsWithHarnessContext<TTools extends ToolSet, TExtraBody>(
           ? async (input: unknown, options: unknown) => {
               const executeOptions: Record<string, unknown> = { ...(isObject(options) ? options : {}), ...ctx };
               const toolCallId = typeof executeOptions.toolCallId === "string" ? executeOptions.toolCallId : undefined;
+              // A model tool call runs only after the session log acknowledged its start, so a
+              // rerun of the run can always tell that it ran.
+              await ctx.beforeInvocation?.();
+              ctx.abortSignal?.throwIfAborted();
+              await modelToolStarts?.acknowledgeToolStart(toolCallId, name);
+              await ctx.beforeInvocation?.();
+              ctx.abortSignal?.throwIfAborted();
+              const modelToolPosition = toolCallId === undefined
+                ? undefined
+                : modelToolPositions?.get(toolCallId);
+              if (modelToolPosition !== undefined) {
+                executeOptions.context = {
+                  ...(isObject(executeOptions.context)
+                    ? executeOptions.context
+                    : {}),
+                  ...modelToolPosition,
+                };
+                // `ask` bound to this call, so a tool can wait in it for a person's answer.
+                const askForCall = (ctx.ask as CallAwareAsk | undefined)?.[ASK_FOR_CALL];
+                if (askForCall !== undefined && toolCallId !== undefined) {
+                  executeOptions.ask = askForCall({ toolCallId, modelStepId: modelToolPosition.modelStepId });
+                }
+              }
               const replayState = ctx.toolReplay?.get(toolCallId);
               if (replayState?.replay.kind === "completed") {
                 return replayState.replay.result;
@@ -37,7 +69,8 @@ export function wrapToolsWithHarnessContext<TTools extends ToolSet, TExtraBody>(
               if (replayState?.replay.kind === "inflight" && replayState.callId !== undefined) {
                 executeOptions.toolCallId = replayState.callId;
               }
-              const result = await execute(input, executeOptions);
+              // A workflow this tool starts hands the same context to the tools its steps call.
+              const result = await runWithCallerToolContext(ctx, () => execute(input, executeOptions));
               return spoolToolResultIfNeeded(name, result, executeOptions, ctx);
             }
           : undefined,

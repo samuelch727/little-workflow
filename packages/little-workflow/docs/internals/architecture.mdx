@@ -3,14 +3,14 @@ title: Architecture
 description: The layers, module layout, and dependency graph for the alpha SDK — now built around the Harness primitive.
 ---
 
-The alpha SDK ships as a single `little-workflow` package. This milestone introduces the **Harness** as the agent-runtime primitive that unifies Planner, Orchestrator, Worker, and Fixer roles under one contract. The four architectural layers below reflect the new design.
+The alpha SDK ships as a single `@little-stack/workflow` package. This milestone introduces the **Harness** as the agent-runtime primitive that unifies Planner, Orchestrator, Worker, and Fixer roles under one contract. The four architectural layers below reflect the new design.
 
 ## The Four Layers
 
 ```
 ┌─────────────────────────────────────────────────────┐
 │  Control Plane                                       │
-│  createLittleWorkflow()  runWorkflow()               │
+│  defineWorkflow()  runWorkflow()                     │
 │  WorkflowDefinition  WorkflowDefinitionHash          │
 └────────────────────┬────────────────────────────────┘
                      │
@@ -38,12 +38,12 @@ The alpha SDK ships as a single `little-workflow` package. This milestone introd
 
 ### Control Plane
 
-`createLittleWorkflow()` produces a `WorkflowDefinition`. A `WorkflowDefinitionHash` (new in this milestone — see [Identity + Manifests](/docs/v0.1.0-alpha/internals/identity-manifests)) is computed once at authoring time: it is the sha256 of the definition's identity-bearing fields (planner config, models, schemas, tools, memory config). This is distinct from `WorkflowVersion`, which is the per-run LWIR hash (unchanged).
+`defineWorkflow()` produces a `WorkflowDefinition`. A `WorkflowDefinitionHash` (new in this milestone — see [Identity + Manifests](/docs/v0.1.0-alpha/internals/identity-manifests)) is computed once at authoring time: it is the sha256 of the definition's identity-bearing fields (planner config, models, schemas, tools, memory config). This is distinct from `WorkflowVersion`, which is the per-run LWIR hash (unchanged).
 
-`runWorkflow()` is polymorphic:
+Two entry points start a run:
 
-- **Single workflow** (`workflows: definition`) → spawns a Planner harness session that drafts LWIR, then executes steps via Worker harness sessions.
-- **Array of workflows** (`workflows: [w1, w2, ...]`) → spawns an Orchestrator harness session that composes sub-workflow runs via tool calls (`plan_workflow`, `run_workflow`, `start_workflow`).
+- **`runWorkflow(workflow, input, options?)`** → spawns a Planner harness session that drafts LWIR (a fixed-plan workflow's planner returns its plan without a model call), then executes steps via Worker harness sessions.
+- **`runOrchestration({ workflows: [w1, w2, ...], orchestrator, input })`** *(deprecated)* → spawns an Orchestrator harness session that composes sub-workflow runs via tool calls (`plan_workflow`, `run_workflow`, `start_workflow`).
 
 ### Harness Layer
 
@@ -63,7 +63,7 @@ type HarnessTask =
 
 One contract, four task kinds. See [Harness](/docs/v0.1.0-alpha/internals/harness) for the full spec.
 
-**Worker unification:** the prior alpha had separate `RuntimeAiAdapter`, `RuntimeCodeRunner`, and tool-dispatch paths. All three are now unified through the worker harness. `ai.generate` steps run an agent loop; `code.run` steps execute directly (JS in a Node child process with a `{input, tools}` proxy); `tool.call` steps invoke the named tool directly. The harness emits the same event vocabulary for all.
+**Worker unification:** the prior alpha had separate `RuntimeAiAdapter`, `RuntimeCodeRunner`, and tool-dispatch paths. All three are now unified through the worker harness. `ai.generate` steps make one model call with no tools; `code.run` steps validate and compile, but the default worker harness refuses to execute them (it checks the step's sandbox policy and then throws), so running one needs a custom `worker.harness` that implements `execute_step`; `tool.call` steps invoke the named tool directly. The harness emits the same event vocabulary for all.
 
 ### Sub-Run Layer
 
@@ -92,7 +92,8 @@ Memory Stores persist across runs and accumulate lessons. Run Scratch is ephemer
 
 ```txt
 packages/little-workflow/src/
-  authoring.ts          createLittleWorkflow(), runWorkflow(), model(), skill(), types
+  authoring.ts          defineWorkflow(), runWorkflow(), runOrchestration(), model(), skill(), types
+  fixed-plan.ts         defineWorkflow({ plan }) — the fixed-plan planner harness
   tool-registry.ts      createToolRegistry() — AI SDK tool({...}) as the primitive
   schema.ts             schema + output-mode normalization (JSON Schema / Zod)
   canonical.ts          canonical JSON + sha256 digest
@@ -117,7 +118,8 @@ packages/little-workflow/src/
   run-report.ts         per-step tokens / cache-hit share / dollars from run state
   cli-core.ts           little validate | run | events | replay | report
   cli.ts                process.argv entry
-  index.ts              public re-exports
+  index.ts              the root entry: an explicit export list (src/index.test.ts pins it)
+  entries/              the /lwir, /eval and /internals entry points
 ```
 
 ## Module Dependency Graph
@@ -240,7 +242,7 @@ Three hashes give auditable identity at three different scopes:
 
 | Hash | Computed when | Covers |
 |---|---|---|
-| `WorkflowDefinitionHash` | `createLittleWorkflow()` | id, schemas, planner config, models, tools, memory config |
+| `WorkflowDefinitionHash` | `defineWorkflow()` | id, schemas, planner config, models, tools, memory config |
 | `WorkflowVersion` (= LWIR hash) | Planner emits LWIR | The complete LWIR graph — per run |
 | `ManifestHash` | Each harness session starts | The session's capability surface (model, harness, skills, tools, memory stores) |
 

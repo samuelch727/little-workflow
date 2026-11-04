@@ -3,15 +3,22 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
-  createLittleWorkflow,
   createToolRegistry,
-  listEvents,
   localWorld,
   model,
   output,
-  runWorkflow,
+  runOrchestration,
 } from "./index.js";
-import type { Harness, LwirWorkflow } from "./index.js";
+import type {
+  LwirWorkflow,
+} from "./entries/lwir.js";
+import {
+  createLittleWorkflow,
+  listEvents,
+} from "./entries/internals.js";
+import type {
+  Harness,
+} from "./entries/internals.js";
 
 const tempDirs: string[] = [];
 
@@ -146,7 +153,7 @@ describe("orchestrator fan-out acceptance", () => {
       globalTools: ["emitCandidate"],
     });
 
-    const result = await runWorkflow({
+    const result = await runOrchestration({
       world,
       workflows: [candidateWorkflow],
       orchestrator: {

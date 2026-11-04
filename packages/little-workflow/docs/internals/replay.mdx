@@ -24,7 +24,7 @@ Both levels apply simultaneously. A resumed run:
 ## API
 
 ```ts
-import { localWorld, replayRun } from "little-workflow";
+import { localWorld, replayRun } from "@little-stack/workflow";
 
 const replay = await replayRun(
   localWorld({ dataDir: ".little-workflow" }),
@@ -181,7 +181,7 @@ Each outer-loop cycle's planner harness session has its own `PlannerManifest` (w
 - **Does not write events.** Replay is read-only; `appendEvent` is never called from `replay.ts`.
 - **Does not cross sub-run boundaries.** Call `replayRun(world, subRunId)` for a sub-run.
 
-To make a run make forward progress: call `runWorkflow()` or `executeWorkflowVersion()` with the same `runId`. Those functions replay the existing log internally, skip every completed step (and fast-forward harness sessions), and resume at the first step with remaining work.
+To make a run make forward progress: call `runWorkflow()` (or the internal `executeWorkflowVersion()` from `@little-stack/workflow/internals`) with the same `runId`. Those functions replay the existing log internally, skip every completed step (and fast-forward harness sessions), and resume at the first step with remaining work.
 
 ## Idempotency
 

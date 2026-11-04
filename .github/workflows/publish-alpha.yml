@@ -45,8 +45,8 @@ jobs:
           # Build every workspace first: little-workflow's integration tests import its
           # built dist, and the kb-chatbot demo typechecks against littledb-client's dist.
           pnpm build
-          pnpm --filter little-harness test
-          pnpm --filter little-workflow test
+          pnpm --filter @little-stack/harness test
+          pnpm --filter @little-stack/workflow test
           pnpm typecheck
           pnpm lint
 
@@ -55,14 +55,20 @@ jobs:
         run: |
           pack_dir="${RUNNER_TEMP}/little-setup-packs"
           mkdir -p "${pack_dir}"
-          pnpm --filter little-workflow pack --pack-destination "${pack_dir}"
+          pnpm --filter @little-stack/harness pack --pack-destination "${pack_dir}"
+          pnpm --filter @little-stack/workflow pack --pack-destination "${pack_dir}"
           package_version="$(node -p "require('./packages/little-workflow/package.json').version")"
-          node scripts/verify-little-setup.mjs --tarball "${pack_dir}/little-workflow-${package_version}.tgz" --managers npm,pnpm
+          harness_version="$(node -p "require('./packages/little-harness/package.json').version")"
+          node scripts/verify-little-setup.mjs \
+            --tarball "${pack_dir}/little-stack-workflow-${package_version}.tgz" \
+            --harness-tarball "${pack_dir}/little-stack-harness-${harness_version}.tgz" \
+            --managers npm,pnpm
 
   publish-alpha:
     name: Publish alpha packages
     runs-on: ubuntu-latest
     needs: verify
+    if: github.ref == 'refs/heads/main'
     environment: npm-alpha
 
     permissions:
@@ -99,8 +105,8 @@ jobs:
       # skipped (and never packed), but its dist must still exist for its dependents.
       - name: Build packages
         run: |
-          pnpm --filter little-harness run build
-          pnpm --filter little-workflow run build
+          pnpm --filter @little-stack/harness run build
+          pnpm --filter @little-stack/workflow run build
 
       - name: Publish missing alpha package versions
         run: |
@@ -147,5 +153,5 @@ jobs:
               --access public
           }
 
-          publish_if_missing little-harness packages/little-harness
-          publish_if_missing little-workflow packages/little-workflow
+          publish_if_missing @little-stack/harness packages/little-harness
+          publish_if_missing @little-stack/workflow packages/little-workflow

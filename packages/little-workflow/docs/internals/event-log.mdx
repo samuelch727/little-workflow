@@ -286,7 +286,7 @@ type ExecuteStepSucceededPayload = {
 |---|---|
 | `plan` | `harness.session.started` → (`harness.model.called` → `harness.model.responded` → `harness.tool_call.*` × tools per turn) × N turns → `harness.session.completed` |
 | `orchestrate` | `harness.session.started` → (`harness.model.called` → `harness.model.responded` → `harness.tool_call.*` × tools per turn) × N turns → `harness.session.completed` |
-| `execute_step` (ai.generate) | `harness.session.started` → agent-loop events × N turns → `harness.session.completed` |
+| `execute_step` (ai.generate) | `harness.session.started` → `harness.execute_step.started` → `harness.model.called` → `harness.model.responded` → `harness.execute_step.succeeded` → `harness.session.completed` (one model call, no tool calls) |
 | `execute_step` (code.run) | `harness.session.started` → `harness.execute_step.started` → (`harness.tool_call.*` with `caller:"code"` × tools invoked by code) → `harness.execute_step.succeeded` → `harness.session.completed` |
 | `execute_step` (tool.call) | `harness.session.started` → `harness.execute_step.started` → `harness.tool_call.*` with `caller:"code"` (single) → `harness.execute_step.succeeded` → `harness.session.completed` |
 | `execute_step` (decision) | `harness.session.started` → `harness.execute_step.started` → `harness.execute_step.succeeded` → `harness.session.completed` |
@@ -421,4 +421,4 @@ Step outputs smaller than 256,000 bytes (canonical JSON) are stored inline in `S
 
 - Not multi-writer. Two processes writing to the same `runId` is a bug; the run lock prevents it.
 - Not durable across hosts. Alpha is one filesystem on one machine; Postgres-backed event stores come in v0.1-beta.
-- Not a query API. The backing store is SQLite, but alpha exposes committed events through `listEvents()` and CLI JSON output rather than arbitrary SQL.
+- Not a query API. The backing store is SQLite, but alpha exposes committed events through `world.listEvents(runId)` and CLI JSON output rather than arbitrary SQL.

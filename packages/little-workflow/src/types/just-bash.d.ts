@@ -42,30 +42,23 @@ declare module "just-bash" {
     }): Promise<BashExecResult>;
   }
 
-  export class InMemoryFs {
-    constructor(options?: Record<string, unknown>);
-  }
+  // just-bash 3.0.1 omits security/transform files referenced by its top-level
+  // declarations. Retain the existing Bash facade, but use its actual filesystem
+  // declarations so World.files has exactly the interface Little Harness uses.
+  export type IFileSystem = import("../../node_modules/just-bash/dist/fs/interface.js").IFileSystem;
+  export type BufferEncoding = import("../../node_modules/just-bash/dist/fs/interface.js").BufferEncoding;
+  export type CpOptions = import("../../node_modules/just-bash/dist/fs/interface.js").CpOptions;
+  export type FileContent = import("../../node_modules/just-bash/dist/fs/interface.js").FileContent;
+  export type FsStat = import("../../node_modules/just-bash/dist/fs/interface.js").FsStat;
+  export type MkdirOptions = import("../../node_modules/just-bash/dist/fs/interface.js").MkdirOptions;
+  export type RmOptions = import("../../node_modules/just-bash/dist/fs/interface.js").RmOptions;
 
-  export class MountableFs {
-    constructor(options?: { readonly base?: unknown });
-    mount(path: string, fs: unknown): void;
-  }
-
-  export class OverlayFs {
-    constructor(options: {
-      readonly root: string;
-      readonly mountPoint?: string;
-      readonly readOnly?: boolean;
-      readonly allowSymlinks?: boolean;
-      readonly maxFileReadSize?: number;
-    });
-  }
-
-  export class ReadWriteFs {
-    constructor(options: {
-      readonly root: string;
-      readonly allowSymlinks?: boolean;
-      readonly maxFileReadSize?: number;
-    });
-  }
+  export type InMemoryFs = import("../../node_modules/just-bash/dist/fs/in-memory-fs/in-memory-fs.js").InMemoryFs;
+  export const InMemoryFs: typeof import("../../node_modules/just-bash/dist/fs/in-memory-fs/in-memory-fs.js").InMemoryFs;
+  export type MountableFs = import("../../node_modules/just-bash/dist/fs/mountable-fs/mountable-fs.js").MountableFs;
+  export const MountableFs: typeof import("../../node_modules/just-bash/dist/fs/mountable-fs/mountable-fs.js").MountableFs;
+  export type OverlayFs = import("../../node_modules/just-bash/dist/fs/overlay-fs/overlay-fs.js").OverlayFs;
+  export const OverlayFs: typeof import("../../node_modules/just-bash/dist/fs/overlay-fs/overlay-fs.js").OverlayFs;
+  export type ReadWriteFs = import("../../node_modules/just-bash/dist/fs/read-write-fs/read-write-fs.js").ReadWriteFs;
+  export const ReadWriteFs: typeof import("../../node_modules/just-bash/dist/fs/read-write-fs/read-write-fs.js").ReadWriteFs;
 }

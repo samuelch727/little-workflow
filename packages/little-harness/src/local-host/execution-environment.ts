@@ -1,19 +1,19 @@
-import { createJustBashRuntime } from "../runtime/just-bash-runtime.js";
+import { justBashSandbox } from "../runtime/just-bash-runtime.js";
 import { subprocessSandbox } from "../sandbox/subprocess/subprocess-sandbox.js";
-import type { HarnessExecutionEnvironmentFactory, HarnessRuntimeOptions } from "../types.js";
+import type { HarnessSandboxFactory, HarnessRuntimeOptions } from "../types.js";
 
 /**
  * How a host picks the execution environment for a turn.
  *
- * - `"in-process"` — always `createJustBashRuntime`. Fastest (no process spawn), but Tier-0
+ * - `"in-process"` — always `justBashSandbox()`. Fastest (no process spawn), but Tier-0
  *   just-bash embedded in the host process: a compatibility layer for trusted tool patterns,
  *   not an isolation boundary.
  * - `"subprocess"` — always `subprocessSandbox()` with its defaults. Pass
  *   `subprocessSandbox({ ... })` as the factory instead when the worker needs `workerPath`,
  *   `env`, or timeout overrides; the string form takes no options.
- * - `"auto"` — apply `selectExecutionEnvironmentMode` per turn. Recommended.
+ * - `"auto"` — apply `selectSandboxMode` per turn. Recommended.
  */
-export type HarnessExecutionEnvironmentMode = "auto" | "in-process" | "subprocess";
+export type HarnessSandboxMode = "auto" | "in-process" | "subprocess";
 
 /**
  * The `"auto"` rule: stay in-process only for turns that cannot execute model-authored code
@@ -25,9 +25,9 @@ export type HarnessExecutionEnvironmentMode = "auto" | "in-process" | "subproces
  * `"auto"` must opt out of both explicitly. Doing so also drops the runtime tool bridge, which
  * only exists for js exec.
  */
-export function selectExecutionEnvironmentMode(
+export function selectSandboxMode(
   runtime: HarnessRuntimeOptions | undefined,
-): Exclude<HarnessExecutionEnvironmentMode, "auto"> {
+): Exclude<HarnessSandboxMode, "auto"> {
   const networkEnabled = runtime?.network !== undefined && runtime.network !== false;
   if (networkEnabled || runtime?.python !== false || runtime?.javascript !== false) {
     return "subprocess";
@@ -39,19 +39,19 @@ export function selectExecutionEnvironmentMode(
  * Resolves a host's configured execution environment for one turn. A factory is used as-is;
  * a mode is mapped to the matching built-in adapter.
  */
-export function resolveExecutionEnvironment<TExtraBody>(
+export function resolveSandbox<TExtraBody>(
   selection:
-    | HarnessExecutionEnvironmentMode
-    | HarnessExecutionEnvironmentFactory<TExtraBody>
+    | HarnessSandboxMode
+    | HarnessSandboxFactory<TExtraBody>
     | undefined,
   runtime: HarnessRuntimeOptions | undefined,
-): HarnessExecutionEnvironmentFactory<TExtraBody> {
+): HarnessSandboxFactory<TExtraBody> {
   if (typeof selection === "function") {
     return selection;
   }
   // Unset means "auto": in-process only for turns that can neither run model-authored code
   // nor reach the network, the subprocess sandbox otherwise.
   const requested = selection ?? "auto";
-  const mode = requested === "auto" ? selectExecutionEnvironmentMode(runtime) : requested;
-  return mode === "subprocess" ? subprocessSandbox() : createJustBashRuntime;
+  const mode = requested === "auto" ? selectSandboxMode(runtime) : requested;
+  return mode === "subprocess" ? subprocessSandbox() : justBashSandbox();
 }

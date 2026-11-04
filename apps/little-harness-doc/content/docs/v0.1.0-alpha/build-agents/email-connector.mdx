@@ -1,0 +1,263 @@
+---
+title: Email Connector
+description: Give an agent its own email address, so that mail sent to it starts a run and the reply goes back in the same thread.
+---
+
+`emailConnector(...)` gives an agent an email address of its own. Mail sent to that address starts a
+run, and the agent's answer goes back to the sender as a reply in the same email thread. It is a
+[Chat SDK connector](/docs/v0.1.0-alpha/build-agents/chat-connectors#chat-sdk-platforms) with email
+defaults, so it lives in a connector folder like any other platform.
+
+This alpha receives mail through [Resend Inbound](https://resend.com/docs/dashboard/receiving/introduction)
+with `@resend/chat-sdk-adapter`. Resend hosts the mailbox and calls a webhook in your app for each
+email that arrives.
+
+<Callout title="Unverified in this alpha" type="warn">
+The connector is tested against Resend's adapter with Resend's API stubbed. No real email has been
+received through Resend Inbound yet, and whether Resend adds an `Authentication-Results` header to
+inbound mail, and under which authserv-id, is unconfirmed. Until you have confirmed it for your
+account (see [Find the authserv-id](#find-the-authserv-id)), treat the DMARC check as unproven.
+</Callout>
+
+## Give an agent an inbox
+
+Install the Chat SDK, the Resend adapter, and a durable state adapter in the app that hosts the route:
+
+```bash
+pnpm add chat @resend/chat-sdk-adapter @chat-adapter/state-redis
+```
+
+Add an `email` connector folder to the agent:
+
+```ts
+// agents/support/connectors/email/connector.ts
+import { createRedisState } from "@chat-adapter/state-redis";
+import { emailConnector } from "@little-stack/harness/connectors/runtime";
+import { createResendAdapter } from "@resend/chat-sdk-adapter";
+
+const address = "support@agents.example.com";
+
+export default emailConnector({
+  address,
+  // Reads RESEND_API_KEY and RESEND_WEBHOOK_SECRET from the environment.
+  adapter: { name: "resend", create: () => createResendAdapter({ fromAddress: address, fromName: "Support" }) },
+  state: () => createRedisState(),
+  senders: {
+    allow: ["@example.com", "partner@vendor.example"],
+    // The id your receiving server writes in Authentication-Results. See "Find the authserv-id".
+    authServId: "your-receivers-authserv-id",
+  },
+});
+```
+
+Then add a route for Resend's webhook:
+
+```ts
+// app/api/email/route.ts
+import { loadChatSdkConnector } from "@little-stack/harness/connectors/runtime";
+import { after } from "next/server";
+
+const supportEmail = await loadChatSdkConnector({ agentDir: "agents/support", connector: "email" });
+
+export async function POST(request: Request) {
+  return supportEmail.webhook(request, { waitUntil: (task) => after(() => task) });
+}
+```
+
+In Resend, set up receiving for the address's domain, add a webhook for the `email.received` event that
+points at `https://your-app.example/api/email`, and set these environment variables:
+
+```bash
+RESEND_API_KEY=re_...
+RESEND_WEBHOOK_SECRET=whsec_...
+```
+
+Then [find the authserv-id](#find-the-authserv-id) of the server that receives your mail and set
+`senders.authServId` to it; until then every email is refused. The route answers Resend with `200` as
+soon as it has fetched the email, and the agent runs and replies after the response through
+`waitUntil`.
+
+## What happens to an email
+
+1. Resend's adapter checks the webhook signature (`401` when it does not match) and fetches the email.
+2. The connector decides whether the email may reach the agent (see [Who can trigger the agent](#who-can-trigger-the-agent)).
+   An email it refuses gets no run and no reply, and it never enters the thread's history.
+3. Quoted earlier messages, the signature, and mobile footers such as "Sent from my iPhone" are removed
+   from the body. The agent is told that the full email is saved at `/session/email/<id>.txt` in its
+   session files. An email with no text gives the agent its subject instead.
+4. The run uses one harness session per email thread. The session id is `email:` plus a hash of the
+   thread, so it carries no email address.
+5. The run's history is the thread's earlier emails and replies, which the Chat SDK keeps in its state
+   because email providers have no history API.
+6. The agent's answer is sent as one email to the sender, with the subject `Re: <subject>` and the
+   `In-Reply-To` and `References` headers that keep it in the same thread in the sender's mail client.
+   An agent that ends its turn without text sends nothing.
+
+Files attached to the email reach the model as `file` parts, like
+[attachments](/docs/v0.1.0-alpha/build-agents/chat-connectors#attachments) on other platforms. The
+connector downloads them from Resend, and the usual `attachments.maxBytes` cap applies: a file
+Resend lists as larger is not downloaded.
+
+## Who can trigger the agent
+
+`senders` is required. An address that anyone can write to takes instructions from anyone, so the
+connector makes you choose:
+
+```ts
+senders: { allow: ["alice@example.com", "@example.com"] } // these addresses and exact domains
+senders: { allow: "anyone" }                               // an open inbox
+```
+
+A domain entry such as `@example.com` matches that exact domain only, not `sub.example.com`.
+
+A `From` header that does not hold exactly one address, such as `eve@evil.com, ceo@example.com`, is
+refused, as is one that the provider's adapter reads as a different address than the connector does,
+because the policy must vet the address the reply goes to.
+
+The `From:` header of an email is easy to forge, so by default an email must also pass DMARC. The
+verdict comes from the `Authentication-Results` header that the receiving mail server adds, and it must
+name the sender's own domain. A sender can put any `Authentication-Results` header in their own mail,
+so only headers whose authserv-id (their first word) is `senders.authServId` count, and
+`emailConnector` throws at startup when `requireDmarc` is on without it. If your provider never adds
+the header, set `requireDmarc: false` knowingly: the allowlist then trusts a `From` header that anyone
+can forge.
+
+```ts
+senders: { allow: ["@example.com"], authServId: "your-receivers-authserv-id" }
+```
+
+### Find the authserv-id
+
+The authserv-id is the first word of the `Authentication-Results` header that the server receiving
+your mail adds, `mx.example.net` in
+`Authentication-Results: mx.example.net; spf=pass ...; dmarc=pass header.from=example.com`. This alpha
+does not know Resend's (see the note at the top). To find it:
+
+1. Set `authServId` to a placeholder such as `"unknown"` and deploy. Every email is now refused with
+   `"dmarc-not-passed"`.
+2. Send the agent a test email from an ordinary mailbox, such as Gmail, whose address is on
+   `senders.allow` (the allowlist is checked first).
+3. The refusal's log line lists the authserv-ids the email carried. To see the whole headers, log
+   them from `onSkip`:
+
+   ```ts
+   onSkip: ({ reason, email }) => {
+     if (reason === "dmarc-not-passed") console.info(email.headerValues["authentication-results"]);
+   },
+   ```
+
+4. Set `authServId` to the id of the header your receiving server added, and send another test email.
+
+If the test email carries no `Authentication-Results` header at all, the provider does not add one,
+and the DMARC check cannot work with it.
+
+The connector checks each email in this order and stops at the first refusal:
+
+| Reason | Refused when |
+|---|---|
+| `"automated"` | The email is an auto-reply, bounce, or mailing-list message (`Auto-Submitted`, `Precedence: bulk`, `List-*` headers, an empty `Return-Path`, a delivery report, or a mailer-daemon sender). |
+| `"not-addressed"` | The agent's address is in neither `To` nor `Cc`. |
+| `"sender-not-allowed"` | The `From` header does not hold exactly one address, the adapter reads it as a different address, or the sender is not on `senders.allow`. |
+| `"dmarc-not-passed"` | `requireDmarc` is on and no `Authentication-Results` header from `authServId` holds a passing DMARC verdict, or one holds a failing one. |
+| `"other-sender"` | The email replies in a thread that someone else started, such as a Reply-All from a person on `Cc`. The agent's replies in a thread go to the person who started it, so this keeps one sender from writing into another's conversation. |
+| `"reply-limit"` | The agent has already replied `maxRepliesPerThread` times in this thread (default 20). |
+| `"duplicate"` | The agent already received an email with the same `Message-ID`. |
+| `"rejected"` | Your own `accept` hook refused it. |
+
+Each refusal logs one `console.info` line, which never contains an email address. Pass `onSkip` to
+send refusals somewhere else:
+
+```ts
+onSkip: ({ reason, detail, email }) => metrics.increment("email.skipped", { reason }),
+```
+
+Add a check of your own with `accept`. It runs after the built-in checks pass and returns `true` to let
+the email through, or `false` or `{ skip: "why" }` to refuse it quietly:
+
+```ts
+accept: async (email) => (await customers.isActive(email.from)) || { skip: "not an active customer" },
+```
+
+## The text the agent reads
+
+By default the agent reads the new part of the email only. Forwarded emails (a `Fwd:` subject, or a
+"Forwarded message" block) are left whole, because the forwarded text is the point. Inline replies
+written between quoted lines are kept as they are.
+
+Replace this with `transform`, which receives the parsed email and returns the text the agent reads.
+When the text differs from the received body, the full email is still saved to the session files:
+
+```ts
+transform: (email) => `Subject: ${email.subject}\n\n${email.text}`,
+```
+
+The pure helpers behind the defaults are exported for your own hooks and tests: `readInboundEmail`,
+`automatedEmailReason`, `senderAllowed`, `dmarcResult`, `authenticationResults`, and `stripQuotedReply`.
+
+## Safety defaults
+
+Email reaches an agent from outside your team, so the connector starts closed:
+
+- **No loops.** Replies carry `Auto-Submitted: auto-replied`, so other auto-responders do not answer
+  them, and the connector refuses automated mail itself. `maxRepliesPerThread` stops a loop with an
+  auto-responder that sends no such header.
+- **No double answers.** Webhook retries and copies of the same email are recognized for three days.
+  Emails that arrive in the same thread while the agent is still answering are queued, and the agent
+  answers the latest one with the others in its history.
+- **No shell by default, but it is up to you.** `bash` is a harness setting, not a connector one, so
+  the connector warns once when the agent has it on. Set `runtime: { bash: false }` in `agent.ts` for
+  an agent that answers email unless it really needs a shell.
+- **Fewer tools.** Use `toolPolicy` to keep tools that act on accounts away from email, as on any
+  connector (see [Tool Access Policy](/docs/v0.1.0-alpha/build-agents/chat-connectors#tool-access-policy)).
+- **Untrusted text.** The email body is the sender's words. Say in the agent's instructions that it
+  should not follow instructions found in an email.
+
+## State
+
+Email needs a durable state adapter such as `@chat-adapter/state-redis`. State remembers which thread a
+reply belongs to (for 30 days), the thread's history, the `Message-ID`s already handled, and how many
+times the agent replied in each thread. With in-memory state a restart forgets all of it, so a reply
+to an old email starts a new conversation.
+
+Give each agent its own address. One Resend webhook often receives mail for a whole domain, and the
+`To`/`Cc` check is what keeps an agent from answering mail meant for another address.
+
+## Options
+
+`emailConnector` takes every [`chatSdkConnector`](/docs/v0.1.0-alpha/build-agents/chat-connectors#chat-sdk-platforms)
+option except `triggers` and `reactions`, which it sets for email, plus:
+
+| Option | Default | What it does |
+|---|---|---|
+| `address` | required | The address the agent owns. Replies are sent from it. |
+| `senders` | required | `{ allow, requireDmarc?, authServId? }`, described above. `authServId` is required while `requireDmarc` is on (the default). |
+| `userName` | local part of `address` | The Chat SDK bot name. |
+| `accept` | none | Your own last check. |
+| `transform` | strip quotes and signature | The text the agent reads. |
+| `maxRepliesPerThread` | `20` | Agent replies allowed in one thread. |
+| `requireAddressedTo` | `true` | Refuse mail whose `To`/`Cc` lacks `address`. Turn it off for mail forwarded from another address. |
+| `onSkip` | one `console.info` line | Observe refused emails. Throwing is swallowed. |
+| `readEmail` | `readInboundEmail` | Read a different provider's message shape. |
+
+The connector also sets Chat SDK defaults for email (`dedupeTtlMs` of three days, queued concurrency,
+and 30 days of thread history), which your own `chat` option overrides key by key.
+
+## Testing
+
+`simulateInbound` starts below the adapter, so it runs the agent but skips the sender checks and quote
+removal. To test those, send signed webhooks through the real Resend adapter with Resend's API stubbed
+at `fetch`. The demo's `src/app/api/email/email-route.test.ts` does this without credentials and sends
+no mail.
+
+## Limits in this alpha
+
+- Unverified against real mail: no email has been received through Resend Inbound yet, and whether
+  Resend adds `Authentication-Results` (and its authserv-id) is unconfirmed.
+- Resend's hosted inbound only. A connector for a self-hosted mail server is planned.
+- Replies go to the person who started the thread. People on `Cc` do not get the agent's reply, a
+  Reply-All from one of them is refused (`"other-sender"`), and `Reply-To` is ignored.
+- Blind-copied mail does not list the agent's address in `To` or `Cc`, so it is refused unless
+  `requireAddressedTo` is off.
+- With a provider adapter other than Resend's, the sender checks, history, and empty-reply handling
+  still apply, but replies are not marked `Auto-Submitted` (the connector warns) and attachments are not
+  downloaded.

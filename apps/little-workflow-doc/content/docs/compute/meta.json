@@ -1,0 +1,26 @@
+{
+  "title": "Little Compute",
+  "description": "Self-hosted agent tasks \u00b7 unpublished source",
+  "icon": "Server",
+  "pages": [
+    "index",
+    "---Operate---",
+    "self-hosting",
+    "cli",
+    "use-from-harness",
+    "---Concepts---",
+    "concepts",
+    "fork-and-merge",
+    "architecture",
+    "recovery",
+    "providers",
+    "runtime-io",
+    "artifacts",
+    "---Reference---",
+    "http-api",
+    "topology-credential-worker",
+    "---Status---",
+    "planned-enforcement"
+  ],
+  "root": true
+}

@@ -25,6 +25,8 @@ export type ResolvedAgentManifest = {
   readonly taskControlToolNames: readonly string[];
   readonly workflowInspectionToolNames: readonly string[];
   readonly dynamicWorkflowToolNames: readonly string[];
+  readonly agentGroupToolNames: readonly string[];
+  readonly checkpointToolNames: readonly string[];
   readonly asyncLauncherNames: readonly string[];
   readonly warnings: readonly HarnessWarning[];
 };
@@ -36,6 +38,8 @@ export type ResolveAgentManifestOptions = {
   readonly taskControlToolNames?: readonly string[];
   readonly workflowInspectionToolNames?: readonly string[];
   readonly dynamicWorkflowToolNames?: readonly string[];
+  readonly agentGroupToolNames?: readonly string[];
+  readonly checkpointToolNames?: readonly string[];
   readonly generatedLauncherNames?: readonly string[];
   readonly workflows?: readonly HarnessWorkflow[];
 };
@@ -64,8 +68,6 @@ export const HARNESS_DYNAMIC_WORKFLOW_TOOL_NAMES = [
 ] as const;
 
 export function resolveAgentManifest(options: ResolveAgentManifestOptions): ResolvedAgentManifest {
-  const configuredToolNames = sortedUnique(options.configuredToolNames ?? []);
-  const discoveredToolNames = sortedUnique(options.discoveredToolNames ?? []);
   const toolNames = sortedUnique([
     ...(options.configuredToolNames ?? []),
     ...(options.discoveredToolNames ?? []),
@@ -74,12 +76,11 @@ export function resolveAgentManifest(options: ResolveAgentManifestOptions): Reso
   const taskControlToolNames = sortedUnique(options.taskControlToolNames ?? []);
   const workflowInspectionToolNames = sortedUnique(options.workflowInspectionToolNames ?? []);
   const dynamicWorkflowToolNames = sortedUnique(options.dynamicWorkflowToolNames ?? []);
+  const agentGroupToolNames = sortedUnique(options.agentGroupToolNames ?? []);
+  const checkpointToolNames = sortedUnique(options.checkpointToolNames ?? []);
   const warnings: HarnessWarning[] = [];
 
   for (const [label, names] of [
-    ["configured tool", configuredToolNames],
-    ["discovered tool", discoveredToolNames],
-    ["MCP tool", mcpToolNames],
     ["task-control tool", taskControlToolNames],
     ["workflow-inspection tool", workflowInspectionToolNames],
     ["dynamic-workflow tool", dynamicWorkflowToolNames],
@@ -132,6 +133,19 @@ export function resolveAgentManifest(options: ResolveAgentManifestOptions): Reso
   rejectCollisions("dynamic-workflow tool", dynamicWorkflowToolNames, "workflow", workflowHandles);
   rejectCollisions("dynamic-workflow tool", dynamicWorkflowToolNames, "task-control tool", taskControlToolNames);
   rejectCollisions("dynamic-workflow tool", dynamicWorkflowToolNames, "workflow-inspection tool", workflowInspectionToolNames);
+  rejectCollisions("agent-group tool", agentGroupToolNames, "configured tool", toolNames);
+  rejectCollisions("agent-group tool", agentGroupToolNames, "MCP tool", mcpToolNames);
+  rejectCollisions("agent-group tool", agentGroupToolNames, "workflow", workflowHandles);
+  rejectCollisions("agent-group tool", agentGroupToolNames, "task-control tool", taskControlToolNames);
+  rejectCollisions("agent-group tool", agentGroupToolNames, "workflow-inspection tool", workflowInspectionToolNames);
+  rejectCollisions("agent-group tool", agentGroupToolNames, "dynamic-workflow tool", dynamicWorkflowToolNames);
+  rejectCollisions("checkpoint tool", checkpointToolNames, "configured tool", toolNames);
+  rejectCollisions("checkpoint tool", checkpointToolNames, "MCP tool", mcpToolNames);
+  rejectCollisions("checkpoint tool", checkpointToolNames, "workflow", workflowHandles);
+  rejectCollisions("checkpoint tool", checkpointToolNames, "task-control tool", taskControlToolNames);
+  rejectCollisions("checkpoint tool", checkpointToolNames, "workflow-inspection tool", workflowInspectionToolNames);
+  rejectCollisions("checkpoint tool", checkpointToolNames, "dynamic-workflow tool", dynamicWorkflowToolNames);
+  rejectCollisions("checkpoint tool", checkpointToolNames, "agent-group tool", agentGroupToolNames);
 
   const rawAsyncLauncherNames = [
     ...workflowEntries.map((entry) => entry.launcherHandle).filter((value): value is string => value !== undefined),
@@ -144,6 +158,8 @@ export function resolveAgentManifest(options: ResolveAgentManifestOptions): Reso
   rejectCollisions("async launcher", asyncLauncherNames, "task-control tool", taskControlToolNames);
   rejectCollisions("async launcher", asyncLauncherNames, "workflow-inspection tool", workflowInspectionToolNames);
   rejectCollisions("async launcher", asyncLauncherNames, "dynamic-workflow tool", dynamicWorkflowToolNames);
+  rejectCollisions("async launcher", asyncLauncherNames, "agent-group tool", agentGroupToolNames);
+  rejectCollisions("async launcher", asyncLauncherNames, "checkpoint tool", checkpointToolNames);
   rejectCollisions("async launcher", asyncLauncherNames, "workflow", workflowHandles);
 
   return {
@@ -153,6 +169,8 @@ export function resolveAgentManifest(options: ResolveAgentManifestOptions): Reso
     taskControlToolNames,
     workflowInspectionToolNames,
     dynamicWorkflowToolNames,
+    agentGroupToolNames,
+    checkpointToolNames,
     asyncLauncherNames,
     warnings,
   };

@@ -1,9 +1,8 @@
 import type { JsonObject } from "../types.js";
 
 /**
- * Outcome vocabulary. Deliberately the same three values as littleDB's `ReportOutcomeSchema`
- * (`packages/littledb-client/src/contract.ts`) so a harness-recorded outcome maps onto the
- * control-plane wire contract without a translation table.
+ * Outcome vocabulary: whether a run did what it was for. A host that sends outcomes to a trace
+ * store such as LittleDB maps them onto its own scores.
  */
 export type HarnessOutcomeStatus = "success" | "failure" | "partial";
 
@@ -34,6 +33,14 @@ export type HarnessOutcomeInput = {
    * every report counts separately.
    */
   reportKey?: string;
+  /**
+   * The caller's order for reports under one `reportKey`. A higher revision supersedes a lower
+   * one whichever arrives last, and two reports with the same key and revision are the same
+   * report sent twice (at one revision, a retraction wins). A whole number from 0, and it needs a
+   * `reportKey`. A sink that keeps state (LittleDB) fences on it, so a late, older report can't
+   * overwrite a newer one. Omit it and the order reports arrive in decides, as before.
+   */
+  revision?: number;
   /** Workflow step path this outcome is about, when it is about one step rather than the run. */
   stepPath?: string;
   /**
@@ -62,23 +69,31 @@ export type HarnessOutcomeEvent = {
   source: string;
   reporter?: string;
   reportKey?: string;
+  revision?: number;
   stepPath?: string;
   promptHash?: string;
   metadata: JsonObject;
 };
 
 /**
- * A downstream consumer of recorded outcomes (littleDB's `reportOutcome`, a queue, a metrics
+ * A downstream consumer of recorded outcomes (a LittleDB score, a queue, a metrics
  * client). Sinks are best-effort: a sink that throws or returns `{ ok: false }` is COUNTED,
  * never propagated — an outcome is an observation about a run, never a gate on it.
  */
 export type HarnessOutcomeSink = {
   /** Used in {@link HarnessOutcomeResult.errors} to say which sink failed. */
   readonly name?: string;
+  /**
+   * `stale: true` with `ok: true`: the store already holds this report's revision with a
+   * retraction, or a newer revision, so nothing changed there (Harness G24).
+   */
   deliver(
     event: HarnessOutcomeEvent,
-  ): Promise<{ ok: boolean } | void> | { ok: boolean } | void;
+  ): Promise<HarnessOutcomeDelivery | void> | HarnessOutcomeDelivery | void;
 };
+
+/** A sink's answer to one report. */
+export type HarnessOutcomeDelivery = { ok: boolean; stale?: boolean };
 
 export type HarnessOutcomeError = {
   stage: "resolve" | "trace" | "sink";
@@ -95,6 +110,12 @@ export type HarnessOutcomeResult = {
   recorded: boolean;
   event?: HarnessOutcomeEvent;
   delivered: number;
+  /**
+   * Sinks (counted in `delivered` too) that answered `stale`: their store already holds this
+   * report's revision with a retraction, or a newer one, so the report didn't become current
+   * there. A definite answer, so the caller doesn't send it again as it is.
+   */
+  stale: number;
   failed: number;
   errors: HarnessOutcomeError[];
 };

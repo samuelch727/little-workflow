@@ -14,30 +14,37 @@ import {
   type WorkflowVersionLockSeed,
 } from "./compiler-lock.js";
 import {
+  createToolRegistry,
+  localWorld,
+  model,
+  runOrchestration,
+  runWorkflow,
+  skill,
+} from "./index.js";
+import type {
+  LwirWorkflow,
+} from "./entries/lwir.js";
+import {
   workflowHarness,
-  type ExecuteStepTask,
-  type HarnessContext,
-  type LwirWorkflow,
   createWorkflowHarness,
-  type Harness,
-  type RuntimeToolHandler,
   RuntimeMaxVisitsError,
   appendEvent,
   canonicalJson,
   createLittleWorkflow,
-  createToolRegistry,
   executeWorkflowVersion,
   listEvents,
-  localWorld,
   materializeRunState,
-  model,
   readArtifact,
-  runWorkflow,
   sha256Digest,
-  skill,
   stepPathFor,
   writeArtifact,
-} from "./index.js";
+} from "./entries/internals.js";
+import type {
+  ExecuteStepTask,
+  HarnessContext,
+  Harness,
+  RuntimeToolHandler,
+} from "./entries/internals.js";
 import { normalizeBashCapabilities } from "./bash-tool.js";
 import { hashHarnessManifest, workerManifest } from "./manifests.js";
 import { normalizeSchema } from "./schema.js";
@@ -69,6 +76,7 @@ async function appendTestExecuteStepEvent(
   await ctx.durability.append({
     type,
     runId: ctx.session.runId,
+    appendIdempotencyKey: `runtime-test:${type}:${task.stepContext.stepPath}:${task.stepContext.visitIndex}`,
     payload: {
       runId: ctx.session.runId,
       stepId: task.step.id,
@@ -293,10 +301,8 @@ Use this skill.
       },
     });
 
-    const result = await runWorkflow({
+    const result = await runWorkflow(workflow, {}, {
       world,
-      workflows: workflow,
-      input: {},
       tools,
       runId: "run_runtime_relative_skill_mount",
     });
@@ -377,10 +383,8 @@ Use this skill.
       globalTools: ["done"],
     });
 
-    const result = await runWorkflow({
+    const result = await runWorkflow(workflow, {}, {
       world,
-      workflows: workflow,
-      input: {},
       tools: createToolRegistry({
         done: { description: "Return a completed result.", execute: async () => ({ ok: true }) },
       }),
@@ -455,10 +459,8 @@ Use this skill.
       globalTools: ["done"],
     });
 
-    const result = await runWorkflow({
+    const result = await runWorkflow(workflow, {}, {
       world,
-      workflows: workflow,
-      input: {},
       tools: createToolRegistry({
         done: { description: "Return a completed result.", execute: async () => ({ ok: true }) },
       }),
@@ -516,7 +518,7 @@ Use this skill.
       },
     } satisfies Harness & { readonly harnessId: string };
 
-    const result = await runWorkflow({
+    const result = await runOrchestration({
       world,
       workflows: [workflow],
       input: {},
@@ -823,7 +825,7 @@ Use this skill.
       },
     } satisfies Harness & { readonly harnessId: string };
 
-    const result = await runWorkflow({
+    const result = await runOrchestration({
       world,
       workflows: [workflow],
       input: {},
@@ -1294,10 +1296,8 @@ Use this skill.
       bash,
     });
 
-    const result = await runWorkflow({
+    const result = await runWorkflow(workflow, {}, {
       world,
-      workflows: workflow,
-      input: {},
       tools,
       runId: "run_runtime_bash_capabilities",
     });

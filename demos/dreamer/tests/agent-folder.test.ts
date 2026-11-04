@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import type { LanguageModel } from "ai";
 import { afterAll, beforeAll, expect, it } from "vitest";
-import { loadHarness } from "little-harness";
+import { loadHarness } from "@little-stack/harness";
 import { setDreamerModel } from "../agents/dreamer/env";
 
 const AGENT_DIR = join(import.meta.dirname, "..", "agents", "dreamer");

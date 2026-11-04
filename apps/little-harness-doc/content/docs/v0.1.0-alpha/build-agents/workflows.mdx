@@ -19,11 +19,11 @@ the output.
 
 ## Install
 
-Workflows come from the `little-workflow` package, which depends on `little-harness` (not the other
+Workflows come from the `@little-stack/workflow` package, which depends on `@little-stack/harness` (not the other
 way around):
 
 ```bash
-pnpm add little-workflow@alpha little-harness@alpha ai@^7 zod @ai-sdk/anthropic
+pnpm add @little-stack/workflow@alpha @little-stack/harness@alpha ai@^7 zod @ai-sdk/anthropic
 ```
 
 ## Author The Workflow
@@ -37,7 +37,7 @@ would run in a batch with `runWorkflow`.
 import { anthropic } from "@ai-sdk/anthropic";
 import { tool } from "ai";
 import { z } from "zod";
-import { defineWorkflow } from "little-workflow";
+import { defineWorkflow } from "@little-stack/workflow";
 
 export const refundWorkflow = defineWorkflow({
   id: "billing.refund",
@@ -52,20 +52,20 @@ export const refundWorkflow = defineWorkflow({
 });
 ```
 
-> **Note:** A tool-using workflow is both *planned* (authors the step graph) and *executed* (the final step generates the declared structured output) by a model, so multi-step refund-style workflows need a **capable model for both roles** — a weak worker may not honor the output schema, even when the plan is correct. Use a capable `model`, and optionally give the planner its own (e.g. stronger) model for hard plans: `defineWorkflow({ ..., model: capable, planner: stronger })`.
+> **Note:** A tool-using workflow is both *planned* (authors the step graph) and *executed* (the final step generates the declared structured output) by a model, so multi-step refund-style workflows need a **capable model for both roles** — a weak worker may not honor the output schema, even when the plan is correct. Use a capable `model`, and optionally give the planner its own (e.g. stronger) model for hard plans: `defineWorkflow({ ..., model: capable, planner: stronger })`. When you already know the steps, give the workflow a fixed `plan` instead (unreleased source); a fixed-plan workflow needs no planner model and no model at all unless a step calls one.
 
 > **Schema subset:** Workflow `input`/`output` schemas compile to the alpha LWIR schema subset, which does **not** support every JSON-Schema keyword. `exclusiveMinimum`/`exclusiveMaximum` (produced by Zod's `.positive()`, `.negative()`, `.gt()`, `.lt()`) and `pattern`/`format` (produced by `.regex()`, `.email()`, `.url()`) are rejected; `.min()`/`.max()` (which produce `minimum`/`maximum`), `.describe()`, enums, and string- or enum-keyed `z.record()` are fine. Validate finer constraints inside a tool. A workflow whose schema uses an unsupported keyword fails to compile before the model is called.
 
 ## Hand It To The Agent
 
 `workflows` takes `HarnessWorkflow` objects, not `defineWorkflow` results. Wrap the workflow with
-`asHarnessWorkflow` from `little-workflow`:
+`asHarnessWorkflow` from `@little-stack/workflow`:
 
 ```ts
 // route.ts — the chat agent.
 import { anthropic } from "@ai-sdk/anthropic";
-import { createHarness, localHost, streamHarness } from "little-harness";
-import { asHarnessWorkflow } from "little-workflow";
+import { createHarness, localHost, streamHarness } from "@little-stack/harness";
+import { asHarnessWorkflow } from "@little-stack/workflow";
 import { refundWorkflow } from "./refund";
 
 const support = createHarness({
@@ -91,8 +91,28 @@ export async function POST(req: Request) {
 `definitionIdentity` is required. It names this version of the workflow's definition: use a stable
 string you change whenever the workflow's behavior changes (`"billing.refund@2"`), or
 `{ notApplicable: true }` to opt out. Workflows loaded from a folder with `loadWorkflow(...)` from
-`little-workflow` are already `HarnessWorkflow` objects with a folder-derived identity, so they can be
+`@little-stack/workflow` are already `HarnessWorkflow` objects with a folder-derived identity, so they can be
 listed directly.
+
+### Keep The Plan Across Sessions
+
+A workflow without a fixed `plan` has its steps written by the planner on its first run, and keeps
+them in its workflow store. By default each agent session gets its own store, under the session's
+data dir, so every new session plans again. Pass a `world` that every session shares to plan once.
+We recommend it for any planned workflow the agent calls in more than one session:
+
+```ts
+import { asHarnessWorkflow, localWorld } from "@little-stack/workflow";
+import { preapproval } from "./preapproval";
+
+const workflow = asHarnessWorkflow(preapproval, {
+  definitionIdentity: "lending.preapproval@1",
+  world: localWorld({ dataDir: "./data/workflows" }),
+});
+```
+
+Leave it out when each session should plan for itself, for example while you are still changing the
+workflow.
 
 ## How It Works
 
@@ -130,7 +150,7 @@ In an [agent folder](/docs/v0.1.0-alpha/build-agents/agent-folders), put each wo
 
 ```ts
 // agents/support/workflows/refund.ts
-import { asHarnessWorkflow } from "little-workflow";
+import { asHarnessWorkflow } from "@little-stack/workflow";
 import { refundWorkflow } from "../../../workflows/refund";
 
 export default asHarnessWorkflow(refundWorkflow, { definitionIdentity: "billing.refund@1" });

@@ -9,14 +9,20 @@ import {
   type WorkflowVersionLockSeed,
 } from "./compiler-lock.js";
 import {
+  localWorld,
+} from "./index.js";
+import type {
+  LwirWorkflow,
+} from "./entries/lwir.js";
+import {
   canonicalJson,
   executeWorkflowVersion,
   listEvents,
-  localWorld,
   sha256Digest,
-  type Harness,
-  type LwirWorkflow,
-} from "./index.js";
+} from "./entries/internals.js";
+import type {
+  Harness,
+} from "./entries/internals.js";
 import { resolveRepairPolicy } from "./runtime.js";
 import { concreteInputStructure } from "./workflow-version-reuse.js";
 

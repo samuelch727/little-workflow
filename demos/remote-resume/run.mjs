@@ -13,7 +13,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createFileSessionLog, startSessionLogServer } from "little-harness";
+import { fileSessionLog, startSessionLogServer } from "@little-stack/harness/remote-session";
 
 const childScript = fileURLToPath(new URL("./child.mjs", import.meta.url));
 const baseDir = await mkdtemp(join(tmpdir(), "lh-remote-resume-"));
@@ -56,7 +56,7 @@ async function runChild(phase, serverUrl) {
 
 // Phase 1: record the run, then die hard.
 const firstServer = await startSessionLogServer({
-  store: createFileSessionLog({ path: eventLogPath }),
+  store: fileSessionLog({ path: eventLogPath }),
   authToken,
 });
 console.log(`session-log server (phase 1) at ${firstServer.url}`);
@@ -72,7 +72,7 @@ await firstServer.close();
 
 // Phase 2: a brand-new server process over the same file, and a brand-new harness process.
 const secondServer = await startSessionLogServer({
-  store: createFileSessionLog({ path: eventLogPath }),
+  store: fileSessionLog({ path: eventLogPath }),
   authToken,
 });
 console.log(`session-log server (phase 2, restarted) at ${secondServer.url}`);

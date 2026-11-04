@@ -222,7 +222,7 @@ it("new adds the selected provider package to the workspace package.json", async
   expect(packageJson.dependencies).toMatchObject({
     "@ai-sdk/openai": resolveProvider("openai").packageVersion,
     ai: scaffoldDependencyVersions().ai,
-    "little-harness": scaffoldDependencyVersions().littleHarness,
+    "@little-stack/harness": scaffoldDependencyVersions().littleHarness,
   });
 });
 
@@ -231,6 +231,59 @@ it("new without a name returns a usage error", async () => {
   const code = await newCommand([], { cwd: await tmp(), stderr: (t) => { err += t; } });
   expect(code).toBe(1);
   expect(err).toMatch(/usage/i);
+});
+
+it("init --yes and new default to the openai provider, like little setup", async () => {
+  const cwd = await tmp();
+  expect(await initCommand(["support-agents", "--yes", "--no-install"], { cwd, stdout: () => {} })).toBe(0);
+  const projectRoot = join(cwd, "support-agents");
+  const initAgent = await readFile(join(projectRoot, "agents", "support", "agent.ts"), "utf8");
+  expect(initAgent).toContain('import { openai } from "@ai-sdk/openai";');
+
+  expect(await newCommand(["billing"], { cwd: projectRoot, stdout: () => {} })).toBe(0);
+  const newAgent = await readFile(join(projectRoot, "agents", "billing", "agent.ts"), "utf8");
+  expect(newAgent).toContain('import { openai } from "@ai-sdk/openai";');
+});
+
+it("init and new reject options they do not support instead of ignoring them", async () => {
+  for (const flag of ["--instal", "--template", "--here=yes"]) {
+    const cwd = await tmp();
+    let err = "";
+    const code = await initCommand(["support-agents", "--provider", "openai", "--no-install", flag], {
+      cwd,
+      stderr: (t) => { err += t; },
+    });
+    expect(code).toBe(1);
+    expect(err).toContain(`Unknown option: ${flag}`);
+    expect(await has(join(cwd, "support-agents"))).toBe(false);
+  }
+  const cwd = await tmp();
+  let err = "";
+  expect(await newCommand(["billing", "--yes"], { cwd, stderr: (t) => { err += t; } })).toBe(1);
+  expect(err).toContain("Unknown option: --yes");
+  expect(await has(join(cwd, "agents", "billing"))).toBe(false);
+});
+
+it("init --help and new --help print usage without scaffolding", async () => {
+  const cwd = await tmp();
+  let out = "";
+  expect(await initCommand(["--help"], { cwd, stdout: (t) => { out += t; } })).toBe(0);
+  expect(await newCommand(["-h"], { cwd, stdout: (t) => { out += t; } })).toBe(0);
+  expect(out).toContain("Usage: little-harness init");
+  expect(out).toContain("Usage: little-harness new");
+  expect(await has(join(cwd, "package.json"))).toBe(false);
+});
+
+it("init points --workflow at little setup instead of scaffolding a Harness-only project", async () => {
+  const cwd = await tmp();
+  let err = "";
+  const code = await initCommand(["support-agents", "--yes", "--no-install", "--workflow"], {
+    cwd,
+    stderr: (t) => { err += t; },
+  });
+  expect(code).toBe(1);
+  expect(err).toContain("setup <dir> --workflow");
+  expect(await has(join(cwd, "support-agents"))).toBe(false);
 });
 
 it("test fails clearly for an unknown agent", async () => {

@@ -1,0 +1,163 @@
+---
+title: Sandboxes Vs Little Harness
+description: Where sandbox providers, Little Compute, and Little Harness each fit.
+---
+
+Sandbox providers solve a crucial layer: give an agent a safe computer.
+
+> **Refocus, 2026-10-23.** Little Compute is now the self-hosted engine behind
+> the stack's [workspaces](/docs/how-they-fit#workspaces) feature, with its
+> control plane frozen; managed workspaces come with LittleDB's hosted
+> service. The comparison below still describes what Little Compute does, but
+> "use Little Compute when" now means "self-host your workspaces when".
+
+Little Compute and Little Harness sit above that layer, but solve different
+problems. Little Compute turns replaceable sandbox capacity into durable,
+fenced agent work. Little Harness defines the product-agent runtime and keeps
+the Harness Session, model loop, tools, skills, Session Files, Artifacts,
+Persistent Dirs, traces, and replay semantics.
+
+Little Harness ships only just-bash-based environments (in-process, or a local subprocess sandbox by default). A provider sandbox plugs in through the [sandbox](/docs/harness/v0.1.0-alpha/runtime/execution-environments) factory port (`HarnessSandboxFactory`) — as the whole environment, or as the `nextTier` that [execution tiers](/docs/harness/v0.1.0-alpha/runtime/execution-tiers) escalate to. No provider adapter ships in the package yet.
+
+None of these layers is a rename for another:
+
+```text
+Little Harness Session and agent loop
+  -> Little Compute Operation / Task Scope / Task / Attempt
+    -> zero or more sequential Sandbox Leases
+      -> a SandboxProvider such as rootless Podman
+```
+
+A Harness Session is the durable boundary for one conversation or job. A
+Compute Attempt is one retryable execution of logical work. A Sandbox Lease is
+temporary authority to use one isolated provider environment. A provider VM or
+container is an implementation detail of that Lease, not the identity of the
+Harness Session or agent.
+
+## Use A Sandbox Provider Directly When
+
+- one application process can own the entire lifecycle
+- the agent must run untrusted code in an isolated Linux environment
+- files, commands, ports, terminals, previews, or provider snapshots are the
+  main missing primitive
+- provider-specific persistence and retry behavior is acceptable
+- durable parent/child Task graphs, joins, budgets, and fenced winners are not
+  required
+
+## Use Little Compute When
+
+- a parent can create many child agents with atomic group membership
+- logical agents must survive runner or provider replacement
+- Attempts should release sandbox CPU and memory during model, child,
+  approval, capacity, or user waits
+- execution is at least once but exactly one fenced Attempt may commit the
+  successful Task winner
+- every child needs private repository lineage, workspace generations,
+  structured publications, results, and evidence
+- fan-out, joins, cancellation, convergence, verification, fairness, and
+  resource grants must remain correct across many processes or Cells
+- the deployment must move between local and production providers without
+  changing the public agent model
+
+Little Compute does not replace a container runtime, VMM, Kubernetes node
+scheduler, or sandbox provider. It owns agent admission and execution
+attachment admission above those systems. Provider node placement remains a
+provider responsibility.
+
+## Use Little Harness When
+
+- the app needs a product-agent runtime, not only isolated compute
+- large tool outputs should become Artifacts
+- selected folders should commit back to app storage through Persistent Dirs
+- the host app needs traceable model, file, and tool behavior
+- message staging, skills, continuation, and an AI SDK-compatible stream
+  contract matter
+- the same Harness API should work across local processes, Little Compute, or
+  another execution backend
+
+Little Harness can use a sandbox adapter without Little Compute for simpler
+deployments. Use Little Compute when the application needs the additional
+durable scheduling, fan-out, fencing, and resource-management layer.
+
+## Core Difference
+
+| Question | Sandbox Provider | Little Compute | Little Harness |
+|---|---|---|---|
+| Main abstraction | Isolated execution environment. | Durable Operation graph over Tasks, Attempts, and temporary Sandbox Leases. | Durable Harness Session and product-agent runtime. |
+| Logical agent loop | Usually outside the provider. | Runs in a trusted runner; admitted independently of sandbox capacity. | Defines the model/tool loop and replay semantics. |
+| Isolation unit | Provider VM, container, process, or pod. | One fenced Sandbox Lease generation for an Attempt. | One Harness Session; not a VM or container. |
+| Files | Provider filesystem, volume, or snapshot. | Immutable File Snapshots selected by an Attempt workspace generation; provider materializations are disposable. | Session Files at `/session/`, `/artifacts/`, `/persistent/`, and `/.agents/`. |
+| Durability | Provider-specific volume or checkpoint. | PostgreSQL facts, Harness event replay, File Snapshots, Artifacts, and credential-free Continuation Capsules. | Harness Session event and file semantics. |
+| Snapshots | Filesystem, rootfs, process, or memory feature. | Optional acceleration only; losing one cannot lose acknowledged work. | Not required for conversation/job durability. |
+| Retry contract | Provider-specific. | At-least-once execution with monotonic fences and one successful winner compare-and-set. | Replays the same durable Harness Session occurrence without defining provider lifecycle. |
+| Scale decision | Creates and places environments. | Admits agent Turns and Lease attachments under Task Scope, fairness, Cell, and conserved-grant rules. | Bounds the parent model context and exposes task handles. |
+| Best fit | Running code safely. | Coordinating many durable, isolated, repository-aware agents. | Letting an agent work safely inside a product. |
+
+## Provider State Is Not Agent State
+
+Little Compute treats provider state as an observed external projection.
+Provider containers, tasks, databases, controller objects, and snapshots never
+become canonical Task, winner, workspace, or quota state. Every provider path
+implements Little's versioned contract and conformance suite with one identity,
+fence, reservation, and outcome per Lease member.
+
+A provider or memory snapshot can make a later attachment faster, but durable
+resume comes from Harness event replay plus the current immutable File
+Snapshot. If a snapshot disappears, resume can be slower but cannot become
+incorrect.
+
+## Local And Production Runtimes
+
+Little Compute does not require Docker or Docker Desktop:
+
+- Podman is the OSS-first local provider path.
+- A direct Moby daemon is an optional local compatibility path.
+- Docker Desktop is optional and user-provided; Little does not bundle or
+  require it.
+- The default single-host profile uses one config and the
+  `init`/`up`/`status` flow; a source checkout builds its own images on the
+  selected rootless Podman authority.
+- The Docker-independent `production-separated` profile and its release
+  evidence remain available only through explicit advanced commands.
+- Kubernetes/containerd and `little-cell` host fleets are additional production
+  paths, not prerequisites for self-hosting.
+
+OCI images remain portable artifacts rather than a dependency on one desktop
+product. The local provider is selected explicitly, and every supported path
+must pass the same file, lifecycle, fencing, isolation, egress, and ambiguity
+tests. A provider's availability on a machine never relaxes those checks.
+The historical six-owner, Runner/Vault/GC, PostgreSQL, gVisor, and patched-Node
+campaigns are retained advanced-profile machinery. They are not the plan of
+record or gates for the default Direction-v2 self-host loop.
+
+## Provider Notes
+
+This table compares outside sandbox products with what Little adds above them. It is not a list of
+what Little Compute supports: [Little Compute's provider table](/docs/compute/providers) has the one supported list and each provider's status.
+
+| Provider | Strongest Fit | What Little Adds |
+|---|---|---|
+| Podman | Self-hosted local OCI execution behind an explicit runtime boundary. | Durable agent identity, admission, fenced retries, workspace generations, and group semantics. |
+| OpenSandbox | Replaceable sandbox lifecycle, exec, file, endpoint, and optional batch primitives. | Canonical state, agent scheduling, per-member fences, budgets, joins, and provider-independent recovery. |
+| Kubernetes SIG Agent Sandbox | Kubernetes-native sandbox lifecycle and runtime-class integration. | Cell-local Task correctness, conserved grants, aggregate agent operations, and structured convergence. |
+| E2B | Agent-native Linux sandbox with filesystem, commands, snapshots, metrics, and MCP patterns. | Self-hosted canonical agent control-plane and Harness Session semantics. |
+| Daytona | Reproducible development environments, Git helpers, commands, volumes, and snapshots. | Product-agent Tasks, fluid Lease attachments, fenced winners, and bounded fan-in. |
+| Vercel Sandbox | Secure microVM execution for Vercel apps, files, commands, ports, policies, and persistence. | Provider-independent agent control-plane and Harness behavior above the sandbox. |
+| Modal Sandbox | Remote code execution with snapshots and filesystem APIs. | App-owned Session Files, agent lineage, joins, and convergence. |
+| Cloudflare Sandbox | Worker-controlled containers with files, commands, previews, terminals, and file watching. | Portable durable Tasks, resource grants, workspace generations, and Harness integration. |
+
+The exact supported provider/version matrix is release-specific. A provider's
+marketing scale or snapshot claim is evidence to benchmark, not proof that it
+satisfies Little's correctness or isolation contract.
+
+## Sources
+
+- [Podman documentation](https://docs.podman.io/)
+- [Moby project](https://mobyproject.org/)
+- [OpenSandbox](https://github.com/opensandbox-group/OpenSandbox)
+- [Kubernetes SIG Agent Sandbox](https://github.com/kubernetes-sigs/agent-sandbox)
+- [E2B docs](https://e2b.dev/docs)
+- [Daytona docs](https://www.daytona.io/docs/getting-started)
+- [Vercel Sandbox SDK reference](https://vercel.com/docs/vercel-sandbox/sdk-reference)
+- [Modal Sandbox reference](https://modal.com/docs/reference/modal.Sandbox)
+- [Cloudflare Sandbox](https://developers.cloudflare.com/sandbox/)

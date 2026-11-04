@@ -16,7 +16,7 @@ artifacts, Persistent Dirs, traces, warnings, and output parsing.
 Create the harness once in server-side code.
 
 ```ts
-import { createHarness, localHost, skill } from "little-harness";
+import { createHarness, localHost, skill } from "@little-stack/harness";
 
 export const accountHarness = createHarness({
   host: localHost({ dataDir: ".little-harness" }),
@@ -45,7 +45,7 @@ Use `streamHarness()` for chat routes and live UI updates.
 
 ```ts
 import type { UIMessage } from "ai";
-import { streamHarness } from "little-harness";
+import { streamHarness } from "@little-stack/harness";
 import { accountHarness } from "@/lib/account-harness";
 
 // Allow streaming responses up to 30 seconds.
@@ -167,7 +167,7 @@ live stream.
 
 ```ts
 import { Output } from "ai";
-import { generateHarness } from "little-harness";
+import { generateHarness } from "@little-stack/harness";
 
 const result = await generateHarness({
   harness: accountHarness,
@@ -180,11 +180,14 @@ const result = await generateHarness({
   session: "acct_123-renewal",
 });
 
-await reports.create({
-  accountId: "acct_123",
-  content: result.output,
-  traceId: result.trace.id,
-});
+// A turn parks only when a tool parks it; see generateHarness().
+if (result.status === "completed") {
+  await reports.create({
+    accountId: "acct_123",
+    content: result.output,
+    traceId: result.trace.id,
+  });
+}
 ```
 
 `generateHarness()` should run the same runtime lifecycle as `streamHarness()`.
@@ -196,7 +199,7 @@ Input Types give reusable meaning to `type + input` calls.
 
 ```ts
 import { Output } from "ai";
-import { createHarness, inputType, localHost } from "little-harness";
+import { createHarness, inputType, localHost } from "@little-stack/harness";
 
 const accountHarness = createHarness({
   host: localHost(),
@@ -259,16 +262,21 @@ Tools should return compact values to the model. Large results should be written
 to the harness filesystem.
 
 ```ts
+import { tool } from "ai";
+import { z } from "zod";
+import { harnessToolContext } from "@little-stack/harness";
+
 const queryCustomers = tool({
   description: "Query customer account data.",
   inputSchema: z.object({
     accountId: z.string().optional(),
     query: z.string().optional(),
   }),
-  execute: async (input, ctx) => {
+  execute: async (input, options) => {
     const rows = await customerDb.query(input);
+    const { files } = harnessToolContext(options);
 
-    const file = await ctx.files.writeJSON(
+    const file = await files.writeJSON(
       "/artifacts/tool/query-customers/result.json",
       rows,
       { source: "tool" },

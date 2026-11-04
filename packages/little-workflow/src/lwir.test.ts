@@ -7,6 +7,7 @@ import {
   LwirValidationError,
   UNIMPLEMENTED_FIELD_CODE,
   assertValidLwir,
+  inferStepNeeds,
   registerWorkflowVersion,
   validateLwir,
 } from "./lwir.js";
@@ -3551,5 +3552,128 @@ describe("declared but unimplemented fields", () => {
         }),
       ),
     ).toThrow(LwirValidationError);
+  });
+});
+
+describe("inferStepNeeds", () => {
+  function step(id: string, prompt: string, overrides: Record<string, unknown> = {}) {
+    return {
+      id,
+      uses: "ai.generate",
+      with: { model: "model.text", prompt },
+      output: { mode: "text" },
+      ...overrides,
+    };
+  }
+
+  it("adds a need for each same-list step a step reads in with or input", () => {
+    const draft = workflow({
+      steps: [
+        workflow().steps[0],
+        step("notes", "Note {{ input.transcript }}."),
+        {
+          ...step("summarize", "Summarize for {{ steps.lookup-customer.output.plan }}."),
+          output: { mode: "object", schema: summarySchema },
+          input: { notes: "{{ steps.notes.output }}" },
+        },
+      ],
+    });
+    const before = JSON.stringify(draft);
+
+    const inferred = inferStepNeeds(draft) as { steps: Array<{ id: string; needs?: string[] }> };
+
+    expect(validateLwir(draft).findings.map((finding) => finding.code)).toContain("step.undeclared_dependency");
+    expect(inferred.steps.find((entry) => entry.id === "summarize")?.needs).toEqual(["lookup-customer", "notes"]);
+    expect(inferred.steps.find((entry) => entry.id === "notes")?.needs).toBeUndefined();
+    expect(validateLwir(inferred)).toEqual({ valid: true, findings: [] });
+    expect(JSON.stringify(draft)).toBe(before);
+  });
+
+  it("returns a document that already validates unchanged", () => {
+    const valid = workflow();
+    expect(inferStepNeeds(valid)).toBe(valid);
+    expect(inferStepNeeds("not a workflow")).toBe("not a workflow");
+  });
+
+  it("keeps a reference to a missing step as an error", () => {
+    const draft = workflow({
+      steps: [workflow().steps[0], step("summarize", "Summarize {{ steps.ghost.output }}.")],
+    });
+    const inferred = inferStepNeeds(draft);
+
+    expect(inferred).toBe(draft);
+    expect(validateLwir(inferred).findings).toEqual(
+      expect.arrayContaining([expect.objectContaining({ code: "step.missing_dependency" })]),
+    );
+  });
+
+  it("does not add a need that would close a cycle", () => {
+    const draft = workflow({
+      steps: [
+        step("draft", "Draft {{ input.transcript }}.", { needs: ["review"] }),
+        step("review", "Review {{ steps.draft.output }}."),
+      ],
+    });
+    const inferred = inferStepNeeds(draft);
+
+    expect(inferred).toBe(draft);
+    expect(validateLwir(inferred).findings).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: "step.undeclared_dependency", path: "$.steps[1].with.prompt" }),
+      ]),
+    );
+  });
+
+  it("leaves a lastOutput read through a loop back-edge alone", () => {
+    const loop = workflow({
+      steps: [
+        step("worker", "Address feedback: {{ steps.review.lastOutput }}.", { maxVisits: 5 }),
+        step("review", "Review the draft.", { needs: ["worker"], maxVisits: 5 }),
+        {
+          id: "route",
+          uses: "decision",
+          needs: ["review"],
+          maxVisits: 5,
+          with: { cases: [{ when: "{{ steps.review.lastOutput.ok }}", to: "end" }], default: "worker" },
+        },
+      ],
+    });
+
+    expect(inferStepNeeds(loop)).toBe(loop);
+  });
+
+  it("infers needs between steps of a parallel body, not to steps outside it", () => {
+    const body = (prompt: string) => [
+      step("extract", "Extract {{ item }}."),
+      {
+        ...step("score", prompt),
+        output: { mode: "object", schema: { type: "object", properties: { score: { type: "number" } } } },
+      },
+    ];
+    const parallel = (steps: unknown[]) => ({
+      id: "review-items",
+      uses: "parallel",
+      with: {
+        items: "{{ input.items }}",
+        itemKey: "{{ item.id }}",
+        cardinality: { kind: "matches_items" },
+        maxBranches: 5,
+        maxConcurrency: 2,
+        failureMode: "all_settled",
+        fanIn: { order: "input", output: "array" },
+      },
+      steps,
+      output: { mode: "array", schema: { type: "array" } },
+    });
+
+    const inside = inferStepNeeds(workflow({ steps: [parallel(body("Score {{ steps.extract.output }}."))] })) as {
+      steps: Array<{ steps: Array<{ id: string; needs?: string[] }> }>;
+    };
+    expect(inside.steps[0]?.steps.find((entry) => entry.id === "score")?.needs).toEqual(["extract"]);
+
+    const outside = workflow({
+      steps: [step("intro", "Intro."), parallel(body("Score with {{ steps.intro.output }}."))],
+    });
+    expect(inferStepNeeds(outside)).toBe(outside);
   });
 });

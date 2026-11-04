@@ -1,5 +1,5 @@
-import { BashTransformPipeline, CommandCollectorPlugin, parse } from "just-bash";
 import type { HarnessRuntimeOptions } from "../types.js";
+import { justBashNodeExport } from "./just-bash-builds.js";
 import {
   tier0CapabilityMatrix,
   type Tier0Capability,
@@ -106,6 +106,9 @@ export function tier0RuntimeCapabilities(
  * `dynamic-command` escalation.
  */
 const MAX_NESTED_DEPTH = 3;
+
+/** A package-manager launcher path: `node_modules/.bin/<tool>`, relative or absolute. */
+const NODE_BIN_SHIM = /(?:^|\/)node_modules\/\.bin\/[^/]+$/u;
 
 /**
  * Decides whether a shell script can run on Tier-0 (just-bash), needs a real execution
@@ -246,6 +249,16 @@ type ScriptFacts = {
 };
 
 function classifyInto(script: string, context: ClassifyContext, depth: number): void {
+  const parse = justBashNodeExport("parse");
+  if (parse === undefined) {
+    // workerd and browsers load just-bash's browser build, which has no parser to read the
+    // script with, so the script cannot be shown to be safe for Tier 0.
+    addReason(context, {
+      kind: "classifier-unavailable",
+      detail: "just-bash's browser build (workerd, browsers) has no parser.",
+    });
+    return;
+  }
   let ast: unknown;
   try {
     ast = parse(script);
@@ -324,6 +337,21 @@ function classifyName(command: string, facts: ScriptFacts, context: ClassifyCont
     addReason(context, { kind: "needs-real-exec", command, reason: realExec });
     return;
   }
+  // `node_modules/.bin/*` entries are Node launchers (`#!/usr/bin/env node` shims), not
+  // shell scripts, so they need exactly what `node` needs. Classifying them as opaque sent
+  // `./node_modules/.bin/vite build 2>&1` to Tier-0, where the "No such file" landed on
+  // stdout and the gap detector never saw it (LIT-78 demo run).
+  if (NODE_BIN_SHIM.test(command)) {
+    // Name the path the model typed in the refusal, not `node`, which it never wrote.
+    const capability = context.matrix.commands.get("node");
+    if (!context.denied.has("node") && capability !== undefined && capability !== "always" &&
+        !context.capabilities[capability]) {
+      addReason(context, { kind: "capability-disabled", command, capability });
+      return;
+    }
+    classifyName("node", facts, context);
+    return;
+  }
   // A path-like name is a script file: just-bash executes it with its own interpreter, so
   // the invocation itself is fine and any gap inside surfaces through `detectEmulationGap`.
   if (command.includes("/")) {
@@ -386,6 +414,11 @@ function addReason(context: ClassifyContext, reason: ClassificationReason): void
  * matrix test pins the surface so an upgrade that moves it fails loudly.
  */
 function collectCommands(script: string): string[] {
+  const BashTransformPipeline = justBashNodeExport("BashTransformPipeline");
+  const CommandCollectorPlugin = justBashNodeExport("CommandCollectorPlugin");
+  if (BashTransformPipeline === undefined || CommandCollectorPlugin === undefined) {
+    throw new Error("just-bash's browser build has no BashTransformPipeline or CommandCollectorPlugin.");
+  }
   const pipeline: unknown = new BashTransformPipeline().use(new CommandCollectorPlugin());
   const transform = (pipeline as { transform?: (input: string) => unknown }).transform;
   if (typeof transform !== "function") {

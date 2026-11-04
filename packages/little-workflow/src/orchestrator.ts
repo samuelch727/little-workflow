@@ -1,10 +1,9 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, writeFile } from "node:fs/promises";
-import { join } from "node:path";
 import { tool } from "ai";
 import { z } from "zod";
 import type { LocalWorld } from "./authoring.js";
 import { sha256Digest } from "./canonical.js";
+import { runFilesFor } from "./run-files.js";
 import {
   compileWorkflow,
   type CompilableWorkflowDefinition,
@@ -44,7 +43,7 @@ function warnOrchestratorDeprecated(entryPoint: string): void {
   hasWarnedOrchestratorDeprecated = true;
   process.emitWarning(
     `${entryPoint} is deprecated. The orchestrator tools (plan_workflow, run_workflow, ` +
-      "start_workflow) and the runWorkflow({ workflows: [...], orchestrator }) mode are " +
+      "start_workflow) and runOrchestration({ workflows: [...], orchestrator }) are " +
       "superseded by the Harness composition surface: defineWorkflow -> asHarnessWorkflow -> " +
       "createHarness({ workflows }). The orchestrator still works in this release and will be " +
       "unexported in the next minor.",
@@ -260,7 +259,7 @@ export function createOrchestratorTools(
       workflowVersionReuse: "structure",
       signal: abortSignalFromToolOptions(executeOptions),
     }));
-    return workflowRunToolResultForCaller(result, options.resultStore, executeOptions);
+    return workflowRunToolResultForCaller(result, options.resultStore, executeOptions, options.world);
   }
 
   return {
@@ -370,6 +369,7 @@ async function workflowRunToolResultForCaller(
   result: Awaited<ReturnType<RunWorkflowVersionDelegate>>,
   resultStore: OrchestratorToolOptions["resultStore"],
   executeOptions: unknown,
+  world: LocalWorld,
 ): Promise<WorkflowRunToolResult> {
   if (!isModelToolExecution(executeOptions)) {
     return legacyWorkflowRunToolResult(result);
@@ -377,7 +377,7 @@ async function workflowRunToolResultForCaller(
   if (resultStore === undefined || result.output === undefined) {
     return result;
   }
-  const stored = await writeModelFacingOutput(resultStore, result.runId, result.output);
+  const stored = await writeModelFacingOutput(world, resultStore, result.runId, result.output);
   return {
     runId: result.runId,
     status: result.status,
@@ -423,6 +423,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 async function writeModelFacingOutput(
+  world: LocalWorld,
   resultStore: NonNullable<OrchestratorToolOptions["resultStore"]>,
   runId: string,
   output: unknown,
@@ -431,10 +432,11 @@ async function writeModelFacingOutput(
   readonly outputSummary: OutputSummary;
 }> {
   const runSegment = safePathSegment(runId);
-  const outputDirectory = join(resultStore.backingDir, runSegment);
-  await mkdir(outputDirectory, { recursive: true });
+  const files = runFilesFor(world);
+  const outputDirectory = files.path.join(resultStore.backingDir, runSegment);
+  await files.mkdir(outputDirectory, { recursive: true });
   const text = `${JSON.stringify(output, null, 2)}\n`;
-  await writeFile(join(outputDirectory, "output.json"), text, "utf8");
+  await files.writeFile(files.path.join(outputDirectory, "output.json"), text, "utf8");
   return {
     outputPath: `${trimTrailingSlash(resultStore.mountDir)}/${runSegment}/output.json`,
     outputSummary: summarizeOutput(output, Buffer.byteLength(text, "utf8")),

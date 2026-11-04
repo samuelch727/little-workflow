@@ -7,9 +7,9 @@ import { Files, File, Folder } from 'fumadocs-ui/components/files';
 
 Persistent Dirs are opt-in directories whose files can survive beyond one session.
 
-Harness memory is a convenience layer on top of this model. `memory(...)` creates
-a normal Persistent Dir, adds a bounded memory index to future prompts, and can
-add the built-in `remember` tool for model-authored durable notes.
+Harness memory is built on this model. `memory(...)` creates a normal Persistent
+Dir, lists its files in every turn's prompt, and adds a built-in skill on how the
+agent keeps them.
 
 They are not global scratch folders. They are developer-backed harness directories: the app decides how to fetch and store files, and Little Harness handles the safe session directory, diffing, tracing, and commit boundary.
 
@@ -37,6 +37,13 @@ For simple apps, that can be a folder snapshot. For larger stores, future adapte
 ## Work
 
 The agent edits the `harnessDir` inside the isolated session. The backing store is not mutated on every write.
+
+`localDir()` keeps relative `sourceDir` folders under the host's `dataDir` on
+`localHost()`. On [`virtualHost()`](/docs/v0.1.0-alpha/runtime/virtual-host),
+it uses `dataFs` under `/.little-harness/data/`; by default that is the session's
+own filesystem, hidden from bash. Virtual paths must be relative POSIX paths
+without `..`. `projectDir()` stays localHost-only. A shared `dataFs` shares
+folders between sessions without making their writes transactional.
 
 <Files>
   <Folder name="persistent" defaultOpen>
@@ -76,6 +83,27 @@ directory accepts changes in the session first, then commits them after the turn
 Little Harness does not infer sharing or read/write policy from names such as
 `company`, `project`, or `user`. The developer controls the backing source and
 commit mode for each directory.
+
+## Who May Write, Per Turn
+
+`commit: "read-only"` fixes a directory as read-only for every turn. To decide per
+turn instead, pass `canWrite`. It runs when the turn loads the directory, with the
+turn's `extraBody`:
+
+```ts
+persistentDirs: [
+  localDir<{ role: string }>({
+    harnessDir: "/persistent/company",
+    sourceDir: "persistent/company",
+    canWrite: ({ extraBody }) => extraBody?.role === "editor",
+  }),
+]
+```
+
+When it returns false, the directory is read-only for that turn, as with
+`commit: "read-only"`: writes fail at once and nothing is stored. The `load` event
+for the turn carries `readOnly: true`. Derive the role from your own sign-in, never
+from what the person typed.
 
 ## The Commit Model
 
@@ -140,7 +168,7 @@ or warn the user.
 const result = streamHarness({ harness, messages, session, extraBody });
 const finished = await result.finished;
 
-if (finished.persistence.status === "failed") {
+if (finished.status === "completed" && finished.persistence.status === "failed") {
   // Host app decides whether to retry, warn, or escalate.
   await retryQueue.enqueue(finished.persistence.failedCommits);
 }

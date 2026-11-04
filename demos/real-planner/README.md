@@ -13,7 +13,7 @@ export DEEPSEEK_API_KEY=...
 export DEEPSEEK_BASE_URL=https://api.deepseek.com/v1
 # optional override, defaults to deepseek-v4-pro
 export DEEPSEEK_MODEL_ID=deepseek-v4-pro
-pnpm --filter little-workflow build
+pnpm --filter @little-stack/workflow build
 pnpm --filter real-planner demo:single
 # or
 pnpm --filter real-planner demo:supervisor

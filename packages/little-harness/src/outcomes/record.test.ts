@@ -193,6 +193,25 @@ describe("reportHarnessOutcome", () => {
     });
   });
 
+  it("records a report's revision and hands it to sinks, and drops one it can't order", async () => {
+    const { host, sessionId, tracePath } = await setup();
+    const deliver = vi.fn(async () => ({ ok: true }));
+    const harness = { sessions: host.sessions } as never;
+    const ordered = await reportHarnessOutcome({ harness, sessionId, status: "success", reportKey: "k1", revision: 7, sinks: [{ deliver }] });
+    expect(ordered.errors).toEqual([]);
+    expect(ordered.event).toMatchObject({ reportKey: "k1", revision: 7 });
+    expect(deliver).toHaveBeenCalledWith(expect.objectContaining({ revision: 7 }));
+    expect((await readTrace(tracePath)).at(-1)?.metadata).toMatchObject({ reportKey: "k1", revision: 7 });
+
+    // Without a key, or not a whole number from 0: recorded without it, and said so.
+    for (const bad of [{ revision: 3 }, { reportKey: "k2", revision: 1.5 }, { reportKey: "k3", revision: -1 }]) {
+      const result = await reportHarnessOutcome({ harness, sessionId, status: "failure", ...bad });
+      expect(result.recorded).toBe(true);
+      expect(result.event).not.toHaveProperty("revision");
+      expect(result.errors).toEqual([expect.objectContaining({ stage: "resolve", message: expect.stringMatching(/revision/u) })]);
+    }
+  });
+
   it("does NOT push the outcome through the harness onEvent/trace-ingest stream", async () => {
     // An outcome that also travelled the trace-ingest path would be counted twice by the
     // control plane, which ingests it through POST /api/outcomes instead.

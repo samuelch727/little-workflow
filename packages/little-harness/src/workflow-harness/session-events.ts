@@ -1,4 +1,8 @@
-import { emitHarnessOccurrence } from "../events/occurrence.js";
+import {
+  createHarnessAppendIdempotencyKey,
+  emitHarnessOccurrence,
+} from "../events/occurrence.js";
+import { stableHash } from "../utils/canonical-hash.js";
 import type {
   WorkflowHarness,
   WorkflowHarnessContext,
@@ -28,6 +32,12 @@ export async function runWorkflowHarnessWithSession(
   await emitHarnessOccurrence({
     type: "harness.session.started",
     runId: sessionCtx.session.runId,
+    appendIdempotencyKey: sessionEventAppendKey(
+      sessionCtx.session.runId,
+      "harness.session.started",
+      task,
+      sessionCtx,
+    ),
     payload: {
       runId: sessionCtx.session.runId,
       role: sessionCtx.session.role,
@@ -54,6 +64,12 @@ export async function runWorkflowHarnessWithSession(
     await emitHarnessOccurrence({
       type: "harness.session.completed",
       runId: sessionCtx.session.runId,
+      appendIdempotencyKey: sessionEventAppendKey(
+        sessionCtx.session.runId,
+        "harness.session.completed",
+        task,
+        sessionCtx,
+      ),
       payload: {
         runId: sessionCtx.session.runId,
         output: asRecord({ result: eventSafeValue(result) }),
@@ -70,6 +86,12 @@ export async function runWorkflowHarnessWithSession(
     await emitHarnessOccurrence({
       type: "harness.session.failed",
       runId: sessionCtx.session.runId,
+      appendIdempotencyKey: sessionEventAppendKey(
+        sessionCtx.session.runId,
+        "harness.session.failed",
+        task,
+        sessionCtx,
+      ),
       payload: {
         runId: sessionCtx.session.runId,
         error: errorEnvelope(error),
@@ -83,6 +105,45 @@ export async function runWorkflowHarnessWithSession(
     });
     throw error;
   }
+}
+
+function sessionEventAppendKey(
+  runId: string,
+  eventType: string,
+  task: WorkflowHarnessTask,
+  ctx: WorkflowHarnessContext,
+): string {
+  return createHarnessAppendIdempotencyKey({
+    runId,
+    eventType,
+    logicalEventId: workflowSessionInvocationId(task, ctx),
+  });
+}
+
+function workflowSessionInvocationId(
+  task: WorkflowHarnessTask,
+  ctx: WorkflowHarnessContext,
+): string {
+  if (task.kind === "execute_step") {
+    return `execute:${task.stepContext.stepPath}:visit:${task.stepContext.visitIndex}:attempt:${task.stepContext.attempt ?? 1}:manifest:${ctx.session.manifestHash}`;
+  }
+  if (task.kind === "fix_step") {
+    return `fix:${ctx.scope.stepPath ?? task.step.id}:attempt:${task.priorFixAttempts + 1}:manifest:${ctx.session.manifestHash}`;
+  }
+  if (task.kind === "plan") {
+    return `plan:${stableHash({
+      manifestHash: ctx.session.manifestHash,
+      workflowDefinitionHash: task.workflowSnapshot.workflowDefinitionHash,
+      input: task.input,
+      systemMessage: task.systemMessage,
+      outerLoopContext: task.outerLoopContext,
+    })}`;
+  }
+  return `orchestrate:${stableHash({
+    manifestHash: ctx.session.manifestHash,
+    available: task.available.map((workflow) => workflow.workflowDefinitionHash),
+    input: task.input,
+  })}`;
 }
 
 function throwIfAborted(signal: AbortSignal): void {

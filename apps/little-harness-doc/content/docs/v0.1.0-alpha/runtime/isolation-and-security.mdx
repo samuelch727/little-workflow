@@ -44,7 +44,7 @@ mistakes, not against an adversary.
 What follows from that:
 
 - **Model-authored code does not run in the host process by default.** `localHost()`
-  defaults `executionEnvironment` to `"auto"`: a turn stays in-process only when
+  defaults its `sandbox` option to `"auto"`: a turn stays in-process only when
   `runtime.python` and `runtime.javascript` are both `false` and network is off.
   Every other turn runs in `subprocessSandbox()`. `"in-process"` opts out of that
   rule and should be reserved for trusted, read-only tool turns.
@@ -54,7 +54,7 @@ What follows from that:
   defense-in-depth layer, which `defenseInDepthForAdapter` turns on only in the
   worker — in-process it would patch process-wide globals of your app.
 - **Neither tier confines native code.** Use an OS-level sandbox (container, VM,
-  microVM) behind a custom execution environment for genuinely untrusted workloads.
+  microVM) behind a custom sandbox for genuinely untrusted workloads.
 
 The rest of the design still applies around either tier:
 

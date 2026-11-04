@@ -3,13 +3,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { LanguageModel } from "ai";
 import { afterEach, describe, expect, it } from "vitest";
-import { resolveHarnessWorkflowTools, type HarnessWorkflow } from "little-harness";
-import { asHarnessWorkflow } from "little-workflow";
-import type { WorkflowDefinition } from "little-workflow";
+import type { HarnessWorkflow } from "@little-stack/harness";
+import { resolveHarnessWorkflowTools } from "@little-stack/harness/internals";
+import { asHarnessWorkflow } from "@little-stack/workflow";
 import { createClusterCardsWorkflow } from "../agents/dreamer/workflows/cluster-cards";
 import { createConfigAbWorkflow } from "../agents/dreamer/workflows/config-ab";
 import { createIncidentCardWorkflow } from "../agents/dreamer/workflows/incident-card";
 import { scriptedModel } from "./support/mock-model";
+
+/** What `asHarnessWorkflow` accepts: any `defineWorkflow` result. */
+type WorkflowDefinitionInput = Parameters<typeof asHarnessWorkflow>[0];
 
 const dirs: string[] = [];
 afterEach(async () => {
@@ -22,13 +25,13 @@ afterEach(async () => {
  * the model is a mock.
  */
 async function runTemplate(
-  build: (model: LanguageModel) => unknown,
+  build: (model: LanguageModel) => WorkflowDefinitionInput,
   handle: string,
   input: unknown,
   output: unknown,
 ): Promise<Record<string, unknown>> {
   const model = scriptedModel({ turns: [], workflowOutput: () => output });
-  const workflow = asHarnessWorkflow(build(model) as unknown as WorkflowDefinition, {
+  const workflow = asHarnessWorkflow(build(model), {
     executionMode: "inline",
     definitionIdentity: { notApplicable: true },
   });
@@ -128,7 +131,7 @@ describe("template workflows execute end to end", () => {
  * rule) and that guidance only reaches the model if the schema converts.
  */
 describe("described schemas convert to a usable tool schema (LIT-43)", () => {
-  const templates: ReadonlyArray<[string, (model: LanguageModel) => unknown]> = [
+  const templates: ReadonlyArray<[string, (model: LanguageModel) => WorkflowDefinitionInput]> = [
     ["dream.incident-card", (model) => createIncidentCardWorkflow(model)],
     ["dream.cluster-cards", (model) => createClusterCardsWorkflow(model)],
     ["dream.config-ab", (model) => createConfigAbWorkflow(model)],
@@ -139,7 +142,7 @@ describe("described schemas convert to a usable tool schema (LIT-43)", () => {
   for (const [id, build] of templates) {
     it(`${id} exposes a json-schema input marker carrying its descriptions`, () => {
       const workflow: HarnessWorkflow = asHarnessWorkflow(
-        build(model) as unknown as WorkflowDefinition,
+        build(model),
         { executionMode: "inline", definitionIdentity: { notApplicable: true } },
       );
 
@@ -157,7 +160,7 @@ describe("described schemas convert to a usable tool schema (LIT-43)", () => {
 
   it("carries the load-bearing 'verbatim' instruction into the incident-card schema", () => {
     const workflow = asHarnessWorkflow(
-      createIncidentCardWorkflow(model) as unknown as WorkflowDefinition,
+      createIncidentCardWorkflow(model),
       { executionMode: "inline", definitionIdentity: { notApplicable: true } },
     );
     const rendered = JSON.stringify(

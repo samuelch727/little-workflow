@@ -1,0 +1,15 @@
+{
+  "title": "Comparisons",
+  "pages": [
+    "index",
+    "ai-sdk-vs-little-harness",
+    "openai-agents-sdk-vs-little-harness",
+    "langgraph-vs-little-harness",
+    "mastra-vs-little-harness",
+    "agent-frameworks-vs-little-harness",
+    "coding-harnesses-vs-little-harness",
+    "sandboxes-vs-little-harness",
+    "visual-builders-vs-little-harness",
+    "memory-observability-vs-little-harness"
+  ]
+}

@@ -1,0 +1,182 @@
+---
+title: Recovery and safe time
+description: Why Little Compute expires authority late rather than early during clock or primary uncertainty.
+---
+
+Little Compute does not use a sandbox timer or a raw PostgreSQL `now()` call as
+proof that durable authority has expired. Claims, sandbox Leases,
+reservations, Scope deadlines, Approvals, rate windows, and deletion grace all
+use a persisted **safe expiry cut**.
+
+A low-frequency, epoch-fenced sampler holds one PostgreSQL session leadership
+lock and compares PostgreSQL time with elapsed monotonic host time. Standby
+processes do not steal epochs from a healthy leader. Losing the pinned
+connection releases leadership; the successor advances the durable epoch
+before it can publish a cut. A sampler restart, failover, forward/backward clock step,
+uncertain observation, or long sampling gap pauses destructive expiry and
+reusable-capacity reclamation. New work with a deadline is rejected while the
+cut is uncertain. An existing renewal is never shortened: it keeps the later
+of its current expiry and `safeExpiryCut + requestedTTL`.
+
+The sampler connection must be session-affine. Connect directly to PostgreSQL
+or use a proxy in session-pooling mode. PgBouncer transaction and statement
+pooling are unsupported because adjacent lock, topology, and sample queries may
+run on different backends. Little Compute checks the backend PID and exact
+advisory lock before every sample and destroys leadership on any mismatch.
+
+The sampler process and its host monotonic clock form a small trusted safety
+leaf. PostgreSQL-owned functions independently observe topology and database
+time and cap the accepted proposal, but they cannot prove that a compromised
+sampler host reported honest monotonic elapsed. Isolate and harden this process;
+never colocate untrusted agent code with it or give sampler credentials to a
+sandbox.
+
+Recovery requires stable observations plus a grace period. The cut advances no
+faster than trusted monotonic elapsed and never goes backward. A large forward
+step remains quarantined until it is safe for every authority issued before
+the step; availability may be late, but acknowledged authority cannot expire
+early.
+
+The exec gateway uses the same cut for its short owner heartbeat. A takeover
+serializes on the exact tenant and Sandbox Exec, increments the owner
+generation, and preserves the original canonical Exec/Lease/provider/runtime/
+workspace identity even if the Attempt later advances to another workspace
+head. Historical transition replay is authority-bearing: it is accepted only
+while the receipt still belongs to the current unexpired owner token,
+generation, and fence. An expired or replaced owner cannot replay an old send,
+ACK, cancellation, or release response.
+
+Recovery also preserves the output durability boundary. Pending page metadata
+and ACK intent survive gateway-process loss, while supervisor output remains in
+its bounded spool until the matching ACK result commits. A terminal resource
+cannot be released merely because process state is terminal; its latest
+terminal output page must be durably sink-bound and acknowledged, or the
+command must carry the separate proven-not-sent receipt.
+
+## Unknown cost and side effects during recovery
+
+Cost and externality observations are optional because a terminal control-plane
+row does not, by itself, prove provider billing or sandbox side effects. Recovery
+must preserve that uncertainty: it does not turn missing observations into zero
+cost or clean (`false`) flags, and it does not estimate compute cost from wall-clock
+elapsed time.
+
+Re-execution is eligible only when the saved milestone contains a complete
+externality observation and `networkWrites`, `databaseCommits`, and
+`externalApiCalls` are all false. If the observation is missing, recovery keeps
+re-execution ineligible; it may still restore workspace bytes and replay a
+durable placement receipt, but it cannot claim safe re-execution without an
+explicitly trusted capture. A measured zero remains a real observation and is
+distinct from an omitted value.
+
+Retry receipts use `reusedPrefixCost` for the measured historical cost prefix
+when the selected ancestor has one; this is not an exact counterfactual saving.
+They omit that field when cost is unknown, including base-generation fallback.
+Legacy receipts that contain the v1 `savedCost` field remain parse-only and
+replay-compatible without being rewritten; newer receipts never emit that field.
+
+## Lease-attachment worker recovery
+
+The v46 database authority defines separate worker heads for provider
+observation and Lease verification. The CLI and self-host appliance use the
+v46 activation/recovery adapter while retaining the frozen v45 cryptographic
+verification ABI behind that session-guarded process boundary.
+
+Each process activation owns a dedicated PostgreSQL session guardian and a
+generation/fence pair. A successor may adopt still-live claims only after the
+database proves the exact prior process incarnation and guardian state; a
+contended deterministic lock without that durable proof is hostile contention,
+not evidence that the old worker is healthy.
+
+Recovery is paginated and replay-safe. Prior-generation claims settle against
+their original ownership and closure lineage and are never projected into the
+successor's current material. Insufficient provider evidence returns the item
+for re-observation. The migration itself requires both worker role graphs to be
+NOLOGIN and drained, plus exclusive role-management maintenance from proof
+through commit. Any ambiguous guardian unlock or migration-lock release
+destroys the physical pooled connection before it can be reused.
+
+## Lease hibernation and resume
+
+Idle and deadline decisions require a certain safe cut, but provider cleanup
+does not stop after a Lease has entered `release_pending`. The reconciler keeps
+retrying the exact generation-scoped destroy operation while time is
+uncertain. Signed absence or fence evidence may be observed, but reusable
+Reservation capacity remains charged until PostgreSQL can validate and commit
+that proof against a certain cut.
+
+A completed hibernation seals the accepted Sandbox Exec cut, commits signed
+workspace quiescence for the current File Snapshot head, proves the old Lease
+and Reservation terminal, returns quota exactly once, and parks the Attempt.
+Resume never revives that Lease. It requires the next Attempt-local
+Reservation and Lease generations, a current provider allocation operation,
+a live signed writable attachment to the exact parked workspace head, and no
+competing live right. One owner-held database routine commits the immutable
+resume receipt and `parked -> runnable` Attempt compare-and-set atomically.
+Wrong workspace heads, forged request digests, uncertain safe time, stale
+heartbeats, and duplicate authorities all leave the Attempt parked. Concurrent
+replays return the one historical receipt.
+
+The maximum-deadline horizon must cover every admitted Lease, token, Approval,
+idempotency tombstone, rate window, retention deadline, and GC grace. The
+owner-sealed PostgreSQL policy defaults to 3,650 days
+(`315360000000` milliseconds), preserving the public ten-year retention and
+idempotency maximum. A sampler loads that persisted version and digest. Policy
+change requires a stopped sampler, immutable change evidence, and a successor
+epoch; no process-local setting can silently weaken it.
+
+An Operation key's horizon starts again after terminalization. The terminal
+transition captures the current frozen safe-cut as an immutable floor; it does
+not matter whether the sampler is certain at that moment. A later retry or
+reconciler attaches the terminal receipt only after a certain cut has advanced
+beyond that floor. Until then the key is undeletable. Garbage collection uses
+`max(creationHorizon, terminalSafeCut + declaredTTL)`, never the raw Operation
+`terminal_at` timestamp.
+
+The initial cut may start at database time only when Little Compute itself
+proves the installation contains no deadline-bearing or idempotency authority.
+A populated pre-v5 database with either an existing guard or no guard is
+quarantined at the Unix epoch. Immutable evidence records the prior guard and
+full deadline inventory. Only an uninterrupted full-policy-horizon monotonic
+run can create the receipt that clears quarantine; restart, takeover, clock
+anomaly, or primary change restarts that proof from zero.
+
+The M1 exit profile must qualify real two-node primary failover and forward and
+backward clock steps at every irreversible time path, while publishing
+uncertainty, cut-lag, paused-admission, and late-expiry telemetry. Later M4/M8
+profiles requalify the installation's specific HA, STONITH, and provider
+bindings; they do not substitute for the baseline M1 proof.
+
+## Backup/restore promotion
+
+`little-compute-ha-backup-restore` packages the physical PostgreSQL
+backup/restore gate. Its `qualify-local` operation runs an already-present
+PostgreSQL 17 or 18 image through streamed `pg_basebackup`,
+`pg_verifybackup`, restore, safe-time uncertainty, stale-authority rejection,
+fresh-authority issuance, RPO/RTO measurement, and bounded owned-resource
+cleanup. That evidence is intentionally `local_physical` and can never make a
+production claim.
+
+`qualify-production` runs the same proof across two distinct named Podman
+connections. It writes a run-specific repository only from the source host,
+verifies that backup before stopping the source, mounts the repository
+read-only on the restore host, and copies it into a restore-owned volume.
+Source, restore, and repository identity digests must be pairwise distinct;
+the later external attestation still proves their actual failure-domain
+separation. The repository is retained rather than deleted so an independent
+immutable-store authority can seal and attest it.
+
+Production evidence remains blocked until `verify-promotion` re-reads its
+read-only raw artifacts and verifies a separately signed Ed25519 attestation
+under an independently pinned trust policy. The attestation binds the exact
+evidence, image, portable-HA manifest, source host, restore host, backup
+repository, immutable evidence store, policy sequence, revocation epoch, and
+validity window. Source, restore, and backup repository must be different
+identities and different in every failure-domain class required by policy.
+RPO must be exactly zero, measured restore duration must meet both RTO limits,
+and evidence retention must remain long enough at verification time.
+
+The raw evidence keeps its external-attestation blocker. Only the derived
+create-once promotion receipt is eligible, and release automation must
+reproduce it from the evidence, attestation, policy, and current anti-rollback
+floors rather than trusting a receipt file by itself.

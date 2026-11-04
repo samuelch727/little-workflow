@@ -1,0 +1,169 @@
+---
+title: Use from Little Harness
+description: Give a Little Harness agent a Compute sandbox in one call, and launch Agent Groups on Compute.
+---
+
+<BoundaryCallout>
+**Unreleased.** `@little-stack/compute` is not on npm yet; these imports resolve
+from a source checkout. The sandbox adapter talks to a running local
+installation, so start one first with the three commands in
+[Self-hosting](/docs/compute/self-hosting).
+</BoundaryCallout>
+
+Little Harness imports nothing from Little Compute. Compute implements two
+Harness ports, and your application passes them in:
+
+| Harness port | Compute adapter | Import from |
+|---|---|---|
+| Sandbox factory (`nextTier` of a tiered sandbox) | `littleComputeSandbox(options)` | `@little-stack/compute/harness` |
+| Agent Group launcher | `littleComputeAgentGroups(options)` | `@little-stack/compute/harness` |
+
+`@little-stack/compute/harness` is a light entry point: importing it loads no
+PostgreSQL, HTTP server, child-process, Kubernetes or `node:http` code.
+
+## Escalate a turn into a Compute sandbox
+
+A turn starts on Tier-0 just-bash in the host process. The first command that
+needs a real toolchain (git, a package manager, a compiler) escalates the turn
+into an isolated Compute sandbox, and the rest of the turn runs there:
+
+```ts
+import { justBashSandbox, localHost, tieredSandbox } from "@little-stack/harness";
+import { littleComputeSandbox } from "@little-stack/compute/harness";
+
+const host = localHost({
+  sandbox: tieredSandbox({
+    tier0: justBashSandbox(),
+    nextTier: littleComputeSandbox({
+      // A running installation's developer socket (see below).
+      socket: "/run/user/1000/lc-1000-<id>/developer.sock",
+      idleTimeoutMs: 30 * 60_000,
+      commandTimeoutMs: 2 * 60_000,
+      prelude: ["ln -sfn workspace/node_modules /session/node_modules"],
+    }),
+  }),
+});
+```
+
+What happens on an escalation:
+
+- **Nothing loads early.** The socket client is imported and opened on the
+  first escalating command of a turn. A turn that never escalates never
+  touches the socket.
+- **One session per turn.** The tiered runtime opens at most one sandbox per
+  turn and closes it when the turn ends. Parallel tool calls run one at a time
+  on the sandbox's single shell.
+- **The workspace travels.** The turn's `/session` mount is handed into the
+  sandbox and merged back on close. Set `handOffWorkspace: false` to run on the
+  repository snapshot alone.
+- **The prelude runs first.** `prelude` commands run once, in order, before
+  the model's first command. Use them to join what the host knows about its
+  project layout, such as the symlink above.
+- **Failures stay small.** A sandbox that cannot be provisioned, or a prelude
+  command that fails, becomes one refused command (exit `126`) and the turn
+  keeps running on Tier 0. Once a session exists, a dead sandbox or a broken
+  socket becomes a command result with exit `126` and a `little-compute:`
+  stderr line; nothing throws at the model.
+
+### Find the socket
+
+A running installation listens on `developer.sock` in a private directory per
+installation, under your runtime directory:
+
+```bash
+ls /run/user/$(id -u)/lc-*/developer.sock
+```
+
+The socket client only talks to a socket owned by you, with private
+permissions, below a trusted directory. `trustedAncestor` defaults to the
+socket's own directory, which is what an installation creates.
+
+### Options
+
+| Option | Default | Notes |
+|---|---|---|
+| `socket` | — | Absolute path of the developer socket. Give either `socket` or `client`. |
+| `trustedAncestor` | the socket's directory | Owner-private directory the socket is checked against. Socket form only. |
+| `preferPreparedSessions` | `false` | Try a one-use prepared session before an ordinary open. Needs a prepared interactive installation; only an explicit miss opens ordinarily. Socket form only. |
+| `client` | — | Your own `Tier1SessionClient`, or a function returning one per escalating turn. |
+| `idleTimeoutMs` | installation default | Idle time before the sandbox closes itself; at most one hour. |
+| `commandTimeoutMs` | 2 minutes | Per-command timeout when the model gives none; no command runs longer than 8 minutes. |
+| `provisioningTimeoutMs` | 2 minutes | Wait for the sandbox to start before refusing the escalation; at most 9 minutes. |
+| `prelude` | none | Up to 8 commands run once before the model's first command. |
+| `handOffWorkspace` | `true` | Carry `/session` into the sandbox and back. |
+| `onSessionOpened` | none | Observes each opened session (`source: "prepared" \| "ordinary"`, `preparedMissReason`); it cannot fail the escalation. |
+
+Invalid options throw `LittleComputeSandboxError` with code
+`little_compute_tier1_options_invalid` when you call `littleComputeSandbox`,
+not on the first escalation.
+
+### Bring your own client
+
+`Tier1SessionClient` has three methods, `open`, `exec` and `close`, so a test
+double or another transport is a few lines:
+
+```ts
+import { littleComputeSandbox, type Tier1SessionClient } from "@little-stack/compute/harness";
+
+const client: Tier1SessionClient = {
+  async open() { return { operationId: "op_…", ready: true }; },
+  async exec({ command }) { return { stdout: "", stderr: "", exitCode: 0 }; },
+  async close() {},
+};
+
+const nextTier = littleComputeSandbox({ client, commandTimeoutMs: 60_000 });
+```
+
+To drive Tier-1 sessions over the developer socket yourself, build the client
+with `createTier1SessionClient({ socket })` from
+`@little-stack/compute/self-host-tier1`.
+
+## Launch Agent Groups on Compute
+
+`littleComputeAgentGroups(options)` returns a Harness Agent Group launcher over
+the Compute HTTP API. Pass it as the `launcher` of the Harness Agent Groups
+configuration.
+
+- `client` is a `LittleComputeClient`.
+- `startAuthority.lower()` turns a Harness start request into one exact
+  Compute start request (prompts, execution context, Bundles, profiles and
+  pools). The adapter re-parses it and checks every Harness identity before any
+  HTTP call.
+- `artifacts` turns result Artifacts into stable opaque refs and reads bounded
+  summaries; `verificationHandles` resolves verifier and check-set handles.
+- `referenceKeys` holds the HMAC keys for the opaque group refs (at most four,
+  32 bytes or more). Rotate by moving `current` into `predecessors`.
+
+- `workspace` is the host's fork-and-merge ask for every group, or a
+  function of each Harness start request: `forkBase` (`parent-workspace` or
+  `project-head`) and `mergePolicies`. It combines with what the model asked
+  through `start_agent_group` (`from`, `mergePolicy`): a `forkBase` the host
+  sets wins, and the host's merge policies apply ahead of the model's. The
+  adapter passes the combined ask to `startAuthority.lower()` and checks that
+  the lowered request honours it.
+- `workspaceOutcomes` reads a completed group's merge-back outcome from the
+  host's own store, when the host keeps one.
+
+The launcher implements the paged Agent Group port. Its legacy full-snapshot
+methods fail with `legacy_snapshot_port_unavailable`, and `close()` zeroes the
+keys. It also implements Harness's `workspaces` capability, so Harness offers
+the model `from` and `mergePolicy` on `start_agent_group` and `spawn_agent`
+and shows how a finished group merged back on join and watch results.
+
+Beyond the Harness port, the launcher exposes `workspacePolicy(request)` (where
+a group's children started and which merge policies apply) and
+`workspaceOutcome(request)` (how each member's work merged back, once the
+group completed). Both take the group ref with the Harness session, turn and
+scope it belongs to. `startAgentGroup(request, { workspace })` accepts a
+per-call workspace ask that replaces both the option and the model's ask;
+Harness never passes one, a host calling the launcher directly does.
+
+`fork(options)` starts a group from the parent's current state with one
+prompt per child, waits for it, and returns each member's result together with
+its merge outcome. [Fork and merge](/docs/compute/fork-and-merge) has the policies,
+the fallback reasons and two worked examples.
+
+## Little Workflow
+
+There is no Little Workflow entry point: Little Workflow does not run on
+Little Compute today.

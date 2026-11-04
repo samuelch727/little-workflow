@@ -7,7 +7,15 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import * as ai from "ai";
 import { createDeepSeek } from "@ai-sdk/deepseek";
-import { createWorkflowHarness, createLittleWorkflow, createToolRegistry, model, output, runWorkflow, skill } from "little-workflow";
+import {
+  createToolRegistry,
+  defineWorkflow,
+  model,
+  output,
+  runOrchestration,
+  skill,
+} from "@little-stack/workflow";
+import { createWorkflowHarness } from "@little-stack/workflow/internals";
 import { littledbWorld } from "./littledb-world.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -40,7 +48,7 @@ const startupSchema = {
   },
 };
 
-const wf = createLittleWorkflow({
+const wf = defineWorkflow({
   id: "delegated.startups",
   description: "generate startup data",
   output: output.array({ element: startupSchema }),
@@ -51,7 +59,7 @@ const wf = createLittleWorkflow({
 });
 
 const world = littledbWorld({ dataDir: join(here, ".little-workflow-generalization"), engineUrl: process.env.LITTLEDB_ENGINE_URL ?? "http://localhost:7878" });
-const result = await runWorkflow({
+const result = await runOrchestration({
   world,
   workflows: [wf],
   orchestrator: { model: pro, harness: createWorkflowHarness({ aiSdkModule: ai }), skills: [designSkill], maxConcurrentSubRuns: 5 },

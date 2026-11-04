@@ -1,35 +1,24 @@
 /**
- * `--loop`: the full littleDB self-improvement loop.
+ * `--loop`: the full LittleDB self-improvement loop.
  *
- * NOT VERIFIED by the demo author — it needs the littleDB stack running, which the
- * offline driver deliberately does not. Every endpoint and every wait below is written
- * against the routes in the littleDB repo (`viewer/src/routes/api`, `viewer/src/server`);
- * treat the timings as the documented defaults, not as measured values.
+ * NOT VERIFIED end to end by the demo author: it needs a LittleDB server with a model key for
+ * its reviewer, which the offline driver deliberately does not. Every endpoint below is one
+ * LittleDB's `/v1` API documents; treat the waits as generous defaults, not measured values.
  *
  * Prerequisites:
- *   - littleDB control plane on http://localhost:3000 and engine on http://localhost:7878
- *     (`docker compose up` in the littledb repo — compose forwards the model env vars).
- *   - `DEEPSEEK_API_KEY` in the littleDB container env, or `POST /dream` answers 503.
- *   - `JUDGE_MODEL` pinned to a concrete model id (not an alias) in the littleDB env, or
- *     the judge scheduler stays off and `judgeAvg` is empty.
+ *   - A LittleDB server (`littledb dev` serves one on http://127.0.0.1:7340 and prints a key
+ *     for local apps): `LITTLEDB_URL` and `LITTLEDB_API_KEY`.
+ *   - `LITTLEDB_ANTHROPIC_API_KEY` in LittleDB's own environment, or its reviewer answers 503.
+ *   - `DEEPSEEK_API_KEY` here, for the Librarian itself.
  */
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 
-const CONTROL_PLANE = process.env.LITTLEDB_URL ?? "http://localhost:3000";
-const ENGINE = process.env.LITTLEDB_ENGINE_URL ?? "http://localhost:7878";
-const HARNESS_ID = process.env.LITTLEDB_HARNESS_ID ?? "kb-librarian";
+const LITTLEDB_URL = (process.env.LITTLEDB_URL ?? "http://127.0.0.1:7340").replace(/\/+$/, "").replace(/\/v1$/, "");
+const HARNESS = process.env.LITTLEDB_HARNESS ?? "kb-librarian";
+const SUBJECT = `harness:${HARNESS}`;
 const CHANNEL = process.env.LITTLEDB_CHANNEL ?? "production";
-
-/** littleDB's registry sync tick (`LITTLEDB_SYNC_INTERVAL_MS`, default 15s). */
-const SYNC_TICK_MS = Number(process.env.LITTLEDB_SYNC_INTERVAL_MS ?? 15_000);
-/** littleDB's judge pass interval (`LITTLEDB_JUDGE_INTERVAL_MS`, default 60s). */
-const JUDGE_TICK_MS = Number(process.env.LITTLEDB_JUDGE_INTERVAL_MS ?? 60_000);
-
-const headers = {
-  "content-type": "application/json",
-  ...(process.env.LITTLEDB_PROJECT_KEY ? { "x-api-key": process.env.LITTLEDB_PROJECT_KEY } : {}),
-};
+const REVIEW_TIMEOUT_MS = Number(process.env.KB_REVIEW_TIMEOUT_MS ?? 10 * 60_000);
 
 function heading(text) {
   console.log(`\n=== ${text} ===`);
@@ -45,7 +34,13 @@ async function reachable(url) {
 }
 
 async function json(path, init) {
-  const response = await fetch(`${CONTROL_PLANE}${path}`, { headers, ...init });
+  const response = await fetch(`${LITTLEDB_URL}/v1${path}`, {
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${process.env.LITTLEDB_API_KEY ?? ""}`,
+    },
+    ...init,
+  });
   const text = await response.text();
   let body;
   try {
@@ -61,101 +56,89 @@ async function json(path, init) {
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+const childEnv = () => ({
+  ...process.env,
+  LITTLEDB_URL,
+  LITTLEDB_HARNESS: HARNESS,
+  LITTLEDB_CHANNEL: CHANNEL,
+});
+
 export async function runLoop({ demoRoot }) {
   heading("0. preflight");
-  const controlPlaneUp = await reachable(CONTROL_PLANE);
-  const engineUp = await reachable(`${ENGINE}/`);
-  console.log(`control plane ${CONTROL_PLANE}: ${controlPlaneUp ? "up" : "UNREACHABLE"}`);
-  console.log(`engine        ${ENGINE}: ${engineUp ? "up" : "UNREACHABLE"}`);
-  if (!controlPlaneUp || !engineUp) {
+  const up = await reachable(`${LITTLEDB_URL}/healthz`);
+  console.log(`LittleDB ${LITTLEDB_URL}: ${up ? "up" : "UNREACHABLE"}`);
+  if (!up || !process.env.LITTLEDB_API_KEY) {
     console.error(
-      "\nStart the littleDB stack first (`docker compose up` in the littledb repo), then re-run.",
+      up
+        ? "\nSet LITTLEDB_API_KEY (`littledb dev` prints a key for local apps), then re-run."
+        : "\nStart LittleDB first (`littledb dev`), then re-run.",
     );
     process.exitCode = 1;
     return;
   }
 
-  heading("1. the conversation, with littleDB wired");
+  heading("1. the conversation, with LittleDB wired");
   console.log(
-    "Runs the offline conversation in a child process with LITTLEDB_URL set. The FIRST",
-    "\n/api/config/resolve call carries `bootstrapConfig` — that is what seeds the harness",
-    "\nand its production channel in littleDB. Traces stream to the engine through the",
-    "\nreporter, cost is stamped per model response, and the 👍/👎 reach /api/outcomes",
-    "\nthrough the outcome sink.",
+    "Runs the offline conversation in a child process with LITTLEDB_URL set. The first",
+    "\nresolve carries the bootstrap { system, model }, which becomes version 1 of the",
+    "\nharness. Each turn is a trace (model calls, tool calls, tokens, cost), and the 👍/👎",
+    "\nreactions become user_feedback scores on the turns they grade.",
   );
   const conversation = spawnSync(process.execPath, [join(demoRoot, "driver.mjs")], {
     cwd: demoRoot,
     stdio: "inherit",
-    env: {
-      ...process.env,
-      LITTLEDB_URL: CONTROL_PLANE,
-      LITTLEDB_ENGINE_URL: ENGINE,
-      LITTLEDB_HARNESS_ID: HARNESS_ID,
-      LITTLEDB_CHANNEL: CHANNEL,
-    },
+    env: childEnv(),
   });
   if (conversation.status !== 0) {
-    console.error("\nThe conversation failed; stopping before the dream.");
+    console.error("\nThe conversation failed; stopping before the review.");
     process.exitCode = 1;
     return;
   }
 
-  heading("2. wait for the registry sync tick and one judge pass");
-  console.log(
-    `Runs land in the engine immediately, but the control plane picks them up on its sync`,
-    `\ntick (~${Math.round(SYNC_TICK_MS / 1000)}s) and scores them on its judge pass (~${Math.round(JUDGE_TICK_MS / 1000)}s).`,
-    "\nThe judge re-scans only the newest 50 COMPLETED runs engine-wide each pass, so on a busy",
-    "\nengine these runs can age out of the window before they are ever scored.",
-  );
-  await wait(SYNC_TICK_MS + 2_000);
-  await wait(JUDGE_TICK_MS + 5_000);
+  heading("2. review");
+  console.log(`POST /v1/reviews  {"subject":"${SUBJECT}"}`);
+  console.log("LittleDB's reviewer reads the traces and their scores and proposes a new version.");
+  const started = await json("/reviews", {
+    method: "POST",
+    body: JSON.stringify({ subject: SUBJECT, maxProposals: 1 }),
+  });
+  const deadline = Date.now() + REVIEW_TIMEOUT_MS;
+  let review = await json(`/reviews/${started.id}`);
+  while (review.review?.status === "running" && Date.now() < deadline) {
+    await wait(5_000);
+    review = await json(`/reviews/${started.id}`);
+  }
+  console.log(`review ${started.id}: ${review.review?.status}`);
 
-  heading("3. dream");
-  console.log(`POST /api/harnesses/${HARNESS_ID}/dream`);
-  console.log("(the same thing the Dream button in the littleDB UI does)");
-  const dream = await json(`/api/harnesses/${HARNESS_ID}/dream`, { method: "POST" });
-  console.log(JSON.stringify(dream, null, 2).slice(0, 2000));
-
-  heading("4. find the proposal");
-  const proposals = await json(`/api/proposals`);
-  const list = Array.isArray(proposals) ? proposals : (proposals.proposals ?? []);
-  const proposal = list.find((entry) => entry.status === "open" || entry.status === "proposed") ?? list[0];
+  heading("3. find the proposal");
+  const proposal = (review.proposals ?? [])[0];
   if (proposal === undefined) {
-    console.error("No proposal was produced. Nothing to canary or promote.");
+    console.error("No proposal was produced. Nothing to approve.");
     process.exitCode = 1;
     return;
   }
-  console.log(`proposal ${proposal.id} — status ${proposal.status}`);
-
-  heading("5. canary");
-  console.log(`POST /api/proposals/${proposal.id}/action  {"action":"canary","channel":"${CHANNEL}"}`);
-  console.log("Splits the channel 50/50 between the base and the proposed config version.");
-  console.log(JSON.stringify(
-    await json(`/api/proposals/${proposal.id}/action`, {
-      method: "POST",
-      body: JSON.stringify({ action: "canary", channel: CHANNEL }),
-    }),
-  ));
-
-  heading("6. promote");
-  console.log(`POST /api/proposals/${proposal.id}/action  {"action":"promote","channel":"${CHANNEL}"}`);
+  console.log(`proposal ${proposal.id}: ${proposal.title} (status ${proposal.status})`);
   console.log(
-    "Points the channel at the proposed config version. `{\"action\":\"auto-promote\"}` instead",
-    "\nconsults the promotion policy and returns the unmet gates without changing anything when",
-    "\nthe five-gate receipt is incomplete — a fallback to human, not an error.",
+    "LittleDB gates a proposal on an experiment over the harness's newest dataset when it has",
+    "\none. This demo uploads no dataset, so there is no experiment to run: depending on the",
+    "\nproject's policy LittleDB starts a live trial or leaves the call to a person. This loop",
+    "\nmakes the call itself.",
   );
-  console.log(JSON.stringify(
-    await json(`/api/proposals/${proposal.id}/action`, {
-      method: "POST",
-      body: JSON.stringify({ action: "promote", channel: CHANNEL }),
-    }),
-  ));
 
-  heading("7. a FRESH session picks up the improved prompt");
+  heading("4. approve");
+  console.log(`POST /v1/proposals/${proposal.id}/approve`);
+  console.log("Makes the proposal's version the live one on the channel.");
+  const approved = await json(`/proposals/${proposal.id}/approve`, {
+    method: "POST",
+    body: JSON.stringify({ note: "Approved by the kb-chatbot loop." }),
+  });
+  console.log(`proposal ${approved.proposal.id}: ${approved.proposal.status}`);
+
+  heading("5. a FRESH session picks up the improved prompt");
   console.log(
-    "Managed config is resolved once per session and pinned for its lifetime, so an existing",
-    "\nthread keeps the old prompt forever. This opens a brand-new thread — a brand-new session —",
-    "\nand prints the configVersionId it pinned.",
+    "A version is resolved once per session and kept for its lifetime, so an existing thread",
+    "\nkeeps the old prompt. This opens a brand-new thread (a brand-new session) and prints the",
+    "\nversion it resolved.",
   );
   const fresh = spawnSync(
     process.execPath,
@@ -164,19 +147,9 @@ export async function runLoop({ demoRoot }) {
       "--ask",
       "How quickly must I report a stolen laptop?",
       "--thread",
-      `kb-thread-post-promote-${Date.now()}`,
+      `kb-thread-post-approve-${Date.now()}`,
     ],
-    {
-      cwd: demoRoot,
-      stdio: "inherit",
-      env: {
-        ...process.env,
-        LITTLEDB_URL: CONTROL_PLANE,
-        LITTLEDB_ENGINE_URL: ENGINE,
-        LITTLEDB_HARNESS_ID: HARNESS_ID,
-        LITTLEDB_CHANNEL: CHANNEL,
-      },
-    },
+    { cwd: demoRoot, stdio: "inherit", env: childEnv() },
   );
   process.exitCode = fresh.status === 0 ? 0 : 1;
 }

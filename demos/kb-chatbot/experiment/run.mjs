@@ -4,11 +4,11 @@
  *
  *   node experiment/run.mjs --seed                 # install the adversarial KB
  *   node experiment/run.mjs --traffic              # run every scenario on prompt v1, grade, react
- *   node experiment/run.mjs --dream                # ask littleDB to reflect; print the proposed diff
- *   node experiment/run.mjs --promote <proposalId> # canary, then promote
+ *   node experiment/run.mjs --dream                # run LittleDB's reviewer; print the proposed diff
+ *   node experiment/run.mjs --promote <proposalId> # approve the proposal: its version goes live
  *   node experiment/run.mjs --retest               # rerun the scenarios; BEFORE/AFTER table
  *   node experiment/run.mjs --gate                 # HELD-OUT set, k attempts each, no telemetry
- *   node experiment/run.mjs --status               # harness metrics
+ *   node experiment/run.mjs --status               # versions, releases and proposals
  *
  * Flags: --limit <n> (first n scenarios), --only <id,id,...>, --baseline <results.json>,
  * and for `--gate`: --k <n>, --prompt-file <path>, --dry-run.
@@ -22,11 +22,11 @@
  * TWO SCENARIO SETS, and the difference is the whole point of `--gate`:
  *
  *   ground-truth.json  the OPTIMIZER set. `--traffic` runs it, its failures are what the
- *                      dream reads, and `--retest` re-asks it. Re-asking the set that
+ *                      reviewer reads, and `--retest` re-asks it. Re-asking the set that
  *                      produced the fix measures memorisation as much as repair.
  *   gate-truth.json    the HELD-OUT set. Only `--gate` asks it, and a gate run reports no
- *                      outcome and reaches no trace plane, so nothing it sees can ever
- *                      become dream evidence. It is also run k times per scenario (pass^k),
+ *                      score and sends no trace, so nothing it sees can ever become
+ *                      reviewer evidence. It is also run k times per scenario (pass^k),
  *                      because one sample of a stochastic model is not a measurement.
  *
  * Grading lives in `grade.mjs` so it can be unit-tested without this file's live paths.
@@ -94,29 +94,31 @@ const value = (flag) => {
 };
 
 // ── environment ────────────────────────────────────────────────────────────────────────
-// Set before ANY agent module loads: `littledb.ts` reads these at import time.
-const CONTROL_PLANE = process.env.LITTLEDB_URL ?? "http://localhost:3000";
-const ENGINE = process.env.LITTLEDB_ENGINE_URL ?? "http://localhost:7878";
-const HARNESS_ID = process.env.LITTLEDB_HARNESS_ID ?? "kb-librarian-x";
+// Set before ANY agent module loads: `littledb.ts` reads these when it creates its handle.
+const LITTLEDB_URL = (process.env.LITTLEDB_URL ?? "http://127.0.0.1:7340").replace(/\/+$/, "").replace(/\/v1$/, "");
+const HARNESS_ID = process.env.LITTLEDB_HARNESS ?? "kb-librarian-x";
+const SUBJECT = `harness:${HARNESS_ID}`;
 const CHANNEL = process.env.LITTLEDB_CHANNEL ?? "production";
-process.env.LITTLEDB_URL = CONTROL_PLANE;
-process.env.LITTLEDB_ENGINE_URL = ENGINE;
-process.env.LITTLEDB_HARNESS_ID = HARNESS_ID;
-// `runDream` looks up the channel named "production" specifically. Pin it.
+process.env.LITTLEDB_URL = LITTLEDB_URL;
+process.env.LITTLEDB_HARNESS = HARNESS_ID;
 process.env.LITTLEDB_CHANNEL = CHANNEL;
 
-// `--traffic` seeds littleDB with the deliberately-flawed v1. `--retest` must NOT: the
-// promoted prompt has to come back from littleDB, or the retest proves nothing.
+// `--traffic` seeds LittleDB with the deliberately-flawed v1. `--retest` must NOT: the
+// approved prompt has to come back from LittleDB, or the retest proves nothing.
 if (has("--traffic")) {
   process.env.LIBRARIAN_PROMPT_FILE ??= "experiment/prompt-v1.md";
 } else {
   delete process.env.LIBRARIAN_PROMPT_FILE;
 }
 
-const apiHeaders = {
-  "content-type": "application/json",
-  ...(process.env.LITTLEDB_PROJECT_KEY ? { "x-api-key": process.env.LITTLEDB_PROJECT_KEY } : {}),
-};
+/** Read when a call is made, so `--gate` can scrub the environment after reading the prompt. */
+function apiHeaders() {
+  const key = process.env.LITTLEDB_API_KEY;
+  if (key === undefined || key.length === 0) {
+    throw new Error("LITTLEDB_API_KEY is not set. `littledb dev` prints a key for local apps.");
+  }
+  return { "content-type": "application/json", authorization: `Bearer ${key}` };
+}
 
 // ── small helpers ──────────────────────────────────────────────────────────────────────
 
@@ -124,8 +126,9 @@ function heading(text) {
   console.log(`\n=== ${text} ===`);
 }
 
+/** One LittleDB `/v1` call. */
 async function api(path, init) {
-  const response = await fetch(`${CONTROL_PLANE}${path}`, { headers: apiHeaders, ...init });
+  const response = await fetch(`${LITTLEDB_URL}/v1${path}`, { headers: apiHeaders(), ...init });
   const text = await response.text();
   let body;
   try {
@@ -150,20 +153,17 @@ async function reachable(url) {
   }
 }
 
-/** Hard-fail rather than silently running with no managed config and no outcomes. */
+/** Hard-fail rather than silently running with no version, no traces and no scores. */
 async function requireStack() {
-  const [controlPlaneUp, engineUp] = await Promise.all([
-    reachable(CONTROL_PLANE),
-    reachable(`${ENGINE}/`),
-  ]);
-  console.log(`control plane ${CONTROL_PLANE}: ${controlPlaneUp ? "up" : "UNREACHABLE"}`);
-  console.log(`engine        ${ENGINE}: ${engineUp ? "up" : "UNREACHABLE"}`);
-  if (!controlPlaneUp || !engineUp) {
+  const up = await reachable(`${LITTLEDB_URL}/healthz`);
+  console.log(`LittleDB ${LITTLEDB_URL}: ${up ? "up" : "UNREACHABLE"}`);
+  if (!up) {
     throw new Error(
-      "The littleDB stack is not reachable. Without it there is no managed config and no " +
-        "outcomes — the run would burn model calls on an experiment that never happened.",
+      "LittleDB is not reachable. Without it there is no version, no trace and no score — " +
+        "the run would burn model calls on an experiment that never happened.",
     );
   }
+  apiHeaders();
 }
 
 function requireSeededKnowledge() {
@@ -280,7 +280,7 @@ function countFiles(dir) {
 }
 
 /**
- * One scenario = one fresh thread = one session = one run in the engine.
+ * One scenario = one fresh thread = one session, each turn a trace in LittleDB.
  *
  * `turns[0]` is graded. The frustration follow-ups fire ONLY when it failed: arguing with a
  * correct answer would be theatre, and the skip is recorded so the tally stays honest.
@@ -328,7 +328,8 @@ async function runScenario({ connector, ChatCtor, scenario, runStamp, testing, d
   }
 
   // Reactions ride the same path the demo uses: the connector's own reaction handler, which
-  // reports through littleDB's outcome sink. Tier C sends none, on purpose.
+  // reports through the LittleDB outcome sink as a `user_feedback` score. Tier C sends none,
+  // on purpose.
   let reactionSent = null;
   if (scenario.reaction === "auto" || scenario.reaction === "up" || scenario.reaction === "down") {
     const emoji =
@@ -352,13 +353,13 @@ async function runScenario({ connector, ChatCtor, scenario, runStamp, testing, d
     reactionSent = emoji;
   }
 
-  const config = db?.configFor(sessionId);
+  const session = db?.sessionFor(sessionId);
   return {
     id: scenario.id,
     tier: scenario.tier,
     kind: scenario.kind,
     sessionId,
-    runId: `harness_${sessionId}`,
+    traceIds: session?.tracer.traceIdsFor(sessionId) ?? [],
     pass: verdict.pass,
     cited: verdict.cited,
     expected: verdict.expected,
@@ -368,7 +369,7 @@ async function runScenario({ connector, ChatCtor, scenario, runStamp, testing, d
     frustrationFired: exchanges.length > 1,
     frustrationSkipped: scenario.turns.length > 1 && exchanges.length === 1,
     reactionSent,
-    configVersionId: config?.configVersionId ?? null,
+    versionId: session?.resolution.versionId ?? null,
     firstAnswer,
     finalAnswer: exchanges.at(-1)?.assistant ?? "",
     exchanges,
@@ -386,7 +387,7 @@ async function runTraffic(mode) {
   );
   console.log(`scenarios: ${scenarios.length} — ${scenarios.map((s) => s.id).join(", ")}`);
 
-  const testing = await import("little-harness/connectors");
+  const testing = await import("@little-stack/harness/connectors");
   const ChatCtor = createReactionAwareTestChat(testing.createTestChat);
   const connector = await loadConnector(ChatCtor);
   const db = await littleDbHandle();
@@ -407,9 +408,9 @@ async function runTraffic(mode) {
       );
       if (index === 0) warnIfBootstrapDrifted(record, db);
     }
-    await db?.flush();
   } finally {
     await connector.close();
+    await db?.shutdown();
   }
 
   const summary = summarize(records, mode);
@@ -423,20 +424,23 @@ async function runTraffic(mode) {
 }
 
 /**
- * littleDB stores the bootstrap prompt on the FIRST resolve for a harness+channel and
- * ignores it ever after. A later edit to prompt-v1.md is therefore a silent no-op — worth
- * saying out loud, since the whole before/after rests on v1 being what the file says.
+ * LittleDB stores the first bootstrap as version 1. A later edit to prompt-v1.md does not
+ * run straight away: it becomes a "Changed in code" proposal, and the live version keeps
+ * running until that ships. Worth saying out loud, since the whole before/after rests on v1
+ * being what the file says.
  */
 function warnIfBootstrapDrifted(record, db) {
   const promptFile = process.env.LIBRARIAN_PROMPT_FILE;
-  if (promptFile === undefined || record.configVersionId === null) return;
+  if (promptFile === undefined || record.versionId === null) return;
   const wanted = readFileSync(resolve(demoRoot, promptFile), "utf8").trim();
-  const live = db?.configFor(record.sessionId)?.harnessOptions?.system;
+  const session = db?.sessionFor(record.sessionId);
+  const live = session?.content.system;
   if (live === undefined || live === wanted) return;
+  const proposal = session?.resolution.code?.proposalId;
   console.warn(
-    `\n  ⚠ the live config (${record.configVersionId}) does NOT match ${promptFile}.\n` +
-      "    littleDB seeds the bootstrap once per harness+channel and ignores it afterwards,\n" +
-      "    so this run is NOT on the prompt in that file. Use a fresh LITTLEDB_HARNESS_ID to reseed.\n",
+    `\n  ⚠ the live version (${record.versionId}) does NOT match ${promptFile}.\n` +
+      `    LittleDB keeps version 1 and opened your edit as a "Changed in code" proposal${proposal == null ? "" : ` (${proposal})`},\n` +
+      "    so this run is NOT on the prompt in that file. Ship the proposal, or use a fresh LITTLEDB_HARNESS to reseed.\n",
   );
 }
 
@@ -447,7 +451,7 @@ function summarize(records, mode) {
     harnessId: HARNESS_ID,
     channel: CHANNEL,
     promptFile: process.env.LIBRARIAN_PROMPT_FILE ?? null,
-    configVersionIds: [...new Set(records.map((r) => r.configVersionId).filter(Boolean))],
+    versionIds: [...new Set(records.map((r) => r.versionId).filter(Boolean))],
     ...summarizeRuns(records),
   };
 }
@@ -555,17 +559,18 @@ function printBeforeAfter(records) {
     `\nsuccess rate ${beforePass}/${compared} (${pct(beforePass / compared)}) → ` +
       `${afterPass}/${compared} (${pct(afterPass / compared)})`,
   );
-  console.log(`baseline: ${baseline.startedAt} on config ${baseline.configVersionIds.join(", ")}`);
+  console.log(
+    `baseline: ${baseline.startedAt} on version ${(baseline.versionIds ?? baseline.configVersionIds ?? []).join(", ")}`,
+  );
 }
 
 // ── the gate: held-out scenarios, k attempts each, and no trace plane ───────────────────
 
 /**
- * A gate run must be MEASUREMENT-ONLY. Reading the promoted prompt from the control plane is
- * fine — that is the same read `--status` does — but nothing about the run itself may reach
- * littleDB: no session config resolve, no event reporter, no outcome sink, no engine run.
- * If gate conversations became dream evidence, the held-out set would stop being held out
- * the first time anyone ran `--dream` again.
+ * A gate run must be MEASUREMENT-ONLY. Reading the live version from LittleDB is fine (that
+ * is the same read `--status` does), but nothing about the run itself may reach LittleDB: no
+ * resolve, no tracer, no score. If gate conversations became traces, the held-out set would
+ * stop being held out the first time anyone ran `--dream` again.
  *
  * The mechanism is the environment, and it lives in `offline.mjs` so it can be tested
  * without loading this driver. See that file for why deleting the variables is stronger than
@@ -573,59 +578,58 @@ function printBeforeAfter(records) {
  */
 
 /**
- * The promoted prompt, read straight off the control plane. Deliberately NOT via the agent's
- * littleDB handle: this is a plain HTTP GET, it happens before the environment is scrubbed,
- * and it creates no session and no run.
+ * The live version's prompt and model slot, read straight off LittleDB. Deliberately NOT via
+ * the agent's LittleDB handle: this is a plain HTTP GET, it happens before the environment
+ * is scrubbed, and it creates no session and no trace.
  */
-async function fetchChannelPrompt() {
-  if (!(await reachable(CONTROL_PLANE))) {
+async function fetchLivePrompt() {
+  if (!(await reachable(`${LITTLEDB_URL}/healthz`))) {
     throw new Error(
-      `gate: the control plane at ${CONTROL_PLANE} is unreachable, so the promoted prompt ` +
-        "cannot be read. The engine is NOT needed for a gate run — start the control plane, " +
-        "or measure a local prompt with --prompt-file experiment/prompt-v1.md.",
+      `gate: LittleDB at ${LITTLEDB_URL} is unreachable, so the live version cannot be read. ` +
+        "Start it, or measure a local prompt with --prompt-file experiment/prompt-v1.md.",
     );
   }
-  const config = await api(`/api/harnesses/${HARNESS_ID}/config`);
-  const channel = (config.channels ?? []).find((entry) => entry.name === CHANNEL);
-  if (channel?.configVersionId === undefined || channel.configVersionId === null) {
+  const detail = await api(`/subjects/${encodeURIComponent(SUBJECT)}`).catch((error) => {
     throw new Error(
-      `gate: harness ${HARNESS_ID} has no config version on channel ${CHANNEL} yet. Run ` +
+      `gate: harness ${HARNESS_ID} is not in LittleDB yet (${error.message}). Run --traffic ` +
+        "first (it seeds the bootstrap), or gate a local prompt with --prompt-file experiment/prompt-v1.md.",
+    );
+  });
+  const release = (detail.releases ?? []).find((entry) => entry.channel === CHANNEL);
+  const versionId = release?.liveVersionId ?? null;
+  if (versionId === null) {
+    throw new Error(
+      `gate: harness ${HARNESS_ID} has no live version on channel ${CHANNEL} yet. Run ` +
         "--traffic first (it seeds the bootstrap), or gate a local prompt with " +
         "--prompt-file experiment/prompt-v1.md.",
     );
   }
-  const version = (config.versions ?? []).find((entry) => entry.id === channel.configVersionId);
-  if (version === undefined) {
-    throw new Error(`gate: config version ${channel.configVersionId} is not in the config response`);
+  const { version } = await api(
+    `/subjects/${encodeURIComponent(SUBJECT)}/versions/${encodeURIComponent(versionId)}`,
+  );
+  const content = version?.content ?? {};
+  if (typeof content.system !== "string" || content.system.length === 0) {
+    throw new Error(`gate: version ${versionId} carries no system prompt`);
   }
-  let bundle;
-  try {
-    bundle = JSON.parse(version.configJson);
-  } catch {
-    throw new Error(`gate: config version ${channel.configVersionId} does not parse as JSON`);
-  }
-  if (typeof bundle.prompt !== "string" || bundle.prompt.length === 0) {
-    throw new Error(`gate: config version ${channel.configVersionId} carries no prompt`);
-  }
-  if (channel.weightsJson !== null && channel.weightsJson !== undefined) {
+  if (release.trialVersionId) {
     console.warn(
-      `  ⚠ channel ${CHANNEL} is CANARYING (${channel.weightsJson}). The gate pins the channel\n` +
-        `    pointer ${channel.configVersionId} and ignores the split — a measurement run that\n` +
+      `  ⚠ channel ${CHANNEL} is in a TRIAL (${release.trialVersionId}, weight ${release.trialWeight}). ` +
+        `The gate pins\n    the live version ${versionId} and ignores the trial: a measurement run that\n` +
         "    sampled two prompts would report the average of two different systems.\n",
     );
   }
   return {
     kind: "channel",
-    prompt: bundle.prompt.trim(),
-    configVersionId: channel.configVersionId,
-    modelSlot: bundle.modelSlot ?? null,
-    canary: channel.weightsJson ?? null,
+    prompt: content.system.trim(),
+    versionId,
+    modelSlot: typeof content.model === "string" ? content.model : null,
+    trial: release.trialVersionId ? { versionId: release.trialVersionId, weight: release.trialWeight } : null,
     file: null,
   };
 }
 
 /**
- * The promoted bundle names a model SLOT, and `--retest` runs on whatever model that slot
+ * The live version names a model SLOT, and `--retest` runs on whatever model that slot
  * resolves to. A gate that silently ran the agent's default model instead would not be
  * comparable with the retest it exists to check, so the slot is resolved here through the
  * agent's own map. `env.ts` imports nothing from `littledb.ts`.
@@ -635,7 +639,7 @@ async function modelForPromotedSlot(slot) {
   const model = env.modelForSlot(slot);
   if (model === undefined) {
     throw new Error(
-      `gate: the promoted config names model slot "${slot}", which agents/librarian/env.ts ` +
+      `gate: the live version names model slot "${slot}", which agents/librarian/env.ts ` +
         "does not know. Refusing to silently run a different model.",
     );
   }
@@ -645,15 +649,15 @@ async function modelForPromotedSlot(slot) {
 /**
  * The gate's connector, built WITHOUT `loadLibrarianConnector`.
  *
- * That helper exists to wire littleDB's per-session overrides and its end-of-turn flush;
+ * That helper exists to wire LittleDB's per-session overrides and its end-of-turn flush;
  * both are exactly what a gate run must not do. This is the same `loadChatSdkConnector` call
- * minus littleDB, with the measured prompt (and model) injected through the identical
+ * minus LittleDB, with the measured prompt (and model) injected through the identical
  * `streamHarness` seam, so the agent, its tools, its persistent knowledge dir, and the run
  * pipeline are the ones the demo uses.
  */
 async function loadGateConnector(ChatCtor, overrides) {
-  const { streamHarness } = await import("little-harness");
-  const { loadChatSdkConnector } = await import("little-harness/connectors");
+  const { streamHarness } = await import("@little-stack/harness");
+  const { loadChatSdkConnector } = await import("@little-stack/harness/connectors");
   return loadChatSdkConnector({
     agentDir: join(demoRoot, "agents", "librarian"),
     connector: "slack",
@@ -773,35 +777,35 @@ async function runGate() {
   console.log(`harness slug: ${HARNESS_ID} (channel ${CHANNEL})`);
   console.log(`scenarios:    ${scenarios.length} × k=${k} = ${scenarios.length * k} conversation(s)`);
 
-  // Read the config BEFORE scrubbing: this is the one control-plane touch a gate run makes.
+  // Read the version BEFORE scrubbing: this is the one LittleDB touch a gate run makes.
   let promptSource;
   if (promptFileFlag !== undefined) {
     const file = resolve(demoRoot, promptFileFlag);
     promptSource = {
       kind: "file",
       prompt: readFileSync(file, "utf8").trim(),
-      configVersionId: null,
+      versionId: null,
       modelSlot: null,
-      canary: null,
+      trial: null,
       file,
     };
-    console.log(`prompt:       ${file} (a LOCAL file, not the promoted config)`);
+    console.log(`prompt:       ${file} (a LOCAL file, not the live version)`);
   } else if (dryRun) {
     promptSource = {
       kind: "none",
       prompt: null,
-      configVersionId: null,
+      versionId: null,
       modelSlot: null,
-      canary: null,
+      trial: null,
       file: null,
     };
     console.log("prompt:       (dry run — no model is called, so no prompt is resolved)");
   } else {
-    console.log(`prompt:       reading ${CONTROL_PLANE}/api/harnesses/${HARNESS_ID}/config`);
-    promptSource = await fetchChannelPrompt();
+    console.log(`prompt:       reading the live version of ${SUBJECT} from ${LITTLEDB_URL}`);
+    promptSource = await fetchLivePrompt();
     console.log(
-      `              config version ${promptSource.configVersionId}, model slot ` +
-        `${promptSource.modelSlot ?? "(none in bundle)"}`,
+      `              version ${promptSource.versionId}, model slot ` +
+        `${promptSource.modelSlot ?? "(none in the version)"}`,
     );
   }
 
@@ -820,9 +824,9 @@ async function runGate() {
     // process-wide holder to null, so `connectors/slack/connector.ts` — which calls the same
     // function at module scope — cannot get a live one either.
     if ((await littleDbHandle()) !== undefined) {
-      throw new Error("gate: littleDB resolved despite the scrub; refusing to run.");
+      throw new Error("gate: LittleDB resolved despite the scrub; refusing to run.");
     }
-    testing = await import("little-harness/connectors");
+    testing = await import("@little-stack/harness/connectors");
     // The PLAIN test chat, not the reaction-aware subclass `--traffic` uses: it has no
     // `onReaction`, so the connector never registers a reaction handler at all.
     const ChatCtor = testing.createTestChat();
@@ -835,11 +839,10 @@ async function runGate() {
     connector = await loadGateConnector(ChatCtor, overrides);
     assertNoLittleDbEnv(process.env, "after loading the agent");
     if ((await littleDbHandle()) !== undefined) {
-      throw new Error("gate: littleDB became live while loading the agent; refusing to run.");
+      throw new Error("gate: LittleDB became live while loading the agent; refusing to run.");
     }
     console.log(
-      "offline:      librarianLittleDb() === undefined — no session resolve, no event " +
-        "reporter, no outcome sink, no engine run",
+      "offline:      librarianLittleDb() === undefined — no resolve, no tracer, no score",
     );
     console.log(
       `offline:      chat double is createTestChat() with no onReaction — ${ChatCtor.name ?? "chat"} ` +
@@ -891,11 +894,11 @@ async function runGate() {
     k,
     prompt: {
       source: promptSource.kind,
-      configVersionId: promptSource.configVersionId,
+      versionId: promptSource.versionId,
       modelSlot: promptSource.modelSlot,
       modelSlotApplied,
       file: promptSource.file,
-      canaryWeights: promptSource.canary,
+      trial: promptSource.trial,
     },
     offline: {
       scrubbedEnv: scrubbed,
@@ -938,7 +941,7 @@ function describeGateRun(result) {
   const prompt = result.prompt ?? {};
   const on =
     prompt.source === "channel"
-      ? `config version ${prompt.configVersionId}`
+      ? `version ${prompt.versionId ?? prompt.configVersionId}`
       : prompt.source === "file"
         ? `local prompt file ${prompt.file}`
         : "no prompt (stub answers)";
@@ -955,118 +958,119 @@ function persistGate(payload, dryRun) {
   return file;
 }
 
+/** How long `--dream` waits for LittleDB's reviewer before giving up on it. */
+const REVIEW_TIMEOUT_MS = Number(process.env.KB_REVIEW_TIMEOUT_MS ?? 10 * 60_000);
+
+/**
+ * Run LittleDB's built-in reviewer on the harness: it reads the traces and their scores (the
+ * 👎 reactions `--traffic` sent among them) and submits proposals, each a new version with its
+ * evidence. It runs inside LittleDB on LittleDB's own model key.
+ */
 async function dream() {
   heading("dream");
   await requireStack();
-  console.log(`POST /api/harnesses/${HARNESS_ID}/dream`);
-  const result = await api(`/api/harnesses/${HARNESS_ID}/dream`, { method: "POST" });
-  console.log(`proposal:  ${result.proposalId}`);
-  console.log(`proposed:  ${result.proposedConfigVersionId}`);
-  console.log(`promotion: ${JSON.stringify(result.promotion)}`);
+  console.log(`POST /v1/reviews  {"subject":"${SUBJECT}"}`);
+  const started = await api("/reviews", {
+    method: "POST",
+    body: JSON.stringify({ subject: SUBJECT, maxProposals: 1 }),
+  });
+  console.log(`review: ${started.id} (polling until it finishes)`);
 
-  const proposals = await api("/api/proposals");
-  const list = Array.isArray(proposals) ? proposals : (proposals.proposals ?? []);
-  const proposal = list.find((entry) => entry.id === result.proposalId);
-  if (proposal !== undefined) {
-    heading("rationale");
-    console.log(proposal.rationale);
-    if (proposal.evidenceJson) {
-      heading("evidence the dream cited");
-      console.log(proposal.evidenceJson);
+  const deadline = Date.now() + REVIEW_TIMEOUT_MS;
+  let detail = await api(`/reviews/${started.id}`);
+  while (detail.review?.status === "running") {
+    if (Date.now() > deadline) {
+      throw new Error(`review ${started.id} is still running after ${REVIEW_TIMEOUT_MS} ms; check it in LittleDB.`);
     }
-    heading("prompt diff (base → proposed)");
-    printPromptDiff(
-      await api(`/api/harnesses/${HARNESS_ID}/config`),
-      proposal.baseConfigVersionId,
-      proposal.proposedConfigVersionId,
-    );
+    await new Promise((settle) => setTimeout(settle, 5_000));
+    detail = await api(`/reviews/${started.id}`);
   }
-  console.log(`\nNext: node experiment/run.mjs --promote ${result.proposalId}`);
+  console.log(`status:   ${detail.review?.status}${detail.review?.error ? ` (${detail.review.error})` : ""}`);
+  const proposals = detail.proposals ?? [];
+  if (proposals.length === 0) {
+    console.log("The reviewer proposed nothing.");
+    return;
+  }
+  for (const summary of proposals) {
+    const { proposal, base, candidate } = await api(`/proposals/${summary.id}`);
+    heading(`proposal ${proposal.id}: ${proposal.title}`);
+    console.log(`status: ${proposal.status}, risk: ${proposal.risk}, evidence verified: ${proposal.evidenceVerified ?? 0}`);
+    if (proposal.body) console.log(`\n${proposal.body}`);
+    heading("prompt diff (base → proposed)");
+    printPromptDiff(base, candidate);
+  }
+  console.log(`\nNext: node experiment/run.mjs --promote ${proposals[0].id}`);
 }
 
-function printPromptDiff(config, baseId, proposedId) {
-  const byId = new Map(config.versions.map((version) => [version.id, version]));
-  const promptOf = (id) => {
-    const version = byId.get(id);
-    if (version === undefined) return undefined;
-    try {
-      return JSON.parse(version.configJson).prompt ?? "";
-    } catch {
-      return undefined;
-    }
-  };
-  const base = promptOf(baseId);
-  const proposed = promptOf(proposedId);
-  if (base === undefined || proposed === undefined) {
-    console.log("(could not read both config versions)");
+function printPromptDiff(base, candidate) {
+  const base_ = base?.content?.system;
+  const proposed = candidate?.content?.system;
+  if (typeof base_ !== "string" || typeof proposed !== "string") {
+    console.log("(could not read both versions' system prompts)");
     return;
   }
   mkdirSync(resultsDir, { recursive: true });
-  const baseFile = join(resultsDir, `.diff-base-${baseId}.md`);
-  const proposedFile = join(resultsDir, `.diff-proposed-${proposedId}.md`);
-  writeFileSync(baseFile, `${base}\n`);
+  const baseFile = join(resultsDir, `.diff-base-${base.id}.md`);
+  const proposedFile = join(resultsDir, `.diff-proposed-${candidate.id}.md`);
+  writeFileSync(baseFile, `${base_}\n`);
   writeFileSync(proposedFile, `${proposed}\n`);
   try {
-    execFileSync("diff", ["-u", "--label", "prompt-v1", "--label", "proposed", baseFile, proposedFile], {
+    execFileSync("diff", ["-u", "--label", `v${base.number}`, "--label", `v${candidate.number}`, baseFile, proposedFile], {
       encoding: "utf8",
     });
-    console.log("(identical — the dream changed something other than the prompt)");
+    console.log("(identical: the proposal changed something other than the prompt)");
   } catch (error) {
-    // `diff` exits 1 when the files differ — that is the expected path.
+    // `diff` exits 1 when the files differ; that is the expected path.
     if (error.status === 1) console.log(error.stdout);
     else throw error;
   }
 }
 
+/** Approve a proposal: its candidate version becomes the live one. */
 async function promote(proposalId) {
   if (proposalId === undefined) throw new Error("usage: --promote <proposalId>");
-  heading("canary");
-  console.log(
-    await api(`/api/proposals/${proposalId}/action`, {
-      method: "POST",
-      body: JSON.stringify({ action: "canary", channel: CHANNEL }),
-    }).then(JSON.stringify),
-  );
-  console.log(`channel ${CHANNEL} now splits 50/50 between the base and the proposed version.`);
-
-  heading("promote");
-  console.log(
-    await api(`/api/proposals/${proposalId}/action`, {
-      method: "POST",
-      body: JSON.stringify({ action: "promote", channel: CHANNEL }),
-    }).then(JSON.stringify),
-  );
-  const config = await api(`/api/harnesses/${HARNESS_ID}/config`);
-  const channel = config.channels.find((entry) => entry.name === CHANNEL);
-  console.log(`channel ${CHANNEL} → ${channel?.configVersionId} (weights cleared: ${channel?.weightsJson === null})`);
+  heading("approve");
+  const { proposal } = await api(`/proposals/${encodeURIComponent(proposalId)}/approve`, {
+    method: "POST",
+    body: JSON.stringify({ note: "Approved from the dream-catch experiment driver." }),
+  });
+  console.log(`proposal ${proposal.id}: ${proposal.status}`);
+  const detail = await api(`/subjects/${encodeURIComponent(SUBJECT)}`);
+  const release = (detail.releases ?? []).find((entry) => entry.channel === CHANNEL);
+  console.log(`channel ${CHANNEL} → ${release?.liveVersionId ?? "(none)"}`);
   console.log("\nNext: node experiment/run.mjs --retest");
 }
 
 async function status() {
   heading("status");
-  const metrics = await api(`/api/harnesses/${HARNESS_ID}/metrics`);
-  console.log(JSON.stringify(metrics, null, 2));
-  const config = await api(`/api/harnesses/${HARNESS_ID}/config`).catch(() => undefined);
-  if (config !== undefined) {
-    for (const channel of config.channels) {
-      console.log(`channel ${channel.name} → ${channel.configVersionId}`);
-    }
+  const detail = await api(`/subjects/${encodeURIComponent(SUBJECT)}`);
+  for (const release of detail.releases ?? []) {
+    console.log(
+      `channel ${release.channel} → ${release.liveVersionId ?? "(none)"}` +
+        (release.trialVersionId ? ` (trial: ${release.trialVersionId} at ${release.trialWeight})` : ""),
+    );
+  }
+  for (const version of detail.versions ?? []) {
+    console.log(`v${version.number}  ${version.id}  ${version.status}  ${version.summary ?? ""}`);
+  }
+  for (const proposal of detail.proposals ?? []) {
+    console.log(`proposal ${proposal.id}  ${proposal.status}  ${proposal.title}`);
   }
 }
 
 function help() {
   console.log(
     [
-      "dream-catch experiment driver (harness slug: kb-librarian-x)",
+      `dream-catch experiment driver (harness slug: ${HARNESS_ID}, LittleDB ${LITTLEDB_URL})`,
       "",
       "  --seed                 wipe knowledge/ and install experiment/kb",
       "  --traffic              run the OPTIMIZER set on prompt v1, grade, react, persist results",
-      "  --dream                POST /dream; print the proposal, rationale, and prompt diff",
-      "  --promote <proposalId> canary, then promote",
-      "  --retest               rerun the OPTIMIZER set on the promoted config; BEFORE/AFTER table",
+      "  --dream                run LittleDB's reviewer; print each proposal and its prompt diff",
+      "  --promote <proposalId> approve the proposal: its version becomes the live one",
+      "  --retest               rerun the OPTIMIZER set on the live version; BEFORE/AFTER table",
       "  --gate                 run the HELD-OUT set (gate-truth.json) k times per scenario;",
-      "                         pass^k and pass^1, no reactions, no trace plane",
-      "  --status               harness metrics and the live channel pointer",
+      "                         pass^k and pass^1, no reactions, nothing sent to LittleDB",
+      "  --status               releases, versions and proposals",
       "",
       "  --limit <n>            first n scenarios only",
       "  --only <id,id,...>     named scenarios only",
@@ -1075,9 +1079,12 @@ function help() {
       "  --k <n>                --gate only: attempts per scenario (default 3). A scenario",
       "                         passes only if ALL k attempts pass.",
       "  --prompt-file <path>   --gate only: measure a local prompt file instead of the",
-      "                         promoted config (e.g. experiment/prompt-v1.md for a baseline)",
+      "                         live version (e.g. experiment/prompt-v1.md for a baseline)",
       "  --dry-run              --gate only: no model, no stack. A deterministic stub answers",
       "                         every turn so the mechanics can be checked offline.",
+      "",
+      "Environment: LITTLEDB_URL (default http://127.0.0.1:7340), LITTLEDB_API_KEY (required),",
+      "LITTLEDB_HARNESS (default kb-librarian-x), LITTLEDB_CHANNEL (default production).",
     ].join("\n"),
   );
 }

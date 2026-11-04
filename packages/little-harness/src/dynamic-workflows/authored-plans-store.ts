@@ -66,13 +66,15 @@ export async function writeAuthoredPlan(
 
 /**
  * Recall authored plans whose `purpose` contains `query` (case-insensitive substring). Successful
- * plans (`status === "completed"`) sort first so callers prefer proven prior work. An empty/whitespace
- * query returns every stored record.
+ * plans (`status === "completed"`) sort first, newest first, so callers prefer proven recent work.
+ * An empty/whitespace query returns every stored record, up to `limit` (default 10). A caller that
+ * narrows the records further (one per distinct plan) passes `Infinity` and caps after narrowing.
  */
 export async function searchAuthoredPlans(
   files: FilesLike,
   harnessDir: string,
   query: string,
+  { limit = 10 }: { readonly limit?: number } = {},
 ): Promise<readonly AuthoredPlanRecord[]> {
   const prefix = plansPrefix(harnessDir);
   let entries: readonly { readonly path: string; readonly kind?: "file" | "directory" }[];
@@ -107,11 +109,15 @@ export async function searchAuthoredPlans(
   const q = query.trim().toLowerCase();
   const matched =
     q.length === 0 ? records : records.filter((r) => r.purpose.toLowerCase().includes(q));
-  // Completed-first ordering so callers prefer proven prior work, then cap the payload to a
-  // sane, model-friendly ceiling.
+  // Completed-first, then newest-first ordering so callers prefer proven, recent work, then cap
+  // the payload to a sane, model-friendly ceiling.
   return matched
-    .sort((a, b) => Number(b.status === "completed") - Number(a.status === "completed"))
-    .slice(0, 10);
+    .sort(
+      (a, b) =>
+        Number(b.status === "completed") - Number(a.status === "completed") ||
+        String(b.createdAt).localeCompare(String(a.createdAt)),
+    )
+    .slice(0, limit);
 }
 
 /**

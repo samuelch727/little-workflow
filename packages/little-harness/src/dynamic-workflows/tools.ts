@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { jsonSchema, tool, type ToolExecutionOptions, type ToolSet } from "ai";
+import type { IFileSystem } from "just-bash";
+import { jsonSchema, tool, type JSONSchema7, type ToolExecutionOptions, type ToolSet } from "ai";
 import type { HarnessChildCapabilities, HarnessWorkflowExecution, HarnessWorkflowRunContext } from "../workflows.js";
 import type { ResolvedDynamicWorkflows } from "./config.js";
 import { dynamicAllowedCapabilities } from "../execution/turn-tools.js";
@@ -30,6 +31,7 @@ export type DynamicWorkflowToolsConfig = {
   readonly turnId: string;
   readonly originTurnId: string;
   readonly dataDir: string;
+  readonly fs?: IFileSystem;
   readonly dynamic: ResolvedDynamicWorkflows;
   readonly parentSnapshot: {
     tools?: Readonly<Record<string, unknown>>;
@@ -50,24 +52,96 @@ export type DynamicWorkflowToolsConfig = {
   readonly budgets?: WorkflowRunConcurrencyBudgets | undefined;
 };
 
-const RUN_INPUT = jsonSchema<{
+type RunInput = {
   purpose: string;
   reasonConfiguredWorkflowsDoNotFit?: string;
   plan: unknown;
   input: unknown;
   outputSchema: unknown;
-}>({
-  type: "object",
-  properties: {
-    purpose: { type: "string" },
-    reasonConfiguredWorkflowsDoNotFit: { type: "string" },
-    plan: { type: "object", additionalProperties: true },
-    input: {},
-    outputSchema: {},
-  },
-  required: ["purpose", "plan", "input", "outputSchema"],
-  additionalProperties: false,
-});
+};
+
+/**
+ * The `run_ad_hoc_plan` input, with the plan's full shape spelled out. With a bare
+ * `{ type: "object" }` for `plan`, models guessed the field names (`kind`, `input`, `$input.x`)
+ * and needed many submissions to find them.
+ */
+function runInputSchema(modelSlots: readonly string[]) {
+  const step: JSONSchema7 = {
+    type: "object",
+    properties: {
+      id: { type: "string", description: "Unique step id: letters, digits and underscores." },
+      uses: { type: "string", enum: ["tool.call", "ai.generate"] },
+      needs: {
+        type: "array",
+        items: { type: "string" },
+        description: "Ids of steps that must finish first. A step that reads {{ steps.<id>.output }} waits for <id> without it.",
+      },
+      tool: { type: "string", description: "tool.call only: the name of one of your tools." },
+      with: {
+        type: "object",
+        additionalProperties: true,
+        description: "tool.call only: the tool's arguments, shaped as the tool's input schema says.",
+      },
+      model: { type: "string", enum: [...modelSlots], description: "ai.generate only: the model slot." },
+      prompt: {
+        type: "string",
+        description: "ai.generate only: the whole instruction for one model call. The model sees only this text, so include any rules it must follow.",
+      },
+      output: {
+        type: "object",
+        properties: {
+          mode: { type: "string", enum: ["json", "text", "object", "array", "choice"] },
+          schema: { description: "JSON Schema the step's output must match (json, object or array mode)." },
+          values: { type: "array", items: { type: "string" }, description: "choice mode: the allowed answers." },
+        },
+        required: ["mode"],
+        additionalProperties: false,
+        description: "Optional: the shape of this step's output. Defaults to any JSON.",
+      },
+      bash: { type: "boolean", description: "ai.generate only: needs your bash grant. The step itself runs no commands." },
+    },
+    required: ["id", "uses"],
+    additionalProperties: false,
+  };
+  return jsonSchema<RunInput>({
+    type: "object",
+    properties: {
+      purpose: {
+        type: "string",
+        description: "What the plan is for, in a few words. search_authored_plans finds plans by this text.",
+      },
+      reasonConfiguredWorkflowsDoNotFit: { type: "string" },
+      plan: {
+        type: "object",
+        properties: {
+          steps: { type: "array", minItems: 1, items: step },
+          output: {
+            type: "object",
+            properties: { from: { type: "string", description: "The id of the last step; its output is the plan's result." } },
+            required: ["from"],
+            additionalProperties: false,
+          },
+        },
+        required: ["steps", "output"],
+        additionalProperties: false,
+      },
+      input: { description: "The plan's input. Steps read it as {{ input.<field> }}." },
+      outputSchema: { description: "JSON Schema of the plan's result, or true for any value." },
+    },
+    required: ["purpose", "plan", "input", "outputSchema"],
+    additionalProperties: false,
+  });
+}
+
+function runDescription(modelSlots: readonly string[]): string {
+  return [
+    "Author and run a ONE-SHOT plan for a request no configured workflow fits. The plan is a step-DAG whose steps are `tool.call` (invoke one of your own tools/MCP handles) or `ai.generate` (one model call that writes text or JSON from its input; it calls no tools, so use `tool.call` steps for those) — no other step kinds are supported. It runs once, is not added to the workflow library, and is remembered for later recall via search_authored_plans. Provide `purpose`, `plan` (steps + output.from naming the terminal step), `input`, and `outputSchema`.",
+    "A tool.call step is `{ id, uses: \"tool.call\", tool, with: { ...the tool's arguments } }`. An ai.generate step is `{ id, uses: \"ai.generate\", model, prompt, output? }`.",
+    "Inside `with` values and `prompt`, write {{ input.<field> }} for the plan's input and {{ steps.<id>.output }} or {{ steps.<id>.output.<field> }} for an earlier step's result.",
+    `Model slots for ai.generate: ${modelSlots.map((slot) => (slot === "default" ? "default (your own model)" : slot)).join(", ")}.`,
+    "Every submission runs every step again, including tools that write or send something.",
+  ].join("\n\n");
+}
 
 const SEARCH_INPUT = jsonSchema<{ query: string }>({
   type: "object",
@@ -79,21 +153,22 @@ const SEARCH_INPUT = jsonSchema<{ query: string }>({
 /**
  * The subset of the harness `FileWriter` the authored-plans store needs. Derived from the
  * store's own parameter type so the two stay in lock-step; pulled off `executeOptions.files`
- * (the same field the memory `remember` tool reads — see `memory/memory.ts`).
+ * (the same field the memory file tools read — see `memory/file-tools.ts`).
  */
 type StoreFiles = Parameters<typeof writeAuthoredPlan>[0];
 
 export function createDynamicWorkflowTools(config: DynamicWorkflowToolsConfig): ToolSet {
   const harnessDir = config.authoredPlansHarnessDir ?? AUTHORED_PLANS_HARNESS_DIR;
   const nowIso = config.nowIso ?? (() => new Date().toISOString());
+  const extraModelSlots = Object.keys(config.dynamic.models ?? {});
+  const modelSlots = ["default", ...extraModelSlots];
 
   return {
     run_ad_hoc_plan: tool({
-      description:
-        "Author and run a ONE-SHOT plan for a request no configured workflow fits. The plan is a step-DAG whose steps are `tool.call` (invoke one of your own tools/MCP handles) or `ai.generate` (a model step, optionally with agentic bash) — no other step kinds are supported. It runs once, is not added to the workflow library, and is remembered for later recall via search_authored_plans. Provide `purpose`, `plan` (steps + output.from naming the terminal step), `input`, and `outputSchema`.",
-      inputSchema: RUN_INPUT,
+      description: runDescription(modelSlots),
+      inputSchema: runInputSchema(modelSlots),
       execute: async (args, executeOptions: ToolExecutionOptions<unknown> & { files?: unknown }) => {
-        const allowed = dynamicAllowedCapabilities(config.parentSnapshot, config.dynamic.exclude);
+        const allowed = dynamicAllowedCapabilities(config.parentSnapshot, config.dynamic.exclude, extraModelSlots);
         const compiled = config.dynamic.factory.compile({
           purpose: args.purpose,
           ...(args.reasonConfiguredWorkflowsDoNotFit
@@ -154,7 +229,7 @@ export function createDynamicWorkflowTools(config: DynamicWorkflowToolsConfig): 
         try {
           execution = await runWithWorkflowRunSlot(config.sessionId, config.budgets, async () => {
             if (files) await writeAuthoredPlan(files, harnessDir, baseRecord);
-            const ctx = runContext(config, compiled.definitionHash, runId, allowed.bash);
+            const ctx = runContext(config, compiled.definitionHash, runId, toolCallId, allowed.bash);
             return compiled.workflow.runForHarness(args.input, ctx);
           });
         } catch (error) {
@@ -199,14 +274,16 @@ export function createDynamicWorkflowTools(config: DynamicWorkflowToolsConfig): 
 
     search_authored_plans: tool({
       description:
-        "Search one-shot plans you authored on prior runs (by purpose). Returns each plan's purpose, the frozen plan, and its last run's status/summary so you can re-submit it (verbatim or adapted) via run_ad_hoc_plan.",
+        `Search one-shot plans you authored on prior runs (by purpose). Returns up to ${SEARCH_RESULT_LIMIT} plans whose last run completed, newest first and one per distinct plan, each with its purpose, the frozen plan and its last run's summary, so you can re-submit it (verbatim or adapted) via run_ad_hoc_plan.`,
       inputSchema: SEARCH_INPUT,
       execute: async (args, executeOptions: ToolExecutionOptions<unknown> & { files?: unknown }) => {
         const files = extractFiles(executeOptions);
         if (!files) return { plans: [] };
-        const records = await searchAuthoredPlans(files, harnessDir, args.query);
+        // Every match: repeats of one plan must not crowd the others out before reusablePlans
+        // keeps one per distinct plan and applies the limit.
+        const records = await searchAuthoredPlans(files, harnessDir, args.query, { limit: Number.POSITIVE_INFINITY });
         return {
-          plans: records.map((r) => ({
+          plans: reusablePlans(records).map((r) => ({
             runId: r.runId,
             purpose: r.purpose,
             status: r.status,
@@ -231,6 +308,7 @@ function runContext(
   config: DynamicWorkflowToolsConfig,
   definitionIdentity: string,
   runId: string,
+  toolCallId: string,
   bash: boolean,
 ): HarnessWorkflowRunContext {
   const capabilities: HarnessChildCapabilities = {
@@ -244,8 +322,8 @@ function runContext(
     skills: {},
     mounts: [],
     permissions: { approvalPolicy: "reject_ask" },
-    // Single model slot; factory `modelsFromContext` maps slot -> wrapped model.
-    models: { default: config.model },
+    // `default` is the agent's own model; factory `modelsFromContext` maps slot -> wrapped model.
+    models: { ...(config.dynamic.models ?? {}), default: config.model },
   };
 
   return {
@@ -253,13 +331,14 @@ function runContext(
     workflowId: "ad_hoc_plan",
     workflowHandle: "ad_hoc_plan",
     definitionIdentity,
-    toolCallId: runId,
+    // The model's own call id, so a trace of the run can point at the tool call that started it.
+    toolCallId,
     disposition: "await",
     parentSessionId: config.sessionId,
     parentTurnId: config.turnId,
     originTurnId: config.originTurnId,
     reservedRunId: runId,
-    persistence: { dataDir: `${config.dataDir}/${runId}` },
+    persistence: { dataDir: `${config.dataDir}/${runId}`, ...(config.fs === undefined ? {} : { fs: config.fs }) },
     ...(config.abortSignal ? { abortSignal: config.abortSignal } : {}),
     inheritance: {},
     capabilities,
@@ -295,6 +374,25 @@ function compact(execution: HarnessWorkflowExecution): Record<string, unknown> {
     runId: execution.runId,
     ...(execution.summary ? { outputSummary: execution.summary } : {}),
   };
+}
+
+const SEARCH_RESULT_LIMIT = 5;
+
+/**
+ * The records worth re-submitting: runs that completed, the newest run of each distinct plan,
+ * newest first. Failed runs and repeats would otherwise crowd out the plan that works, and a long
+ * result is moved out of the conversation into a file the agent may not be able to read.
+ */
+function reusablePlans(records: readonly AuthoredPlanRecord[]): readonly AuthoredPlanRecord[] {
+  const newest = new Map<string, AuthoredPlanRecord>();
+  for (const record of records) {
+    if (record.status !== "completed") continue;
+    const seen = newest.get(record.definitionHash);
+    if (seen === undefined || record.createdAt > seen.createdAt) newest.set(record.definitionHash, record);
+  }
+  return [...newest.values()]
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+    .slice(0, SEARCH_RESULT_LIMIT);
 }
 
 function summarize(output: unknown): string {

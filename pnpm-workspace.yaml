@@ -1,10 +1,15 @@
 packages:
-  - "apps/*"
+  - "apps/little-harness-doc"
+  - "apps/little-workflow-doc"
   - "demos/*"
-  - "packages/*"
+  - "packages/little-harness"
+  - "packages/little-workflow"
+  - "packages/littledb-client"
 
-# Allow the native build script for the embedded WAL event store.
-# Without this, pnpm's default "ignore build scripts" leaves better-sqlite3
-# without its compiled binding and `require("better-sqlite3")` fails at runtime.
+# Keep workerd-chats on the workspace versions of esbuild and sharp.
+overrides:
+  wrangler>esbuild: 0.28.0
+  miniflare>sharp: 0.34.5
+
 onlyBuiltDependencies:
   - better-sqlite3

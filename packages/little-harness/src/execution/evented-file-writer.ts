@@ -6,14 +6,14 @@ import type {
   FileWriter,
   HarnessArtifactAccessor,
   HarnessEvent,
-  JsonObject,
   ReadFileOptions,
   WriteFileOptions,
 } from "../types.js";
-import { sha256Hex } from "../ids.js";
+import { createEventId, sha256Hex } from "../ids.js";
 import { createTraceDiff } from "../trace/diff.js";
 import { redactionReasonForPath } from "../trace/redaction.js";
 import type { ResolvedHarnessTraceOptions } from "../trace/types.js";
+import { createHarnessFileMutationEvents } from "../remote-session/file-events.js";
 
 type TurnEvent = Omit<HarnessEvent, "timestamp" | "sessionId">;
 
@@ -28,6 +28,7 @@ export function createEventedFileWriter(
   options: EventedFileWriterOptions,
 ): FileWriter {
   return {
+    get limits() { return base.limits; },
     write: (targetPath, content, writeOptions) =>
       writeWithEvents(base, emit, targetPath, content, options, writeOptions),
     writeText: (targetPath, text, writeOptions) =>
@@ -43,16 +44,14 @@ export function createEventedFileWriter(
       const before = await deletedFileSnapshots(base, targetPath, removeOptions);
       await base.remove(targetPath, removeOptions);
       for (const deleted of before) {
-        await emit({
-          type: "harness.file.deleted",
-          metadata: {
-            path: deleted.path,
-            root: rootFromPath(deleted.path),
-            ...(options.defaultSource ? { source: options.defaultSource } : {}),
-            before: binaryMetadata(deleted.content),
-            diff: { available: false, reason: "content_unavailable" },
-          },
-        });
+        for (const event of createHarnessFileMutationEvents({
+          occurrenceId: createEventId(),
+          kind: "deleted",
+          file: { path: deleted.path },
+          ...(options.defaultSource === undefined ? {} : { source: options.defaultSource }),
+          before: binaryMetadata(deleted.content),
+          diff: { available: false, reason: "content_unavailable" },
+        })) await emit(event);
       }
     },
   };
@@ -85,40 +84,24 @@ async function writeWithEvents(
   const ref = await base.write(targetPath, content, writeOptions);
   const after = await base.read(targetPath);
   const source = writeOptions.source ?? eventOptions.defaultSource;
-  const metadata = {
-    ...fileMetadata(ref, source, writeOptions.metadata),
-    root: rootFromPath(ref.path),
-    ...(before ? { before: binaryMetadata(before.content) } : {}),
-    after: binaryMetadata(after.content),
+  const afterVersion = binaryMetadata(after.content);
+  const events = createHarnessFileMutationEvents({
+    occurrenceId: createEventId(),
+    kind: before ? "updated" : "created",
+    file: ref,
+    ...(source === undefined ? {} : { source }),
+    ...(writeOptions.metadata === undefined ? {} : { metadata: writeOptions.metadata }),
+    ...(before === undefined ? {} : { before: binaryMetadata(before.content) }),
+    after: afterVersion,
     diff: redactionReasonForPath(ref.path, eventOptions.traceOptions)
       ? { available: false as const, reason: "redacted" as const }
       : await createTraceDiff(before?.content, after.content, eventOptions.traceOptions, {
           files: base,
           path: ref.path,
         }),
-  };
-
-  await emit({
-    type: before ? "harness.file.updated" : "harness.file.created",
-    metadata,
+    ...(ref.artifact === undefined ? {} : { artifact: ref.artifact }),
   });
-
-  if (source === "tool") {
-    await emit({
-      type: "harness.file.written_by_tool",
-      metadata,
-    });
-  }
-
-  if (ref.artifact) {
-    await emit({
-      type: "harness.artifact.created",
-      metadata: {
-        ...fileMetadata(ref.artifact, source, ref.artifact.metadata),
-        artifact: ref.artifact,
-      },
-    });
-  }
+  for (const event of events) await emit(event);
 
   return ref;
 }
@@ -164,34 +147,4 @@ async function deletedFileSnapshots(
 
 function binaryMetadata(content: Uint8Array): { bytes: number; sha256: string } {
   return { bytes: content.byteLength, sha256: sha256Hex(content) };
-}
-
-function rootFromPath(pathname: string): string | undefined {
-  return pathname.split("/").filter(Boolean)[0];
-}
-
-function fileMetadata(
-  ref: FileRef,
-  source: string | undefined,
-  metadata: JsonObject | undefined,
-): JsonObject {
-  const out: JsonObject = {
-    path: ref.path,
-  };
-  if (ref.bytes !== undefined) {
-    out.bytes = ref.bytes;
-  }
-  if (ref.mediaType !== undefined) {
-    out.mediaType = ref.mediaType;
-  }
-  if (ref.sha256 !== undefined) {
-    out.sha256 = ref.sha256;
-  }
-  if (source !== undefined) {
-    out.source = source;
-  }
-  if (metadata !== undefined) {
-    out.metadata = metadata;
-  }
-  return out;
 }

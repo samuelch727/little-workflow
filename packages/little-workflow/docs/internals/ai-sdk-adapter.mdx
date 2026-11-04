@@ -12,7 +12,7 @@ This page covers how `workflowHarness` uses the AI SDK under the hood.
 | Prior alpha | This milestone |
 |---|---|
 | `RuntimeAiAdapter.generate(options)` — custom interface for AI step execution | Worker harness dispatches `ai.generate` through `workflowHarness` and the AI SDK module supplied to it |
-| `createRuntimeAiAdapter(ai)` — factory passed to `runWorkflow({ ai })` | Gone. `runWorkflow` no longer accepts `ai` or `codeRunner` options. |
+| `createRuntimeAiAdapter(ai)` — factory passed to `runWorkflow` as the `ai` option | Gone. `runWorkflow` no longer accepts `ai` or `codeRunner` options. |
 | `createAiSdkPlannerAdapter(ai, { model, system })` — function-only planner | Gone. Planner lives in a harness session; `WorkflowDefinition.planner.harness` is the config point. |
 | Custom `ToolDescriptor` shape for tool registration | AI SDK's `tool({...})` — import from `"ai"`, use directly. |
 | `code.run` signature `async (input) => output` | `async ({ input, tools }) => output` — tools proxy injected by the harness. |
@@ -49,6 +49,8 @@ The agent-loop tasks configure the AI SDK request as follows:
 3. **Per-turn event recording**: before each model invocation, emits `harness.model.called`; after the response, emits `harness.model.responded`. Per tool call, emits `harness.tool_call.started(caller: "model")` + `harness.tool_call.succeeded, harness.tool_call.failed`.
 4. **Durability checks**: before invoking the model, checks the event log for an existing committed `harness.model.responded` matching this turn's `promptHash` — if present, skips the model call and replays the cached response. Same for tool calls.
 5. **Memory + scratch mounts**: ensures dirs exist; exposes them to the bash tool's cwd-allowlist.
+
+An `ai.generate` step is not an agent loop: it is one model call with no tools. `instructions` is the worker's system prompt and skill list followed by the step's `with.system`; `messages` is one user message, `with.prompt` + `"\n\nInput:\n"` + the resolved step input; `tools` is empty, so the workflow's tools and bash are not offered. The runtime resolves `{{ ... }}` expressions in `with.prompt` and `with.system` before the harness builds the request.
 
 ## `Output.*` Mapping
 
@@ -115,7 +117,7 @@ The AI SDK tool format is now the canonical shape. Existing code using Little Wo
 
 ### MCP Tools
 
-Declarative MCP belongs on `runWorkflow({ mcp })`; Little Workflow resolves those servers through Little Harness gateway tools. Use manual MCP attachment only when the caller already owns MCP client lifetime. The client comes from AI SDK 7's companion package `@ai-sdk/mcp` (install separately: `pnpm add @ai-sdk/mcp`):
+Declarative MCP belongs on `runWorkflow(workflow, input, { mcp })`; Little Workflow resolves those servers through Little Harness gateway tools. Use manual MCP attachment only when the caller already owns MCP client lifetime. The client comes from AI SDK 7's companion package `@ai-sdk/mcp` (install separately: `pnpm add @ai-sdk/mcp`):
 
 ```ts
 import { createMCPClient } from "@ai-sdk/mcp";
@@ -136,12 +138,14 @@ Every model turn builds one AI SDK request and records the response in the harne
 2. Calls `streamText(request)` when available, otherwise `generateText(request)`.
 3. Coerces the response into the harness's internal result shape with `output`, `text`, `reasoning`, `toolCalls`, and `usage`.
 
+A failed call throws the provider's own error, which is recorded as `harness.model.failed`: the harness passes `streamText` an `onError` that keeps the error (and keeps it off the console), and a rejected `text` or `finishReason` also throws. Only `output` is read leniently, because it also rejects for a turn that ends in tool calls. In a planner, fixer or orchestrator loop, a turn with tool calls runs them and calls the model again; the loop ends on the first turn with no tool calls.
+
 Usage normalization handles both AI SDK naming styles (`inputTokens`/`promptTokens`, `outputTokens`/`completionTokens`). In AI SDK 7, `usage` is the all-steps total, so it is read first; `totalUsage` is read only from older, v6-shaped results that lack `usage`. It also carries through two subset counts, reading whichever spelling the provider used:
 
 - `cachedInputTokens` — from AI SDK 7's `inputTokenDetails.cacheReadTokens`, then `usage.cachedInputTokens`, `inputTokenDetails.cachedTokens`, or `promptTokensDetails.cachedTokens`. These are prompt-cache hits, a *subset* of `inputTokens`, not an addition to it.
 - `reasoningTokens` — from `outputTokenDetails.reasoningTokens`, `usage.reasoningTokens`, or `completionTokensDetails.reasoningTokens`. A subset of `outputTokens`, billed at the normal output rate and therefore never charged twice.
 
-Usage lands in `harness.model.responded.payload.response.usage` and is rolled up per session into `harness.session.completed.payload.usage`. Both are **token-only**: this package cannot see the model registry — it lives in `little-workflow`, which depends on the harness — so a cost computed here could only ever be a stub. `little-workflow`'s event recorder rejects a `costUsd` on any recorded usage payload, which makes the wrong design unrepresentable rather than merely discouraged.
+Usage lands in `harness.model.responded.payload.response.usage` and is rolled up per session into `harness.session.completed.payload.usage`. Both are **token-only**: this package cannot see the model registry — it lives in `@little-stack/workflow`, which depends on the harness — so a cost computed here could only ever be a stub. `@little-stack/workflow`'s event recorder rejects a `costUsd` on any recorded usage payload, which makes the wrong design unrepresentable rather than merely discouraged.
 
 What the harness does contribute to pricing is **identity**: `harness.model.responded.payload.model` records `{ provider, modelId }` on the payload (not just the trace metadata) so the downstream materializer has a registry key to price against. See [Event Log → Pricing](/docs/v0.1.0-alpha/internals/event-log#pricing).
 
@@ -152,7 +156,7 @@ The `ctx.abortSignal` is forwarded to the AI SDK request and to tool `execute()`
 If you need a different runtime (e.g., Cloudflare Workers, a different agent loop library), implement the `Harness` contract directly rather than wrapping `workflowHarness`:
 
 ```ts
-import type { Harness } from "little-workflow";
+import type { Harness } from "@little-stack/workflow/internals";
 
 export const customHarness: Harness = {
   async run(task, ctx) {

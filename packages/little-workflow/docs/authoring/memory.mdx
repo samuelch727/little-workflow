@@ -7,7 +7,7 @@ Agents in Little Workflow have two storage surfaces: **Memory Stores** that pers
 
 Both are mounted as directories in the Harness's bash environment. The same `cat`, `ls`, `grep`, and write-redirect commands that work in a terminal work here — no new vocabulary needed.
 
-> **Related but distinct.** This is *not* the same feature as Little Harness's `memory()` helper (a single agent-scoped store at `/persistent/memory`). Little Workflow's memory is a three-scope role mount (`/mnt/memory/{workflow,pipeline,org}/`) with rw/ro per role. Both persist across runs, but they are different surfaces — see the [Little Harness memory docs](https://github.com/samuelch727/little-workflow/tree/main/packages/little-harness) for that one.
+> **Related but distinct.** This is *not* the same feature as Little Harness's `memory()` helper, which keeps an agent's long-term memory as plain files in one or more Persistent Dir folders under `/persistent/` (by default `/persistent/memory`), lists those files in the agent's prompt every turn, and adds a built-in `memory` skill; the agent saves, changes, and forgets memories with its ordinary file tools. Little Workflow's memory is a three-scope role mount (`/mnt/memory/{workflow,pipeline,org}/`) with rw/ro per role. Both persist across runs, but they are different surfaces — see the [Little Harness memory docs](https://github.com/samuelch727/little-workflow/tree/main/packages/little-harness) for that one.
 
 ## Memory Stores (persistent)
 
@@ -46,7 +46,7 @@ Structure is the agent's discretion. The SDK does not enforce a schema.
 ### Configuring memory on a workflow
 
 ```ts
-createLittleWorkflow({
+defineWorkflow({
   id: "candidate.review",
   // ...
   memory: {
@@ -74,7 +74,7 @@ type MemoryConfig = {
 A downstream workflow can read an upstream's accumulated lessons:
 
 ```ts
-createLittleWorkflow({
+defineWorkflow({
   id: "candidate-scoring",
   // ...
   memory: {
@@ -237,7 +237,7 @@ The agent sees what is available; it decides when to read and what to write.
 - **Cross-dataDir memory sync** — sharing stores across machines. Local world only.
 - **Structured query tools** — semantic search over memory. Bash and grep are sufficient for alpha.
 - **Memory size quotas** — stores grow unbounded; cleanup is the developer's responsibility.
-- **Dreaming** — consolidating memory across many sessions. Dreaming is itself a workflow created with `createLittleWorkflow`; it reads prior run event logs and writes consolidated notes. Reserved for post-alpha once the store primitives are battle-tested.
+- **Dreaming** — consolidating memory across many sessions. Dreaming is itself a workflow created with `defineWorkflow`; it reads prior run event logs and writes consolidated notes. Reserved for post-alpha once the store primitives are battle-tested.
 
 ---
 
@@ -245,4 +245,4 @@ The agent sees what is available; it decides when to read and what to write.
 
 - [Orchestrator](/docs/v0.1.0-alpha/authoring/orchestrating-workflows) — pipeline and available-workflows memory mounts
 - [Skills](/docs/v0.1.0-alpha/authoring/skills) — org skills live under `dataDir/memory/org/skills/`
-- [Create A Workflow](/docs/v0.1.0-alpha/authoring/advanced-createlittleworkflow) — workflow definition and the `memory` config field
+- [Workflow Config](/docs/v0.1.0-alpha/authoring/advanced-createlittleworkflow) — workflow definition and the `memory` config field

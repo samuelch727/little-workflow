@@ -1,0 +1,352 @@
+---
+title: Fork and merge
+description: Start many children from the parent's current files, let each work in its own sandbox, and merge their work back into one Project head with per-path policies.
+---
+
+<BoundaryCallout>
+**Unreleased.** This page describes the fork-and-merge path as it is being
+built. The [status](#status) section says which parts are in the source tree
+today and which are still landing. None of it has run end to end against
+Podman and PostgreSQL yet.
+</BoundaryCallout>
+
+Little Compute runs Agent Group children as isolated sandboxes. Fork and merge
+is what happens around that isolation: every child starts from the state its
+parent is in right now, works on its own copy, and when the group completes
+the children's work merges back into one Project head. Merge policies decide,
+path by path, what happens where two children touched the same files.
+
+The goal is the fan-out a parent agent actually wants: split a job into N
+pieces, run them in parallel from one breakpoint, and get one merged result
+back, accepting that a small conflict now and then is cheaper than serialising
+the work.
+
+## What a fork is
+
+A fork is one Git commit of the parent's current workspace on top of the
+Project head the parent started from, captured as a Repository Snapshot.
+Starting a group with a fork:
+
+1. Exports the parent's workspace from its sandbox. Only regular files and
+   directories travel: `.git`, `node_modules`, symlinks, nested repositories
+   and secret-bearing paths are dropped.
+2. Commits those files on the Project head and captures the commit as a
+   Repository Snapshot. A retried start replays the same fork.
+3. Starts every child from that snapshot, each in its own sandbox with its
+   own clone.
+
+Children never see each other's files while they run. When the group
+completes, the fork merges into the Project head first, so the parent's edits
+land, and the children's work merges after it. See
+[Concepts](/docs/compute/concepts#where-children-start) for the export rules.
+
+## Where children start
+
+`runtime.managedAgent.agentGroupChildBase` in `little-compute.yaml` chooses
+the base:
+
+| Setting | Children start from |
+| --- | --- |
+| unset (default) | The parent's current files when the parent runs in a Compute sandbox on the Project head. Otherwise the Project head, with the reason recorded on the group. |
+| `parent-workspace` | The parent's current files, always. A parent that cannot be forked fails the start. |
+| `project-head` | The Project head the Operation started from. Nothing is forked. |
+
+The reason a group started from the Project head is recorded as
+`forkBase.reason` on the group's workspace policy and outcome:
+
+| Reason | Meaning |
+| --- | --- |
+| `configured` | The host chose `project-head`. |
+| `parent_files_unchanged` | The parent's files matched the Project head, so there was nothing to fork. |
+| `parent_sandbox_unknown` | The host could not name the parent's sandbox, so it could not export its files. |
+| `parent_not_on_project_head` | The parent runs on a base the Project never committed, so there is no generation to fork from. An older head or an enclosing fork is fine: the fork is built on it and merges onto the current head. |
+| `fork_unavailable` | The runtime has no fork owner (reserved). |
+| `requested` | The start asked for the Project head: a model passed `from: "project"`, or a host asked for `project-head` on a host that forks. |
+| `unrecorded` | Outcome only: the host that completed the group did not see its start. |
+
+An export or capture failure never falls back: then nothing proves what the
+parent's files were, and the start fails as it does with `parent-workspace`.
+
+## How work merges back
+
+At completion, Compute merges each member's commit onto the Project head in
+member order, three-way from the generation the member started on (the fork,
+or the head the Operation pinned, even if other groups have moved the head
+since). For every path, the first matching merge policy decides how:
+
+| Policy | What happens |
+| --- | --- |
+| `three_way` (default) | An ordinary Git three-way merge. A member whose merge conflicts keeps its work on a branch, `refs/heads/little-compute/members/<memberKey>`, with the conflicting paths listed on its outcome. The group does not fail. |
+| `collect` | The member's matching outputs are routed under `members/<memberKey>/<path>`, so parallel members can never collide on them. |
+| `owner` | Only the named member may write matching paths. Writes from any other member are refused and recorded, never merged. |
+
+Clean merges always land. A member whose merge conflicts is retried once
+after the others have merged; if it still conflicts it is kept, never
+dropped:
+
+- Its own commit stays on `refs/heads/little-compute/members/<memberKey>`.
+- Its **conflict workspace**, the merge of that commit onto the merged head
+  with Git's conflict markers left in the files, is committed on
+  `refs/heads/little-compute/conflicts/<memberKey>`.
+- Both are captured as Repository Snapshots and recorded on the member's
+  outcome in the completion receipt, so a later Task can start from either.
+
+When nothing merged at all, the group still advances the Project head by one
+empty commit so the branches travel with the head's repository.
+
+A policy is `{ glob, policy, owner? }`. Globs are repository-relative: `**`
+matches any number of segments, `*` matches within one segment, and a pattern
+without `/` matches at any depth. `owner` is required exactly when the policy
+is `owner`, and must name one of the group's members.
+
+Policies come from two places:
+
+- The Project configuration (`merge.policies`) and the installation's
+  managed-agent settings, which apply to every group.
+- The group's start request (`workspace.mergePolicies`), which a host sets
+  per group and a model can add to through `mergePolicy` on
+  `start_agent_group` (the host's rules come first). Compute records them on
+  the group and returns them with its outcome. At completion they apply ahead
+  of the configured rules: the first match across the group's policies
+  followed by the configured ones wins, and the receipt echoes the whole
+  effective list.
+
+What to do with a conflicting member is `merge.conflicts`: `resolve` (the
+default) starts one resolver child per kept member; `keep_branch` leaves the
+branch and the conflict workspace for a person or a later agent.
+
+On a local installation both are chosen when it is created, because they are
+part of the configuration every installation authority binds to:
+
+```bash
+little-compute init --merge-policy 'reports/**=collect' \
+  --merge-policy 'docs/**=owner:member_1' --merge-conflicts keep_branch
+```
+
+`init` writes them under `spec.runtime.managedAgent.merge` and refuses
+different values for an existing installation; editing that block in the YAML
+afterwards makes `up` refuse the changed configuration. Per-group policies on
+the start request need no reinstall.
+
+### The resolver
+
+A resolver is a one-member Agent Group under the same parent, started by the
+host right after the group completes. Its child starts from the member's
+conflict workspace snapshot, runs with the host's worker profile, and has one
+fixed instruction: remove every conflict marker in the listed files while
+keeping the intent of both sides, with no unrelated changes. The host drives
+the resolver's join itself, so no agent has to wait for it; the parent reads
+the result later.
+
+Because the conflict workspace already sits on the merged head, the
+resolver's commit merges onto the head without conflicts unless the head has
+moved on the same files again. Each resolution is recorded per member, with
+the resolver group, its task id and an outcome: `pending`, `resolved` (the
+merge revision) or `failed` (`conflict_again`, `resolver_failed`,
+`resolver_deadline`, `resolver_cancelled`, `resolver_start_failed`). A
+resolver has thirty minutes; a resolver that fails leaves the member's two
+snapshots exactly as the completion recorded them.
+
+The completion receipt is written before any resolver runs, so it always
+shows a kept member on its branch. The outcome a host reads afterwards is
+current: once the resolver merged the member, its row says `resolved`, with
+the merge revision and the resolver's task id; while the resolution is
+pending or after it failed, the row stays `branch`.
+
+## Reading the outcome
+
+A host that holds the Compute launcher reads two records per group:
+
+- The **workspace policy** the group started with: where the children began
+  (`forkBase`) and the merge policies that apply.
+- The **workspace outcome** once the group has completed: `baseRevision` and
+  `mergedRevision` of the Project head, and one row per member whose
+  `outcome` is `merged` (with its merge revision), `resolved` (merge revision
+  and the resolver's task id) or `branch` (branch ref, revision and
+  conflicting paths).
+
+`littleComputeAgentGroups()` exposes them as `workspacePolicy(request)` and
+`workspaceOutcome(request)`; the [`fork()`](#fork-from-a-host) helper returns
+both with each member's result. Over the HTTP API, the same data is the
+`workspace` field of the start request and the group's completion receipt;
+see [HTTP API](/docs/compute/http-api#agent-groups). A model inside Harness sees a
+compact form of the outcome on its join and watch results; see
+[From a Harness agent](#from-a-harness-agent).
+
+## `fork()` from a host
+
+`fork()` in `@little-stack/compute/harness` is the host-side counterpart of
+the Harness `start_agent_group` tool: one prompt per child, started from the
+parent's current state, waited for, and returned with the merge outcome. It
+speaks only the launcher's public port, so it works wherever
+`littleComputeAgentGroups()` does.
+
+### A website split by area
+
+Three children each own one area of the site. Shared files such as the route
+table merge three-way; a child that conflicts there stays on its branch
+instead of blocking the others.
+
+```ts
+import { fork, littleComputeAgentGroups } from "@little-stack/compute/harness";
+
+const launcher = littleComputeAgentGroups({
+  client, startAuthority, artifacts, verificationHandles, referenceKeys,
+});
+
+const result = await fork({
+  launcher,
+  sessionId, originTurnId,
+  callIdentity: "site-v2-split-001",
+  profile: workerProfile,
+  members: [
+    { name: "nav", prompt: "Build the site navigation under src/nav/. Register its routes in src/routes.ts." },
+    { name: "catalog", prompt: "Build the product catalog under src/catalog/. Register its routes in src/routes.ts." },
+    { name: "checkout", prompt: "Build checkout under src/checkout/. Register its routes in src/routes.ts." },
+  ],
+  workspace: {
+    mergePolicies: [
+      { glob: "src/nav/**", policy: "owner", owner: "member_1" },
+      { glob: "src/catalog/**", policy: "owner", owner: "member_2" },
+      { glob: "src/checkout/**", policy: "owner", owner: "member_3" },
+    ],
+  },
+});
+
+for (const member of result.members) {
+  console.log(member.name, member.status, member.merge?.kind);
+  if (member.merge?.kind === "branch") {
+    console.log("  conflicts:", member.merge.conflictPaths.join(", "));
+  }
+}
+console.log(result.workspace?.forkBase, result.merge?.mergedRevision);
+```
+
+Member ids are `member_1` … `member_N` in prompt order, the same ids Harness
+derives for its own groups, so the owner policies name them directly.
+
+### A report split by section
+
+Nothing about fork and merge is specific to code. Here each child writes one
+section of a quarterly report. With `collect`, every child's files land under
+its own directory, so no two sections can conflict; the parent, or one more
+child, assembles them afterwards.
+
+```ts
+const sections = [
+  { slug: "revenue", title: "Revenue" },
+  { slug: "costs", title: "Costs" },
+  { slug: "pipeline", title: "Pipeline" },
+  { slug: "risks", title: "Risks" },
+];
+
+const report = await fork({
+  launcher,
+  sessionId, originTurnId,
+  callIdentity: "q3-report-sections-001",
+  profile: workerProfile,
+  members: sections.map((section) => ({
+    name: section.slug,
+    prompt: `Write the "${section.title}" section of the Q3 report from the data in data/q3/. Save it as reports/q3/${section.slug}.md.`,
+  })),
+  workspace: {
+    mergePolicies: [{ glob: "reports/**", policy: "collect" }],
+  },
+});
+
+// Each section is at members/member_<n>/reports/q3/<slug>.md on the merged head.
+console.log(report.merge?.members.map((member) => member.outcome.kind));
+```
+
+### Options
+
+| Option | Meaning |
+| --- | --- |
+| `launcher` | The launcher `littleComputeAgentGroups()` returned. |
+| `sessionId`, `originTurnId` | The Harness session and turn the children belong to. |
+| `callIdentity` | Names this fork. Calling again with the same identity converges on the same group instead of starting a second one. |
+| `members` | One child per entry, in order: `prompt`, optional `name` and `purpose`. |
+| `profile` | The declared launch profile every child runs with. |
+| `workspace` | `forkBase` (`parent-workspace` by default, or `project-head`) and `mergePolicies`. |
+| `joinPolicy`, `reductionPolicy` | Default to `all_success` and the local runtime's `bounded` policy. |
+| `deadlineAt`, `onDeadline` | Default to thirty minutes from now and `cancel_pending`. |
+| `joinWaitMs`, `maximumJoinCalls` | How long each join call waits (30 s) and how many join and page calls the fork makes before giving up (4096). |
+
+The result carries the group's `status` and `disposition`, the summary and
+result refs of the join, one entry per member (status, summary, result ref,
+failure code and `merge` outcome), and the group's `workspace` policy and
+`merge` outcome when the host reports them.
+
+## From a Harness agent
+
+A model inside a Harness session forks through the `start_agent_group` tool,
+or `spawn_agent` for one child. On a launcher that can fork and merge, which
+`littleComputeAgentGroups()` and the managed-agent runtime both are, the two
+tools take two more optional fields:
+
+| Field | Meaning |
+| --- | --- |
+| `from` | `parent` (the default): children start from a copy of the parent's current files when the host can fork them. `project`: they start from the Project head and nothing is exported. |
+| `mergePolicy` | Up to 64 rules `{ glob, policy, owner? }`, as in [How work merges back](#how-work-merges-back). `owner` names a member id: `member_1` is the first member. |
+
+The website split above, asked by the model itself:
+
+```json
+{
+  "members": [
+    { "name": "nav", "prompt": "Build the site navigation under src/nav/.", "profileHandle": "worker" },
+    { "name": "catalog", "prompt": "Build the product catalog under src/catalog/.", "profileHandle": "worker" }
+  ],
+  "mergePolicy": [
+    { "glob": "src/nav/**", "policy": "owner", "owner": "member_1" },
+    { "glob": "src/catalog/**", "policy": "owner", "owner": "member_2" }
+  ]
+}
+```
+
+The host still decides. A `forkBase` the host sets through the launcher's
+`workspace` option wins over `from`, and the host's merge policies apply
+ahead of the model's rules. Together they stay within 256 rules; a start
+past that is refused with
+`little_compute_agent_group_merge_policies_above_limit:model_may_add_<n>`,
+where `n` is how many rules the model may still give. `from: "parent"` is a
+preference: on a host that does not fork, the children start from the
+Project head and the result says why.
+
+Once the group has merged back, `join_agent_group` returns a `workspace`
+field, and `watch_agent_group` returns it for a finished group:
+
+```json
+{
+  "workspace": {
+    "from": "parent",
+    "members": [
+      { "memberId": "member_1", "merge": "merged" },
+      {
+        "memberId": "member_2",
+        "merge": "branch",
+        "branch": "refs/heads/little-compute/members/member_2",
+        "conflictPaths": ["src/routes.ts"]
+      }
+    ]
+  }
+}
+```
+
+`merge` is `merged`, `resolved` (a resolver merged it after a conflict) or
+`branch` (kept unmerged, with its first 32 conflicting paths). With
+`from: "project"`, `reason` is one of the [reasons](#where-children-start)
+above. The field is read when the tool runs, so a member that a resolver
+merges later shows as `resolved` on the next watch.
+
+## Status
+
+| Piece | State |
+| --- | --- |
+| Fork at start: export, commit, capture, start children from the fork | In the tree. Default on with recorded fallback; explicit modes as above. |
+| Workspace policy on the start request; fork base and merge policies over the HTTP API and the Harness adapter | In the tree. |
+| Workspace outcome: per-member merge results for the host, `fork()` helper | In the tree. Member rows come from the completion receipt; a kept member's `resolved` row from the resolver's record, read when the host asks. |
+| Merge policies at completion, conflicting members kept as branches and snapshots, fork from any committed generation | In the tree. |
+| Resolver child for conflicting members, resolution record | In the tree. The host starts and drives it; the host's outcome read and the model's join or watch result show the member as `resolved`. |
+| `from` and `mergePolicy` on the Harness `start_agent_group` and `spawn_agent` input, `workspace` on join and watch results | In the tree, through Harness's `workspaces` launcher capability; the managed-agent runtime carries both across its sandbox broker. |
+| End-to-end run on Podman and PostgreSQL | Not yet. |

@@ -6,7 +6,7 @@
  *   node run.mjs stub [count]   keyless deterministic smoke run
  *
  * We define *only* the candidate output schema and a terse description
- * ("generate candidates data"). No inputSchema (flexible input), no planner or
+ * ("generate candidates data"). No input schema (flexible input), no planner or
  * orchestrator system prompts, no batch plan. Pro plans + orchestrates, flash is
  * the only worker model, and we hand the model nothing but a one-line goal +
  * count — then watch (in the littleDB viewer) what it chooses to do.
@@ -22,15 +22,16 @@ import * as ai from "ai";
 import { tool } from "ai";
 import { createDeepSeek } from "@ai-sdk/deepseek";
 import {
-  createWorkflowHarness,
-  createLittleWorkflow,
   createToolRegistry,
+  defineWorkflow,
   localWorld,
   model,
   output,
+  runOrchestration,
   runWorkflow,
   skill,
-} from "little-workflow";
+} from "@little-stack/workflow";
+import { createWorkflowHarness } from "@little-stack/workflow/internals";
 
 import {
   candidateItemSchema,
@@ -114,19 +115,23 @@ export async function runDelegatedCandidates({
 
   const setup = useStub ? buildStubSetup() : buildLiveSetup({ compaction });
 
-  const result = await runWorkflow({
+  const options = {
     world: traceWorld,
-    // Array + orchestrator → the model can fan out; single workflow → direct run.
-    ...(setup.orchestrator
-      ? { workflows: [setup.workflow], orchestrator: { ...setup.orchestrator, maxConcurrentSubRuns } }
-      : { workflows: setup.workflow }),
-    input,
     tools: setup.tools,
     runId,
     label: "delegated-candidates",
     tags,
     ...(permissions ? { permissions } : {}),
-  });
+  };
+  // An orchestrator lets the model fan out over the workflow; without one it is a direct run.
+  const result = setup.orchestrator
+    ? await runOrchestration({
+        ...options,
+        workflows: [setup.workflow],
+        orchestrator: { ...setup.orchestrator, maxConcurrentSubRuns },
+        input,
+      })
+    : await runWorkflow(setup.workflow, input, options);
 
   if (typeof traceWorld.flushTee === "function") await traceWorld.flushTee();
 
@@ -182,10 +187,10 @@ function buildLiveSetup({ compaction } = {}) {
   const designSkill = skill(join(here, "skills", "designing-workflows"));
 
   return {
-    workflow: createLittleWorkflow({
+    workflow: defineWorkflow({
       id: WORKFLOW_ID,
       description: "generate candidates data",
-      // no inputSchema — flexible input
+      // no input schema — flexible input
       output: output.array({ element: candidateItemSchema }),
       models: [flashSlot],
       planner: { model: pro, harness: createWorkflowHarness(harnessOpts), skills: [designSkill] }, // no system; skill, not prompt
@@ -238,13 +243,13 @@ function buildStubSetup() {
   };
 
   return {
-    workflow: createLittleWorkflow({
+    workflow: defineWorkflow({
       id: WORKFLOW_ID,
       description: "generate candidates data",
       output: output.array({ element: candidateItemSchema }),
       models: [model({ provider: "stub", modelId: "stub-worker" }, { id: "model.worker", description: "Unused stub slot (tool.call path)." })],
       planner: { model: { provider: "stub", modelId: "stub-planner" }, harness: plannerHarness },
-      globalTools: ["emit_candidates"],
+      tools: ["emit_candidates"],
       worker: { harness: createWorkflowHarness() },
       workflowVersionReuseStrategy: "planner_reviewed",
     }),

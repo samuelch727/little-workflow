@@ -1,11 +1,11 @@
 import { HarnessInputError } from "../errors.js";
-import type { HarnessDurableServices } from "../types.js";
+import type { HarnessOrchestrationServices } from "../types.js";
 import { stableHash } from "../utils/canonical-hash.js";
 import type { WorkflowLaunchTransactionInput, WorkflowReserveInput, WorkflowReserveResult } from "./types.js";
 import { modelFacingWorkflowStatus } from "./types.js";
 
 export type CreateWorkflowSchedulerOptions = {
-  readonly durable: Pick<HarnessDurableServices, "workflowLaunches" | "workflowQueue" | "tasks" | "results">;
+  readonly durable: Pick<HarnessOrchestrationServices, "workflowLaunches" | "workflowQueue" | "tasks" | "results">;
   readonly maxConcurrentWorkflowRuns: number;
   readonly maxQueuedWorkflowRuns: number;
   readonly queueDeadlineMs?: number;

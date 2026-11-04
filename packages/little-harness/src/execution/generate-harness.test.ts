@@ -1,3 +1,4 @@
+import { assertCompletedTurn } from "../test/completed-turn.js";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -12,6 +13,7 @@ import type {
   HarnessPriorEventQuery,
   PersistedDurableHarnessEvent,
 } from "../events/occurrence.js";
+import { canonicalHarnessEventRequestDigest } from "../events/occurrence.js";
 import { inputType } from "../input-types/input-type.js";
 import { localHost } from "../local-host/index.js";
 import { skill } from "../skills/skill.js";
@@ -65,6 +67,7 @@ function replayDurability(seed: readonly PersistedDurableHarnessEvent[] = []) {
           eventId: `evt_${events.length + 1}`,
           sequence: events.length + 1,
           recordedAt: "2026-06-07T00:00:00.000Z",
+          canonicalRequestDigest: canonicalHarnessEventRequestDigest(event),
         };
         events.push(persisted);
         return persisted;
@@ -91,17 +94,121 @@ function providerToolNames(tools: unknown): string[] {
 }
 
 describe("generateHarness", () => {
+  it("supplies deterministic model position to a checkpoint tool called by the model", async () => {
+    await withTempDir(async (dir) => {
+      const checkpointRequests: Array<Record<string, unknown>> = [];
+      let step = 0;
+      const model = new MockLanguageModelV3({
+        provider: "test",
+        modelId: "checkpoint-model-position",
+        doGenerate: async () => {
+          step += 1;
+          if (step === 1) {
+            return {
+              content: [
+                {
+                  type: "tool-call",
+                  toolCallId: "noop_call_1",
+                  toolName: "noop",
+                  input: JSON.stringify({}),
+                },
+                {
+                  type: "tool-call",
+                  toolCallId: "checkpoint_call_1",
+                  toolName: "checkpoint",
+                  input: JSON.stringify({
+                    label: "tests green",
+                    kind: "goal_reached",
+                    evidenceArtifactIds: [],
+                  }),
+                },
+              ],
+              finishReason: { unified: "tool-calls", raw: "tool-calls" },
+              usage,
+              warnings: [],
+            };
+          }
+          return {
+            content: [{ type: "text", text: "checkpoint recorded" }],
+            finishReason: { unified: "stop", raw: "stop" },
+            usage,
+            warnings: [],
+          };
+        },
+      });
+      const harness = createHarness({
+        host: localHost({ dataDir: dir }),
+        model,
+        tools: {
+          noop: tool({
+            description: "No-op before the checkpoint.",
+            inputSchema: z.object({}),
+            execute: async () => ({}),
+          }),
+        },
+        checkpoints: {
+          writer: {
+            checkpoint: async (request) => {
+              checkpointRequests.push(request as unknown as Record<string, unknown>);
+              return {
+                protocolVersion: "little-harness.checkpoints.v1",
+                sessionId: request.sessionId,
+                callIdentity: request.callIdentity,
+                milestoneId: "milestone-1",
+                kind: request.kind,
+                tier: "filesystem",
+                disposition: "created",
+              };
+            },
+          },
+        },
+      });
+
+      const result = await generateHarness({
+        harness,
+        type: "job",
+        input: {},
+        session: "checkpoint-session",
+      });
+
+      expect(result).toMatchObject({ status: "completed", text: "checkpoint recorded" });
+      expect(checkpointRequests).toHaveLength(1);
+      expect(checkpointRequests[0]).toMatchObject({
+        protocolVersion: "little-harness.checkpoints.v1",
+        sessionId: "checkpoint-session",
+        modelStepId: "step_1",
+        sequenceIndex: 1,
+        label: "tests green",
+        kind: "goal_reached",
+        evidenceArtifactIds: [],
+      });
+      expect(checkpointRequests[0]).not.toHaveProperty("verdict");
+    });
+  });
+
   it("rejects with HarnessInputError when no harness or call model is configured", async () => {
     await withTempDir(async (dir) => {
       const harness = createHarness({
         host: localHost({ dataDir: dir }),
         system: "Missing model.",
-      } as any);
+      });
 
       const run = generateHarness({ harness, type: "job", input: {} });
 
       await expect(run).rejects.toThrow(HarnessInputError);
       await expect(run).rejects.toThrow(/model/i);
+    });
+  });
+
+  it("runs a harness without a model of its own on the model the call passes", async () => {
+    await withTempDir(async (dir) => {
+      // A LittleDB managed agent names no model; its runtime passes the version's on each call.
+      const harness = createHarness({ host: localHost({ dataDir: dir }), system: "Be brief." });
+      expect(harness.config.model).toBeUndefined();
+
+      const result = await generateHarness({ harness, type: "job", input: {}, model: textModel("from the call") });
+
+      expect(result).toMatchObject({ status: "completed", text: "from the call" });
     });
   });
 
@@ -187,6 +294,7 @@ describe("generateHarness", () => {
       });
 
       expect(result.status).toBe("completed");
+      assertCompletedTurn(result);
       expect(result.text).toBe("request response");
       expect(defaultModel.doGenerateCalls).toHaveLength(0);
       expect(requestModel.doGenerateCalls).toHaveLength(1);
@@ -224,6 +332,7 @@ describe("generateHarness", () => {
         messages: [{ id: "m1", role: "user", parts: [{ type: "text", text: "Hi" }] }] as any,
       });
 
+      assertCompletedTurn(result);
       expect(result.text).toBe("done");
       expect(seenPrompt).not.toContain("missing");
       expect(result.warnings).toEqual([
@@ -476,6 +585,7 @@ describe("generateHarness", () => {
         session: "ticket:t1",
       });
 
+      assertCompletedTurn(result);
       expect(result.text).toBe("done");
       expect(result.output).toBe("done");
       expect(result.session.id).toBe("ticket:t1");
@@ -495,6 +605,7 @@ describe("generateHarness", () => {
       });
 
       expect(result.warnings[0]?.code).toBe("undefined_input_type");
+      assertCompletedTurn(result);
       expect(result.text).toBe("done");
     });
   });
@@ -527,6 +638,7 @@ describe("generateHarness", () => {
 
       const result = await generateHarness({ harness, type: "job", input: {}, session: "job" });
 
+      assertCompletedTurn(result);
       expect(result.persistence.status).toBe("succeeded");
       expect(stored).toHaveLength(1);
       expect(stored[0]).toMatchObject({
@@ -701,12 +813,42 @@ describe("generateHarness", () => {
 
       const result = await generateHarness({ harness, type: "job", input: {}, session: "mcp-generate" });
 
+      assertCompletedTurn(result);
       expect(result.text).toBe("mcp done");
       expect(mcpResolverMock.resolveHarnessMcpGateway).toHaveBeenCalledTimes(1);
       expect(mcpResolverMock.resolveHarnessMcpGateway).toHaveBeenCalledWith(mcpConfig);
       expect(seenToolNames).toEqual(expect.arrayContaining(["mcp_call_tool", "mcp_list_tools"]));
       expect(seenPrompt).toContain("Configured body.");
       expect(seenPrompt).toContain("MCP guide body.");
+      expect(close).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("surfaces a successful-path MCP close failure as a bounded terminal stage", async () => {
+    await withTempDir(async (dir) => {
+      const close = vi.fn(async () => {
+        throw new Error("mcp close failed");
+      });
+      mcpResolverMock.resolveHarnessMcpGateway.mockResolvedValueOnce({
+        tools: {},
+        skills: [],
+        manifest: { servers: [] },
+        close,
+      });
+      const harness = createHarness({
+        host: localHost({ dataDir: dir }),
+        model: textModel("mcp close stage"),
+        mcp: { servers: [] },
+      });
+
+      await expect(generateHarness({
+        harness,
+        messages: [{ id: "m1", role: "user", parts: [{ type: "text", text: "Close." }] }] as any,
+        session: "mcp-close-stage",
+      })).rejects.toMatchObject({
+        code: "harness_terminal_mcp_close_failed",
+        stage: "mcp_close",
+      });
       expect(close).toHaveBeenCalledTimes(1);
     });
   });
@@ -773,6 +915,7 @@ describe("generateHarness", () => {
       });
 
       const spooledPath = (await result.session.files.read("/artifacts/mcp-runtime-path.txt")).text().trim();
+      assertCompletedTurn(result);
       expect(result.text).toBe("final after mcp runtime spooling");
       expect(spooledPath).toMatch(/^\/artifacts\/tool-results\/mcp_call_tool\/.+\.txt$/u);
       expect((await result.session.files.read(spooledPath)).text()).toBe(longResult);
@@ -907,6 +1050,7 @@ describe("generateHarness", () => {
         session: "tool-loop",
       });
 
+      assertCompletedTurn(result);
       expect(result.text).toBe("final after tool");
       expect(model.doGenerateCalls).toHaveLength(2);
       expect((await result.session.files.read("/artifacts/tool/out.txt")).text()).toBe("hello");
@@ -974,6 +1118,7 @@ describe("generateHarness", () => {
         runId: "run_tool_events",
       });
 
+      assertCompletedTurn(result);
       expect(result.text).toBe("done");
       const succeeded = durability.events.find((event) => event.type === "harness.tool_call.succeeded");
       const failed = durability.events.find((event) => event.type === "harness.tool_call.failed");
@@ -1049,6 +1194,7 @@ describe("generateHarness", () => {
         activeTools: ["bash"],
       });
 
+      assertCompletedTurn(result);
       expect(result.text).toBe("final after runtime bridge");
       expect(events).toEqual(
         expect.arrayContaining([
@@ -1104,6 +1250,7 @@ describe("generateHarness", () => {
         activeTools: ["add"],
       });
 
+      assertCompletedTurn(result);
       expect(result.text).toBe("no bridge hint");
       expect(seenPrompt).not.toContain("js-exec");
       expect(seenPrompt).not.toContain("tools.add");
@@ -1147,6 +1294,7 @@ describe("generateHarness", () => {
         prepareStep: () => ({ activeTools: ["add"] }) as any,
       });
 
+      assertCompletedTurn(result);
       expect(result.text).toBe("prepare step no bridge hint");
       expect(seenToolNames).toEqual(["add"]);
       expect(seenPrompt).not.toContain("js-exec");
@@ -1193,6 +1341,7 @@ describe("generateHarness", () => {
         prepareStep: () => ({ activeTools: undefined, system: undefined }) as any,
       });
 
+      assertCompletedTurn(result);
       expect(result.text).toBe("undefined prepare step no bridge hint");
       expect(seenToolNames).toEqual(["add"]);
       expect(seenPrompt).toContain("Keep this base system.");
@@ -1260,6 +1409,7 @@ describe("generateHarness", () => {
       });
 
       const spooledPath = (await result.session.files.read("/artifacts/runtime-bridge-path.txt")).text().trim();
+      assertCompletedTurn(result);
       expect(result.text).toBe("final after runtime spooling");
       expect(spooledPath).toMatch(/^\/artifacts\/tool-results\/longLookup\/.+\.txt$/u);
       expect((await result.session.files.read(spooledPath)).text()).toBe(longResult);
@@ -1278,288 +1428,182 @@ describe("generateHarness", () => {
     });
   });
 
-  it("lets the model remember durable lessons", async () => {
+  it("lets an allowed person change a company memory with bash, and keeps it read-only for others", async () => {
     await withTempDir(async (dir) => {
+      type Body = { userId: string; role: "officer" | "underwriter" };
+      const prompts: Record<string, string> = {};
+      const toolResults: Record<string, string> = {};
+      const writeRule = (months: number) =>
+        `mkdir -p /persistent/company/rules && printf '%s\\n' '---' 'description: Refer when self-employed under ${months} months.' '---' > /persistent/company/rules/self-employed.md`;
+      const commands: Record<string, string> = {
+        TEACH: writeRule(24),
+        CHANGE: writeRule(12),
+        DROP: "rm /persistent/company/rules/self-employed.md",
+        PREFER: "printf 'Bob wants bullet points.\\n' > /persistent/me/style.md",
+      };
+      const model = new MockLanguageModelV3({
+        provider: "test",
+        modelId: "file-company-memory",
+        doGenerate: async (options) => {
+          const prompt = JSON.stringify(options.prompt);
+          const ask = /"text":"(TEACH|CHANGE|DROP|PREFER)"/.exec(prompt)?.[1] ?? "?";
+          if (prompt.includes("tool-result")) {
+            toolResults[ask] = prompt;
+            return { content: [{ type: "text", text: "done" }], finishReason: { unified: "stop", raw: "stop" }, usage, warnings: [] };
+          }
+          prompts[ask] = prompt;
+          return {
+            content: [
+              { type: "tool-call", toolCallId: `call_${ask}`, toolName: "bash", input: JSON.stringify({ command: commands[ask] }) },
+            ],
+            finishReason: { unified: "tool-calls", raw: "tool-calls" },
+            usage,
+            warnings: [],
+          };
+        },
+      });
+      const harness = createHarness<any, Body>({
+        host: localHost({ dataDir: dir }),
+        model,
+        memory: [
+          {
+            sourceDir: "memory/company",
+            harnessDir: "/persistent/company",
+            description: "The bank's lending rules. Underwriters set them.",
+            canWrite: ({ extraBody }) => extraBody?.role === "underwriter",
+          },
+          {
+            sourceDir: ({ extraBody }) => `memory/users/${extraBody?.userId}`,
+            harnessDir: "/persistent/me",
+          },
+        ],
+      });
+      const turn = (text: string, session: string, extraBody: Body) =>
+        generateHarness({
+          harness,
+          messages: [{ id: session, role: "user", parts: [{ type: "text", text }] }] as any,
+          session,
+          extraBody,
+        });
+      const dana = { userId: "dana", role: "underwriter" } as const;
+      const bob = { userId: "bob", role: "officer" } as const;
+      const ruleFile = path.join(dir, "memory/company/rules/self-employed.md");
+
+      const taught = await turn("TEACH", "dana-1", dana);
+      assertCompletedTurn(taught);
+      expect(prompts.TEACH).toContain("- memory: How to save, change and forget long-term memories");
+      expect(prompts.TEACH).toContain(
+        "The bank's lending rules. Underwriters set them.\\nYou may change this memory in this conversation. Read the memory skill",
+      );
+      expect(await readFile(ruleFile, "utf8")).toContain("under 24 months");
+
+      const changed = await turn("CHANGE", "dana-2", dana);
+      assertCompletedTurn(changed);
+      expect(changed.persistence.status).toBe("succeeded");
+      expect(prompts.CHANGE).toContain("- rules/self-employed.md: Refer when self-employed under 24 months.");
+      expect(await readFile(ruleFile, "utf8")).toContain("under 12 months");
+
+      // An officer sees the new rule, is told the memory is read-only, and the sandbox refuses the delete.
+      const dropped = await turn("DROP", "bob-1", bob);
+      assertCompletedTurn(dropped);
+      expect(prompts.DROP).toContain("- rules/self-employed.md: Refer when self-employed under 12 months.");
+      expect(prompts.DROP).toContain("This memory is read-only in this conversation");
+      expect(toolResults.DROP).toContain("read-only");
+      expect(await readFile(ruleFile, "utf8")).toContain("under 12 months");
+
+      // The officer's own memory is still theirs to change.
+      assertCompletedTurn(await turn("PREFER", "bob-2", bob));
+      expect(await readFile(path.join(dir, "memory/users/bob/style.md"), "utf8")).toBe("Bob wants bullet points.\n");
+    });
+  });
+
+  it("gives an agent without bash load_skill and file tools for its memory folders", async () => {
+    await withTempDir(async (dir) => {
+      const prompts: string[] = [];
+      const toolNames: string[][] = [];
       let call = 0;
-      let secondTurnPrompt = "";
-      const tailSentinel = "TAIL_SENTINEL_SHOULD_NOT_APPEAR";
-      const lesson = [
-        "For natural-language questions about paid invoices, query billing_invoices before invoice_events.",
-        "This bounded-context check adds filler before the late sentinel.",
-        tailSentinel,
-      ].join(" ");
+      const steps = [
+        { toolName: "load_skill", input: { name: "memory" } },
+        {
+          toolName: "write_file",
+          input: { path: "/persistent/memory/billing.md", content: "---\ndescription: Query billing_invoices first.\n---\n" },
+        },
+      ];
       const model = new MockLanguageModelV3({
         provider: "test",
-        modelId: "remember-durable-lessons",
+        modelId: "no-bash-memory",
         doGenerate: async (options) => {
+          prompts.push(JSON.stringify(options.prompt));
+          toolNames.push((options.tools ?? []).map((candidate: any) => candidate.name).sort());
+          const step = steps[call];
           call += 1;
-          if (call === 1) {
-            return {
-              content: [
-                {
-                  type: "tool-call",
-                  toolCallId: "call_remember",
-                  toolName: "remember",
-                  input: JSON.stringify({ memory: lesson, topic: "db-query-agent" }),
-                },
-              ],
-              finishReason: { unified: "tool-calls", raw: "tool-calls" },
-              usage,
-              warnings: [],
-            };
-          }
-
-          if (call === 2) {
-            return {
-              content: [{ type: "text", text: "stored memory" }],
-              finishReason: { unified: "stop", raw: "stop" },
-              usage,
-              warnings: [],
-            };
-          }
-
-          secondTurnPrompt = JSON.stringify(options.prompt);
-          return {
-            content: [{ type: "text", text: "used stored memory" }],
-            finishReason: { unified: "stop", raw: "stop" },
-            usage,
-            warnings: [],
-          };
+          return step === undefined
+            ? { content: [{ type: "text", text: "saved" }], finishReason: { unified: "stop", raw: "stop" }, usage, warnings: [] }
+            : {
+                content: [
+                  { type: "tool-call", toolCallId: `call_${call}`, toolName: step.toolName, input: JSON.stringify(step.input) },
+                ],
+                finishReason: { unified: "tool-calls", raw: "tool-calls" },
+                usage,
+                warnings: [],
+              };
         },
       });
       const harness = createHarness({
         host: localHost({ dataDir: dir }),
         model,
-        memory: {
-          sourceDir: "memory/db-query-agent",
-          maxIndexBytes: 220,
-          now: () => new Date("2026-06-09T00:00:00.000Z"),
-        },
+        runtime: { bash: false },
+        memory: { sourceDir: "memory/agent" },
       });
+      const send = (id: string, text: string) =>
+        generateHarness({
+          harness,
+          messages: [{ id, role: "user", parts: [{ type: "text", text }] }] as any,
+          session: "no-bash",
+        });
 
-      const first = await generateHarness({
-        harness,
-        messages: [
-          {
-            id: "m1",
-            role: "user",
-            parts: [{ type: "text", text: "Remember this database query rule." }],
-          },
-        ] as any,
-        session: "db-query-agent",
-      });
-
-      expect(first.text).toBe("stored memory");
-      expect(first.persistence.status).toBe("succeeded");
-      const memoryIndex = await readFile(
-        path.join(dir, "memory/db-query-agent/MEMORY.md"),
-        "utf8",
+      assertCompletedTurn(await send("m1", "Remember to query billing_invoices first."));
+      expect(toolNames[0]).toEqual(
+        expect.arrayContaining(["delete_file", "list_files", "load_skill", "read_file", "write_file"]),
       );
-      expect(memoryIndex).toContain("billing_invoices");
-      expect(memoryIndex).toContain("entries/2026-06-09/");
+      expect(toolNames[0]).not.toContain("bash");
+      expect(prompts[0]).toContain("- memory: How to save, change and forget long-term memories");
+      expect(prompts[0]).toContain("Open it with load_skill.");
+      expect(prompts[1]).toContain("One file per memory");
+      expect(await readFile(path.join(dir, "memory/agent/billing.md"), "utf8")).toContain("billing_invoices");
 
-      await generateHarness({
-        harness,
-        messages: [
-          {
-            id: "m2",
-            role: "user",
-            parts: [{ type: "text", text: "How should I answer paid invoice questions?" }],
-          },
-        ] as any,
-        session: "db-query-agent",
-      });
-
-      expect(secondTurnPrompt).toContain("billing_invoices");
-      expect(secondTurnPrompt).toContain("Long-term memory is mounted at /persistent/memory.");
-      expect(secondTurnPrompt).not.toContain(tailSentinel);
+      assertCompletedTurn(await send("m2", "How do I answer billing questions?"));
+      expect(prompts.at(-1)).toContain("- billing.md: Query billing_invoices first.");
     });
   });
 
-  it("preserves memory index bullets from concurrent sessions sharing one sourceDir", async () => {
+  it("uses a developer's own skill named memory in place of the built-in one", async () => {
     await withTempDir(async (dir) => {
-      let firstTurnCount = 0;
-      let releaseFirstTurns!: () => void;
-      const bothFirstTurnsLoaded = new Promise<void>((resolve) => {
-        releaseFirstTurns = resolve;
-      });
+      let prompt = "";
       const model = new MockLanguageModelV3({
         provider: "test",
-        modelId: "concurrent-shared-memory",
+        modelId: "own-memory-skill",
         doGenerate: async (options) => {
-          const prompt = JSON.stringify(options.prompt);
-          if (prompt.includes("tool-result")) {
-            return {
-              content: [{ type: "text", text: "stored memory" }],
-              finishReason: { unified: "stop", raw: "stop" },
-              usage,
-              warnings: [],
-            };
-          }
-
-          firstTurnCount += 1;
-          if (firstTurnCount >= 2) {
-            releaseFirstTurns();
-          }
-          await bothFirstTurnsLoaded;
-
-          const memory = prompt.includes("FIRST_SHARED_MEMORY")
-            ? "FIRST_SHARED_MEMORY survives a concurrent shared source commit."
-            : "SECOND_SHARED_MEMORY survives a concurrent shared source commit.";
-          return {
-            content: [
-              {
-                type: "tool-call",
-                toolCallId: `call_${memory.slice(0, 6).toLowerCase()}`,
-                toolName: "remember",
-                input: JSON.stringify({ memory }),
-              },
-            ],
-            finishReason: { unified: "tool-calls", raw: "tool-calls" },
-            usage,
-            warnings: [],
-          };
+          prompt = JSON.stringify(options.prompt);
+          return { content: [{ type: "text", text: "ok" }], finishReason: { unified: "stop", raw: "stop" }, usage, warnings: [] };
         },
       });
       const harness = createHarness({
         host: localHost({ dataDir: dir }),
         model,
-        memory: {
-          sourceDir: "memory/shared",
-          now: () => new Date("2026-06-09T00:00:00.000Z"),
-        },
+        memory: { sourceDir: "memory/agent" },
+        skills: [{ name: "memory", description: "Our own way to keep notes", files: { "SKILL.md": "# Ours\n" } }],
       });
-
-      const [first, second] = await Promise.all([
-        generateHarness({
+      assertCompletedTurn(
+        await generateHarness({
           harness,
-          messages: [
-            {
-              id: "m1",
-              role: "user",
-              parts: [{ type: "text", text: "Remember FIRST_SHARED_MEMORY." }],
-            },
-          ] as any,
-          session: "shared-memory-first",
+          messages: [{ id: "m1", role: "user", parts: [{ type: "text", text: "Hi" }] }] as any,
+          session: "own-skill",
         }),
-        generateHarness({
-          harness,
-          messages: [
-            {
-              id: "m2",
-              role: "user",
-              parts: [{ type: "text", text: "Remember SECOND_SHARED_MEMORY." }],
-            },
-          ] as any,
-          session: "shared-memory-second",
-        }),
-      ]);
-
-      expect(first.persistence.status).toBe("succeeded");
-      expect(second.persistence.status).toBe("succeeded");
-      const memoryIndex = await readFile(path.join(dir, "memory/shared/MEMORY.md"), "utf8");
-      expect(memoryIndex).toContain("FIRST_SHARED_MEMORY");
-      expect(memoryIndex).toContain("SECOND_SHARED_MEMORY");
-    });
-  });
-
-  it("prioritizes concurrent source memory over stale loaded index bullets when bounded", async () => {
-    await withTempDir(async (dir) => {
-      await mkdir(path.join(dir, "memory/shared"), { recursive: true });
-      await writeFile(
-        path.join(dir, "memory/shared/MEMORY.md"),
-        [
-          "# Memory Index",
-          "- 2026-06-08: [old](entries/2026-06-08/old.md) - OLD_ORDERING_SENTINEL",
-          "",
-        ].join("\n"),
       );
-
-      let firstTurnCount = 0;
-      let releaseFirstTurns!: () => void;
-      const bothFirstTurnsLoaded = new Promise<void>((resolve) => {
-        releaseFirstTurns = resolve;
-      });
-      const model = new MockLanguageModelV3({
-        provider: "test",
-        modelId: "bounded-concurrent-shared-memory",
-        doGenerate: async (options) => {
-          const prompt = JSON.stringify(options.prompt);
-          if (prompt.includes("tool-result")) {
-            return {
-              content: [{ type: "text", text: "stored memory" }],
-              finishReason: { unified: "stop", raw: "stop" },
-              usage,
-              warnings: [],
-            };
-          }
-
-          firstTurnCount += 1;
-          if (firstTurnCount >= 2) {
-            releaseFirstTurns();
-          }
-          await bothFirstTurnsLoaded;
-
-          const memory = prompt.includes("FIRST_ORDERING_SENTINEL")
-            ? "FIRST_ORDERING_SENTINEL"
-            : "SECOND_ORDERING_SENTINEL";
-          return {
-            content: [
-              {
-                type: "tool-call",
-                toolCallId: `call_${memory.slice(0, 6).toLowerCase()}`,
-                toolName: "remember",
-                input: JSON.stringify({ memory }),
-              },
-            ],
-            finishReason: { unified: "tool-calls", raw: "tool-calls" },
-            usage,
-            warnings: [],
-          };
-        },
-      });
-      const harness = createHarness({
-        host: localHost({ dataDir: dir }),
-        model,
-        memory: {
-          sourceDir: "memory/shared",
-          maxIndexBytes: 300,
-          now: () => new Date("2026-06-09T00:00:00.000Z"),
-        },
-      });
-
-      const [first, second] = await Promise.all([
-        generateHarness({
-          harness,
-          messages: [
-            {
-              id: "m1",
-              role: "user",
-              parts: [{ type: "text", text: "Remember FIRST_ORDERING_SENTINEL." }],
-            },
-          ] as any,
-          session: "bounded-shared-memory-first",
-        }),
-        generateHarness({
-          harness,
-          messages: [
-            {
-              id: "m2",
-              role: "user",
-              parts: [{ type: "text", text: "Remember SECOND_ORDERING_SENTINEL." }],
-            },
-          ] as any,
-          session: "bounded-shared-memory-second",
-        }),
-      ]);
-
-      expect(first.persistence.status).toBe("succeeded");
-      expect(second.persistence.status).toBe("succeeded");
-      const memoryIndex = await readFile(path.join(dir, "memory/shared/MEMORY.md"), "utf8");
-      expect(new TextEncoder().encode(memoryIndex).byteLength).toBeLessThanOrEqual(300);
-      expect(memoryIndex).toContain("FIRST_ORDERING_SENTINEL");
-      expect(memoryIndex).toContain("SECOND_ORDERING_SENTINEL");
-      expect(memoryIndex).not.toContain("OLD_ORDERING_SENTINEL");
+      expect(prompt).toContain("- memory: Our own way to keep notes.");
+      expect(prompt).not.toContain("How to save, change and forget long-term memories");
+      expect(prompt).toContain("Read the memory skill before you save");
     });
   });
 
@@ -1643,6 +1687,7 @@ describe("generateHarness", () => {
         session: "spooled-tool-result",
       });
 
+      assertCompletedTurn(result);
       expect(result.text).toBe("final after readback");
       expect((await result.session.files.read("/artifacts/tool-results/longLookup/call_1.txt")).text()).toBe(
         longResult,
@@ -1907,6 +1952,37 @@ describe("generateHarness", () => {
     });
   });
 
+  it("puts the turn's trigger on harness.session.started as string metadata, not in the session log", async () => {
+    await withTempDir(async (dir) => {
+      const durable: Array<{ type: string; payload?: unknown }> = [];
+      const trace: Array<{ type: string; metadata?: unknown }> = [];
+      const harness = createHarness({
+        host: localHost({ dataDir: dir }),
+        model: textModel("done"),
+        sessionLog: {
+          append: async (event) => {
+            durable.push(event);
+          },
+        },
+        onEvent: async (event) => {
+          trace.push(event);
+        },
+      });
+      const trigger = { kind: "message", source: "whatsapp", from: "+15550100", label: "New order" };
+
+      await generateHarness({ harness, prompt: "Hi", session: "triggered", trigger });
+      await generateHarness({ harness, prompt: "Hi", session: "triggered", trigger });
+      await generateHarness({ harness, prompt: "Hi", session: "untriggered" });
+
+      const started = trace.filter((event) => event.type === "harness.session.started");
+      const expected = { triggerKind: "message", triggerSource: "whatsapp", triggerFrom: "+15550100", triggerLabel: "New order" };
+      expect(started.map((event) => event.metadata)).toEqual([expected, expected, {}]);
+      const startedPayloads = durable.filter((event) => event.type === "harness.session.started").map((event) => event.payload);
+      expect(startedPayloads).toHaveLength(3);
+      expect(JSON.stringify(startedPayloads)).not.toMatch(/whatsapp|New order/u);
+    });
+  });
+
   it("emits durable payloads and trace metadata from one model occurrence", async () => {
     await withTempDir(async (dir) => {
       const durable: unknown[] = [];
@@ -1914,7 +1990,7 @@ describe("generateHarness", () => {
       const harness = createHarness({
         host: localHost({ dataDir: dir }),
         model: textModel("done"),
-        durability: {
+        sessionLog: {
           append: async (event) => {
             durable.push(event);
           },
@@ -2001,14 +2077,16 @@ describe("generateHarness", () => {
       const harness = createHarness({
         host: localHost({ dataDir: dir }),
         model,
-        durability: durability.sink,
+        sessionLog: durability.sink,
       });
       const messages = [{ id: "m1", role: "user", parts: [{ type: "text", text: "Cache me." }] }] as any;
 
       const first = await generateHarness({ harness, messages, session: "model-replay", runId: "run_model_replay" });
       const second = await generateHarness({ harness, messages, session: "model-replay", runId: "run_model_replay" });
 
+      assertCompletedTurn(first);
       expect(first.text).toBe("cached response");
+      assertCompletedTurn(second);
       expect(second.text).toBe("cached response");
       expect(model.doGenerateCalls).toHaveLength(1);
     });
@@ -2028,7 +2106,7 @@ describe("generateHarness", () => {
       const harness = createHarness({
         host: localHost({ dataDir: dir }),
         model,
-        durability: durability.sink,
+        sessionLog: durability.sink,
         mcp: { servers: [] },
       });
       const messages = [{ id: "m1", role: "user", parts: [{ type: "text", text: "Cache me with MCP." }] }] as any;
@@ -2038,7 +2116,9 @@ describe("generateHarness", () => {
       mcpResolverMock.resolveHarnessMcpGateway.mockRejectedValueOnce(new Error("mcp server down"));
       const second = await generateHarness({ harness, messages, session: "mcp-model-replay", runId: "run_mcp_model_replay" });
 
+      assertCompletedTurn(first);
       expect(first.text).toBe("cached mcp response");
+      assertCompletedTurn(second);
       expect(second.text).toBe("cached mcp response");
       expect(model.doGenerateCalls).toHaveLength(1);
       expect(mcpResolverMock.resolveHarnessMcpGateway).toHaveBeenCalledTimes(1);
@@ -2053,7 +2133,7 @@ describe("generateHarness", () => {
       const harness = createHarness({
         host: localHost({ dataDir: dir }),
         model,
-        durability: durability.sink,
+        sessionLog: durability.sink,
       });
       const messages = [
         { id: "m1", role: "user", parts: [{ type: "text", text: "Temperature-sensitive request." }] },
@@ -2085,7 +2165,7 @@ describe("generateHarness", () => {
       const harness = createHarness({
         host: localHost({ dataDir: dir }),
         model,
-        durability: durability.sink,
+        sessionLog: durability.sink,
         tools: {
           lookup: tool({
             description: "Lookup data.",
@@ -2129,7 +2209,7 @@ describe("generateHarness", () => {
       const harness = createHarness({
         host: localHost({ dataDir: dir }),
         model,
-        durability: durability.sink,
+        sessionLog: durability.sink,
         tools: {
           lookup: tool({
             description: "Lookup data.",
@@ -2172,7 +2252,7 @@ describe("generateHarness", () => {
       const harness = createHarness({
         host: localHost({ dataDir: dir }),
         model,
-        durability: durability.sink,
+        sessionLog: durability.sink,
         tools: {
           lookup: tool({
             description: "Lookup data.",
@@ -2200,7 +2280,9 @@ describe("generateHarness", () => {
         activeTools: ["bash", "lookup"],
       });
 
+      assertCompletedTurn(first);
       expect(first.text).toBe("active-tools-set response");
+      assertCompletedTurn(second);
       expect(second.text).toBe("active-tools-set response");
       expect(model.doGenerateCalls).toHaveLength(1);
     });
@@ -2213,7 +2295,7 @@ describe("generateHarness", () => {
       const harness = createHarness({
         host: localHost({ dataDir: dir }),
         model,
-        durability: durability.sink,
+        sessionLog: durability.sink,
         tools: {
           lookup: tool({
             description: "Lookup data.",
@@ -2256,7 +2338,7 @@ describe("generateHarness", () => {
       const harness = createHarness({
         host: localHost({ dataDir: dir }),
         model,
-        durability: durability.sink,
+        sessionLog: durability.sink,
         tools: {
           lookup: tool({
             description: "Lookup data.",
@@ -2295,7 +2377,7 @@ describe("generateHarness", () => {
       const firstHarness = createHarness({
         host: localHost({ dataDir: path.join(dir, "first") }),
         model: textModel("before crash"),
-        durability: initial.sink,
+        sessionLog: initial.sink,
       });
       const messages = [{ id: "m1", role: "user", parts: [{ type: "text", text: "Resume me." }] }] as any;
       await generateHarness({ harness: firstHarness, messages, session: "model-crash", runId: "run_model_crash" });
@@ -2307,13 +2389,14 @@ describe("generateHarness", () => {
       const harness = createHarness({
         host: localHost({ dataDir: path.join(dir, "second") }),
         model,
-        durability: crashWindow.sink,
+        sessionLog: crashWindow.sink,
       });
 
       const result = await generateHarness({ harness, messages, session: "model-crash", runId: "run_model_crash" });
       const modelEvents = crashWindow.events.filter((event) => event.type.startsWith("harness.model."));
       const responded = crashWindow.events.find((event) => event.type === "harness.model.responded");
 
+      assertCompletedTurn(result);
       expect(result.text).toBe("after crash");
       expect(model.doGenerateCalls).toHaveLength(1);
       expect(modelEvents.filter((event) => event.type === "harness.model.called")).toHaveLength(1);
@@ -2340,7 +2423,7 @@ describe("generateHarness", () => {
             throw new Error("provider down");
           },
         }),
-        durability: durability.sink,
+        sessionLog: durability.sink,
       });
       const messages = [{ id: "m1", role: "user", parts: [{ type: "text", text: "Retry me." }] }] as any;
 
@@ -2353,7 +2436,7 @@ describe("generateHarness", () => {
       const harness = createHarness({
         host: localHost({ dataDir: path.join(dir, "recovered") }),
         model,
-        durability: durability.sink,
+        sessionLog: durability.sink,
       });
 
       const result = await generateHarness({ harness, messages, session: "model-terminal-failed", runId: "run_model_terminal_failed" });
@@ -2364,6 +2447,7 @@ describe("generateHarness", () => {
           (event.payload as { response?: { text?: string } }).response?.text === "recovered",
       );
 
+      assertCompletedTurn(result);
       expect(result.text).toBe("recovered");
       expect(model.doGenerateCalls).toHaveLength(1);
       expect(modelCalled).toHaveLength(2);
@@ -2412,7 +2496,7 @@ describe("generateHarness", () => {
                 };
           },
         }),
-        durability: initial.sink,
+        sessionLog: initial.sink,
         tools: {
           lookup: tool({
             description: "Lookup data.",
@@ -2462,7 +2546,7 @@ describe("generateHarness", () => {
                 };
           },
         }),
-        durability: crashWindow.sink,
+        sessionLog: crashWindow.sink,
         tools: {
           lookup: tool({
             description: "Lookup data.",
@@ -2480,6 +2564,7 @@ describe("generateHarness", () => {
           (event.payload as { callId?: string }).callId === (secondCalled!.payload as { callId?: string }).callId,
       );
 
+      assertCompletedTurn(result);
       expect(result.text).toBe("resumed final");
       expect(providerCalls).toBe(2);
       expect(modelCalled).toHaveLength(2);
@@ -2528,7 +2613,7 @@ describe("generateHarness", () => {
       const harness = createHarness({
         host: localHost({ dataDir: dir }),
         model,
-        durability: durability.sink,
+        sessionLog: durability.sink,
         tools: {
           lookup: tool({
             description: "Lookup data.",
@@ -2545,7 +2630,9 @@ describe("generateHarness", () => {
       const first = await generateHarness({ harness, messages, session: "tool-replay", runId: "run_tool_replay" });
       const second = await generateHarness({ harness, messages, session: "tool-replay", runId: "run_tool_replay" });
 
+      assertCompletedTurn(first);
       expect(first.text).toBe("final with tool");
+      assertCompletedTurn(second);
       expect(second.text).toBe("final with tool");
       expect(toolCalls).toBe(1);
     });
@@ -2588,7 +2675,7 @@ describe("generateHarness", () => {
       const harness = createHarness({
         host: localHost({ dataDir: path.join(dir, "first") }),
         model,
-        durability: initial.sink,
+        sessionLog: initial.sink,
         tools: {
           counted: tool({
             description: "Count executions.",
@@ -2609,6 +2696,7 @@ describe("generateHarness", () => {
         runId: "run_runtime_bridge_replay",
         activeTools: ["bash"],
       });
+      assertCompletedTurn(first);
       expect(first.text).toBe("first final");
       expect(bridgedToolCalls).toBe(1);
 
@@ -2651,7 +2739,7 @@ describe("generateHarness", () => {
                 };
           },
         }),
-        durability: crashWindow.sink,
+        sessionLog: crashWindow.sink,
         tools: {
           counted: tool({
             description: "Count executions.",
@@ -2672,6 +2760,7 @@ describe("generateHarness", () => {
         activeTools: ["bash"],
       });
 
+      assertCompletedTurn(second);
       expect(second.text).toBe("replayed final");
       expect(bridgedToolCalls).toBe(1);
     });
@@ -2741,7 +2830,7 @@ describe("generateHarness", () => {
       const harness = createHarness({
         host: localHost({ dataDir: path.join(dir, "first") }),
         model,
-        durability: initial.sink,
+        sessionLog: initial.sink,
         tools: { counted },
       });
 
@@ -2752,6 +2841,7 @@ describe("generateHarness", () => {
         runId: "run_runtime_bridge_parent_scope",
         activeTools: ["bash"],
       });
+      assertCompletedTurn(first);
       expect(first.text).toBe("first final");
       expect(bridgedToolCalls).toBe(2);
       expect((await first.session.files.read("/artifacts/second-bridge-value.txt")).text()).toBe("2\n");
@@ -2797,7 +2887,7 @@ describe("generateHarness", () => {
                 };
           },
         }),
-        durability: crashWindow.sink,
+        sessionLog: crashWindow.sink,
         tools: { counted },
       });
 
@@ -2809,6 +2899,7 @@ describe("generateHarness", () => {
         activeTools: ["bash"],
       });
 
+      assertCompletedTurn(second);
       expect(second.text).toBe("replayed final");
       expect(bridgedToolCalls).toBe(2);
       expect((await second.session.files.read("/artifacts/second-bridge-value.txt")).text()).toBe("2\n");
@@ -3300,6 +3391,62 @@ describe("generateHarness", () => {
     });
   });
 
+  it("records what the turn ran on in one harness.runtime.usage event before the turn closes", async () => {
+    await withTempDir(async (dir) => {
+      let call = 0;
+      const events: any[] = [];
+      const harness = createHarness({
+        host: localHost({ dataDir: dir }),
+        model: new MockLanguageModelV3({
+          provider: "test",
+          modelId: "runtime-usage",
+          doGenerate: async () => {
+            call += 1;
+            return call === 1
+              ? {
+                  content: [
+                    { type: "tool-call", toolCallId: "call_1", toolName: "bash", input: JSON.stringify({ command: "echo one" }) },
+                    { type: "tool-call", toolCallId: "call_2", toolName: "bash", input: JSON.stringify({ command: "echo two" }) },
+                  ],
+                  finishReason: { unified: "tool-calls", raw: "tool-calls" },
+                  usage,
+                  warnings: [],
+                }
+              : {
+                  content: [{ type: "text", text: "done" }],
+                  finishReason: { unified: "stop", raw: "stop" },
+                  usage,
+                  warnings: [],
+                };
+          },
+        }),
+        onEvent: (event) => {
+          events.push(event);
+        },
+      });
+
+      await generateHarness({
+        harness,
+        messages: [{ id: "m1", role: "user", parts: [{ type: "text", text: "Use bash." }] }] as any,
+        session: "runtime-usage",
+      });
+
+      const types = events.map((event) => event.type);
+      expect(types.filter((type) => type === "harness.runtime.usage")).toHaveLength(1);
+      // LittleDB closes the turn's trace on the terminal session event, so the usage has to
+      // come first.
+      expect(types.indexOf("harness.runtime.usage")).toBeLessThan(types.indexOf("harness.session.completed"));
+      expect(events.find((event) => event.type === "harness.runtime.usage")).toMatchObject({
+        metadata: {
+          tier: "tier-0",
+          commands: { tier0: 2, nextTier: 0, denied: 0 },
+          escalations: 0,
+          sandbox: { provider: "just-bash", activeMs: expect.any(Number) },
+        },
+      });
+    });
+  });
+
   it("allows manual Persistent Dirs to be committed from the completed result", async () => {
     await withTempDir(async (dir) => {
       const stored: unknown[] = [];
@@ -3329,6 +3476,7 @@ describe("generateHarness", () => {
 
       const result = await generateHarness({ harness, type: "job", input: {}, session: "manual" });
 
+      assertCompletedTurn(result);
       expect(result.persistence).toMatchObject({
         status: "succeeded",
         commits: [{ harnessDir: "/persistent/manual", commit: "manual", status: "skipped" }],
@@ -3405,6 +3553,7 @@ describe("generateHarness", () => {
       await secondStartedPromise;
 
       let manualDone = false;
+      assertCompletedTurn(first);
       const manual = first.commitManual().then(() => {
         manualDone = true;
       });

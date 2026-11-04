@@ -1,4 +1,4 @@
-import { createHarness, localHost } from "little-harness";
+import { createHarness, localHost } from "@little-stack/harness";
 import { getConciergeModel } from "./env";
 
 /**

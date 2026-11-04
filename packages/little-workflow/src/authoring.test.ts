@@ -4,32 +4,38 @@ import {
   createRuntime,
   localWorld,
   model,
+  runOrchestration,
   runWorkflow,
   skill,
 } from "./authoring.js";
 import * as publicApi from "./index.js";
+import * as internalsApi from "./entries/internals.js";
 import type {
   BashCapabilities,
-  ExecuteWorkflowVersionOptions,
-  Harness,
   InferWorkflowInput,
   InferWorkflowOutput,
   MemoryConfig,
   ModelSlot,
   OrchestratorConfig,
   OutputMode,
-  ParserSchemaLike,
   PlannerConfig,
   RunResult,
-  RunWorkflowOptions,
-  Schema,
   Skill,
   SkillOidcToken,
   SuperviseDecision,
   SuperviseOuterLoopState,
   WorkerConfig,
-  WorkflowDefinition,
 } from "./index.js";
+import type {
+  RunWorkflowRequest,
+} from "./entries/internals.js";
+import type {
+  ExecuteWorkflowVersionOptions,
+  Harness,
+  ParserSchemaLike,
+  Schema,
+  WorkflowDefinition,
+} from "./entries/internals.js";
 import type { CompilableWorkflowDefinition } from "./compiler.js";
 import {
   DEFAULT_WORKFLOW_VERSION_REUSE_STRATEGY,
@@ -69,7 +75,7 @@ import {
     },
   });
 
-  const _legacyPlannerOption: RunWorkflowOptions<typeof typeCheckWorkflow> = {
+  const _legacyPlannerOption: RunWorkflowRequest<typeof typeCheckWorkflow> = {
     world: localWorld(),
     workflows: typeCheckWorkflow,
     input: { ticketId: "TIN-types", body: "legacy planner option" },
@@ -78,7 +84,7 @@ import {
   };
   void _legacyPlannerOption;
 
-  const _legacyModelsOption: RunWorkflowOptions<typeof typeCheckWorkflow> = {
+  const _legacyModelsOption: RunWorkflowRequest<typeof typeCheckWorkflow> = {
     world: localWorld(),
     workflows: typeCheckWorkflow,
     input: { ticketId: "TIN-types", body: "legacy models option" },
@@ -87,7 +93,7 @@ import {
   };
   void _legacyModelsOption;
 
-  const _legacyAiOption: RunWorkflowOptions<typeof typeCheckWorkflow> = {
+  const _legacyAiOption: RunWorkflowRequest<typeof typeCheckWorkflow> = {
     world: localWorld(),
     workflows: typeCheckWorkflow,
     input: { ticketId: "TIN-types", body: "legacy ai option" },
@@ -96,7 +102,7 @@ import {
   };
   void _legacyAiOption;
 
-  const _legacyCodeRunnerOption: RunWorkflowOptions<typeof typeCheckWorkflow> = {
+  const _legacyCodeRunnerOption: RunWorkflowRequest<typeof typeCheckWorkflow> = {
     world: localWorld(),
     workflows: typeCheckWorkflow,
     input: { ticketId: "TIN-types", body: "legacy code option" },
@@ -136,7 +142,7 @@ import {
       harness: plannerTypeHarness,
     },
   });
-  const _plannerConfiguredRunOptions: RunWorkflowOptions<typeof plannerConfiguredWorkflow> = {
+  const _plannerConfiguredRunOptions: RunWorkflowRequest<typeof plannerConfiguredWorkflow> = {
     world: localWorld(),
     workflows: plannerConfiguredWorkflow,
     input: { ticketId: "TIN-types", body: "planner configured" },
@@ -376,7 +382,7 @@ describe("authoring helpers", () => {
         planner,
       });
 
-      const options: RunWorkflowOptions<typeof workflow> = {
+      const options: RunWorkflowRequest<typeof workflow> = {
         world: localWorld({ dataDir: "/tmp/lwf-types" }),
         workflows: workflow,
         input: {},
@@ -469,7 +475,7 @@ describe("authoring helpers", () => {
 
     expect(workflow.bash).toBe(workflowBash);
 
-    const runOptions: RunWorkflowOptions<readonly [typeof workflow]> = {
+    const runOptions: RunWorkflowRequest<readonly [typeof workflow]> = {
       world: localWorld(),
       workflows: [workflow],
       input: { batch: "networked" },
@@ -486,14 +492,16 @@ describe("authoring helpers", () => {
   });
 
   it("re-exports the authoring surface from the public package entrypoint", () => {
-    expect(publicApi.createLittleWorkflow).toBe(createLittleWorkflow);
+    expect(publicApi).not.toHaveProperty("createLittleWorkflow");
+    expect(internalsApi.createLittleWorkflow).toBe(createLittleWorkflow);
     expect(publicApi.model).toBe(model);
     expect(publicApi.localWorld).toBe(localWorld);
     expect(publicApi).not.toHaveProperty("createRuntime");
     expect(publicApi.skill).toBe(skill);
     expect(publicApi.runWorkflow).toBe(runWorkflow);
-    expect(publicApi.DEFAULT_WORKFLOW_VERSION_REUSE_STRATEGY).toBe("planner_reviewed");
-    expect(publicApi.resolveWorkflowVersionReuseStrategy()).toBe("planner_reviewed");
+    expect(publicApi.runOrchestration).toBe(runOrchestration);
+    expect(internalsApi.DEFAULT_WORKFLOW_VERSION_REUSE_STRATEGY).toBe("planner_reviewed");
+    expect(internalsApi.resolveWorkflowVersionReuseStrategy()).toBe("planner_reviewed");
     expect(publicApi).not.toHaveProperty("DEFAULT_WORKFLOW_VERSION_REUSE_POLICY");
     expect(publicApi).not.toHaveProperty("resolveWorkflowVersionReusePolicy");
     expect(publicApi).not.toHaveProperty("concreteInputStructure");
@@ -515,10 +523,8 @@ describe("authoring helpers", () => {
     } as unknown as Parameters<typeof createLittleWorkflow>[0]);
 
     await expect(
-      runWorkflow({
+      runWorkflow(workflowWithoutPlanner, { ticketId: "TIN-1", body: "Cannot sign in." }, {
         world: localWorld(),
-        workflows: workflowWithoutPlanner,
-        input: { ticketId: "TIN-1", body: "Cannot sign in." },
       }),
     ).rejects.toThrow("runWorkflow requires workflow.planner harness config in alpha.");
   });
@@ -561,7 +567,7 @@ describe("authoring helpers", () => {
     expectTypeOf(standardSchemaWorkflow).toMatchTypeOf<
       WorkflowDefinition<TicketInput, TicketOutput>
     >();
-    expectTypeOf<RunWorkflowOptions<typeof ticketWorkflow>["input"]>().toEqualTypeOf<
+    expectTypeOf<RunWorkflowRequest<typeof ticketWorkflow>["input"]>().toEqualTypeOf<
       TicketInput
     >();
     expectTypeOf<RunResult<TicketOutput>["output"]>().toEqualTypeOf<TicketOutput>();
@@ -583,17 +589,14 @@ describe("authoring helpers", () => {
     expectTypeOf<MemoryConfig["attach"]>().toEqualTypeOf<
       readonly { readonly id: string; readonly mode: "ro" }[] | undefined
     >();
-    // runWorkflow accepts the power-user options object and returns the typed result
-    // (it is now overloaded to also accept the ergonomic `runWorkflow(def, input)` form).
+    // runWorkflow(workflow, input, options) returns the typed result.
     expectTypeOf(
-      runWorkflow({
+      runWorkflow(ticketWorkflow, { ticketId: "TIN-1", body: "Billing question." }, {
         world: localWorld(),
-        workflows: ticketWorkflow,
-        input: { ticketId: "TIN-1", body: "Billing question." },
       }),
     ).toEqualTypeOf<Promise<RunResult<TicketOutput>>>();
 
-    const validOptions: RunWorkflowOptions<typeof ticketWorkflow> = {
+    const validOptions: RunWorkflowRequest<typeof ticketWorkflow> = {
       world: localWorld(),
       workflows: ticketWorkflow,
       input: { ticketId: "TIN-2", body: "Billing question." },
@@ -641,7 +644,7 @@ describe("authoring helpers", () => {
     expect(workerWithSkillDefaults.skillMaxRisk).toBe("MEDIUM");
     expect(orchestratorWithSkillDefaults.skillMaxRisk).toBe("HIGH");
 
-    const invalidOptions: RunWorkflowOptions<typeof ticketWorkflow> = {
+    const invalidOptions: RunWorkflowRequest<typeof ticketWorkflow> = {
       world: localWorld(),
       workflows: ticketWorkflow,
       // @ts-expect-error input must match the workflow definition input type.
@@ -650,52 +653,50 @@ describe("authoring helpers", () => {
     void invalidOptions;
 
     if (false) {
-      void runWorkflow({
-        world: localWorld(),
-        workflows: inferredTicketWorkflow,
+      void runWorkflow(
+        inferredTicketWorkflow,
         // @ts-expect-error direct runWorkflow input must match the workflow input type.
-        input: { ticketId: "TIN-4" },
-      });
+        { ticketId: "TIN-4" },
+        { world: localWorld() },
+      );
 
       const orchestrator = {
         model: { provider: "openai", modelId: "gpt-5" },
         harness: testHarness,
       };
 
-      // @ts-expect-error workflow arrays require orchestrator config.
-      void runWorkflow({
+      // @ts-expect-error runWorkflow runs one workflow; workflow arrays go to runOrchestration.
+      void runWorkflow([ticketWorkflow, arrayWorkflow] as const, {}, { world: localWorld() });
+
+      void runOrchestration({
+        world: localWorld(),
+        // @ts-expect-error runOrchestration takes a workflow array, not a single workflow.
+        workflows: ticketWorkflow,
+        input: { ticketId: "TIN-4", body: "Single workflow belongs to runWorkflow." },
+        orchestrator,
+      });
+
+      // @ts-expect-error runOrchestration requires orchestrator config.
+      void runOrchestration({
         world: localWorld(),
         workflows: [ticketWorkflow, arrayWorkflow] as const,
         input: {},
       });
 
-      void runWorkflow({
-        world: localWorld(),
-        workflows: ticketWorkflow,
-        input: { ticketId: "TIN-4", body: "Single workflow forbids orchestrator." },
-        // @ts-expect-error single-workflow runs must not accept orchestrator config.
-        orchestrator,
-      });
-
-      void runWorkflow({
-        world: localWorld(),
+      void runOrchestration({
         workflows: [ticketWorkflow, arrayWorkflow] as const,
         input: {},
         orchestrator,
       });
 
-      void runWorkflow({
+      void runWorkflow(ticketWorkflow, { ticketId: "TIN-4", body: "Models in runWorkflow should be removed." }, {
         world: localWorld(),
-        workflows: ticketWorkflow,
-        input: { ticketId: "TIN-4", body: "Models in runWorkflow should be removed." },
         // @ts-expect-error runWorkflow must not accept direct models overrides.
         models: { "model.fast": reasoningModel },
       });
 
-      void runWorkflow({
+      void runWorkflow(ticketWorkflow, { ticketId: "TIN-4", body: "ai adapter in runWorkflow should be removed." }, {
         world: localWorld(),
-        workflows: ticketWorkflow,
-        input: { ticketId: "TIN-4", body: "ai adapter in runWorkflow should be removed." },
         // @ts-expect-error runWorkflow must not accept direct ai adapter overrides.
         ai: {
           async generate() {
@@ -704,10 +705,8 @@ describe("authoring helpers", () => {
         },
       });
 
-      void runWorkflow({
+      void runWorkflow(ticketWorkflow, { ticketId: "TIN-4", body: "codeRunner in runWorkflow should be removed." }, {
         world: localWorld(),
-        workflows: ticketWorkflow,
-        input: { ticketId: "TIN-4", body: "codeRunner in runWorkflow should be removed." },
         // @ts-expect-error runWorkflow must not accept direct codeRunner overrides.
         codeRunner: {
           async run() {

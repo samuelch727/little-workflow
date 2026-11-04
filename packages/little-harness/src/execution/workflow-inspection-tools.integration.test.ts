@@ -1,3 +1,4 @@
+import { assertCompletedTurn } from "../test/completed-turn.js";
 import { MockLanguageModelV3 } from "ai/test";
 import { beforeEach, expect, it, vi } from "vitest";
 import { createHarness } from "../create-harness.js";
@@ -105,6 +106,7 @@ it("lets the model inspect available workflows before choosing one", async () =>
     const result = await generateHarness({ harness, type: "job", input: {} });
 
     expect(result.status).toBe("completed");
+    assertCompletedTurn(result);
     expect(result.text).toBe("I found candidate.review.");
     expect(call).toBe(2);
     expect(seenToolNames[0]).toEqual(expect.arrayContaining([

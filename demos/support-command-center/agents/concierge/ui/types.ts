@@ -1,5 +1,5 @@
 import type { UIMessage } from "ai";
-import type { ToolOutputPart, ToolUI } from "little-harness/connectors";
+import type { ToolOutputPart, ToolUI } from "@little-stack/harness/connectors";
 
 /**
  * The render-dashboard tool's typed shape for the browser. We reference the

@@ -43,6 +43,10 @@ export async function toolCallEventData(
   }
   if (output !== undefined) {
     payload.result = output;
+  } else if (event.success === true) {
+    // A void tool still succeeded. Without this marker replay reads the call as inflight
+    // and runs its side effect again.
+    payload.resultUndefined = true;
   }
   if (event.success === false) {
     payload.error = createTraceErrorEnvelope(event.error);

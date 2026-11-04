@@ -139,11 +139,11 @@ describe("createHarness", () => {
       });
 
       expect(harness.config.mcp).toBe(mcp);
-      expect(harness.config.tools).toHaveProperty("remember");
+      expect(harness.config.tools).toEqual({});
     });
   });
 
-  it("expands memory into resolved config, persistent dir, and remember tool", async () => {
+  it("expands memory into resolved config and a persistent dir, with no memory tool", async () => {
     await withTempDir(async (dir) => {
       const harness = createHarness({
         host: localHost({ dataDir: dir }),
@@ -154,17 +154,18 @@ describe("createHarness", () => {
       });
 
       expect(harness.config.memory).toHaveLength(1);
-      expect(harness.config.memory[0]).toMatchObject({
+      expect(harness.config.memory[0]).toEqual({
         harnessDir: "/persistent/memory",
-        indexPath: "MEMORY.md",
-        toolName: "remember",
+        commit: "after-turn",
+        maxIndexBytes: 8000,
+        skill: true,
       });
       expect(harness.config.persistentDirs).toHaveLength(1);
       expect(harness.config.persistentDirs[0]).toMatchObject({
         harnessDir: "/persistent/memory",
         commit: "after-turn",
       });
-      expect(harness.config.tools).toHaveProperty("remember");
+      expect(harness.config.tools).toEqual({});
     });
   });
 
@@ -188,6 +189,39 @@ describe("createHarness", () => {
         "/persistent/project",
         "/persistent/memory",
       ]);
+    });
+  });
+
+  it("rejects a tool that collides with the file tools a bash-off harness adds", async () => {
+    await withTempDir(async (dir) => {
+      const own = { description: "x", inputSchema: { type: "object" }, execute: async () => "x" } as any;
+      expect(() =>
+        createHarness({
+          host: localHost({ dataDir: dir }),
+          model,
+          runtime: { bash: false },
+          tools: { read_file: own },
+          memory: memory({ sourceDir: "memory/agent" }),
+        }),
+      ).toThrow(/adds its own read_file tool/);
+      expect(() =>
+        createHarness({
+          host: localHost({ dataDir: dir }),
+          model,
+          runtime: { bash: false },
+          tools: { load_skill: own },
+          skills: ["./skills/x"],
+        }),
+      ).toThrow(/adds its own load_skill tool/);
+      // With bash on, nothing is added, so the names are free.
+      expect(() =>
+        createHarness({
+          host: localHost({ dataDir: dir }),
+          model,
+          tools: { read_file: own, load_skill: own },
+          memory: memory({ sourceDir: "memory/agent" }),
+        }),
+      ).not.toThrow();
     });
   });
 
@@ -266,18 +300,18 @@ describe("createHarness", () => {
 
   it("rejects reserved user tool names before runtime tools are merged", async () => {
     await withTempDir(async (dir) => {
-      expect(() =>
-        createHarness({
+      for (const name of ["bash", "checkpoint", "start_agent_group", "spawn_agent", "join_agent_group"] as const) {
+        expect(() => createHarness({
           host: localHost({ dataDir: dir }),
           model,
           tools: {
-            bash: tool({
+            [name]: tool({
               inputSchema: z.object({}),
-              execute: async () => "user bash",
+              execute: async () => "reserved user tool",
             }),
           },
-        }),
-      ).toThrow(HarnessInputError);
+        })).toThrow(HarnessInputError);
+      }
     });
   });
 });

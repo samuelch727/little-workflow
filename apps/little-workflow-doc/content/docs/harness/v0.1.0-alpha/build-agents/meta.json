@@ -1,0 +1,22 @@
+{
+  "title": "Build Agents",
+  "pages": [
+    "basic-agent",
+    "tools",
+    "skills",
+    "memory",
+    "message-files",
+    "input-types",
+    "generating-and-streaming",
+    "agent-folders",
+    "serving-agents",
+    "chat-connectors",
+    "email-connector",
+    "outcomes",
+    "user-feedback",
+    "asking-a-person",
+    "workflows",
+    "dynamic-workflows",
+    "agent-groups"
+  ]
+}

@@ -1,3 +1,4 @@
+import { assertCompletedTurn } from "../test/completed-turn.js";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import * as path from "node:path";
 import { MockLanguageModelV3 } from "ai/test";
@@ -11,6 +12,7 @@ import type {
   HarnessPriorEventQuery,
   PersistedDurableHarnessEvent,
 } from "../events/occurrence.js";
+import { canonicalHarnessEventRequestDigest } from "../events/occurrence.js";
 import { inputType } from "../input-types/input-type.js";
 import { generateHarness } from "./generate-harness.js";
 import { localHost } from "../local-host/index.js";
@@ -109,6 +111,7 @@ function replayDurability(seed: readonly PersistedDurableHarnessEvent[] = []) {
           eventId: `evt_${events.length + 1}`,
           sequence: events.length + 1,
           recordedAt: "2026-06-07T00:00:00.000Z",
+          canonicalRequestDigest: canonicalHarnessEventRequestDigest(event),
         };
         events.push(persisted);
         return persisted;
@@ -135,6 +138,105 @@ function providerToolNames(tools: unknown): string[] {
 }
 
 describe("streamHarness", () => {
+  it("supplies deterministic model position to a checkpoint tool called by the model", async () => {
+    await withTempDir(async (dir) => {
+      const checkpointRequests: Array<Record<string, unknown>> = [];
+      const failedTools: unknown[] = [];
+      let call = 0;
+      const model = new MockLanguageModelV3({
+        provider: "test",
+        modelId: "stream-checkpoint-model-position",
+        doStream: async () => {
+          call += 1;
+          return {
+            stream: new ReadableStream({
+              start(controller) {
+                controller.enqueue({ type: "stream-start", warnings: [] });
+                if (call === 1) {
+                  controller.enqueue({
+                    type: "tool-call",
+                    toolCallId: "noop_call_1",
+                    toolName: "noop",
+                    input: JSON.stringify({}),
+                  });
+                  controller.enqueue({
+                    type: "tool-call",
+                    toolCallId: "checkpoint_call_1",
+                    toolName: "checkpoint",
+                    input: JSON.stringify({ label: "Ready", kind: "pre_risky_op", evidenceArtifactIds: [] }),
+                  });
+                  controller.enqueue({
+                    type: "finish",
+                    finishReason: { unified: "tool-calls", raw: "tool-calls" },
+                    usage,
+                  });
+                } else {
+                  controller.enqueue({ type: "text-start", id: "0" });
+                  controller.enqueue({ type: "text-delta", id: "0", delta: "checkpoint recorded" });
+                  controller.enqueue({ type: "text-end", id: "0" });
+                  controller.enqueue(finishChunk());
+                }
+                controller.close();
+              },
+            }),
+          };
+        },
+      });
+      const harness = createHarness({
+        host: localHost({ dataDir: dir }),
+        model,
+        tools: {
+          noop: tool({
+            description: "No-op before the checkpoint.",
+            inputSchema: z.object({}),
+            execute: async () => ({}),
+          }),
+        },
+        checkpoints: {
+          writer: {
+            checkpoint: async (request) => {
+              checkpointRequests.push(request as unknown as Record<string, unknown>);
+              return {
+                protocolVersion: "little-harness.checkpoints.v1",
+                sessionId: request.sessionId,
+                callIdentity: request.callIdentity,
+                milestoneId: "milestone-1",
+                kind: request.kind,
+                tier: "filesystem",
+                disposition: "created",
+              };
+            },
+          },
+        },
+        onEvent: (event) => {
+          if (event.type === "harness.tool_call.failed") failedTools.push(event.metadata);
+        },
+      });
+
+      const result = streamHarness({
+        harness,
+        type: "job",
+        input: {},
+        session: "stream-checkpoint-session",
+      });
+
+      expect(await result.text).toBe("checkpoint recorded");
+      expect(await result.finished).toMatchObject({ status: "completed" });
+      expect(failedTools).toEqual([]);
+      expect(checkpointRequests).toHaveLength(1);
+      expect(checkpointRequests[0]).toMatchObject({
+        protocolVersion: "little-harness.checkpoints.v1",
+        sessionId: "stream-checkpoint-session",
+        modelStepId: "step_1",
+        sequenceIndex: 1,
+        label: "Ready",
+        kind: "pre_risky_op",
+        evidenceArtifactIds: [],
+      });
+      expect(checkpointRequests[0]).not.toHaveProperty("verdict");
+    });
+  });
+
   it("rejects finished with HarnessInputError when no harness or call model is configured", async () => {
     await withTempDir(async (dir) => {
       const harness = createHarness({
@@ -320,6 +422,7 @@ describe("streamHarness", () => {
       expect(body).toContain("hello");
       expect(await result.text).toBe("hello");
       expect(finished.session.id).toBe("chat");
+      assertCompletedTurn(finished);
       expect(finished.persistence.status).toBe("not-configured");
     });
   });
@@ -467,6 +570,33 @@ describe("streamHarness", () => {
           }),
         ]),
       );
+    });
+  });
+
+  it("puts the turn's trigger on harness.session.started as string metadata", async () => {
+    await withTempDir(async (dir) => {
+      const events: any[] = [];
+      const harness = createHarness({
+        host: localHost({ dataDir: dir }),
+        model: streamingTextModel("hello"),
+        onEvent: (event) => {
+          events.push(event);
+        },
+      });
+
+      const result = streamHarness({
+        harness,
+        prompt: "Hi",
+        session: "stream-trigger",
+        trigger: { kind: "message", source: "slack", from: "ada" },
+      });
+      await result.finished;
+
+      expect(events.find((event) => event.type === "harness.session.started")?.metadata).toEqual({
+        triggerKind: "message",
+        triggerSource: "slack",
+        triggerFrom: "ada",
+      });
     });
   });
 
@@ -852,7 +982,7 @@ describe("streamHarness", () => {
       const harness = createHarness({
         host: localHost({ dataDir: dir }),
         model,
-        durability: {
+        sessionLog: {
           append: async (event) => {
             durable.push(event);
           },
@@ -1365,7 +1495,7 @@ describe("streamHarness", () => {
       const harness = createHarness({
         host: localHost({ dataDir: dir }),
         model: streamingTextModel("stream durable"),
-        durability: {
+        sessionLog: {
           append: async (event) => {
             durable.push(event);
           },
@@ -1420,7 +1550,7 @@ describe("streamHarness", () => {
       const harness = createHarness({
         host: localHost({ dataDir: dir }),
         model,
-        durability: durability.sink,
+        sessionLog: durability.sink,
       });
       const messages = [{ id: "m1", role: "user", parts: [{ type: "text", text: "Cache stream." }] }] as UIMessage[];
 
@@ -1454,7 +1584,7 @@ describe("streamHarness", () => {
       const harness = createHarness({
         host: localHost({ dataDir: dir }),
         model,
-        durability: durability.sink,
+        sessionLog: durability.sink,
         mcp: { servers: [] },
       });
       const messages = [{ id: "m1", role: "user", parts: [{ type: "text", text: "Cache stream with MCP." }] }] as UIMessage[];
@@ -1481,7 +1611,7 @@ describe("streamHarness", () => {
       const harness = createHarness({
         host: localHost({ dataDir: dir }),
         model,
-        durability: durability.sink,
+        sessionLog: durability.sink,
         mcp: { servers: [] },
         tools: {
           addReaction: {
@@ -1556,7 +1686,7 @@ describe("streamHarness", () => {
       const harness = createHarness({
         host: localHost({ dataDir: dir }),
         model,
-        durability: durability.sink,
+        sessionLog: durability.sink,
         mcp: { servers: [] },
         tools: {
           alpha: tool({ description: "alpha", inputSchema: z.object({}), execute: async () => "a" }),
@@ -1595,7 +1725,7 @@ describe("streamHarness", () => {
       const harness = createHarness({
         host: localHost({ dataDir: dir }),
         model,
-        durability: durability.sink,
+        sessionLog: durability.sink,
         tools: {
           lookup: tool({
             description: "Lookup data.",
@@ -1644,7 +1774,7 @@ describe("streamHarness", () => {
       const harness = createHarness({
         host: localHost({ dataDir: dir }),
         model,
-        durability: durability.sink,
+        sessionLog: durability.sink,
         tools: {
           lookup: tool({
             description: "Lookup data.",
@@ -1692,7 +1822,7 @@ describe("streamHarness", () => {
       const harness = createHarness({
         host: localHost({ dataDir: dir }),
         model,
-        durability: durability.sink,
+        sessionLog: durability.sink,
         tools: {
           lookup: tool({
             description: "Lookup data.",
@@ -1736,7 +1866,7 @@ describe("streamHarness", () => {
       const harness = createHarness({
         host: localHost({ dataDir: dir }),
         model,
-        durability: durability.sink,
+        sessionLog: durability.sink,
         tools: {
           lookup: tool({
             description: "Lookup data.",
@@ -1784,7 +1914,7 @@ describe("streamHarness", () => {
       const harness = createHarness({
         host: localHost({ dataDir: dir }),
         model,
-        durability: durability.sink,
+        sessionLog: durability.sink,
         tools: {
           lookup: tool({
             description: "Lookup data.",
@@ -1828,7 +1958,7 @@ describe("streamHarness", () => {
       const firstHarness = createHarness({
         host: localHost({ dataDir: path.join(dir, "first") }),
         model: streamingTextModel("before crash"),
-        durability: initial.sink,
+        sessionLog: initial.sink,
       });
       const messages = [{ id: "m1", role: "user", parts: [{ type: "text", text: "Resume stream." }] }] as UIMessage[];
       const first = streamHarness({ harness: firstHarness, messages, session: "stream-crash", runId: "run_stream_crash" });
@@ -1842,7 +1972,7 @@ describe("streamHarness", () => {
       const harness = createHarness({
         host: localHost({ dataDir: path.join(dir, "second") }),
         model,
-        durability: crashWindow.sink,
+        sessionLog: crashWindow.sink,
       });
 
       const result = streamHarness({ harness, messages, session: "stream-crash", runId: "run_stream_crash" });
@@ -1876,7 +2006,7 @@ describe("streamHarness", () => {
             throw new Error("provider down");
           },
         }),
-        durability: durability.sink,
+        sessionLog: durability.sink,
       });
       const messages = [{ id: "m1", role: "user", parts: [{ type: "text", text: "Retry stream." }] }] as UIMessage[];
 
@@ -1889,7 +2019,7 @@ describe("streamHarness", () => {
       const harness = createHarness({
         host: localHost({ dataDir: path.join(dir, "recovered") }),
         model,
-        durability: durability.sink,
+        sessionLog: durability.sink,
       });
 
       const result = streamHarness({ harness, messages, session: "stream-terminal-failed", runId: "run_stream_terminal_failed" });
@@ -1955,7 +2085,7 @@ describe("streamHarness", () => {
             };
           },
         }),
-        durability: initial.sink,
+        sessionLog: initial.sink,
         tools: {
           lookup: tool({
             description: "Lookup data.",
@@ -2009,7 +2139,7 @@ describe("streamHarness", () => {
             };
           },
         }),
-        durability: crashWindow.sink,
+        sessionLog: crashWindow.sink,
         tools: {
           lookup: tool({
             description: "Lookup data.",
@@ -2083,6 +2213,7 @@ describe("streamHarness", () => {
 
       expect(await result.text).toBe("stream done");
       expect(stored).toHaveLength(0);
+      assertCompletedTurn(finished);
       await finished.commitManual();
       expect(stored).toHaveLength(1);
     });

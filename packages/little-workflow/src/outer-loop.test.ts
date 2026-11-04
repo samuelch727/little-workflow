@@ -1,32 +1,44 @@
 import { mkdtempSync, rmSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { InMemoryFs } from "just-bash";
+import { virtualWorld } from "./world.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  appendEvent,
-  createLittleWorkflow,
   createToolRegistry,
-  createWorkflowHarness,
-  getWorkflowDefinitionHash,
-  listEvents,
   localWorld,
   model,
   output,
   RunFailedError,
-  truncateEventLogForTest,
-  writeOuterLoopManifest,
 } from "./index.js";
-import { runWorkflowWithLegacyPlannerAdapter } from "./runtime.js";
 import type {
-  Harness,
   InferWorkflowOutput,
-  LwirWorkflow,
   RunResult,
-  RunWorkflowOptions,
   SuperviseDecision,
   SuperviseOuterLoopState,
-  WorkflowRunTarget,
 } from "./index.js";
+import type {
+  RunWorkflowRequest,
+} from "./entries/internals.js";
+import type {
+  LwirWorkflow,
+} from "./entries/lwir.js";
+import {
+  appendEvent,
+  createLittleWorkflow,
+  createWorkflowHarness,
+  getWorkflowDefinitionHash,
+  listEvents,
+  writeOuterLoopManifest,
+} from "./entries/internals.js";
+import type {
+  Harness,
+  WorkflowRunTarget,
+} from "./entries/internals.js";
+import {
+  truncateEventLogForTest,
+} from "./world.js";
+import { runWorkflowWithLegacyPlannerAdapter } from "./runtime.js";
 import type { PlannerAdapter } from "./compiler.js";
 
 // ── Fixtures ───────────────────────────────────────────────────────────────────
@@ -114,7 +126,7 @@ function plannerWithoutSupervise(): PlannerAdapter {
 }
 
 type RunWorkflowLegacyPlannerOptions<TWorkflow extends WorkflowRunTarget> =
-  RunWorkflowOptions<TWorkflow> & {
+  RunWorkflowRequest<TWorkflow> & {
     readonly planner?: PlannerAdapter;
   };
 
@@ -671,44 +683,18 @@ describe("outer-loop replay (Layer B §3.6)", () => {
     expect(vi.mocked(planner.draft)).not.toHaveBeenCalled();
   });
 
-  it("resumes between cycles: cycle 1 done and manifest persisted, cycle 2 runs on resume", async () => {
-    // Simulate "killed between cycles" by:
-    // 1. Running a full first invocation (cycle 1 completes, supervise=continue,
-    //    manifest written with cycles=[1], no result). The loop then exhausts
-    //    because maxOuterCycles=2 and isFinalCycle is true for cycle 2...
-    //    Actually we need the manifest to have cycles=[1] without result.
-    //    Strategy: run with maxOuterCycles=2, supervise[0]=continue. The loop
-    //    writes manifest with cycles=[1] and no result, then starts cycle 2.
-    //    We stop that by making the cycle 2 draft() throw — but that would leave
-    //    a pendingCycleRunId in the manifest.
-    //
-    // Cleanest approach: run first call with maxOuterCycles=3, supervise=[continue,done].
-    // Capture the outerLoopId. Then call runWorkflow with the same outerLoopId
-    // and a new planner — since the manifest has result=done, it returns immediately.
-    //
-    // For a true "starts from cycle 2" test without running cycle 1 again, we
-    // pre-write the manifest with cycles=[cycle1Summary] and no result, simulating
-    // a state where cycle 1 completed but the process died after writing the manifest
-    // but before starting cycle 2 (i.e., pendingCycleRunId is absent).
-
+  it.each(["local", "virtual"] as const)("reopens between completed cycles on %s: cycle 2 runs from the saved manifest", async (storage) => {
+    const fs = new InMemoryFs();
+    const initialWorld = storage === "local" ? world : virtualWorld({ fs, dataDir: "/outer-loop" });
+    // Seed the saved state after cycle 1 completed and before cycle 2 started.
+    // There is no pending cycle and no completed outer-loop result. This test
+    // reopens storage; it does not interrupt a process or prove crash durability.
     const outerLoopId = "ol_betweencyclesresume00000000000000000";
 
-    // Simulate a real cycle 1 run: run a single-cycle workflow and capture the
-    // run result. We use a separate world for this "setup" run.
-    // Instead, directly pre-write the manifest and event log.
-
-    // Pre-inject cycle 1 event log. The runtime will accept a pre-written
-    // RunCompleted event for a runId as a completed run.
-    // We write the manifest with cycles=[{cycleNumber:1, runId, ...}].
-    // No pendingCycleRunId — the crash happened after cycle 1 completed but
-    // before cycle 2 started.
-
-    // We don't need a real event log for cycle 1 since it's not replayed
-    // in the second call (cycles=1 means cycleNumber starts at 2 in the loop).
     const cycle1RunId = "run_betweencycles1run000000000000000000";
     const fakeWvId = "wv_betweencycles1fake0000000000000000";
 
-    await writeOuterLoopManifest(world, outerLoopId, {
+    await writeOuterLoopManifest(initialWorld, outerLoopId, {
       outerLoopId,
       goal: {
         workflowDefinitionHash: simpleWorkflowDefinitionHash(),
@@ -734,8 +720,13 @@ describe("outer-loop replay (Layer B §3.6)", () => {
       { kind: "done", finalOutput: { result: "cycle-2-answer" } },
     ]);
 
+    // A fresh World opens the same store. This is reopen evidence, not a process-crash test.
+    const reopenedWorld = storage === "local"
+      ? localWorld({ dataDir: initialWorld.dataDir })
+      : virtualWorld({ fs, dataDir: "/outer-loop/./" });
+
     const result = await runWorkflow({
-      world,
+      world: reopenedWorld,
       workflows: simpleWorkflow,
       input: { value: "resume-test" },
       planner: resumePlanner,

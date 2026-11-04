@@ -2,7 +2,7 @@ import type {
   WorkflowHarnessContext,
   WorkflowHarnessResult,
   WorkflowHarnessTask,
-} from "little-harness/workflow-harness";
+} from "@little-stack/harness/workflow-harness";
 
 export type {
   ErrorEnvelope,
@@ -20,7 +20,7 @@ export type {
   WorkflowScratchMount as ScratchMount,
   WorkflowSkillDescriptor as SkillDescriptor,
   WorkflowToolPermissions as ToolPermissions,
-} from "little-harness/workflow-harness";
+} from "@little-stack/harness/workflow-harness";
 
 export type HarnessTask = WorkflowHarnessTask;
 export type HarnessResult = WorkflowHarnessResult;
@@ -46,6 +46,8 @@ export type ErrorEnvelopeValue =
 
 export type HarnessEventInput = {
   readonly type: string;
+  /** Mandatory on the public Harness Session port; optional here only for legacy recorder callers. */
+  readonly appendIdempotencyKey?: string;
   readonly occurrenceId?: string;
   readonly payload: Record<string, unknown>;
 };

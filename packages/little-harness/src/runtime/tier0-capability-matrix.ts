@@ -1,9 +1,5 @@
-import {
-  getCommandNames,
-  getJavaScriptCommandNames,
-  getNetworkCommandNames,
-  getPythonCommandNames,
-} from "just-bash";
+import { getCommandNames, getNetworkCommandNames } from "just-bash";
+import { hasJustBashNodeBuild, JUST_BASH_NODE_ONLY_COMMANDS, justBashNodeExport } from "./just-bash-builds.js";
 
 /**
  * Bump when the *shape* of {@link Tier0CapabilityMatrix} changes, so a consumer that
@@ -227,14 +223,22 @@ export function tier0CapabilityMatrix(): Tier0CapabilityMatrix {
     for (const name of getCommandNames()) {
       commands.set(name, "always");
     }
-    for (const name of getPythonCommandNames()) {
+    // The browser build (workerd, browsers) has no Python or JavaScript runner and lists
+    // sqlite3, tar, yq and xan without being able to run them, so none of those count as
+    // Tier 0 there.
+    for (const name of justBashNodeExport("getPythonCommandNames")?.() ?? []) {
       commands.set(name, "python");
     }
-    for (const name of getJavaScriptCommandNames()) {
+    for (const name of justBashNodeExport("getJavaScriptCommandNames")?.() ?? []) {
       commands.set(name, "javascript");
     }
     for (const name of getNetworkCommandNames()) {
       commands.set(name, "network");
+    }
+    if (!hasJustBashNodeBuild()) {
+      for (const name of JUST_BASH_NODE_ONLY_COMMANDS) {
+        commands.delete(name);
+      }
     }
     const needsRealExec = new Map<string, Tier0RealExecReason>(TIER0_NEEDS_REAL_EXEC);
     for (const name of TIER0_UNIMPLEMENTED_BUILTINS) {

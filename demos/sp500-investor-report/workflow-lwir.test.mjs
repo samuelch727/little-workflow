@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { assertValidLwir } from "little-workflow";
+import { assertValidLwir } from "@little-stack/workflow/lwir";
 import { buildInvestorWorkflowLwir } from "./workflow-lwir.mjs";
 
 test("investor workflow LWIR grants only the unzip-backed data tool and worker model", () => {

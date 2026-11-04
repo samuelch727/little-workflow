@@ -1000,4 +1000,37 @@ describe("Harness event recorder", () => {
     expect(left).toMatch(/^sha256:[a-f0-9]{64}$/u);
     expect(right).toBe(left);
   });
+
+  it("persists Harness append identity and returns the original row on retry", async () => {
+    const world = await tempWorld();
+    const runId = "run_harness_recorder_idempotency";
+    const recorder = createHarnessEventRecorder({ world, runId });
+    const request = {
+      type: "harness.model.responded",
+      appendIdempotencyKey: "workflow-recorder:model-responded:turn-1",
+      occurrenceId: "model-call-1",
+      payload: {
+        turn: 1,
+        response: {
+          text: "ok",
+          toolCalls: [],
+          usage: { inputTokens: 10, outputTokens: 2 },
+        },
+      },
+    } as const;
+
+    const first = await recorder.append(request);
+    await expect(recorder.append(structuredClone(request))).resolves.toEqual(first);
+    await expect(recorder.append({
+      ...request,
+      payload: { ...request.payload, response: { ...request.payload.response, text: "changed" } },
+    })).rejects.toThrow(/another request/u);
+    const events = await listEvents(world, runId);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      appendIdempotencyKey: request.appendIdempotencyKey,
+      canonicalRequestDigest: expect.stringMatching(/^sha256:[a-f0-9]{64}$/u),
+      sequence: 1,
+    });
+  });
 });

@@ -18,7 +18,7 @@ is exposed through Little Harness rather than leaking arbitrary host paths to th
 model.
 
 ```ts
-import { localDir, projectDir } from "little-harness";
+import { localDir, projectDir } from "@little-stack/harness";
 
 localDir({
   harnessDir: "/persistent/dev",
@@ -50,7 +50,7 @@ The simplest shape provides `load` / `store` (load the whole directory, commit
 changes at the [commit boundary](/docs/v0.1.0-alpha/foundations/persistent-dirs)):
 
 ```ts
-import { customDir } from "little-harness";
+import { customDir } from "@little-stack/harness";
 
 customDir({
   harnessDir: "/persistent/user",

@@ -7,6 +7,39 @@ The event names below are the alpha trace vocabulary. The names are observable
 from local traces and `onEvent` callbacks, while metadata details may continue
 to evolve during alpha.
 
+The trace vocabulary on this page is separate from the durable session-log
+contract described under [HarnessEvent Envelope](#harnessevent-envelope).
+
+> **UNRELEASED:** the durable validators `normalizePersistedDurableHarnessEvent`
+> and `canonicalHarnessEventRequestDigest`, and the dedicated
+> `@little-stack/harness/events` and `@little-stack/harness/remote-session` entry
+> points, exist only in the current source. No npm version includes them yet.
+> In the current source these two entries are the only home of the durable
+> event contract (`HarnessSessionLog`, `DurableHarnessEventInput`,
+> `createHarnessAppendIdempotencyKey`, `emitHarnessOccurrence`, …) and of the
+> session-log helpers; the root entry no longer re-exports them.
+>
+> Published `0.2.0-alpha.0` has neither the validators nor an `./events` or
+> `./remote-session` package export. It exports the older durable and remote
+> helpers from the root `@little-stack/harness` entry: `emitHarnessOccurrence`,
+> `remoteSessionLog`, `startSessionLogServer`, `createFileSessionLog` and
+> `createInMemorySessionLog` (renamed `fileSessionLog` and `inMemorySessionLog`
+> in the current source). See
+> [Small subpaths](/docs/v0.1.0-alpha/reference/alpha-migrations#small-subpaths-events-and-remote-session).
+
+```ts
+// Published 0.2.0-alpha.0 (the `little-harness` package): older helpers from the root entry.
+import { createFileSessionLog, remoteSessionLog } from "little-harness";
+
+// UNRELEASED: the session logs and the durable event contract have their own entries.
+import { fileSessionLog, remoteSessionLog } from "@little-stack/harness/remote-session";
+import {
+  canonicalHarnessEventRequestDigest,
+  normalizePersistedDurableHarnessEvent,
+  type HarnessSessionLog,
+} from "@little-stack/harness/events";
+```
+
 ## HarnessEvent Envelope
 
 `HarnessEvent` is the versioned trace/callback event object emitted by
@@ -66,21 +99,61 @@ Example trace event:
 ```
 
 `HarnessEvent` is not the same object as a durable replay event. Durable replay
-stores payloads:
+stores payloads. The shape differs by version:
+
+| Version | `DurableHarnessEventInput` | Persisted event adds |
+| --- | --- | --- |
+| Published `0.2.0-alpha.0` | `type`, `runId`, optional `occurrenceId`, `payload` (a JSON object) | `eventId`, `sequence`, `recordedAt` |
+| UNRELEASED source (no npm version yet) | The type below: a required `appendIdempotencyKey`, optional correlation ids, and either `payload` or `payloadArtifactId` | `eventId`, `sequence`, `recordedAt`, `canonicalRequestDigest` |
+
+The type below and the three paragraphs after it describe the UNRELEASED
+durable contract, including the Little Compute adapter, which is also
+unpublished. None of it is in `0.2.0-alpha.0`; see
+[Alpha Migrations](/docs/v0.1.0-alpha/reference/alpha-migrations).
 
 ```ts
+// UNRELEASED durable event input.
 type DurableHarnessEventInput<TEventType extends string = HarnessEventType> = {
   type: TEventType;
   runId: string;
+  appendIdempotencyKey: string;
   occurrenceId?: string;
-  payload: Record<string, unknown>;
-};
+  operationId?: string;
+  taskId?: string;
+  attemptId?: string;
+  correlationId?: string;
+  causationId?: string;
+} & (
+  | { payload: Record<string, unknown>; payloadArtifactId?: never }
+  | { payload?: never; payloadArtifactId: string }
+);
 ```
 
-Use `occurrenceId` to correlate a trace/callback `HarnessEvent` with a durable
-replay event for the same model or tool occurrence.
+`appendIdempotencyKey` is mandatory and is chosen by the logical emitter before
+transport. Retrying the same `(runId, appendIdempotencyKey)` and canonical
+request returns the original `eventId` and sequence; reusing the key with
+different content fails. `occurrenceId` is a separate, optional causal group:
+called/responded or started/succeeded lifecycle events normally share it while
+using different append keys. Use `createHarnessAppendIdempotencyKey()` to derive
+an opaque key from a stable session, turn, call, or step identity.
 
-Large strings and JSON values use a bounded content record:
+Persisted events add `eventId`, a per-run `sequence`, canonical UTC
+`recordedAt`, and `canonicalRequestDigest`. Inline payloads are normalized to
+wire JSON before that digest is computed. Large payloads should be stored as a
+content-addressed Artifact and referenced with `payloadArtifactId`. When Little
+Harness runs under Little Compute, its Artifact-spooling Session-log adapter
+does this automatically before the event append and can verify/reconstruct the
+payload after the trusted runner moves.
+
+In a self-hosted Little Compute installation, that adapter uses an exact
+`little_compute_runner` database credential. It can select and append Session
+events, advance the per-run sequence head, and insert an Artifact idempotency
+record, but it cannot update/delete event history or delete a run head. API,
+scheduler, reconciler, GC, provider-gateway, and time-sampler credentials have
+no Session-log access.
+
+The rest of this page returns to the trace vocabulary. Large strings and JSON
+values use a bounded content record:
 
 ```ts
 type TraceContentRef = {
@@ -173,6 +246,7 @@ harness.runtime.command.failed
 harness.runtime.command.denied
 harness.runtime.tier.escalated
 harness.runtime.tier.unavailable
+harness.runtime.usage
 harness.runtime.error
 harness.runtime.dispose.failed
 ```
@@ -180,16 +254,32 @@ harness.runtime.dispose.failed
 Runtime events are for the execution substrate, such as the built-in bash tool.
 `harness.runtime.command.*` events record commands, exit codes, duration, bounded
 stdout and stderr previews, and file changes discovered by the runtime. Every
-execution environment emits them identically.
+sandbox emits them identically.
 
 `harness.runtime.tier.escalated`, `harness.runtime.tier.unavailable`, and
-`harness.runtime.command.denied` appear only under `tieredExecutionEnvironment`.
+`harness.runtime.command.denied` appear only under `tieredSandbox`.
 They record why a turn switched execution tier, why a needed tier could not be
 used, or why a policy refused a command — with the classification reasons — and
 never reach the model's prompt. See
 [Execution Tiers](/docs/v0.1.0-alpha/runtime/execution-tiers#events).
 
-`harness.runtime.dispose.failed` records an execution environment whose teardown
+`harness.runtime.usage` is emitted once per turn that had a shell sandbox, when
+the sandbox is disposed and before the turn's terminal session event, so a
+LittleDB trace of the turn includes it. It records which execution tier the turn
+reached and what the sandbox used, for cost accounting; it never reaches the
+model. Its metadata: `tier` (`"tier-0"` for the emulated shell over the session
+folder, `"next-tier"` for a real execution environment), `commands` (`tier0`,
+`nextTier` and `denied` counts), `escalations`, and `sandbox`, the
+`HarnessSandboxUsage` the sandbox reported: `provider`, `instanceType`, `vcpu`,
+`memoryGiB`, `diskGB`, `activeMs` (milliseconds commands were running),
+`awakeMs` (what the vendor billed as provisioned, when known) and `costUsd` (the
+provider's estimate at list price, when it knows the rates). The built-in
+just-bash sandboxes report `provider: "just-bash"` and their active time; a
+custom sandbox reports its own through `HarnessSandbox.usage()`, and one that
+reports nothing emits no usage event. See
+[Execution Tiers](/docs/v0.1.0-alpha/runtime/execution-tiers#events).
+
+`harness.runtime.dispose.failed` records a sandbox whose teardown
 threw, with the error envelope under `metadata.error`. It never fails the turn,
 but `little-harness doctor` counts it as a failure.
 
@@ -253,6 +343,24 @@ type TraceFileDiff =
 ```
 
 Deleted file events should record metadata and path, not deleted file contents.
+When a deleted `FileRef` includes byte/hash fields, they must match the `before`
+version; created and updated references must match `after`.
+
+> **UNRELEASED:** `createHarnessFileMutationEvents()` exists only in the current
+> source. Published `0.2.0-alpha.0` has no such symbol, and no npm version
+> includes it yet.
+
+Trusted local and remote adapters share `createHarnessFileMutationEvents()`.
+Its caller must allocate one stable `occurrenceId` at the file-mutation
+boundary, before transport; every file/tool/artifact projection of that one
+mutation shares the ID. Repeated byte-identical writes are separate mutations
+and therefore receive different occurrence IDs instead of collapsing during
+durable append replay.
+The serializer rejects noncanonical paths and version contradictions, accessors,
+symbols, non-JSON values, JSON deeper than 64 levels or larger than 10,000
+nodes/256 KiB, strings larger than 64 KiB, keys larger than 1 KiB, paths larger
+than 4 KiB, and source/media/artifact labels larger than 1 KiB. These are event
+metadata limits, independent of Artifact and File Snapshot content limits.
 
 ## Persistent Dir Events
 

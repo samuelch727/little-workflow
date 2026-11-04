@@ -3,7 +3,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { runCli } from "./cli-core.js";
-import { appendEvent, localWorld } from "./index.js";
+import {
+  localWorld,
+} from "./index.js";
+import {
+  appendEvent,
+} from "./entries/internals.js";
 import { materializeRunStateFromEvents } from "./run-state.js";
 import { formatRunReport, runReport } from "./run-report.js";
 import type { EventEnvelope, EventType } from "./world.js";

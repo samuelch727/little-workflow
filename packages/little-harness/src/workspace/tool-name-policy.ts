@@ -1,10 +1,19 @@
+import { HARNESS_AGENT_GROUP_TOOL_NAMES } from "../agents/tools.js";
+import { HARNESS_CHECKPOINT_TOOL_NAMES } from "../checkpoints/tools.js";
 import { HarnessInputError } from "../errors.js";
 
 // Tool names a folder-discovered tool may not claim, because the runtime overlays them at turn
 // assembly (e.g. `bash`) and would silently overwrite the discovered tool during object spread.
 // createHarness rejects these for configured tools via assertSafeUserTools; the discovery path
 // must reject them too rather than mask the author's tool with an unexpected runtime tool.
-export const RESERVED_DISCOVERED_TOOL_NAMES = new Set(["bash", "__proto__", "constructor", "prototype"]);
+export const RESERVED_DISCOVERED_TOOL_NAMES = new Set([
+  "bash",
+  "__proto__",
+  "constructor",
+  "prototype",
+  ...HARNESS_AGENT_GROUP_TOOL_NAMES,
+  ...HARNESS_CHECKPOINT_TOOL_NAMES,
+]);
 // Mirrors createHarness's HARNESS_TOOL_NAME (assertSafeUserTools) so a discovered tool whose name is
 // not a valid model-tool identifier (e.g. a `tools/my.tool.ts` stem `my.tool`) fails fast at load
 // with a clear error — symmetric with the configured-tool path — instead of degrading to a late

@@ -208,7 +208,7 @@ For `code.run` steps, any tools the code body invokes also emit `harness.tool_ca
 |---|---|
 | `plan` | `harness.session.started` → (`harness.model.called` → `harness.model.responded` → `harness.tool_call.*` × tools per turn) × turns → `harness.session.completed` |
 | `orchestrate` | `harness.session.started` → (`harness.model.called` → `harness.model.responded` → `harness.tool_call.*` × tools per turn) × turns → `harness.session.completed` |
-| `execute_step` (ai.generate) | `harness.session.started` → agent-loop events × turns → `harness.session.completed` |
+| `execute_step` (ai.generate) | `harness.session.started` → `harness.execute_step.started` → `harness.model.called` → `harness.model.responded` → `harness.execute_step.succeeded` → `harness.session.completed` (one model call, no tool calls) |
 | `execute_step` (code.run) | `harness.session.started` → `harness.execute_step.started` → (`harness.tool_call.*` × tools invoked by code) → `harness.execute_step.succeeded` → `harness.session.completed` |
 | `execute_step` (tool.call) | `harness.session.started` → `harness.execute_step.started` → `harness.tool_call.*` (single) → `harness.execute_step.succeeded` → `harness.session.completed` |
 | `execute_step` (decision) | `harness.session.started` → `harness.execute_step.started` → `harness.execute_step.succeeded` → `harness.session.completed` |

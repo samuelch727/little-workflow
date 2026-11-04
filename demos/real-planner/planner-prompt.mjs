@@ -71,7 +71,7 @@ export const VALID_PARALLEL_LWIR_EXAMPLE = {
           with: {
             model: "model.worker",
             prompt:
-              "Return only a JSON object with id, score, and reasoning. Candidate id: {{ input.candidate.id }} Candidate summary: {{ input.candidate.summary }} Job description: {{ input.jobDescription }}",
+              "Return only a JSON object with id, score, and reasoning. Candidate id: {{ item.id }} Candidate summary: {{ item.summary }} Job description: {{ input.jobDescription }}",
           },
           output: { mode: "object", schema: rankingItemSchema },
         },
@@ -114,8 +114,7 @@ Step contract:
 - Every step that is not a decision step must declare "output".
 - Every ai.generate step's with.model must be exactly "model.worker".
 - The only available model permission is "model.worker".
-- Inside ai.generate prompts, reference only "{{ input.somePath }}" templates.
-- Use "{{ item.* }}" only for parallel item selectors and branch step input mapping, not inside ai.generate prompts.
+- Inside ai.generate prompts, "{{ input.somePath }}" reads the workflow input, "{{ item.somePath }}" the current parallel item, and "{{ steps.<id>.output }}" an earlier step's output.
 
 Parallel contract:
 - A parallel step must have uses: "parallel".

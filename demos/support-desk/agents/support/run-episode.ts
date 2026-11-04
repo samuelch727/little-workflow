@@ -4,14 +4,12 @@ import type { UIMessage } from "ai";
 import {
   generateHarness,
   loadHarness,
-  reportHarnessOutcome,
   type Harness,
   type HarnessEvent,
-  type HarnessOutcomeStatus,
   type HarnessSession,
-} from "little-harness";
+} from "@little-stack/harness";
 import { bindEpisode, createEpisode, readActions, unbindEpisode, type ActionEntry } from "./episode";
-import { supportLittleDb } from "./littledb";
+import { episodeTraceId, overridesFor, supportLittleDb, type SupportTurnOverrides, type SupportVersionContent } from "./littledb";
 
 /**
  * One episode — one scripted customer, one fresh database, one session — as a function.
@@ -52,7 +50,10 @@ export type EpisodeResult = {
   readonly turns: readonly EpisodeTurnRecord[];
   /** Every tool the agent called, in order, across every turn. */
   readonly toolCalls: readonly string[];
-  readonly configVersionId: string | null;
+  /** The LittleDB version the episode ran on; `null` without LittleDB or on the bootstrap fallback. */
+  readonly versionId: string | null;
+  /** The LittleDB trace the episode was sent to; `null` when it was not traced. */
+  readonly traceId: string | null;
   /** True when a scripted turn was withheld because the episode was already resolved. */
   readonly turnsWithheld: number;
 };
@@ -73,10 +74,16 @@ export type RunEpisodeOptions = {
    */
   readonly shouldSendTurn?: (turnIndex: number) => boolean | Promise<boolean>;
   /**
-   * Send trace events to littleDB. FALSE for gate runs: a gate episode must never become run
-   * history the dream can read. See `littledb.ts`'s `reporterFor`.
+   * Send the episode to LittleDB as a trace. FALSE for gate runs: a gate episode must never
+   * become history the reviewer can read. See `littledb.ts`'s `tracerFor`.
    */
   readonly telemetry?: boolean;
+  /**
+   * Run this version instead of resolving one: an eval worker runs the version LittleDB
+   * handed it, with its own tracer (the experiment run's trace).
+   */
+  readonly version?: { readonly content: SupportVersionContent; readonly versionId: string | null };
+  readonly tracer?: { readonly onEvent: (event: HarnessEvent) => Promise<void>; readonly traceId: string };
 };
 
 /**
@@ -112,9 +119,21 @@ export async function runEpisode(options: RunEpisodeOptions): Promise<EpisodeRes
 
   const harness = await supportHarness();
   const db = supportLittleDb();
-  const config = db === undefined ? undefined : await db.prepareSession(sessionId);
-  const overrides = db?.overridesFor(sessionId);
-  const reporter = options.telemetry === false ? undefined : db?.reporterFor(sessionId);
+  let overrides: SupportTurnOverrides | undefined;
+  let versionId: string | null = null;
+  let tracer = options.tracer;
+  if (options.version !== undefined) {
+    overrides = overridesFor(options.version.content);
+    versionId = options.version.versionId;
+  } else if (db !== undefined) {
+    const prepared = await db.prepareSession(sessionId);
+    overrides = prepared.overrides;
+    versionId = prepared.resolution.versionId;
+    if (tracer === undefined && options.telemetry !== false) {
+      const sessionTracer = db.tracerFor(sessionId, prepared.resolution);
+      tracer = { onEvent: sessionTracer.onEvent, traceId: episodeTraceId(sessionId) };
+    }
+  }
 
   const history: UIMessage[] = [];
   const records: EpisodeTurnRecord[] = [];
@@ -147,10 +166,14 @@ export async function runEpisode(options: RunEpisodeOptions): Promise<EpisodeRes
             const name = event.metadata?.toolName;
             if (typeof name === "string") turnToolCalls.push(name);
           }
-          await reporter?.(event);
+          await tracer?.onEvent(event);
         },
       });
 
+      // Episodes run on a local host without parking, so every turn must complete.
+      if (result.status !== "completed") {
+        throw new Error(`episode turn ended as ${result.status}, expected completed`);
+      }
       session = result.session;
       const messageId = `${sessionId}-a${index + 1}`;
       history.push({
@@ -176,36 +199,31 @@ export async function runEpisode(options: RunEpisodeOptions): Promise<EpisodeRes
     episodeDir,
     turns: records,
     toolCalls: allToolCalls,
-    configVersionId: config?.configVersionId ?? null,
+    versionId,
+    traceId: tracer?.traceId ?? null,
     turnsWithheld: withheld,
   };
 }
 
 /**
- * Report an episode's verdict as a harness outcome, and onward to littleDB.
+ * Score an episode in LittleDB: `task_success` (did the database end up right) and
+ * `policy_compliance` (did the calls obey `policy.md`), 1 or 0, on the episode's trace.
  *
- * This is the demo's stand-in for the 👍/👎 a real user clicks, and it takes the same path a
- * chat reaction would: `reportHarnessOutcome` writes `outcome.reported` into the session
- * trace and hands it to the littleDB sink. Tier C scenarios never call it — their failures
- * exist only in the conversation text, which is the whole point of that tier.
+ * This is the demo's stand-in for the thumbs-up or thumbs-down a real user clicks, except
+ * that it reports the GRADE, not a mood. Tier C scenarios never call it: their failures exist
+ * only in the conversation text, which is the whole point of that tier.
  */
-export async function reportEpisodeOutcome(input: {
-  readonly session: HarnessSession;
-  readonly status: HarnessOutcomeStatus;
-  readonly detail: string;
-  readonly reporter: string;
-}): Promise<{ recorded: boolean; delivered: number }> {
+export function scoreEpisode(input: {
+  readonly traceId: string;
+  readonly taskSuccess: boolean;
+  readonly policyCompliant: boolean;
+  readonly taskFailures: readonly string[];
+  readonly policyFailures: readonly string[];
+}): boolean {
   const db = supportLittleDb();
-  const result = await reportHarnessOutcome({
-    session: input.session,
-    status: input.status,
-    detail: input.detail,
-    source: "experiment",
-    reporter: input.reporter,
-    // One report per session: a re-report of the same episode replaces rather than
-    // double-counts, which is what `reportKey` is for.
-    reportKey: `${input.session.id}:verdict`,
-    ...(db === undefined ? {} : { sinks: [db.outcomeSink] }),
-  });
-  return { recorded: result.recorded, delivered: result.delivered };
+  if (db === undefined) return false;
+  const comment = (failures: readonly string[]) => (failures.length === 0 ? {} : { comment: failures.join("; ").slice(0, 10_000) });
+  db.db.score({ traceId: input.traceId, name: "task_success", value: input.taskSuccess ? 1 : 0, source: "code", ...comment(input.taskFailures) });
+  db.db.score({ traceId: input.traceId, name: "policy_compliance", value: input.policyCompliant ? 1 : 0, source: "code", ...comment(input.policyFailures) });
+  return true;
 }

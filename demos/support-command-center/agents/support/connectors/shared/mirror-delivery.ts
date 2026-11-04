@@ -3,7 +3,7 @@ import type {
   ConnectorDeliveryOptions,
   ConnectorTextDeliveryContext,
   SessionConnectorEndpoint,
-} from "little-harness/connectors";
+} from "@little-stack/harness/connectors";
 
 /**
  * In-memory mirror outbox for the support demo.

@@ -1,0 +1,62 @@
+---
+title: What Little Harness Is
+description: A zero-config agent runtime for tools, skills, files, traces, and isolated sessions.
+---
+
+Little Harness is an agent runtime for apps that need agents to use tools, skills, files, and scripts without making the developer design the sandbox, storage, artifact, or tracing layer first.
+
+The developer-facing contract stays small: provide instructions, tools, optional skills, optional workflows, and optional Persistent Dirs. Little Harness creates the session workspace, isolates it from other sessions, stores large outputs as artifacts, records a trace, and returns a result. A `workflows` option lets the agent trigger a Little Workflow as a typed tool.
+
+```txt
+app request
+-> Little Harness session
+-> isolated workspace + skills + tools + artifacts
+-> optional Persistent Dirs
+-> assistant result + trace + persistence status
+```
+
+## Product Boundary
+
+Little Harness is:
+
+- a local-first agent runtime
+- an isolated session workspace
+- a tool and skill harness
+- an artifact-first file surface
+- a trace and persistence boundary
+- a first runtime target for just-bash
+
+Little Harness is not:
+
+- a workflow compiler
+- a chat UI
+- a requirement to adopt Little Workflow
+- a reason to expose arbitrary host paths to the model
+- a requirement that developers define containers or microVMs before their first agent works
+
+> **UNRELEASED review preview.** Some pages document source changes that are not
+> in any npm version yet. They are labeled **UNRELEASED**; see
+> [Alpha Migrations](/docs/harness/v0.1.0-alpha/reference/alpha-migrations).
+
+## Where It Sits In The Stack
+
+Little Harness is the SDK half of the Little stack, with Little Workflow. You
+build the agent here; [LittleDB](/docs/littledb), the product, traces what the
+agent does, scores it, and improves it. Harness needs nothing from LittleDB to
+run, and the connection is one `onEvent` hook. An agent's work lives in a
+[workspace](/docs/how-they-fit#workspaces): the folder tier is Harness's own
+just-bash sandbox, and a container joins only when a command needs one, managed
+on Cloudflare or self-hosted with Little Compute. See
+[How they fit](/docs/how-they-fit).
+
+## Start Here
+
+- [Setup](/docs/get-started/setup) — create a Node or Next.js project with a Harness agent (shared guide for all products)
+- [How they fit](/docs/how-they-fit) — Harness next to Workflow, LittleDB and workspaces
+- [Releases](/docs/releases) — what `0.2.0-alpha.0` contains and what is UNRELEASED
+- [Guides and API](/docs/harness/v0.1.0-alpha) — the alpha developer API and local runtime (currently `0.2.0-alpha.0` on npm). Its URLs keep the historical `v0.1.0-alpha` segment so old links stay stable; that segment is not the package version.
+- [Getting Started](/docs/harness/v0.1.0-alpha/getting-started) — scaffold an agent workspace and chat with it from the CLI in minutes
+- [Embedding in Your App](/docs/harness/v0.1.0-alpha/quickstart) — tools, skills, artifacts, Persistent Dirs, and after-turn commits
+- [Foundations](/docs/harness/v0.1.0-alpha/foundations) — the concepts behind sessions, files, tools, persistence, and traces
+- [Runtime Overview](/docs/harness/v0.1.0-alpha/runtime) — the just-bash-backed local runtime
+- [Roadmap](/docs/harness/v0.1.0-alpha/roadmap) — where Little Harness goes after alpha

@@ -49,7 +49,7 @@ The planner reads only the safe surface of the request:
 
 - the goal and input/output schemas
 - execution model slot metadata (model id, quality tier, description)
-- tool descriptions and input schemas for tools the developer passed in `globalTools`
+- tool descriptions and input schemas for the tools the workflow declares in `tools`
 - memory store contents (via bash) and skill bodies (via bash on demand)
 
 It never sees:
@@ -130,7 +130,7 @@ The planner is one of four roles that run in a harness session. All four use the
 |---|---|---|
 | **Planner** | `"plan"` | LWIR for one workflow run |
 | **Orchestrator** | `"orchestrate"` | Composition of multiple workflow runs (`plan_workflow` / `run_workflow` tools) |
-| **Worker** | `"execute_step"` | One LWIR step (`ai.generate` runs agent loop; `code.run` / `tool.call` / `decision` run direct) |
+| **Worker** | `"execute_step"` | One LWIR step (`ai.generate` makes one model call with no tools; `code.run` / `tool.call` / `decision` run direct) |
 | **Fixer** | `"fix_step"` | Repairs a failed `code.run` step source so it produces output matching the schema |
 
 Each role receives its own `ctx.tools` (SDK-injected, role-specific), its own memory and scratch mounts, and its own system prompt addendum. The harness implementation is the same (`workflowHarness` by default) — the task and context configure the behavior.

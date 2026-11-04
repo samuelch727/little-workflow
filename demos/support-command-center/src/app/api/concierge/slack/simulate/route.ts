@@ -4,12 +4,12 @@ import {
   createTestThread,
   loadChatSdkConnector,
   type LoadChatSdkConnectorOptions,
-} from "little-harness/connectors/runtime";
+} from "@little-stack/harness/connectors/runtime";
 import {
   streamHarness,
   type StreamHarnessOptions,
   type StreamHarnessResult,
-} from "little-harness/execution";
+} from "@little-stack/harness";
 import slackConnector from "../../../../../../agents/concierge/connectors/slack/connector";
 import {
   clearChannelFeed,

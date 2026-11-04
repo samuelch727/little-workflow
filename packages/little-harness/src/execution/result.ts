@@ -34,11 +34,11 @@ export type HarnessCompletedResult<TOutput = string> = {
   warnings: HarnessWarning[];
 };
 
+/** A turn can finish by completing or by parking until its pending work settles. */
 export type HarnessTurnResult<TOutput = string> =
   | HarnessCompletedResult<TOutput>
   | HarnessParkedResult;
 
-export type GenerateHarnessResult<TOutput = string> = HarnessCompletedResult<TOutput>;
 
 export type StreamHarnessCompletedResult = {
   status: "completed";
@@ -54,4 +54,3 @@ export type StreamHarnessTurnFinished =
   | StreamHarnessCompletedResult
   | HarnessParkedResult;
 
-export type StreamHarnessFinished = StreamHarnessCompletedResult;

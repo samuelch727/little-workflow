@@ -3,15 +3,19 @@ import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
-  createLittleWorkflow,
   createToolRegistry,
   model,
   skill,
-  type Harness,
-  type HarnessResult,
-  type HarnessTask,
-  type WorkflowDefinition,
 } from "./index.js";
+import {
+  createLittleWorkflow,
+} from "./entries/internals.js";
+import type {
+  Harness,
+  HarnessResult,
+  HarnessTask,
+  WorkflowDefinition,
+} from "./entries/internals.js";
 import {
   getWorkflowDefinitionHash,
   getWorkflowDefinitionSnapshot,

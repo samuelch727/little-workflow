@@ -3,7 +3,7 @@ title: Orchestrator
 description: Compose multiple workflows dynamically — chains, fan-out, and schema transformation between workflows.
 ---
 
-> **Deprecated composition surface.** Little Workflow has two ways to compose workflows, and the orchestrator is the one being retired. That means `workflows: [...]` plus an `orchestrator` config, and the `plan_workflow` / `run_workflow` / `start_workflow` tools it injects. Use the Harness surface instead: author each workflow with `defineWorkflow`, adapt it with `asHarnessWorkflow`, and hand the adapters to `createHarness({ workflows })`, which exposes every workflow to the agent as its own typed tool. See [Compose With Little Harness](/docs/v0.1.0-alpha/authoring/compose-with-harness), which includes a migration table. Nothing on this page has been removed and every example still runs. The orchestrator entry points emit a one-time `DeprecationWarning` (code `LWF_DEP_ORCHESTRATOR`) and are scheduled to be unexported in the next minor. One orchestrator behaviour has no Harness equivalent yet, planning once and running many; see [Plan once, run many](/docs/v0.1.0-alpha/cookbook/plan-once-run-many). `maxConcurrentSubRuns` maps to `workflowBudgets.maxConcurrentWorkflowRuns`.
+> **Deprecated composition surface.** Little Workflow has two ways to compose workflows, and the orchestrator is the one being retired. That means `runOrchestration({ workflows: [...], orchestrator })` and the `plan_workflow` / `run_workflow` / `start_workflow` tools it injects. Use the Harness surface instead: author each workflow with `defineWorkflow`, adapt it with `asHarnessWorkflow`, and hand the adapters to `createHarness({ workflows })`, which exposes every workflow to the agent as its own typed tool. See [Compose With Little Harness](/docs/v0.1.0-alpha/authoring/compose-with-harness), which includes a migration table. Nothing on this page has been removed and every example still runs. The orchestrator entry points emit a one-time `DeprecationWarning` (code `LWF_DEP_ORCHESTRATOR`) and are scheduled to be unexported in the next minor. One orchestrator behaviour has no Harness equivalent yet, planning once and running many; see [Plan once, run many](/docs/v0.1.0-alpha/cookbook/plan-once-run-many). `maxConcurrentSubRuns` maps to `workflowBudgets.maxConcurrentWorkflowRuns`.
 
 An **Orchestrator** is an agent that operates over multiple `WorkflowDefinition`s together. Where a Planner designs the LWIR for one workflow, the Orchestrator decides how several workflows combine at runtime: which runs sequentially, which run in parallel, and how data flows between them.
 
@@ -11,33 +11,27 @@ There is no static pipeline graph. The pipeline emerges from the orchestrator's 
 
 ## When to use an orchestrator
 
-Use `workflows: [w1, w2]` (an array) when you need any of:
+Use `runOrchestration({ workflows: [w1, w2], orchestrator })` when you need any of:
 
 - **Sequential chains** — pass the output of `candidate.review` into `candidate.scoring`
 - **Fan-out / fan-in** — run `candidate.review` 50 times in parallel for one job opening, then reduce
 - **Schema transformation** — reshape data between workflows whose output and input schemas don't match
 
-A single workflow with `workflows: candidateReview` (not an array) runs just a Planner. No orchestrator is involved.
+A single workflow runs through `runWorkflow(candidateReview, input)`, which runs just a Planner. No orchestrator is involved.
 
-## Polymorphic `runWorkflow`
+## `runWorkflow` and `runOrchestration`
 
-Passing a single `WorkflowDefinition` vs an array changes the type contract. TypeScript enforces this at compile time.
+One workflow and a set of workflows have separate entry points:
 
 ```ts
-import { runWorkflow, localWorld, skill } from "little-workflow";
+import { runOrchestration, runWorkflow, skill } from "@little-stack/workflow";
 import { openai } from "@ai-sdk/openai";
 
-// Single workflow — planner runs; orchestrator field is forbidden
-const result = await runWorkflow({
-  world: localWorld({ dataDir: ".little-workflow" }),
-  workflows: candidateReview,
-  input: { jobDescription, candidate },
-  tools,
-});
+// Single workflow — the planner runs
+const result = await runWorkflow(candidateReview, { jobDescription, candidate }, { tools });
 
-// Multiple workflows — orchestrator is required
-const result2 = await runWorkflow({
-  world: localWorld({ dataDir: ".little-workflow" }),
+// Multiple workflows — the orchestrator runs; `orchestrator` is required
+const result2 = await runOrchestration({
   workflows: [candidateReview, candidateScoring],
   input: { jobDescription, candidates: [...50 items] },
   tools,
@@ -49,7 +43,7 @@ const result2 = await runWorkflow({
 });
 ```
 
-The type system rejects `orchestrator` on a single-workflow call, and errors if `orchestrator` is missing when `workflows` is an array.
+`runWorkflow` takes no `orchestrator` option and throws when given an array; `runOrchestration` requires `orchestrator` and a non-empty `workflows` array.
 
 ## Orchestrator config shape
 
@@ -63,7 +57,7 @@ type OrchestratorConfig = {
 };
 ```
 
-The SDK injects the three orchestrator tools automatically and uses `workflowHarness` when no custom harness is supplied. Any `globalTools` declared on available workflows are also surfaced to the orchestrator — it can call them directly for data transformation between steps.
+The SDK injects the three orchestrator tools automatically and uses `workflowHarness` when no custom harness is supplied. Any `tools` declared on available workflows are also surfaced to the orchestrator — it can call them directly for data transformation between steps.
 
 ## The three orchestrator tools
 
@@ -132,7 +126,7 @@ The orchestrator's system prompt teaches the trade-off:
 ### Worked example: 50 candidates
 
 ```ts
-const result = await runWorkflow({
+const result = await runOrchestration({
   world,
   workflows: [candidateReview, candidateScoring],
   input: {
@@ -181,10 +175,10 @@ Turn 2 tool calls (model emits all 50 at once):
   ... 50 total ...
 ```
 
-The harness starts up to `maxConcurrentSubRuns` (default: **10**) at a time. Excess calls queue and dispatch as slots free. Configure the cap on `runWorkflow`:
+The harness starts up to `maxConcurrentSubRuns` (default: **10**) at a time. Excess calls queue and dispatch as slots free. Configure the cap on `runOrchestration`:
 
 ```ts
-runWorkflow({
+runOrchestration({
   // ...
   orchestrator: { model, harness, system },
   maxConcurrentSubRuns: 25,  // default 10
@@ -193,7 +187,7 @@ runWorkflow({
 
 ## Schema transformation between workflows
 
-When workflow A's output doesn't match workflow B's input, the orchestrator transforms the data itself — it has bash and any registered `globalTools`. No special transform primitive is needed.
+When workflow A's output doesn't match workflow B's input, the orchestrator transforms the data itself — it has bash and the tools the available workflows declare. No special transform primitive is needed.
 
 Via bash:
 
@@ -238,7 +232,7 @@ The orchestrator's session is durable: every model turn and every tool call is e
 ## Not in alpha
 
 - **Nested orchestrators** — one orchestrator calling another. Alpha is one level deep.
-- **Long-running sessions** spanning multiple `runWorkflow` invocations. Each call is one orchestrator session.
+- **Long-running sessions** spanning multiple `runOrchestration` invocations. Each call is one orchestrator session.
 - **Approval gates** between sub-workflow runs.
 - **Streaming sub-run results** to the orchestrator turn-by-turn. Sub-runs complete fully before returning.
 - **Budget enforcement** at the sub-workflow boundary. Cost is *observed* — real dollars per step and per run, via `result.usage` and `little report` — but nothing pauses or fails a run for spending too much. Note that each sub-run reports its own usage under its own `runId`; the orchestrator's total does not roll them up. Enforcement, and pre-run cost estimation, are post-alpha.
@@ -247,5 +241,5 @@ The orchestrator's session is durable: every model turn and every tool call is e
 
 - [Memory](/docs/v0.1.0-alpha/authoring/memory) — memory mounts the orchestrator sees
 - [Skills](/docs/v0.1.0-alpha/authoring/skills) — how to configure `orchestrator.skills`
-- [Create A Workflow](/docs/v0.1.0-alpha/authoring/advanced-createlittleworkflow) — single-workflow planner path
+- [Workflow Config](/docs/v0.1.0-alpha/authoring/advanced-createlittleworkflow) — single-workflow planner path
 - [Tools](/docs/v0.1.0-alpha/authoring/tools-and-capabilities) — registering tools the orchestrator can call

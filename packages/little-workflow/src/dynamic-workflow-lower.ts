@@ -1,4 +1,4 @@
-import { registerWorkflowVersion, validateLwir, type LwirStep, type LwirWorkflow, type WorkflowVersion } from "./lwir.js";
+import { inferStepNeeds, registerWorkflowVersion, validateLwir, type LwirStep, type LwirWorkflow, type WorkflowVersion } from "./lwir.js";
 import { normalizeSchema } from "./schema.js";
 import type { AdHocPlan, AdHocPlanStep } from "./dynamic-workflow-plan.js";
 
@@ -17,7 +17,9 @@ export function lowerAdHocPlan(
     return { ok: false, message: error instanceof Error ? error.message : String(error) };
   }
 
-  const lwir: LwirWorkflow = {
+  // A step that reads {{ steps.<id>.output }} waits for that step even when the plan's author
+  // left it out of `needs`, as in a planner's draft.
+  const lwir = inferStepNeeds({
     apiVersion: "littleworkflow.dev/v0.1",
     kind: "Workflow",
     metadata: { name: opts.name },
@@ -30,7 +32,7 @@ export function lowerAdHocPlan(
       network: [],
     },
     steps,
-  };
+  }) as LwirWorkflow;
 
   const validation = validateLwir(lwir);
   if (!validation.valid) {
@@ -66,8 +68,8 @@ function lowerStep(step: AdHocPlanStep): LwirStep {
       throw new Error(`Step ${step.id}: ai.generate requires a model slot.`);
     }
     const withField: Record<string, unknown> = { model: step.model };
-    // Agentic bash is signalled to the runtime via the presence of bashCapabilities at run time;
-    // record intent on the step so the harness knows this step wants bash.
+    // Kept on the step so the plan's bash use is checked against the agent's grant. The workflow
+    // harness runs an ai.generate step as one model call with no tools, so it gets no shell.
     if (step.bash === true) withField.bash = true;
     return {
       ...base,
@@ -111,7 +113,9 @@ export function subsetCheck(referenced: ReferencedCapabilities, allowed: Allowed
   }
   const allowModels = new Set(allowed.models);
   for (const m of referenced.models) {
-    if (!allowModels.has(m)) return { ok: false, message: `Model slot '${m}' is not available (use "default").` };
+    if (!allowModels.has(m)) {
+      return { ok: false, message: `Model slot '${m}' is not available (use ${[...allowModels].map((slot) => `"${slot}"`).join(" or ")}).` };
+    }
   }
   if (referenced.bash && !allowed.bash) {
     return { ok: false, message: "This plan uses bash, but the agent's snapshot does not grant bash." };

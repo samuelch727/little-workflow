@@ -1,0 +1,185 @@
+---
+title: gbrain As Memory
+description: A recipe for keeping Harness memory in a gbrain brain over MCP, with one gbrain source per memory and tokens gbrain scopes to each.
+---
+
+This is an example recipe, not a core Little Harness concept and not a package. It keeps [memory](/docs/harness/v0.1.0-alpha/build-agents/memory) in [gbrain](https://github.com/garrytan/gbrain) instead of a folder, through the memory `backend` option. The agent's side does not change: it still sees one line per memory and edits files.
+
+Use it when you want what gbrain adds on top of files: `forget` with an audit trail, relevance search with `recall`, and other agents, such as Claude Code or Cursor, reading the same brain over MCP. The adapter below ran the loan-desk memory demo, with company knowledge and one memory per person, against gbrain 0.60.221.
+
+## Before You Start
+
+- **A separate process.** gbrain runs on Bun and cannot be imported into Node, so run its HTTP MCP server next to your app: `gbrain serve --http --port 3131`.
+- **Not on npm under its name.** The npm package `gbrain` is unrelated. Install from `github:garrytan/gbrain` and pin a version: it releases very often.
+- **One process, or Postgres.** The default PGLite store is single-process. Anything shared needs Postgres.
+- **Its content folder must sit outside a git repository.**
+- **One source per memory.** The demo brain had a `company` source and one source per person.
+- **Scoped tokens.** One token per person, scoped to their own source, plus a `company-reader` and a `company-writer`. gbrain itself refuses the rest: a person's token reading someone else's source gets `scope_denied`, and the reader token trying to write gets `insufficient_scope`. `canWrite` in the harness is a second lock on top. Mint the tokens with gbrain's CLI into a secrets store, not the terminal.
+
+## The Adapter
+
+The adapter talks to gbrain with the AI SDK's MCP client (`@ai-sdk/mcp`):
+
+```ts
+// src/gbrain-memory.ts
+import { createMCPClient } from "@ai-sdk/mcp";
+import type { HarnessMemoryBackend } from "@little-stack/harness";
+
+/**
+ * A memory kept in gbrain. Each memory is one gbrain source, reached with a token scoped to it.
+ * On load, each active fact becomes one file, at the path the agent first gave it (kept in the
+ * fact's provenance). On store, a new file is a `remember`, a deleted file a `forget`, and a
+ * changed file both, so gbrain keeps the old version in its audit trail.
+ */
+export function gbrainMemory<TExtraBody>(options: {
+  /** The gbrain server's MCP endpoint, e.g. http://127.0.0.1:3131/mcp. */
+  url: string;
+  /** This turn's tokens: one that reads the source, and one that writes it when the turn may. */
+  tokens: (ctx: { extraBody?: TExtraBody | undefined }) => { read: string; write?: string };
+  /** The gbrain fact kind for what this memory saves. */
+  kind: "fact" | "preference";
+}): HarnessMemoryBackend<TExtraBody> {
+  return {
+    async load({ extraBody }) {
+      const { read } = options.tokens({ extraBody });
+      const recalled = await call(options.url, read, "recall", { limit: 100 });
+      const facts = (recalled.facts ?? []) as GbrainFact[];
+      const files: Record<string, string> = {};
+      const ids: Record<string, string> = {};
+      for (const fact of facts) {
+        const wanted = /(?:^|; )path: ([^;]+)/.exec(fact.provenance ?? "")?.[1]?.trim();
+        const path =
+          wanted && !(wanted in files) && /^[\w./-]+\.md$/.test(wanted) && !wanted.includes("..")
+            ? wanted
+            : `gbrain-fact-${fact.fact_id}.md`;
+        const { description, body } = splitFact(fact.fact);
+        files[path] = `---\ndescription: ${JSON.stringify(description)}\n---\n\n${body}\n`;
+        ids[path] = fact.fact_id;
+      }
+      // The cursor comes back to store, so it knows which fact each file was.
+      return { files, cursor: { ids } };
+    },
+    async store({ changes, extraBody, session, cursor }) {
+      const ids = (cursor as { ids?: Record<string, string> } | undefined)?.ids ?? {};
+      const written = Object.entries({ ...changes.created, ...changes.updated });
+      const gone = [...changes.deleted, ...Object.keys(changes.updated)].flatMap((path) => ids[path] ?? []);
+      if (written.length === 0 && gone.length === 0) return;
+      const { write } = options.tokens({ extraBody });
+      if (write === undefined) throw new Error("gbrainMemory: this turn has no write token for the memory it changed");
+      for (const id of gone) {
+        await call(options.url, write, "forget", { id, reason: `changed or deleted in Little Harness session ${session.id}` });
+      }
+      for (const [path, bytes] of written) {
+        const fact = factText(new TextDecoder().decode(bytes));
+        if (fact.length === 0) continue;
+        await call(options.url, write, "remember", {
+          fact,
+          provenance: `path: ${path}; Little Harness session ${session.id}`.slice(0, 500),
+          kind: options.kind,
+          infer_entity: false,
+        });
+      }
+    },
+  };
+}
+
+type GbrainFact = { fact_id: string; fact: string; provenance?: string; valid_from?: string; created_at?: string };
+
+/** A memory file as one gbrain fact: its description, then its body, without the frontmatter. */
+function factText(text: string): string {
+  const match = /^---\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)([\s\S]*)$/.exec(text);
+  const body = (match ? match[2]! : text).trim();
+  const raw = match ? /^description:[ \t]*(.*)$/m.exec(match[1]!)?.[1]?.trim() : undefined;
+  const description = raw?.startsWith('"') ? (JSON.parse(raw) as string) : raw;
+  if (!description) return body;
+  return body.length === 0 || body.startsWith(description) ? body || description : `${description}\n\n${body}`;
+}
+
+/** The first paragraph of a fact as the file's description; the whole fact as its body. */
+function splitFact(fact: string): { description: string; body: string } {
+  const first = fact.trim().split(/\n\s*\n/)[0] ?? fact;
+  const description = first.replace(/\s+/g, " ").trim();
+  return { description: description.length <= 600 ? description : `${description.slice(0, 600)}…`, body: fact.trim() };
+}
+
+async function call(url: string, token: string, name: string, args: Record<string, unknown>): Promise<Record<string, any>> {
+  const client = await createMCPClient({ transport: { type: "http", url, headers: { Authorization: `Bearer ${token}` } } });
+  try {
+    const result = await client.callTool({ name, arguments: args });
+    const text = (result.content as { type: string; text?: string }[]).find((part) => part.type === "text")?.text ?? "{}";
+    const parsed = JSON.parse(text) as Record<string, any>;
+    if (result.isError || parsed.error) throw new Error(`gbrain ${name}: ${parsed.code ?? parsed.error}: ${parsed.message ?? text}`);
+    return parsed;
+  } finally {
+    await client.close();
+  }
+}
+```
+
+## Use It
+
+Company knowledge everyone reads and only underwriters change, next to one memory per person:
+
+```ts
+import { createHarness, localHost, memory } from "@little-stack/harness";
+import { gbrainMemory } from "./gbrain-memory";
+
+type DeskUser = { userId: string; role: "officer" | "underwriter" };
+
+const url = process.env.GBRAIN_URL ?? "http://127.0.0.1:3131/mcp";
+const tokens = await loadGbrainTokens(); // from your secrets store
+
+const harness = createHarness<typeof tools, DeskUser>({
+  host: localHost({ dataDir: ".little-harness" }),
+  model,
+  tools,
+  memory: [
+    memory<DeskUser>({
+      harnessDir: "/persistent/company",
+      description: "The bank's shared lending knowledge. Only underwriters may change it.",
+      canWrite: ({ extraBody }) => extraBody?.role === "underwriter",
+      backend: gbrainMemory<DeskUser>({
+        url,
+        kind: "fact",
+        tokens: ({ extraBody }) => ({
+          read: tokens["company-reader"]!,
+          ...(extraBody?.role === "underwriter" ? { write: tokens["company-writer"]! } : {}),
+        }),
+      }),
+    }),
+    memory<DeskUser>({
+      harnessDir: "/persistent/me",
+      description: "This person's own preferences, such as how they like answers. Never lending rules.",
+      backend: gbrainMemory<DeskUser>({
+        url,
+        kind: "preference",
+        tokens: ({ extraBody }) => {
+          const token = extraBody && tokens[`user-${extraBody.userId}`];
+          if (!token) throw new Error("This turn needs a userId with a gbrain token.");
+          return { read: token, write: token };
+        },
+      }),
+    }),
+  ],
+});
+```
+
+The per-person `tokens` throws when the turn has no known user, for the same reason a per-user `sourceDir` does: a fallback would make every turn without one share a memory.
+
+## How Files Map To Facts
+
+| The agent | gbrain |
+| --- | --- |
+| Sees a file | An active fact, at the path kept in its provenance (`path: rules/self-employed.md; …`), with its first paragraph as the description |
+| Creates a file | `remember`, with the path and session as provenance |
+| Edits a file | `forget` on the old fact, then `remember` the new text |
+| Deletes a file | `forget`, with the session as the reason |
+
+gbrain keeps forgotten facts in its audit trail, so a rule the agent replaced can be found later.
+
+## Limits
+
+- **No relevance yet.** `load` recalls up to 100 facts with no question, because a memory backend's `load` doesn't see the turn's message. Once a memory outgrows the 8,000-byte file list, the agent sees the cut by file name, not the facts that matter for this turn.
+- **One MCP connection per call.** Fine for a demo; reuse a client per process under load.
+- **No review.** A change goes live in gbrain when the turn ends. For org memory that waits for a person, with history and a Memory tab, see LittleDB's [managed memory](/docs/littledb/memory).
+- **Moving target.** gbrain changes quickly, so keep it behind this one adapter and pin the version you tested.

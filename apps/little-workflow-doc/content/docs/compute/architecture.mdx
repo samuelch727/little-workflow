@@ -1,0 +1,510 @@
+---
+title: Architecture
+description: A production-shaped modular control plane with provider-pluggable isolated execution.
+---
+
+Little Compute begins as a modular control plane with PostgreSQL as the canonical state store.
+Every public mutation is idempotent. Task finalization and sandbox-derived Publications are
+fenced by Attempt identity, generation, cancellation epoch, and the committed workspace
+generation.
+
+Each process owns exactly one service role and one matching least-privilege
+PostgreSQL LOGIN. Within that boundary, independent lazy connection lanes
+reserve capacity for critical cancellation/finalization, admission, bounded
+reads, background reconciliation, and safe-time access. The 24-connection
+per-process baseline is `6/8/5/3/2`; deployments multiply lane maxima by role
+replica count before comparing them with PostgreSQL capacity. Admission or
+diagnostic bursts therefore cannot consume the connections reserved for
+fencing acknowledged authority, and horizontally scaled roles never share a
+credential or pool set.
+
+Database-time sampling is its own singleton/HA-fenced `time-sampler` process.
+API replicas read the persisted guard for readiness but cannot execute the
+sealed sampler bootstrap or handoff functions.
+The sampler process and its host monotonic clock are a trusted safety leaf;
+owner-sealed SQL caps proposals at database-observed time but cannot attest a
+compromised host's elapsed-time measurement. Untrusted agent execution stays
+outside this trust domain.
+
+```txt
+Little Harness / application
+          |
+          v
+Little Compute API + scheduler + reconciler + runner + attachment verifier + time sampler
+          |
+          +-- PostgreSQL (canonical state and outbox)
+          +-- blob store (large Artifacts and File Snapshots)
+          +-- SandboxProvider contract + conformance suite
+                    |
+                    +-- rootless Podman provider (default local)
+                    +-- Kubernetes Agent Sandbox provider (conditional)
+                    +-- Cloudflare Sandbox provider (contract fixtures only)
+                    +-- little-cell provider (later)
+```
+
+Provider statuses are kept in one table on the [Providers](/docs/compute/providers) page.
+
+Trusted model loops and control-plane credentials stay outside untrusted sandboxes. A
+Sandbox Lease receives only scoped, short-lived capabilities. Baseline networking is deny
+all. A credential-injecting egress proxy that would admit selected traffic is designed but
+not installed; see [Planned enforcement](/docs/compute/planned-enforcement).
+
+## Managed-agent activation boundary
+
+The target managed-agent composition separates four process authorities. The
+runner validates and closes scheduler/Attempt authority but never talks to
+Podman. The provider gateway owns provider mutation and supervisor I/O. A
+dedicated broker holds upstream model and tool credentials and exposes only
+purpose-bound calls. The reconciler observes provider state and cleanup
+evidence but does not mutate the provider. The v47 protocol freezes the runner
+and launcher authority graph and binds an immutable broker contract digest; the
+broker and reconciler process authorities remain implementation work.
+
+The production v49 runner adapter submits only the exact activation,
+activation-work, atomic-request and signing-intent identities. PostgreSQL
+validates the immutable activation-secret consumption proof and atomically commits
+scheduler materialization and acknowledgement, claim and capability authority,
+the immutable WorkSpec, and the queued genesis WorkState. An uncertain response
+is recovered by resubmitting the same four-field command to the exact replay
+boundary. The trusted supervisor—not the child agent kernel—is the capsule
+recipient. It decrypts the capsule, owns the boot signing key, supervises the
+process tree, relays bounded broker frames, and signs terminal quiescence. A
+provider `missing` observation cannot close launch authority by itself;
+settlement requires signed operation-final absence evidence tied to the exact
+launch and observation head. The remaining production worker,
+supervisor/kernel, and broker composition is still in progress.
+
+## Scaling shape
+
+A Cell is a correctness and failure boundary. Stable IDs are location independent, while an
+Operation pins one home Cell and authority epoch before acknowledgement. Work beyond a
+Cell&apos;s published envelope uses several explicitly linked Operations; it never introduces a
+cross-Cell winner, graph, workspace, or budget transaction.
+
+Provider vector operations may accelerate large Task Scopes, but every member retains its
+own fence, outcome, and diagnostic identity. Scalar fallback remains part of conformance.
+
+## Aggregate Cell-capacity delegation
+
+The v123/v125 agent-scale authority separates global quota from the hot local
+admission path. A Cell obtains one bounded, renewable aggregate lease per
+installation, tenant, and stable lease identity from the global database.
+Ordinary environment admission then consumes a lane allocation in the Cell
+database without a global round trip. CPU, memory, ephemeral disk, and
+environment slots are conserved independently; auxiliary v24 envelope
+dimensions remain owned by the existing lane authority.
+
+The bridge is a durable two-database saga. The Cell stores the desired vector,
+canonical allocation across at most 128 lanes, conservative live-use
+reconciliation, and one immutable global request before making the external
+call. A lost response is recovered by reading the global lease head and then,
+only when necessary, replaying the exact request. The exact v123 receipt is
+validated and imported before any lane right becomes usable. The global Router
+credential cannot read Cell tables, and the Cell reconciler credential cannot
+read global tables.
+
+Admission fails closed at the receipt&apos;s `admitUntil` guard even if an older
+v24 snapshot still exists. Running environments are retained as liability and
+must be fenced or detached by `expiresAt`; quota debt remains accounted through
+`partitionDebtUntil`. Expiry never releases a charge by itself. Shrink and
+return wait for committed/staged scheduler charges and conservative provider
+absence evidence, so a partition can reduce availability but cannot manufacture
+capacity.
+
+The SQL authority, two-database PostgreSQL 17 qualification, and top-level
+`capacity-delegator` process are implemented in v125. The process holds one
+Cell Reconciler credential and a separate one-connection Global Router
+credential; it never holds global policy-admin or security-admin authority.
+A durable Cell controller fence makes restart and replica takeover exclusive.
+The worker re-reads a private desired-set file, recovers exact pending saga
+requests, and stays unready until both databases and the purpose-exclusive
+mutual-TLS provider fence/detach path pass their live probes. Reconciliation is
+bounded and intentionally serial at the global mutation boundary while the
+ordinary per-environment scheduling path remains Cell-local.
+
+## Warm-stock authority boundary
+
+Profile v39 introduces the durable warm-stock creation and cleanup path. Pool
+authority is scoped by tenant, runtime-profile digest, and provider cluster,
+with an independent provider-wide ceiling. Each reservation holds exactly its
+CPU, memory, disk, and one Lease slot in CoreQuota before it can enter
+`provisioning`. Capacity is activated before native provider I/O. The provider
+ensure call runs outside the database transaction and is replayed under the
+reservation fence; its physical identity is then recorded as either `ready`
+or, if expiry or configuration fencing won the race, still draining under
+`release_pending`.
+
+Desired-ready replenishment is only a hint to bounded workers. PostgreSQL locks
+the provider and scope ceilings and counts provisioning, ready, claim-pending,
+and release-pending residents until exact native deletion and quota return
+finish. Concurrent reconcilers use skip-locked, generation-fenced cleanup
+claims. Native deletion remains outside the database transaction, and final
+release requires the same absence-or-fence evidence committed by CoreQuota.
+Fresh reservation expiry is admitted only against a certain database safe-time
+cut and is capped by the renewable-authority horizon; uncertainty rejects new
+stock. The claim deadline remains dormant and cannot be written in v39.
+
+<BoundaryCallout>
+Warm-stock claim remains intentionally unavailable to a frozen v39 runtime.
+Current profile v41 adds the reviewed v61 adoption gateway: it inherits the
+existing reservation-owned capacity atomically, creates no second charge, and
+preserves the shared reusable grant. Older binaries still fail closed rather
+than approximating that authority transition.
+</BoundaryCallout>
+
+## Inherited-capacity adoption boundary
+
+Profile v41 adds the online v61 successor on the exact v40 predecessor. One
+transaction locks the global task stripe, reusable grant, warm scope,
+reservation, consumed charge, Lease, and provider subject in canonical order.
+It binds the physical provider identity once, creates a canonical Lease and an
+already-observed provider operation, and records exact request, authority, and
+observation receipts without changing charge ownership.
+
+Replay is content-addressed: the exact request returns the original adoption,
+while a conflicting request, stale fence, physical-identity rebind, second
+charge, or ordinary quota-hold race is rejected. Terminal absence or fencing
+returns only the adopted reservation capacity; the reusable scope grant stays
+live for other stock. Recovery can finish the same transition after a crash.
+The database authority is qualified on PostgreSQL 17 and 18, including v40
+writer coexistence, but the built-in appliance does not yet advertise a native
+adoption worker as executable.
+
+## Resource-advisor authority boundary
+
+Profile v40 adds the online v60 resource-advisor authority on the exact v39
+predecessor. Trusted execution evidence is ingested against immutable historical
+Lease lineage; response-loss retries replay before mutable liveness checks, and
+the hot history is bounded to 256 records while replay identities remain
+immutable. Applied resource classes advance in database-assigned allocation
+order, and evaluation state changes use a safe-time-bound compare-and-swap.
+
+The OOM path deliberately splits authority. The execution-evidence verifier
+commits the canonical cgroup delta and terminal outcome, while the scheduler can
+only register a short-lived covered budget grant and reserve one retry against
+that exact outcome root.
+
+Physical telemetry is host-private. The supervisor reads only fixed cgroup-v2
+files beneath its configured root, captures the baseline before the shepherd
+starts, observes the terminal state after execution, and signs the exact
+monotonic window. That receipt covers CPU, memory, OOM, CPU/memory/I/O pressure,
+and page-fault counters. The producer queue carries an opaque fenced canonical
+claim; callers cannot provide a cgroup path, native counter, JSON supplement, or
+project-quota identity.
+
+Disk evidence uses a separate purpose-exclusive authority after the broker has
+wrapped the supervisor receipt. It derives the project-quota identity from
+receipt-bound Attempt, Lease, Exec, allocation, and provider lineage. The
+root-only quota helper batches every live project ID into one bounded XFS quota
+report, persists each observed high water, and marks a window permanently
+incomplete if sampling exceeds the configured maximum interval or continuity is
+lost over restart. `diskPeakBytes` is consequently a sampled high water with a
+declared maximum resolution; it is not a continuous instantaneous-peak claim.
+Production admission remains closed until the exact request authority,
+least-privilege credential composition, and Linux/XFS candidate campaign pass.
+
+Profile v54 adds the v75 work queues and exact generation-LOGIN boundary. A
+wrapper-only host administrator owns private crash-safe receipts and stable
+advisory fences, activates one least-privilege LOGIN per role/source generation,
+and atomically registers the matching tenant, Cell, runtime profile, SPIFFE,
+capability, and binding digest. Worker handles expose a purpose-scoped pool and
+caller-zeroizable URL copies. Retryable release always revokes the source first,
+then removes LOGIN/password/membership authority and drains its sessions. The
+runner queue is startable through this boundary; evidence and scheduler input
+loaders remain absent until canonical physical-telemetry and project-input
+authorities exist.
+
+Workspace Authority defaults and caps its managed data-plane pool at seven
+connections. Each generated LOGIN has an eight-connection limit, and the eighth
+backend is reserved for the host-owned advisory fence that continuously proves
+the generation is still held.
+
+## PostgreSQL cluster-bootstrap authority
+
+The one-time self-host cluster marker is authorized by a host-private canonical
+v2 journal. Its random 256-bit token is HMAC-bound to the installation and
+Podman authority, the PostgreSQL volume's mandatory native creation timestamp,
+its storage ID when present, and the live `pg_control_system()` system identifier. Public labels,
+a deterministic secret name, or secret existence never constitute authority.
+
+Before marker DDL, lifecycle re-inspects the sensitive token bytes and exact
+native secret ID, PostgreSQL container ID and health, native volume incarnation,
+and database system identifier. Marker SQL independently rejects a system ID
+different from the token claim before any DDL. The private journal advances
+`pending` to `bound`, records the exact secret ID, and commits `consumed` before
+removing that ID. Bound work can recover idempotently after interruption;
+consumed work can only finish cleanup. An interruption that leaves a native
+volume while the journal is still unbound fails closed until an explicitly
+confirmed purge retires both the resource and journal.
+
+After bootstrap, Workspace Authority retains a dedicated marker-observer
+session. Its LOGIN can only connect to `postgres`, use and read the canonical
+marker, and execute `pg_control_system()`; it has no settings or unrelated
+membership, ACL, function, or ownership surface. The canonical marker identity,
+the observer's live system identifier, and the managed database's live system
+identifier must remain equal before mutation and throughout the authority's
+lifetime. A restored volume or cross-install marker therefore fails closed
+before generation-role mutation.
+
+## Self-host release activation boundary
+
+Managed host owners require an offline-produced release-activation envelope.
+A policy-pinned fixed qualification plan runs direct, sanitized commands from
+private snapshots copied from their opened, content-verified descriptors; its
+canonical typed assertions are signed by a dedicated qualification key. A
+separate builder identity signs the package closure produced from pinned local
+OCI archives and scanner bytes. The attestor verifies that signature, the
+signed aggregate run and raw outputs, all three images' platform/source SBOM
+and provenance subjects, the release manifest, and a separate release-chain
+signature before signing the activation envelope with a fourth,
+fingerprint-disjoint identity.
+
+Runtime loading requires pinned evidence and policy files plus a crash-safe
+activation-state file and SQLite kernel-gate sidecar. The state atomically
+enforces minimum policy sequence, revocation epoch, and credential generation,
+retains every run nonce in a bounded fail-closed replay filter, and rechecks
+wall-clock expiry at final promotion. Crash-left publication links are moved
+to unpredictable same-directory quarantines, checked against the retained open
+file identity before retirement, and recovered after interruption. Direct signature verification cannot open
+an owner gate. Operator commands and the five runtime variables are documented
+in the package's `self-host-release-activation-evidence-v1.md` guide.
+
+The production guardian boundary uses distinct locked system identities for
+the signing guardian, the Node owner, and the Podman daemon. The guardian key
+is a systemd credential and the owner gets connect-only access to a
+systemd-created Unix `SOCK_SEQPACKET` socket. The root-owned connector pins and
+hashes the owner executable and argv, sends a bounded pre-exec contract, then
+executes the same descriptor without changing PID. The guardian binds that
+contract to the accepted peer credentials, cgroup, pidfd, and process start
+time before signed HELLO can release a token. Client-side `SO_PEERCRED`
+identifies systemd (PID 1/root) as socket creator; the pinned signing key
+authenticates the guardian. Live qualification binds the single process under
+each release UID, both cgroups and executables, the socket inode, accepted peer,
+connector, systemd credential, and exact unit bytes. A normal Node
+`execve` resets Linux dumpability, so the portable same-user launcher is only a
+protocol/development harness: it withholds its launch token until a post-exec
+non-dumpability probe succeeds and fails closed for ordinary Node. The systemd
+installer refuses systemd older than 249, installs content-pinned root-owned
+native assets and generated units atomically, and restores prior file and unit
+state if activation fails. Owner networking denies all addresses except
+localhost and installer-pinned IPv4/IPv6 CIDRs; HA or external PostgreSQL is
+fail-closed until every database network is supplied explicitly. `BindsTo=`
+stops the owner when the guardian is lost;
+guardian `Upholds=` restarts it only after the guardian is active. The strict
+root observer and release gate require the complete live identity observation.
+That observation proves exact per-thread credentials and cgroup membership,
+distinct listener and accepted socket inodes, the guardian credential ACL, and
+direct leaf-cgroup ingress/egress BPF programs with exact LPM allow-map
+contents; inherited or name-only programs cannot satisfy the gate. Destructive
+live qualification renders an independent v2 install manifest and atomically
+publishes that manifest, the observation, and their digest-bound receipt from a
+root-only staging directory.
+
+## Harness Session durability
+
+The canonical Harness Session event stream lives in PostgreSQL. Each logical
+emitter chooses an append idempotency key before transport. Writers serialize
+one tenant/run with a versioned advisory transaction lock; identical key and
+request-digest retries return the original event and sequence, while different
+content fails. Causal occurrence IDs are intentionally non-unique across
+lifecycle phases.
+
+Project confinement also covers schema cutovers. Legacy rows are resolved as
+one run from all durable graph, Artifact, and Harness/Task-link witnesses. If
+those witnesses are absent or disagree, the run is explicitly quarantined and
+the canonical cutover gate stays closed; Little Compute never assigns session
+history to a guessed Project.
+
+Replay is page- and cursor-bounded. Large payloads are immutable Artifact
+references rather than oversized JSONB rows. A credential-free Continuation
+Capsule binds the exact event cursor, conversation digest, File Snapshot and
+workspace generation, pinned execution/configuration refs, pending Task Scope
+and publication cuts, and restartable service receipts. Provider checkpoints
+may accelerate resume but are never required for correctness.
+
+The executable self-host scheduler composes the durable v69 hibernation-resume
+worker by default. An installation may opt out explicitly, in which case no
+resume binding credential is projected. Enabled bindings pin the bootstrap
+tenant and credential generation; an ambiguous claim reuses its request only
+under the exact binding that minted it. The default claim window covers both
+resume and completion replay envelopes. Primary scheduling, Warm Pool, and
+resume are checked as one admission-lane budget; the combined default projects
+36 scheduler connections.
+
+PostgreSQL capacity is then derived from the complete selected service plan,
+not from a scheduler-only reserve. Each long-running database consumer has one
+explicit per-replica classification; fixed secondary pools include the
+evidence-verifier watchdog, Artifact GC controller, and managed-process-group
+children. The executable default is 207 service-pool connections plus 16
+ordinary operational slots, five operator-only reserved-role slots, and three
+superuser slots, yielding `max_connections = 231`. Control-plane-only yields
+96. Generated installation config records the physical cap as
+`spec.resources.postgresConnections`; smaller overrides fail validation.
+Little Compute runtime LOGINs are never granted `pg_use_reserved_connections`.
+On PostgreSQL 17 and 18, bootstrap verifies the live maximum and both reserved
+settings and also proves that the ordinary envelope fits below the reserved
+cut.
+
+Cold Park v89 archives terminal idle-claim batches only after a seven-day
+database-safe hot window. A Put-only exporter reads canonical pages and renews
+its exact claim on every page; a separate read-only verifier reads the exact
+object version back before PostgreSQL atomically records finalization, a
+permanent hashed replay guard, and source deletion. The bootstrap archive policy
+is inactive until self-host activates the real physical object namespace, and
+namespace rotation is refused while work from the prior namespace remains.
+
+This is deliberately a bounded single-object archive: 4,096 pages and 64 MiB
+are hard fail-closed limits. Streaming immutable page objects plus a resumable
+manifest are a subsequent format, not a behavior v89 claims to provide.
+`auditRetentionDays` is currently durable policy evidence rather than an active
+deletion schedule; no audit-receipt or archive-object GC ABI exists yet, so the
+v89 authority does not delete archive objects or retained audit receipts.
+
+## External calls and trusted side effects
+
+Model and trusted-tool calls use a separate durable dispatch ledger. The
+runner redeems a one-time Attempt- and RunnerClaim-bound capability into one
+stable provider call identity. A short-lived dispatch claim stores only
+domain-separated bearer hashes. PostgreSQL commits `send_started` and fences
+that claim before the provider callback may write its first socket byte. An
+exact replay after this point returns the historical receipt and requires
+provider reconciliation; it never sends the call again.
+
+Confirmed results bind immutable Artifact bytes, provider evidence, and the
+charge authorized for that call. A model response lost after send reserves the
+pre-authorized maximum charge until a late result, cancellation proof, or
+safe-time ambiguity deadline settles it. A trusted-tool response lost after
+send instead commits `unknown_side_effect`, creates one explicit
+SideEffectResolution blocker, fences the active RunnerClaim, and moves the
+Attempt to decision-only recovery. An authorized repair actor must attach
+exact live evidence for recovery, compensation, or Attempt failure before the
+Attempt can leave that recovery cut.
+
+ExternalCall, result, dispatch-token, and resolution evidence is owned by a
+NOLOGIN database authority role. Service roles can read public facts and call
+only narrow owner-held functions; they cannot write ledger rows, read bearer
+hashes, or forge replay receipts directly.
+
+## Reservation and Lease events
+
+Reservation hold/dispatch/release/proof transitions and Lease
+issue/provision/ready/attach/release/proof/failure transitions commit canonical
+state, an immutable transition receipt, an Operation event, and its outbox row
+in the same PostgreSQL transaction. A retry must present the exact original
+event and outbox identity. Internal system identities are deterministic from
+the stable command and mutation identity, never from time or randomness.
+
+Routine heartbeat renewal keeps its narrow replay receipt without publishing
+an Operation event. Expiry, release, absence proof, fencing, and failure are
+state transitions, so they remain evented even when a heartbeat initiated the
+work.
+
+## Fact-cut barriers
+
+Cancellation, ownership transfer, Scope deadline, impossibility, and
+cancel-remaining decisions require a post-commit fact-cut receipt. One
+PostgreSQL transaction holds the exact Operation authority stripes, freezes
+the prior rolling Operation fact head, commits the canonical transition,
+appends its purpose-specific event and outbox publication, advances the head,
+and stores an immutable normalized receipt. Deadline notices use the Scope's
+persisted parent-anchor stripe in shared mode; authority-changing commands use
+every stripe exclusively.
+
+The domain accepts the receipt only after a fresh connection reload verifies
+the authority transition, stripe manifest, Scope anchor, event payload,
+actor/reason/trace, outbox identity, and prior-to-committed fact-head link.
+Operation history is never scanned on this hot path. A rolling-upgrade
+watermark and offline rebuild process backfill legacy event streams and keep
+cutover closed until every Operation head is caught up.
+
+Large Task-subtree cancellation keeps that authority cut bounded by separating
+it from derived terminal-row projection. The exclusive-stripe transaction
+advances lineage authority, terminalizes the target, and commits the immutable
+barrier/event/outbox receipt plus the logical cancelled count, preserved
+terminal counts, and exact Task-ID-sorted `(task_id, final_phase)` digest.
+Descendant commands are stale at that commit even before their Task rows show
+`cancelled`. A retry-safe `projectCancellation` step later terminalizes only
+pending/active descendants without reacquiring authority stripes; it must
+reproduce the committed count partition, digest, target version, epoch, fact
+cut, and timestamp while preserving earlier terminal outcomes. Qualification
+therefore reports authority-cut and terminal-projection latency separately.
+
+## Project reference readiness
+
+Every executable Operation pins one immutable canonical v2
+ProjectConfigVersion. Configuration planning derives a Project-bound exact
+digest for each Agent Definition, Repository Snapshot, Template Version,
+Compute Pool Version, Model Profile, versioned SecretReference, and Verification
+Profile. The live PostgreSQL catalogs store those exact identities with
+immutable content and one-way revocation.
+
+Applying a pending version requires an explicit `pending_references` opt-in; it
+never becomes ready in place. Operation admission rechecks that the config,
+readiness JSON, normalized projection rows, and exact pins agree, that every
+resolution is executable, and that every catalog row is still active. The
+single `canonical_m1_cutover_status_v` also has to be ready. This direct-SQL
+guard keeps pending, inert, stale, or revoked configurations non-executable
+even if an application preflight is bypassed.
+
+Managed roots add one exact execution cut. The frozen default Agent profile
+must grant the request&apos;s immutable Managed Agent Bundle, whose Agent Definition,
+capability manifest, model allowlist, and Verification Profile are rechecked in
+the Operation transaction. The root Task and its generic execution pin commit
+atomically, and scheduler admission fails closed if a managed Task has no pin.
+Attached coordinators have no Bundle pin. Trusted extensions remain rejected
+until the frozen authority includes operator trust evidence.
+
+The cutover projection also gates canonical identity repairs, ownership
+constraints, fact-head backfill, and deferred structural validation. A bulk
+transaction ignores only its own uncommitted validation-queue rows; those rows
+must still pass their deferred checks and disappear before commit, while a row
+left by any earlier transaction closes admission. Legacy identity issues need
+an active installation-administrator receipt backed by a directly verified
+quarantine, canonical identity repair, or replacement Role binding. PostgreSQL
+generates and immutably binds the evidence, database time, and digest.
+
+Ed25519-signed M1 fixtures remain available only as an explicit test overlay.
+They are permanently `inert_m1_contract_fixture`: useful for contract tests,
+never execution authority.
+
+## Version boundary
+
+Frozen `v1alpha1` JSON schemas remain inspectable for compatibility. Canonical
+Project configuration and Operation payloads use `v2alpha1`. HTTP endpoints
+continue to use the stable `/v1alpha` route family, which is versioned
+independently and is not a payload-schema label. Binary and storage formats
+such as File Snapshot v1 declare their own compatibility versions rather than
+inheriting the HTTP route name.
+
+## Candidate qualification targets
+
+These are benchmark gates for the published portable HA reference environment.
+Results must report warm/cold, cached/uncached, repository-size, browser, and
+fan-out buckets separately. The checked-in profile and normative source generate
+this table; CI rejects hand-edited drift.
+
+{/* BEGIN GENERATED SLO PROJECTION: candidate-qualification; DO NOT EDIT */}
+
+| Measure | Candidate target |
+| --- | --- |
+| Post-deployment HA API availability | at least 99.9 percent over rolling 30 days by the defined SLI |
+| Acknowledged Task loss | invariant: zero in the qualified synchronous-durability fault model |
+| Operation request receipt to durable acknowledgement | p95 at or below 100 ms |
+| Ready projection to durable admit/reject decision | p95 at or below 250 ms |
+| Task eligibility to Attempt/runner grant commit | p95 at or below 500 ms |
+| Execution eligibility to Lease/reservation commit | p95 at or below 500 ms |
+| Root Task eligibility to trusted-runner start | p95 at or below 500 ms, model call excluded |
+| Exact-template warm Lease ready to first sandbox command | p95 at or below 2 s |
+| Cached-image cold Lease request to first sandbox command | p95 at or below 15 s |
+| Parent spawn_agent commit to child admission | p95 at or below 500 ms when capacity exists |
+| Ten-member Task Scope commit to all ten admissions | p95 at or below 1 s when capacity is pre-reserved |
+| Warm ten-member Task Scope commit to all ten first commands | p95 at or below 5 s; report every child, not the first |
+| Proven-unchanged command exit to durable generation outcome and runner continuation | p95 at or below 250 ms with at most 64 KiB post-exit output tail; zero changed-content writes and the declared write budget |
+| Small-delta command exit to durable next generation and runner continuation | p95 at or below 1 s for the versioned at-most-4-MiB/1,000-path and at-most-64-KiB post-exit-output fixture and declared write budget |
+| Child terminal commit to parent resume enqueue | p95 at or below 1 s |
+| Cancellation commit to command-tree termination | p95 at or below 5 s |
+| Lease expiry detection | no later than two heartbeat periods plus 5 s |
+| Owned orphan cleanup | 99.9 percent within 10 minutes after grace; unknown ownership is never deleted |
+| Accounting discrepancy | below 2 percent per resource per 24-hour window by the defined formula |
+
+{/* END GENERATED SLO PROJECTION: candidate-qualification */}

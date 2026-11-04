@@ -1,4 +1,4 @@
-import { createHarness, localHost } from "little-harness";
+import { createHarness, localHost } from "@little-stack/harness";
 import { dataDir, demoRoot, supportModel } from "./env";
 
 /**
@@ -36,6 +36,9 @@ export default createHarness({
   host: localHost({ dataDir, projectRoot: demoRoot }),
   model: supportModel(),
   runtime: { bash: false },
+  // Harness events carry previews of prompts and tool results, 512 bytes by default. LittleDB
+  // traces are built from those events, so keep whole prompts and transcripts in them.
+  trace: { content: { previewBytes: 65_536 } },
   workflowBudgets: {
     maxConcurrentToolCalls: 1,
     // An episode is small on purpose: read the policy, look the order up (twice if the first

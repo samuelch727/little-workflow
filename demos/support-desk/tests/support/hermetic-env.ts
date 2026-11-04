@@ -8,7 +8,7 @@
  *    (`model: supportModel()`), and that module level runs the moment `loadHarness` imports
  *    it — before any `beforeAll` could install anything. Installing the `globalThis` model
  *    seam here short-circuits it: `modelForSlot` returns the override without ever reading
- *    `DEEPSEEK_API_KEY`. This is the in-process analogue of what
+ *    a provider key. This is the in-process analogue of what
  *    `tests/support/preload-mock-model.mjs` does for the driver's child processes.
  *
  * 2. **The developer's real key is never read.** `loadSupportEnv()` only FILLS gaps — it
@@ -17,7 +17,7 @@
  *    real key into `process.env`, and `driver.test.ts` hands its whole environment to the
  *    children it spawns.
  *
- * 3. **No test can reach a real littleDB.** `LITTLEDB_URL=""` reads as "unset" to
+ * 3. **No test can reach a real LittleDB.** `LITTLEDB_URL=""` reads as "unset" to
  *    `supportLittleDb()` (it checks for a non-empty string), so a developer with a running
  *    local stack still gets the no-littleDB path unless a test explicitly points the URL at
  *    its own stub server.
@@ -29,6 +29,7 @@ import type { LanguageModel } from "ai";
 import { setSupportModel } from "../../agents/support/env";
 
 process.env.DEEPSEEK_API_KEY = "test-key-never-sent";
+process.env.SUPPORT_ANTHROPIC_API_KEY = "test-key-never-sent";
 process.env.LITTLEDB_URL = "";
 
 // A stand-in, not a mock: nothing in the suite calls THIS model. Files that exercise the

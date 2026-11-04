@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { jsonSchema, tool } from "ai";
+import { searchAuthoredPlans, writeAuthoredPlan } from "./authored-plans-store.js";
 import { createDynamicWorkflowTools } from "./tools.js";
 
 const echo = tool({
@@ -71,6 +72,42 @@ describe("createDynamicWorkflowTools", () => {
     expect(result).toMatchObject({ status: "completed", runId: expect.any(String), output: { ok: true } });
   });
 
+  it("runs the plan with the model's tool call id, so its trace can point at that call", async () => {
+    const seen: Array<{ toolCallId: string; parentSessionId: string; parentTurnId: string }> = [];
+    const compile = stubFactory.compile;
+    const tools = makeTools({
+      dynamic: {
+        factory: {
+          compile: () => {
+            const compiled = compile();
+            return {
+              ...compiled,
+              workflow: {
+                ...compiled.workflow,
+                async runForHarness(_input: unknown, ctx: { toolCallId: string; parentSessionId: string; parentTurnId: string }) {
+                  seen.push({ toolCallId: ctx.toolCallId, parentSessionId: ctx.parentSessionId, parentTurnId: ctx.parentTurnId });
+                  return compiled.workflow.runForHarness();
+                },
+              },
+            };
+          },
+        } as never,
+        exclude: [],
+        limits: { maxSteps: 8, maxRuntimeMs: 120_000 },
+      },
+    });
+    await tools.run_ad_hoc_plan!.execute!(
+      {
+        purpose: "echo it",
+        plan: { steps: [{ id: "c", uses: "tool.call", tool: "echo", with: {} }], output: { from: "c" } },
+        input: {},
+        outputSchema: true,
+      },
+      { toolCallId: "call_7", files: fileStub() } as never,
+    );
+    expect(seen).toEqual([{ toolCallId: "call_7", parentSessionId: "s", parentTurnId: "t" }]);
+  });
+
   it("search_authored_plans recalls a plan written by a prior run", async () => {
     const tools = makeTools();
     const files = fileStub();
@@ -100,6 +137,158 @@ describe("createDynamicWorkflowTools", () => {
     // The recalled record carries outputSchema so the plan can be re-submitted verbatim.
     expect(found.plans[0]!.outputSchema).toBe(true);
     expect(found.plans[0]!.plan).toBeDefined();
+  });
+
+  it("search_authored_plans returns only completed runs, the newest of each distinct plan first", async () => {
+    // Every run is recorded, but failed runs and repeats of one plan would crowd the result
+    // (past the inline limit it moves to a file the agent may not be able to read).
+    const runs = [
+      { hash: "sha256:a", status: "completed", at: "2026-10-14T01:00:00.000Z" },
+      { hash: "sha256:b", status: "failed", at: "2026-10-14T02:00:00.000Z" },
+      { hash: "sha256:a", status: "completed", at: "2026-10-14T03:00:00.000Z" },
+      { hash: "sha256:c", status: "completed", at: "2026-10-14T02:30:00.000Z" },
+    ];
+    let index = 0;
+    const factory = {
+      compile: () => {
+        const run = runs[index]!;
+        return {
+          ...stubFactory.compile(),
+          definitionHash: run.hash,
+          workflow: {
+            ...stubFactory.compile().workflow,
+            async runForHarness() {
+              return run.status === "completed"
+                ? { protocolVersion: 1 as const, status: "completed" as const, runId: "run_1", output: { ok: true } }
+                : { protocolVersion: 1 as const, status: "failed" as const, runId: "run_1", causeCode: "workflow_failed" as const, message: "no" };
+            },
+          },
+        };
+      },
+    };
+    const files = fileStub();
+    for (const run of runs) {
+      const tools = makeTools({
+        dynamic: { factory: factory as never, exclude: [], limits: { maxSteps: 8, maxRuntimeMs: 120_000 } },
+        nowIso: () => run.at,
+      });
+      await tools.run_ad_hoc_plan!.execute!(
+        {
+          purpose: "mortgage pre-approval",
+          plan: { steps: [{ id: "c", uses: "tool.call", tool: "echo", with: {} }], output: { from: "c" } },
+          input: {},
+          outputSchema: true,
+        },
+        { toolCallId: `call_${index}`, files } as never,
+      );
+      index += 1;
+    }
+
+    const found = (await makeTools().search_authored_plans!.execute!(
+      { query: "pre-approval" },
+      { toolCallId: "call_search", files } as never,
+    )) as { plans: readonly { runId: string; status: string }[] };
+
+    expect(found.plans.map((plan) => plan.runId)).toEqual([
+      expect.stringMatching(/^run_adhoc_s_t_call_2_/u),
+      expect.stringMatching(/^run_adhoc_s_t_call_3_/u),
+    ]);
+    expect(found.plans.every((plan) => plan.status === "completed")).toBe(true);
+  });
+
+  it("search_authored_plans keeps one per distinct plan before limiting, so repeats cannot hide others", async () => {
+    const files = fileStub();
+    const base = {
+      purpose: "mortgage pre-approval",
+      plan: { steps: [] },
+      capabilitySnapshot: {},
+      outputSchema: true,
+      status: "completed" as const,
+      steps: 1,
+    };
+    // Eleven newer runs of one plan, then one older run of another.
+    for (let i = 0; i < 11; i += 1) {
+      await writeAuthoredPlan(files, "/persistent/dynamic-plans", {
+        ...base,
+        runId: `run_a${i}`,
+        definitionHash: "sha256:a",
+        createdAt: `2026-10-14T${String(10 + i).padStart(2, "0")}:00:00.000Z`,
+      });
+    }
+    await writeAuthoredPlan(files, "/persistent/dynamic-plans", {
+      ...base,
+      runId: "run_b",
+      definitionHash: "sha256:b",
+      createdAt: "2026-10-14T01:00:00.000Z",
+    });
+
+    const found = (await makeTools().search_authored_plans!.execute!(
+      { query: "pre-approval" },
+      { toolCallId: "call_search", files } as never,
+    )) as { plans: readonly { runId: string }[] };
+
+    expect(found.plans.map((plan) => plan.runId)).toEqual(["run_a10", "run_b"]);
+  });
+
+  it("run_ad_hoc_plan spells out the plan's shape, the template syntax and the model slots", () => {
+    const tools = makeTools({
+      dynamic: {
+        factory: stubFactory as never,
+        exclude: [],
+        limits: { maxSteps: 8, maxRuntimeMs: 120_000 },
+        models: { fast: { provider: "test", modelId: "fast" } },
+      },
+    });
+    const run = tools.run_ad_hoc_plan!;
+    const schema = (run.inputSchema as { jsonSchema: Record<string, any> }).jsonSchema;
+    const step = schema.properties.plan.properties.steps.items;
+    expect(step.properties.uses.enum).toEqual(["tool.call", "ai.generate"]);
+    expect(step.properties.model.enum).toEqual(["default", "fast"]);
+    expect(step.additionalProperties).toBe(false);
+    expect(run.description).toContain("{{ input.<field> }}");
+    expect(run.description).toContain("{{ steps.<id>.output }}");
+    expect(run.description).toContain("default (your own model), fast");
+  });
+
+  it("offers configured model slots to a plan and hands their models to the run", async () => {
+    const fast = { provider: "test", modelId: "fast" };
+    let submittedModels: readonly string[] = [];
+    let runModels: Record<string, unknown> = {};
+    const factory = {
+      compile: (submission: { allowed: { models: readonly string[] } }) => {
+        submittedModels = submission.allowed.models;
+        const compiled = stubFactory.compile();
+        return {
+          ...compiled,
+          workflow: {
+            ...compiled.workflow,
+            async runForHarness(_input: unknown, ctx: { capabilities: { models?: Record<string, unknown> } }) {
+              runModels = ctx.capabilities.models ?? {};
+              return compiled.workflow.runForHarness();
+            },
+          },
+        };
+      },
+    };
+    const tools = makeTools({
+      dynamic: {
+        factory: factory as never,
+        exclude: [],
+        limits: { maxSteps: 8, maxRuntimeMs: 120_000 },
+        models: { fast },
+      },
+    });
+    await tools.run_ad_hoc_plan!.execute!(
+      {
+        purpose: "x",
+        plan: { steps: [{ id: "c", uses: "tool.call", tool: "echo", with: {} }], output: { from: "c" } },
+        input: {},
+        outputSchema: true,
+      },
+      { toolCallId: "call_models", files: fileStub() } as never,
+    );
+    expect(submittedModels).toEqual(["default", "fast"]);
+    expect(runModels).toMatchObject({ default: { modelId: "test" }, fast });
   });
 
   it("run_ad_hoc_plan returns capability_not_allowed compactly when the factory rejects", async () => {
@@ -228,12 +417,10 @@ describe("createDynamicWorkflowTools", () => {
     const overflow = await run(2);
     expect(overflow).toMatchObject({ status: "failed", causeCode: "max_queued_workflow_runs" });
     expect((overflow as { message: string }).message).toContain("maxQueuedWorkflowRuns is 1");
-    // The rejected call is not recorded as a running plan.
-    const found = (await tools.search_authored_plans!.execute!(
-      { query: "hold" },
-      { toolCallId: "call_search", files } as never,
-    )) as { plans: readonly { status: string }[] };
-    expect(found.plans).toHaveLength(1);
+    // The rejected call is not recorded as a running plan. (Read the store itself: the search
+    // tool offers only completed plans.)
+    const recorded = await searchAuthoredPlans(files, "/persistent/dynamic-plans", "hold");
+    expect(recorded.map((record) => record.status)).toEqual(["running"]);
 
     for (let released = 0; released < 2; released += 1) {
       await new Promise((resolve) => setTimeout(resolve, 0));

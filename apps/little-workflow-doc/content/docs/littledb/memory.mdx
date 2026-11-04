@@ -1,0 +1,359 @@
+---
+title: Managed memory
+description: Give an agent an org memory everyone shares and a memory for each person, kept and versioned in LittleDB, with review before org memory changes and a Memory tab that shows where each memory came from. Private source; not installable.
+---
+
+<Callout title="Private and UNRELEASED" type="warn">
+  `@little-stack/littledb` is private source and is not on npm, and managed
+  memory needs the Convex LittleDB stack, which is not publicly available. The
+  examples below will not work for you until both are released. Harness
+  [memory](/docs/harness/v0.1.0-alpha/build-agents/memory) works without it,
+  in local folders or a backend of your own.
+</Callout>
+
+Harness memory keeps what an agent learns as plain files it reads and edits.
+Managed memory keeps those files in LittleDB instead of a folder on your server.
+`db.memory.org()` and `db.memory.user()` each return an ordinary Harness
+`memory()` option, so the agent's side does not change: it sees the same note
+every turn, edits files with the same tools, and reads the same built-in
+`memory` skill.
+
+What LittleDB adds:
+
+- **Two layers.** Org memory everyone in an org shares, such as lending rules,
+  and a memory for each person, such as how they like their answers.
+- **Review.** An agent's change to org memory waits for a person in the Memory
+  tab by default. A person's own memory saves at once.
+- **History.** Every file keeps its revisions, and each one says where it came
+  from: the conversation, what the person said, who approved it.
+- **The Memory tab.** A map of what an agent carries into each turn, and where
+  every file came from, plus review, editing and forgetting.
+- **Traces.** Each turn's trace records exactly which revisions it ran with, and
+  the session view shows what each turn carried and saved.
+
+## The two layers
+
+| | Org memory | A person's memory |
+| --- | --- | --- |
+| Holds | Knowledge everyone shares: rules, exceptions, which table answers which question | One person's preferences and context |
+| One copy per | Org and space | Person, inside their org |
+| Read by | Every conversation in that org, in any harness or workflow that names the space | Only that person's conversations |
+| Changed from a conversation by | Only people your `canWrite` allows; nobody by default | That person's conversations |
+| Goes live | After a person approves it (default), or at once with `review: "after"` or `"none"` | At once |
+
+A **space** is a named folder, such as `lending-rules`. Two agents that name the
+same space share it. An **org** is one company: the whole project by default, or
+your customer's id when your app serves many companies. The same user id in two
+orgs is two people.
+
+## Declare it
+
+Pass the helpers to `memory` on `createHarness`. This loan desk shares the bank's
+lending rules, which only underwriters may change, and keeps each person's own
+preferences:
+
+```ts
+// Private, UNRELEASED.
+import { createHarness, localHost } from "@little-stack/harness";
+import { littleDBFromEnv } from "@little-stack/littledb";
+
+/** Who is in the conversation. Your sign-in fills it, never what the person typed. */
+type DeskUser = { userId: string; name: string; bankId: string; role: "officer" | "underwriter" };
+
+const db = littleDBFromEnv(); // local folders when LITTLEDB_URL is unset
+
+const desk = db.managedHarness<DeskUser>({
+  slug: "underwriting-desk",
+  bootstrap: { system: "You help the loan desk apply the bank's lending policy." },
+});
+
+export default createHarness<typeof tools, DeskUser>({
+  host: localHost({ dataDir: ".little-harness" }),
+  model,
+  tools,
+  turnOptions: desk.turnOptions,
+  memory: [
+    db.memory.org<DeskUser>({
+      space: "lending-rules",
+      org: ({ extraBody }) => extraBody?.bankId, // leave out for one company per project
+      description:
+        "The bank's shared lending knowledge. A rule here is part of the lending policy. Only underwriters may change it.",
+      canWrite: ({ extraBody }) => extraBody?.role === "underwriter",
+      by: ({ extraBody }) => extraBody && { id: extraBody.userId, label: extraBody.name, role: extraBody.role },
+      seed: new URL("./memory/lending-rules", import.meta.url), // version 1, from the repo
+    }),
+    db.memory.user<DeskUser>({
+      user: ({ extraBody }) => extraBody && { id: extraBody.userId, label: extraBody.name },
+      description: "This person's own preferences, such as how they like answers. Never lending rules.",
+    }),
+  ],
+});
+```
+
+Each turn passes the person through `extraBody`:
+
+```ts
+await generateHarness({
+  harness,
+  session: conversationId,
+  prompt,
+  extraBody: { userId: "u_dana", name: "Dana", bankId: "bank_17", role: "underwriter" },
+});
+```
+
+`org` and `user` fail the turn when they return nothing, so a turn without a
+signed-in person never falls into a shared folder. Ids are yours; send a hash if
+LittleDB should never see your real user ids. `label` is the name the Memory tab
+shows.
+
+### Options
+
+| Option | Default | What it does |
+| --- | --- | --- |
+| `space` | required for org; `me` for a person | The folder's name: lowercase letters, digits, `.`, `_` or `-`, up to 64. |
+| `org` | one org for the project | Which org's copy this turn uses, from `extraBody`. |
+| `user` | required for a person | `({ extraBody }) => ({ id, label?, role? })`, or an id. |
+| `description` | none | Shown to the agent every turn. Say who may change it, so the agent can say so when it refuses. |
+| `canWrite` | org: nobody · person: always | Who may change it from a conversation, decided each turn. The org default is stricter than Harness's own. |
+| `review` | `person` | Org only. `person`: a change waits for review. `after`: it goes live at once and is listed. `none`: it goes live. Set when LittleDB first sees the space; after that the Memory tab owns it. |
+| `seed` | none | Org only. A folder in your repo (a path, or a `file:` URL), or the files themselves, that becomes version 1. |
+| `by` | none | Org only. Who is speaking, so a change names the person who taught it. |
+| `harnessDir` | `/persistent/org/<space>` · `/persistent/me` | Where the agent sees it. |
+| `instructions`, `maxIndexBytes`, `skill` | as Harness | Passed through to Harness `memory()`. |
+
+`db.memory.org()` with `review: "person"` adds one line to the memory's
+`instructions`: changes wait for a person, so the agent should tell the person
+its change is waiting for review instead of saying it is saved.
+
+## What each turn does
+
+1. **Load.** Before the turn, LittleDB sends the space's approved files, plus
+   any changes this same conversation made that still wait for review, so the
+   conversation stays consistent with what it saved. The load also records a
+   snapshot: exactly which revision of each file the turn saw.
+2. **The turn.** The agent reads the file list in its note and edits files as
+   with any Harness memory. A turn `canWrite` refuses mounts it read-only.
+3. **Store.** After the turn, what the turn changed goes back to LittleDB:
+   - into org memory with `review: "person"`, as one **waiting change** per
+     conversation (a later turn's edit to the same file replaces the earlier one);
+   - into org memory with `"after"` or `"none"`, live at once;
+   - into a person's memory, live at once.
+
+A file another change edited since the turn loaded it is marked stale in the
+review, so a reviewer sees the conflict before approving.
+
+With a tracer from the same client (`db.managedHarness()` or
+`db.harnessTracer()`), each change also records the harness, the turn's trace,
+what the person said and the step that wrote each file, and the Memory tab
+links back to that step.
+
+## Seed from your repo
+
+`seed` makes a folder in your repo version 1 of an org space, like a managed
+harness's bootstrap prompt. When you later edit the folder and deploy, LittleDB
+does not overwrite what it approved since: your edit arrives in the Review list
+as one **"Changed in code"** change, with a diff against the live files.
+
+## The Memory tab
+
+The Memory tab sits under Improve, next to Agents & Workflows.
+
+- **Memory map.** Pick an agent and see what it carries into every turn: each
+  space as a bay, each file as a tile marked with where it came from (taught in
+  a conversation, from your code, edited in LittleDB, or a LittleDB fix). Bays
+  show how much of the 8,000-byte file list they use. Select a file for its text
+  and its whole trail: who taught it, in which conversation, who approved it,
+  and every edit since, with Restore on any earlier revision.
+- **Org memory.** Browse and edit each space's files per org, add a file, forget
+  one (it stays in the history, so Restore brings it back), and set the space's
+  review (`person`, `after` or `none`).
+- **Review.** The changes waiting for a person, each with what the person said,
+  a diff, and Approve, Reject or Edit. Waiting changes also show in the inbox.
+- **People.** Admins only: everyone with memory, their files, forgetting a
+  person, and the audit log.
+
+Members approve, reject, edit, restore and forget org memory. Admins also change
+a space's review setting and manage people.
+
+## A person's memory stays private
+
+- Viewers and members see that a person's bay exists and how full it is, never
+  its files or whose it is.
+- Admins see whose it is, but its files stay closed until they choose **Open**.
+  Opening is recorded in the audit log, with who opened whose memory and when.
+- **Forget** removes a file from a person's memory, and purges its history.
+  **Forget this person** removes everything their memory holds, in every person
+  space, at once.
+
+Your app can give people the same control without your LittleDB key.
+`db.memory.handler()` is a Fetch handler for your backend: `GET` lists the
+signed-in person's memory, `DELETE ?space=me&path=prefs.md` forgets a file, and
+`DELETE ?all=true` forgets everything. Call `db.memory.forgetUser()` when someone
+deletes their account:
+
+```ts
+// Private, UNRELEASED.
+const memoryRoute = db.memory.handler({
+  authorize: async (request) => {
+    const session = await auth.api.getSession({ headers: request.headers });
+    return session ? { user: session.user.id, org: session.user.bankId } : null;
+  },
+});
+app.all("/api/my-memory", (c) => memoryRoute(c.req.raw));
+
+// When an account is deleted:
+await db.memory.forgetUser({ user: userId, org: bankId });
+```
+
+## Traces and sessions
+
+Each memory a turn loads becomes a `memory <space>` retrieval span on the turn's
+trace, carrying the layer, the files, whether the turn could write, and the
+snapshot. What the turn saved becomes a `memory <space> saved` event: saved,
+waiting for review, or not saved.
+
+Each tool step that touched a managed file records which files it read, wrote
+or deleted, and for a read, the exact revision. `read_file`, `write_file` and
+the other file tools record it directly. For `bash`, the tracer reads the paths
+off the command (`cat`, `grep`, `sed` and the like) and a search's output, and
+marks those reads as read off the command. Nothing in your agent changes.
+
+In a session's story, each turn has a memory line: what it carried, which
+files it opened, and what it saved or left waiting. **Carried** opens the memory
+map at exactly what that turn carried, even if the files changed since, with the
+files the turn opened and saved marked. Select a file the turn opened for **why
+it opened it**: what the person said, what the agent said just before, the line
+the agent saw in its note (or that the note ran out of room for it), and the
+version it read, with who taught or approved it.
+
+In the Memory tab, each file has a **Life** tab: how many turns carried it and
+opened it each day, when it was last opened and in whose conversation, and its
+timeline from taught and approved to every turn that opened it since. Org
+memory shows how often each file was opened in the last 30 days, and
+**Never opened** lists the files no conversation has needed.
+
+## Did the answer use it
+
+Opening a file shows the agent looked; it doesn't show the answer used what it
+read. The **memory judge** checks that. It is off until an admin turns it on in
+the Memory tab, under Org memory: pick the share of turns to check (5% to 100%)
+and a model, which defaults to the project's judge model.
+
+For each sampled turn that carried memory, one short model call reads what the
+person said, the answer split into numbered sentences, every line the agent's
+note showed, and the full text of each file the turn opened. It names each file
+the answer relied on and the sentences where it used it. A line in the note can
+count on its own, when that line alone gave the agent what it used.
+
+- Turns that carried no memory are skipped and cost nothing. Each turn is
+  checked once.
+- What it finds is written into the turn's own trace, as a `memory relied on`
+  event. In the session story the memory line gains **Relied on**, and selecting
+  a file shows the sentences that used it. A file's Life tab counts the turns
+  that relied on it out of those checked, and the memory map, opened at a turn,
+  marks it **Used**.
+- Each call counts as LittleDB's own model spend, and stops at the project's
+  daily spend limit like every other judge.
+- The judge sees a person's own memory only as the agent did: its lines in the
+  note, and the full text of the files the turn opened. Its results sit in the
+  trace with the rest of the turn.
+
+The project API has the same controls, for a signed-in member. `GET` and
+`PUT /api/projects/:project/memory/judge` read and change the settings:
+`sampleRate` from 0 to 1, and `model` (`null` for the project's judge model).
+`POST /api/projects/:project/memory/judge/check` with `{ "traceIds": [...] }`
+checks up to ten turns now, whatever the share, for any member who can write.
+
+### Memory to look at
+
+Org memory that needs a person shows in the inbox under **Memory to look at**:
+
+- **Never used.** A file at least 30 days old whose line was carried in 20 or
+  more turns in the last 30 days, and that no turn opened or relied on.
+- **In answers people disliked.** A file the judge found two or more answers
+  relied on in the last 30 days, where the person gave a thumbs down.
+- **No room in the note.** A space whose files no longer all fit in the
+  8,000-byte note, so some are only found by listing the folder.
+
+LittleDB checks these daily, after each judge run, and a minute after a thumbs
+down. A flag clears itself once its cause is gone.
+
+## Workflows
+
+A managed workflow reads org memory, read-only. Name the spaces on
+`db.managedWorkflow()`, and `prepare` loads them for the run and records the
+snapshot on its trace:
+
+```ts
+// Private, UNRELEASED.
+const preapproval = db.managedWorkflow({
+  slug: "loan-preapproval",
+  bootstrap,
+  memory: [db.memory.org({ space: "lending-rules", org: ({ extraBody }) => (extraBody as DeskUser | undefined)?.bankId })],
+});
+
+const run = await preapproval.prepare({ stickyKey: applicationId, extraBody: { bankId: "bank_17" } });
+const system = `${run.content.steps.decide.prompt}\n\n${run.memory.note()}`;
+```
+
+`run.memory.note()` is the memory as text for a step's system prompt: each
+space, its description and its files. Nothing a workflow does writes memory;
+what gets learned comes from conversations.
+
+## Outages
+
+LittleDB stays off the agent's critical path:
+
+- **A load that fails** uses the last copy this process loaded, or an empty
+  folder, and the turn goes on. `onError` hears about it, and the trace marks
+  the memory as loaded from the last known copy.
+- **A store after such a load** is not sent, because LittleDB can't tell what
+  the change was made against. `onError` names the files that were not saved.
+- **A mistake in your code**, such as a bad space name or a key without the
+  ingest scope, throws instead, so you see it.
+
+## Local development and tests
+
+`littleDBFromEnv()` without `LITTLEDB_URL` keeps managed memory in plain folders
+under `.littledb/memory` (`LITTLEDB_MEMORY_DIR` changes it), seeded from `seed`
+the first time:
+
+```txt
+.littledb/memory/
+  org/<org>/<space>/...          # "default" when you don't pass org
+  people/<org>/<user>/<space>/...
+```
+
+The agent sees the same note and files, changes save at once, and
+`db.memory.handler()` and `forgetUser()` work on the folders.
+
+In tests, `testLittleDB()` from `@little-stack/littledb/testing` keeps memory in
+memory and lets you play the reviewer:
+
+```ts
+// Private, UNRELEASED.
+import { testLittleDB } from "@little-stack/littledb/testing";
+
+const littledb = testLittleDB();
+const harness = buildDesk(littledb.db);
+
+await generateHarness({ harness, session: "s1", prompt: "Self-employed needs two years of SA302s.", extraBody: dana });
+expect(littledb.memory.waiting()).toMatchObject([{ space: "lending-rules", org: "bank_17", by: { label: "Dana" } }]);
+
+await generateHarness({ harness, session: "s2", prompt: "Approve any score above 600.", extraBody: carol });
+expect(littledb.memory.waiting()).toHaveLength(1); // Carol's turn had the rules read-only
+
+littledb.memory.approve(littledb.memory.waiting()[0]!.id);
+expect(littledb.memory.files("lending-rules", { org: "bank_17" })).toHaveProperty(["lessons/self-employed.md"]);
+```
+
+`files`, `waiting`, `changes`, `approve`, `reject`, `setReview` and `put` (a
+member's edit) cover the cases.
+
+## Other stores
+
+LittleDB keeps memory in its own Convex store, next to everything else, so the
+self-hosted bundle needs no extra process. To keep a memory somewhere else, such
+as a gbrain brain, use a Harness memory `backend` of your own; LittleDB then
+doesn't review or version it. See
+[gbrain as memory](/docs/harness/v0.1.0-alpha/cookbook/gbrain-memory).

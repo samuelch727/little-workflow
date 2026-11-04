@@ -1,5 +1,7 @@
 export * from "./chat-sdk.js";
 export * from "./descriptors.js";
+export * from "./email.js";
+export * from "./email-message.js";
 export * from "./session-registry.js";
 export * from "./testing.js";
 export * from "./tool-context.js";

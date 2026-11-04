@@ -1,0 +1,10 @@
+{
+  "title": "Little Harness",
+  "description": "Agent runtime · npm 0.2.0-alpha.0",
+  "icon": "Bot",
+  "pages": [
+    "index",
+    "v0.1.0-alpha"
+  ],
+  "root": true
+}

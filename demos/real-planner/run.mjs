@@ -19,13 +19,13 @@ import { dirname, join } from "node:path";
 import * as ai from "ai";
 import { streamText, Output, jsonSchema } from "ai";
 import {
-  createLittleWorkflow,
-  createWorkflowHarness,
   createToolRegistry,
+  defineWorkflow,
   localWorld,
   model,
   runWorkflow,
-} from "little-workflow";
+} from "@little-stack/workflow";
+import { createWorkflowHarness } from "@little-stack/workflow/internals";
 import {
   decideStubSupervisorOutcome,
   DONE_RETRY_PLANNER_NOTE,
@@ -436,14 +436,16 @@ async function runDemo() {
           throw new TypeError(`Step '${step.id}' must declare an output contract.`);
         }
 
-        const stepSystem = typeof step.with?.system === "string"
-          ? step.with.system
-          : undefined;
+        // `system` already ends with the step's with.system, and the runtime has filled in the
+        // prompt's {{ }} templates; the step input still follows the prompt as JSON.
         const prompt = typeof step.with?.prompt === "string"
           ? step.with.prompt
           : undefined;
-        const renderedPrompt = renderPromptTemplate(prompt, input);
-        const mergedSystem = [system, stepSystem].filter(Boolean).join("\n\n") || undefined;
+        const inputNote = `Use this input JSON:\n${safeJson(input)}`;
+        const renderedPrompt = prompt === undefined || prompt.length === 0
+          ? inputNote
+          : `${prompt}\n\n${inputNote}`;
+        const mergedSystem = system || undefined;
         const mergedMessages = [{
           role: "user",
           content: renderedPrompt,
@@ -514,11 +516,11 @@ async function runDemo() {
 
   const SYSTEM_PROMPT = PLANNER_SYSTEM_PROMPT;
 
-  const workflow = createLittleWorkflow({
+  const workflow = defineWorkflow({
     id: workflowId,
     description:
       "Rank the candidates against the job description; output a sorted array of { id, score, reasoning }.",
-    inputSchema,
+    input: inputSchema,
     output: { kind: "array", element: rankingItemSchema },
     models: [workerSlot],
     planner: {
@@ -526,7 +528,7 @@ async function runDemo() {
       harness: plannerHarness,
       system: SYSTEM_PROMPT,
     },
-    globalTools: useStubPlanner ? ["score_candidate"] : [],
+    tools: useStubPlanner ? ["score_candidate"] : [],
     worker: { harness: workerHarness },
   });
 
@@ -576,10 +578,8 @@ async function runDemo() {
     let latestCycleOutput;
 
     try {
-      const result = await runWorkflow({
+      const result = await runWorkflow(workflow, { candidates, jobDescription }, {
         world,
-        workflows: workflow,
-        input: { candidates, jobDescription },
         ...(useStubPlanner ? { tools } : {}),
         runId: `run_demo_real_planner_${variant}_${cycleNumber}_${Date.now()}`,
       });
@@ -700,48 +700,6 @@ async function runDemo() {
 // ---------------------------------------------------------------------------
 // Pure utility functions (module-level, safe to import)
 // ---------------------------------------------------------------------------
-
-function renderPromptTemplate(prompt, input) {
-  const fallback = `Use this input JSON:\n${safeJson(input)}`;
-  if (typeof prompt !== "string" || prompt.length === 0) {
-    return fallback;
-  }
-
-  const rendered = prompt.replace(/\{\{\s*(input|item)\.([^{}]+)\s*\}\}/gu, (_whole, _root, path) => {
-    const value = readPath(input, path.trim());
-    return value === undefined ? "" : safeScalar(value);
-  });
-
-  if (rendered.includes("{{") || rendered.includes("}}")) {
-    return fallback;
-  }
-  return `${rendered}\n\n${fallback}`;
-}
-
-function readPath(root, rawPath) {
-  const normalized = rawPath
-    .replace(/\[(\d+)\]/gu, ".$1")
-    .replace(/\[['"]([^'"]+)['"]\]/gu, ".$1");
-  const segments = normalized.split(".").filter(Boolean);
-  let current = root;
-  for (const segment of segments) {
-    if (current === null || typeof current !== "object") {
-      return undefined;
-    }
-    if (!Object.hasOwn(current, segment)) {
-      return undefined;
-    }
-    current = current[segment];
-  }
-  return current;
-}
-
-function safeScalar(value) {
-  if (typeof value === "string") return value;
-  if (typeof value === "number" || typeof value === "boolean") return String(value);
-  if (value === null) return "null";
-  return safeJson(value);
-}
 
 function safeJson(value) {
   try {

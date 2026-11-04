@@ -13,3 +13,11 @@ it("passes through exclude and limits", () => {
   expect(config.exclude).toEqual(["danger"]);
   expect(config.limits).toEqual({ maxRuntimeMs: 60_000 });
 });
+
+it("passes a registry through and keeps the factory's define", () => {
+  const registry = { resolve: (records: readonly unknown[]) => records as never };
+  const config = dynamicWorkflows({ registry, world: () => ({}) as never });
+  expect(config.registry).toBe(registry);
+  expect(typeof config.factory.define).toBe("function");
+  expect(dynamicWorkflows()).not.toHaveProperty("registry");
+});

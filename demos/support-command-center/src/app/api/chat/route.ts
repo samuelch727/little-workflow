@@ -4,7 +4,7 @@ import {
   loadWebRichConnector,
   type LoadWebRichConnectorOptions,
   type LoadedWebRichConnector,
-} from "little-harness/connectors/runtime";
+} from "@little-stack/harness/connectors/runtime";
 import { supportMirrorDelivery } from "../../../../agents/support/connectors/shared/mirror-delivery";
 import webRichConnector, {
   type SupportWebExtraBody,

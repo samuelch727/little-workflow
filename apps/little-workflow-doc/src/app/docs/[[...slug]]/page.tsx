@@ -9,9 +9,9 @@ import {
 } from 'fumadocs-ui/layouts/docs/page';
 import { notFound } from 'next/navigation';
 import { getMDXComponents } from '@/components/mdx';
+import { ProductStatus } from '@/components/product-status';
 import type { Metadata } from 'next';
 import { createRelativeLink } from 'fumadocs-ui/mdx';
-import { gitConfig } from '@/lib/shared';
 
 export default async function Page(props: PageProps<'/docs/[[...slug]]'>) {
   const params = await props.params;
@@ -27,11 +27,14 @@ export default async function Page(props: PageProps<'/docs/[[...slug]]'>) {
       <DocsDescription className="mb-0">{page.data.description}</DocsDescription>
       <div className="flex flex-row gap-2 items-center border-b pb-6">
         <MarkdownCopyButton markdownUrl={markdownUrl} />
-        <ViewOptionsPopover
-          markdownUrl={markdownUrl}
-          githubUrl={`https://github.com/${gitConfig.user}/${gitConfig.repo}/blob/${gitConfig.branch}/apps/little-workflow-doc/content/docs/${page.path}`}
-        />
+        {/*
+          No per-page GitHub link: this preview combines pages whose sources are not
+          all at a public path, so a generated "open in GitHub" link could point to a
+          missing file. The site header keeps the repository link.
+        */}
+        <ViewOptionsPopover markdownUrl={markdownUrl} />
       </div>
+      <ProductStatus product={page.slugs[0]} />
       <DocsBody>
         <MDX
           components={getMDXComponents({

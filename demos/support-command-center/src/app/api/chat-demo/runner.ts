@@ -8,11 +8,11 @@ import {
   loadWebRichConnector,
   type ConnectorToolPolicy,
   type LoadWebRichConnectorOptions,
-} from "little-harness/connectors/runtime";
+} from "@little-stack/harness/connectors/runtime";
 import type {
   StreamHarnessOptions,
   StreamHarnessResult,
-} from "little-harness/execution";
+} from "@little-stack/harness";
 import discordConnector from "../../../../agents/support/connectors/discord/connector";
 import type { SupportDiscordExtraBody } from "../../../../agents/support/connectors/discord/connector";
 import type { SendChannelUpdateOutput } from "../../../../agents/support/connectors/discord/tools/send-channel-update";

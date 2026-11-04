@@ -126,7 +126,7 @@ The sandbox defaults are:
 Developers can enable network at the workflow, run, or orchestrator level:
 
 ```ts
-createLittleWorkflow({
+defineWorkflow({
   // ...
   bash: {
     network: {
@@ -138,7 +138,7 @@ createLittleWorkflow({
 });
 ```
 
-Effective precedence is closest scope first: `workflow.bash` for planner/worker/fixer sessions, `orchestrator.bash` for orchestrator sessions, then `runWorkflow({ bash })`, then defaults. The normalized Bash capabilities are hashed into the `OrchestrationRequest.capabilityManifest` and every harness session manifest.
+Effective precedence is closest scope first: `workflow.bash` for planner/worker/fixer sessions, `orchestrator.bash` for orchestrator sessions, then the `bash` run option (`runWorkflow(workflow, input, { bash })`), then defaults. The normalized Bash capabilities are hashed into the `OrchestrationRequest.capabilityManifest` and every harness session manifest.
 
 Replay never re-executes Bash commands. It replays the recorded `stdout`, `stderr`, and `exitCode` from harness tool-call events.
 
@@ -400,7 +400,7 @@ type ExecuteStepSucceededEvent = {
 | --- | --- |
 | `plan` | `harness.session.started` → (`harness.model.called` → `harness.model.responded` → `harness.tool_call.started/succeeded` × tools) × turns → `harness.session.completed` |
 | `orchestrate` | same as plan |
-| `execute_step` (ai.generate) | `harness.session.started` → agent-loop events × turns → `harness.session.completed` |
+| `execute_step` (ai.generate) | `harness.session.started` → `harness.execute_step.started` → `harness.model.called` → `harness.model.responded` → `harness.execute_step.succeeded` → `harness.session.completed` (one model call, no tool calls) |
 | `execute_step` (code.run) | `harness.session.started` → `harness.execute_step.started` → (`harness.tool_call.started/succeeded` × tools) → `harness.execute_step.succeeded` → `harness.session.completed` |
 | `execute_step` (tool.call) | `harness.session.started` → `harness.execute_step.started` → `harness.tool_call.started` → `harness.tool_call.succeeded` → `harness.execute_step.succeeded` → `harness.session.completed` |
 | `execute_step` (decision) | `harness.session.started` → `harness.execute_step.started` → `harness.execute_step.succeeded` → `harness.session.completed` |
@@ -429,7 +429,7 @@ Sub-runs (spawned by `start_workflow` / `run_workflow`) maintain their own event
 Any object conforming to `Harness` is a valid harness:
 
 ```ts
-import type { Harness } from "little-workflow";
+import type { Harness } from "@little-stack/workflow/internals";
 
 export const cloudflareHarness: Harness = {
   async run(task, ctx) {

@@ -1,0 +1,83 @@
+---
+title: What Little Compute Is
+description: Agent-native scheduling and isolated execution for Little Harness at self-hosted scale.
+---
+
+Little Compute is a self-hostable control plane for repository-aware agents. It lets a
+Little Harness parent create durable child Tasks, attach isolated compute only for tool
+bursts, preserve workspace progress between attachments, and converge results with clean
+verification.
+
+<Callout title="Refocus, 2026-10-23">
+  Little Compute is the self-hosted engine behind the stack's
+  [workspaces](/docs/how-they-fit#workspaces) feature, not a product of its own.
+  Managed workspaces come with LittleDB's hosted service (private for now). Little Compute's
+  control plane is frozen: what is merged keeps working, and nothing new is added
+  to it. See `packages/little-compute/FROZEN.md` in the source checkout.
+</Callout>
+
+<BoundaryCallout>
+**UNRELEASED review preview.** These pages document Little Compute from an
+unpublished source checkout. There is no `@little-stack/compute` package on npm, and
+the public `samuelch727/little-workflow` repository does not contain Little
+Compute, so nothing here is publicly installable yet. Nothing on this site
+implies release readiness or qualification.
+
+Little Compute is pre-release. The local prompt-to-preview loop passed its
+physical G1 acceptance on 2026-09-07. The separate fresh-Ubuntu G2 receipt
+passed on 2026-09-08 in 25 minutes 3.13725125 seconds; see
+[Self-hosting](/docs/compute/self-hosting) for its scope and installation path.
+The Cloudflare adapter has contract fixtures, but its production gateway and
+managed G1 loop remain required Phase A work. Local acceptance does not prove
+the managed loop.
+Advanced release machinery remains
+fail-closed; it is not a prerequisite for the default local tier.
+</BoundaryCallout>
+
+```txt
+Operation
+  -> immutable Task Scope
+    -> Task
+      -> Attempt + Harness Session + File Snapshot generation
+        -> zero or more sequential Sandbox Leases
+          -> fenced execs
+  -> convergence and fresh verification
+```
+
+## Product boundary
+
+Little Compute owns agent Tasks, retry Attempts, fluid Sandbox Leases, admission, budgets,
+repository lineage, typed Publications, convergence, and provider fencing. It does not
+reimplement a container runtime, hypervisor, Kubernetes node scheduler, object store,
+workflow engine, or browser protocol.
+
+The core optimization target is time from one user intent to one verified, reviewable result
+across many cooperating agents—not the largest number of empty generic containers.
+
+## Start here
+
+Little Compute is operated, not imported: an operator runs it on their own
+machine or cluster, and Little Harness agents use it through optional ports. It
+is not publicly installable yet; the operator steps below need access to an
+unpublished source checkout.
+
+**Operate (source checkout only)**
+
+- [Self-hosting](/docs/compute/self-hosting) starts with the three-command rootless-Podman install/health path, then the first durable product action.
+- [CLI](/docs/compute/cli) separates the default developer surface from advanced controls.
+- [Use from Little Harness](/docs/compute/use-from-harness) gives a Harness agent a Compute sandbox in one call with `littleComputeSandbox()`.
+
+**Understand**
+
+- [Concepts](/docs/compute/concepts) defines the correctness vocabulary: Operation, Task, Attempt and Sandbox Lease.
+- [Architecture](/docs/compute/architecture) explains the control and data planes.
+- [Recovery and safe time](/docs/compute/recovery) explains why authority expires late, not early, under clock or primary uncertainty.
+- [How they fit](/docs/how-they-fit) explains where Compute sits next to Harness, Workflow and LittleDB.
+
+**Status**
+
+- [Releases](/docs/releases) records that Compute is unpublished source, with no npm package.
+- [Planned enforcement](/docs/compute/planned-enforcement) distinguishes the egress
+  credential proxy and subtree-budget designs from shipped behavior.
+
+For the published packages, start with [Setup](/docs/get-started/setup) instead.

@@ -17,7 +17,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { listEvents, localWorld } from "little-workflow";
+import { localWorld } from "@little-stack/workflow";
 import { runDelegatedCandidates } from "./run.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -62,7 +62,7 @@ try {
   let compactedCalls = 0;
   let modelCalls = 0;
   for (const id of runIds) {
-    const events = await listEvents(world, id).catch(() => []);
+    const events = await world.listEvents(id).catch(() => []);
     for (const event of events) {
       if (event.type !== "harness.model.called") continue;
       modelCalls += 1;

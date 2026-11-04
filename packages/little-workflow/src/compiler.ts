@@ -1,8 +1,9 @@
-import { createRequire } from "node:module";
+import { getSchemaValidator as getAjv } from "./schema-validator.js";
 import {
   runWorkflowHarnessWithSession,
   workflowHarness,
-} from "little-harness/workflow-harness";
+} from "@little-stack/harness/workflow-harness";
+import { canonicalHarnessEventRequestDigest } from "@little-stack/harness/events";
 import type { LocalWorld, ModelSlot, ToolSelectionPolicy } from "./authoring.js";
 import { canonicalJson, sha256Digest } from "./canonical.js";
 import {
@@ -50,9 +51,11 @@ import {
   type WorkflowVersionReuseStrategy,
 } from "./workflow-version-reuse.js";
 import {
+  inferStepNeeds,
   registerWorkflowVersion,
   validateAlphaJsonSchema,
   validateLwir,
+  type LwirStep,
   type LwirStepOutput,
   type LwirValidationFinding,
   type LwirWorkflow,
@@ -66,17 +69,6 @@ import {
 } from "./schema.js";
 
 type JsonRecord = Record<string, unknown>;
-type AjvError = {
-  readonly instancePath?: string;
-  readonly schemaPath?: string;
-  readonly message?: string;
-};
-type AjvInstance = {
-  validate(schema: unknown, data: unknown): boolean | Promise<unknown>;
-  readonly errors?: readonly AjvError[] | null;
-  errorsText?(errors?: readonly AjvError[] | null): string;
-};
-type AjvConstructor = new (options?: Record<string, unknown>) => AjvInstance;
 
 export type CompilableWorkflowDefinition = WorkflowDefinitionSnapshotInput & {
   readonly suggestedInputSchema?: unknown;
@@ -103,6 +95,7 @@ export type OrchestrationRequest = {
   readonly metadata: {
     readonly name: string;
     readonly description?: string;
+    readonly policy?: string;
   };
   readonly messages: {
     readonly user: string;
@@ -262,6 +255,16 @@ export type WorkflowCompileOptions = {
     event: CompilerLifecycleEvent,
   ) => Promise<void> | void;
   readonly plannerHarnessRuntime?: PlannerHarnessRuntimeContext;
+  /**
+   * Keep this stored WorkflowVersion without calling the planner. The runtime sets it when nothing
+   * the planner reads has changed since the version was planned, so a review would only repeat the
+   * last answer. Compile still records the request and checks the input before handing back.
+   */
+  readonly keepWithoutPlanner?: {
+    readonly workflowVersionId: string;
+    readonly rationale: string;
+    readonly acknowledgedWarnings?: readonly string[];
+  };
 };
 
 export type PlannerHarnessRuntimeContext = {
@@ -316,6 +319,8 @@ export type CompilerLifecycleEvent =
   | {
       readonly type: "OrchestrationRequested";
       readonly request: OrchestrationRequest;
+      /** True when compile keeps a stored version and the planner will not run. */
+      readonly keepsWithoutPlanner?: true;
     }
   | {
       readonly type: "PlannerStarted";
@@ -383,9 +388,7 @@ const ALPHA_STEP_TYPES = [
 // the planner with its prior validation findings (they used to be useless replays), so 3
 // is already 3 self-correction passes.
 const DEFAULT_MAX_WORKFLOW_REVISIONS = 3;
-const nodeRequire = createRequire(import.meta.url);
 
-let cachedAjv: AjvInstance | undefined;
 
 type OrchestrationRequestBody = Omit<OrchestrationRequest, "requestId" | "locks"> & {
   readonly locks: Omit<CompilerRequestLocks, "requestHash">;
@@ -421,8 +424,12 @@ export class WorkflowCompileError extends Error {
   readonly request: OrchestrationRequest;
   readonly revisions: readonly CompilerRevision[];
 
-  constructor(request: OrchestrationRequest, revisions: readonly CompilerRevision[]) {
-    super("Planner did not produce valid LWIR within maxWorkflowRevisions.");
+  constructor(
+    request: OrchestrationRequest,
+    revisions: readonly CompilerRevision[],
+    message = "Planner did not produce valid LWIR within maxWorkflowRevisions.",
+  ) {
+    super(message);
     this.name = "WorkflowCompileError";
     this.request = request;
     this.revisions = revisions;
@@ -507,6 +514,7 @@ export function toOrchestrationRequest(
     metadata: stripUndefined({
       name: workflow.id,
       description: workflow.description,
+      policy: workflow.policy,
     }) as OrchestrationRequest["metadata"],
     messages: {
       user: workflow.description ?? workflow.id,
@@ -570,11 +578,16 @@ export async function compileWorkflow(
 ): Promise<WorkflowCompileResult> {
   const request = toOrchestrationRequest(workflow, options);
   const planner = plannerAdapterForCompile(workflow, options, request);
+  const fixedPlan = isFixedPlanPlanner(workflow.planner);
   await options.onCompilerLifecycleEvent?.({
     type: "OrchestrationRequested",
     request,
+    ...(options.keepWithoutPlanner === undefined ? {} : { keepsWithoutPlanner: true as const }),
   });
   validateInputAgainstSchema(request.input, request.inputSchema);
+  if (options.keepWithoutPlanner !== undefined) {
+    throw new PlannerReuseUnchangedDecisionError(options.keepWithoutPlanner);
+  }
 
   const revisions: CompilerRevision[] = [];
   let repair: PlannerRepairContext | undefined;
@@ -587,7 +600,10 @@ export async function compileWorkflow(
     });
     const plannerOutput = await planner.draft(request, repair);
     const unwrappedPlannerOutput = unwrapPlannerDecision(plannerOutput);
-    const { lwir, plannerReuseDecision } = unwrappedPlannerOutput;
+    const { plannerReuseDecision } = unwrappedPlannerOutput;
+    // A drafted plan that reads an earlier step's output without listing it in `needs` gets the
+    // entry added, instead of costing a repair call. A fixed plan runs as its author wrote it.
+    const lwir = fixedPlan ? unwrappedPlannerOutput.lwir : inferStepNeeds(unwrappedPlannerOutput.lwir);
     const validation = validateLwir(lwir);
     const findings = validation.valid ? validateRequestBinding(lwir, request) : validation.findings;
     const findingSnapshot = deepFreeze(canonicalClone(findings));
@@ -614,6 +630,17 @@ export async function compileWorkflow(
       request,
       revision: record,
     });
+    if (fixedPlan) {
+      // A fixed plan is the author's plan: asking again returns the same document, and the
+      // synthesized fallback below would run a different plan in its place.
+      throw new WorkflowCompileError(
+        request,
+        deepFreeze([...revisions]),
+        `Fixed plan for workflow '${request.metadata.name}' is invalid: ${
+          record.findings.map((finding) => `${finding.path}: ${finding.message}`).join("; ")
+        }`,
+      );
+    }
     repair = deepFreeze({
       previousLwir: record.lwir,
       findings: record.findings,
@@ -891,10 +918,30 @@ export function buildPlanningContext(request: OrchestrationRequest): string {
     for (const t of manifest.tools) {
       const desc = t.description === undefined ? "" : ` — ${t.description}`;
       const schema = t.inputSchema === undefined ? "(no input)" : JSON.stringify(t.inputSchema);
-      lines.push(`    - ${t.name}${desc}; input schema: ${schema}`);
+      // The output schema gives the field names a `{{ steps.<id>.output.<field> }}` reads.
+      const output = t.outputSchema === undefined ? "" : `; output schema: ${JSON.stringify(t.outputSchema)}`;
+      lines.push(`    - ${t.name}${desc}; input schema: ${schema}${output}`);
     }
   }
   lines.push(`- step types (a step's uses): ${manifest.stepTypes.join(", ")}`);
+  lines.push("");
+  // Left to itself a planner model paraphrases a stated policy into its own cut-offs, and a case
+  // the policy never covered gets a rule nobody wrote.
+  lines.push(
+    "If the workflow description states rules, a policy or thresholds, copy them word for word into the with.system of each ai.generate step that applies them. Do not add, drop, tighten or loosen a rule, and do not invent a cut-off the description does not state.",
+  );
+  // A kept plan runs again, without a planner call, for later inputs of the same shape, so a
+  // value copied from this run's input would be reused for every later input.
+  lines.push(
+    "This plan is kept and reused for later runs whose input has the same shape. Read input values through {{ input.<field> }} expressions; never copy a value from this run's input into a step's with.prompt, with.system or with.args.",
+  );
+  if (request.metadata.policy !== undefined) {
+    lines.push("");
+    lines.push(
+      "This workflow has a policy. The runtime adds it, word for word, to the system prompt of every ai.generate step, so do not copy it into with.system. Plan the steps it needs (for example a tool.call for each fact it checks), and do not add rules of your own. The policy:",
+    );
+    lines.push(request.metadata.policy);
+  }
   const reference = synthesizeSimpleLwir(request);
   if (reference !== undefined) {
     lines.push("");
@@ -927,13 +974,16 @@ function composePlanningContext(planningContext: string, priorNote: string | und
  * fix and (b) changes the prompt so the durable planner harness re-invokes the model
  * instead of replaying the same invalid draft.
  */
-export function buildPlannerRepairNote(repair: PlannerRepairContext): string {
+export function buildPlannerRepairNote(repair: PlannerRepairContext, revision?: number): string {
   const findings = repair.findings.length === 0
     ? "(validator reported no specific findings)"
     : repair.findings.map((finding) => `- ${finding.path}: ${finding.message}`).join("\n");
   return [
     "Your previous LWIR draft was REJECTED by the validator. Fix EVERY error listed below and return corrected LWIR — ONLY the JSON, no prose or markdown fences.",
     "",
+    // The revision keeps each retry's prompt distinct even when the model repeats the same
+    // rejected draft, so the retry re-invokes it instead of replaying the earlier session.
+    ...(revision === undefined ? [] : [`This is planner revision ${revision}.`, ""]),
     "Validation errors:",
     findings,
     "",
@@ -1013,7 +1063,6 @@ function plannerAdapterForCompile(
   const recorder = runtime === undefined
     ? createInMemoryHarnessRecorder(harnessRunId)
     : createHarnessEventRecorder({ world: runtime.world, runId: runtime.runId });
-  const tools = options.tools?.toRecord() ?? {};
   const context = {
     scope: {
       runId: harnessRunId,
@@ -1028,7 +1077,9 @@ function plannerAdapterForCompile(
       model: resolvedModel.aiSdkModel,
     },
     ...(plannerConfig.system === undefined ? {} : { system: plannerConfig.system }),
-    tools,
+    // Planning only writes the LWIR. The workflow's tools run later as tool.call steps and may
+    // have side effects, so the planner is offered bash alone; its prompt still lists the tools.
+    tools: {},
     bash: runtime === undefined
       ? createBashTool({
           cwd: process.cwd(),
@@ -1055,8 +1106,12 @@ function plannerAdapterForCompile(
     durability: {
       append: async (event) => {
         const eventWithWarnings = eventWithSessionWarnings(event, runtime?.skillWarnings);
+        if (eventWithWarnings.payload === undefined) {
+          throw new TypeError("Little Workflow recorder requires an inline Harness event payload.");
+        }
         await recorder.append({
           type: eventWithWarnings.type,
+          appendIdempotencyKey: eventWithWarnings.appendIdempotencyKey,
           ...(eventWithWarnings.occurrenceId === undefined ? {} : { occurrenceId: eventWithWarnings.occurrenceId }),
           payload: eventWithWarnings.payload,
         });
@@ -1076,9 +1131,11 @@ function plannerAdapterForCompile(
     readonly bash: ReturnType<typeof createBashTool>;
   };
 
+  let drafts = 0;
   return {
     async draft(requestInput, repair): Promise<unknown> {
-      const repairNote = repair === undefined ? undefined : buildPlannerRepairNote(repair);
+      drafts += 1;
+      const repairNote = repair === undefined ? undefined : buildPlannerRepairNote(repair, drafts);
       const task = {
         kind: "plan" as const,
         workflowSnapshot: {
@@ -1169,10 +1226,14 @@ function plannerAdapterForCompile(
           ...harnessContext,
           recorder: defaultRecorder,
           durability: {
-            append: async (event: { readonly type: string; readonly occurrenceId?: string; readonly payload: Record<string, unknown> }) => {
+            append: async (event: Parameters<HarnessContext["durability"]["append"]>[0]) => {
               const eventWithWarnings = eventWithSessionWarnings(event, runtime?.skillWarnings);
+              if (eventWithWarnings.payload === undefined) {
+                throw new TypeError("Little Workflow recorder requires an inline Harness event payload.");
+              }
               await defaultRecorder.append({
                 type: eventWithWarnings.type,
+                appendIdempotencyKey: eventWithWarnings.appendIdempotencyKey,
                 ...(eventWithWarnings.occurrenceId === undefined ? {} : { occurrenceId: eventWithWarnings.occurrenceId }),
                 payload: eventWithWarnings.payload,
               });
@@ -1282,6 +1343,7 @@ function plannerBashScope(runtime: PlannerHarnessRuntimeContext): Parameters<typ
   ];
   return {
     cwd: ownScratch?.mountPath ?? runtime.logDir,
+    ...(runtime.world.files === undefined ? {} : { files: runtime.world.files }),
     readableRoots,
     ...(runtime.bashCapabilities === undefined ? {} : { capabilities: runtime.bashCapabilities }),
     ...(pathAliases.length === 0 ? {} : { pathAliases }),
@@ -1383,12 +1445,36 @@ function createInMemoryHarnessRecorder(runId: string): HarnessEventRecorder {
 	    readonly sequence: number;
 	    readonly type: HarnessEventInput["type"];
 	    readonly occurrenceId?: string;
+	    readonly appendIdempotencyKey?: string;
+	    readonly canonicalRequestDigest?: string;
 	    readonly recordedAt: string;
 	    readonly payload: Record<string, unknown>;
   }> = [];
 
   return {
     async append(event) {
+      const canonicalRequestDigest = event.appendIdempotencyKey === undefined
+        ? undefined
+        : canonicalHarnessEventRequestDigest({
+            type: event.type,
+            runId,
+            appendIdempotencyKey: event.appendIdempotencyKey,
+            ...(event.occurrenceId === undefined ? {} : { occurrenceId: event.occurrenceId }),
+            payload: event.payload,
+          });
+      if (event.appendIdempotencyKey !== undefined) {
+        const existing = events.find(
+          (candidate) => candidate.appendIdempotencyKey === event.appendIdempotencyKey,
+        );
+        if (existing !== undefined) {
+          if (existing.canonicalRequestDigest !== canonicalRequestDigest) {
+            throw new Error(
+              `Append key ${event.appendIdempotencyKey} was reused with different content.`,
+            );
+          }
+          return existing;
+        }
+      }
       sequence += 1;
       const envelope = {
         eventId: `inmem_${sequence}`,
@@ -1396,6 +1482,10 @@ function createInMemoryHarnessRecorder(runId: string): HarnessEventRecorder {
 	        sequence,
 	        type: event.type,
 	        ...(event.occurrenceId === undefined ? {} : { occurrenceId: event.occurrenceId }),
+	        ...(event.appendIdempotencyKey === undefined
+            ? {}
+            : { appendIdempotencyKey: event.appendIdempotencyKey }),
+	        ...(canonicalRequestDigest === undefined ? {} : { canonicalRequestDigest }),
 	        recordedAt: new Date(0).toISOString(),
 	        payload: event.payload,
       };
@@ -1408,11 +1498,15 @@ function createInMemoryHarnessRecorder(runId: string): HarnessEventRecorder {
   };
 }
 
-function eventWithSessionWarnings<TEvent extends { readonly type: string; readonly payload: Record<string, unknown> }>(
+function eventWithSessionWarnings<TEvent extends {
+  readonly type: string;
+  readonly payload?: Record<string, unknown>;
+}>(
   event: TEvent,
   warnings: readonly Record<string, unknown>[] | undefined,
 ): TEvent {
   if (
+    event.payload === undefined ||
     normalizeHarnessEventType(event.type) !== "harness.session.started" ||
     warnings === undefined ||
     warnings.length === 0 ||
@@ -1426,7 +1520,7 @@ function eventWithSessionWarnings<TEvent extends { readonly type: string; readon
       ...event.payload,
       warnings,
     },
-  };
+  } as TEvent;
 }
 
 function compileOutputMode(workflow: CompilableWorkflowDefinition): CompilerOutputMode {
@@ -1751,6 +1845,60 @@ function validateRequestBinding(
   return findings;
 }
 
+/** Harness ids of synthesized fixed-plan planners start with this prefix, followed by the plan hash. */
+export const FIXED_PLAN_HARNESS_PREFIX = "little-workflow.fixed-plan@";
+
+/** True for the planner `fixedPlanPlanner` builds. Data-based, so it holds across module copies. */
+export function isFixedPlanPlanner(planner: unknown): boolean {
+  if (!isRecord(planner) || !isRecord(planner.harness)) return false;
+  const harnessId = planner.harness.harnessId;
+  return typeof harnessId === "string" && harnessId.startsWith(FIXED_PLAN_HARNESS_PREFIX);
+}
+
+/**
+ * Complete a hand-written plan (`defineWorkflow({ plan: { steps } })`) into the LWIR document a
+ * planner would draft. The name, input schema and output schema come from the workflow definition,
+ * so they are written once and always satisfy the request binding; the permissions list exactly
+ * the tools and model slots the steps reference.
+ */
+export function fixedPlanLwir(
+  workflow: Pick<CompilableWorkflowDefinition, "id" | "description" | "inputSchema" | "output" | "outputSchema">,
+  steps: readonly LwirStep[],
+): LwirWorkflow {
+  const inputSchema = workflow.inputSchema === undefined ? true : normalizeSchema(workflow.inputSchema);
+  const outputSchema = requestedOutputSchema(compileOutputMode(workflow as CompilableWorkflowDefinition));
+  const tools = new Set<string>();
+  const models = new Set<string>();
+  collectFixedPlanCapabilities(steps, tools, models);
+  return {
+    apiVersion: "littleworkflow.dev/v0.1",
+    kind: "Workflow",
+    metadata: stripUndefined({ name: workflow.id, description: workflow.description }),
+    input: { schema: inputSchema },
+    output: { schema: outputSchema },
+    permissions: { models: [...models].sort(), tools: [...tools].sort(), secrets: [], network: [] },
+    steps,
+  };
+}
+
+/**
+ * Collect the tools and model slots a fixed plan's steps reference. Only the step structure is
+ * walked (each step's own `with.tool`, `with.model` and fixer model, then a parallel body's
+ * `steps`); argument values are data, even when they look like steps.
+ */
+function collectFixedPlanCapabilities(steps: unknown, tools: Set<string>, models: Set<string>): void {
+  if (!Array.isArray(steps)) return;
+  for (const step of steps) {
+    if (!isRecord(step)) continue;
+    const config = isRecord(step.with) ? step.with : {};
+    if (step.uses === "tool.call" && typeof config.tool === "string") tools.add(config.tool);
+    if (step.uses === "ai.generate" && typeof config.model === "string") models.add(config.model);
+    const onFailure = isRecord(step.onFailure) ? step.onFailure : {};
+    if (isRecord(onFailure.fixer) && typeof onFailure.fixer.model === "string") models.add(onFailure.fixer.model);
+    collectFixedPlanCapabilities(step.steps, tools, models);
+  }
+}
+
 function requestedOutputSchema(output: CompilerOutputMode): NormalizedSchemaDescriptor {
   switch (output.mode) {
     case "text":
@@ -1843,21 +1991,6 @@ function bindingFinding(code: string, path: string, message: string): LwirValida
   return { severity: "error", code, path, message };
 }
 
-function getAjv(): AjvInstance {
-  if (cachedAjv !== undefined) {
-    return cachedAjv;
-  }
-
-  const ajvModule = nodeRequire("ajv") as
-    | AjvConstructor
-    | { readonly default?: AjvConstructor };
-  const Ajv = typeof ajvModule === "function" ? ajvModule : ajvModule.default;
-  if (Ajv === undefined) {
-    throw new TypeError("Ajv default export is unavailable.");
-  }
-  cachedAjv = new Ajv({ allErrors: true, strict: false, validateSchema: true });
-  return cachedAjv;
-}
 
 function maxWorkflowRevisionsFor(options: OrchestrationRequestOptions): number {
   const value = options.maxWorkflowRevisions ?? options.controls?.maxWorkflowRevisions;

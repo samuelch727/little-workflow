@@ -1,0 +1,20 @@
+{
+  "title": "Reference",
+  "pages": [
+    "api-reference",
+    "create-harness",
+    "stream-harness",
+    "generate-harness",
+    "harness-session",
+    "file-writer",
+    "skill-helper",
+    "persistent-dir-reference",
+    "local-host",
+    "cli",
+    "events",
+    "alpha-migrations",
+    "storage-adapters",
+    "using-littledb",
+    "glossary"
+  ]
+}

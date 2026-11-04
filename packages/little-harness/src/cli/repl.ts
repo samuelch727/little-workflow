@@ -47,13 +47,14 @@ export async function runRepl(
       messages,
       session,
       uiMessageStream: { onError: formatReplError },
+      trigger: { kind: "cli" },
       ...(opts.connectorTools === undefined ? {} : { connectorTools: opts.connectorTools }),
       ...(opts.toolPolicy === undefined ? {} : { toolPolicy: opts.toolPolicy }),
     });
     const renderResult = renderUiMessageStream(result.toUIMessageStream(), out);
     let finished: StreamHarnessTurnFinished;
     try {
-      finished = await result.finished as StreamHarnessTurnFinished; // let the turn settle (durability flushed) before the next prompt
+      finished = await result.finished; // let the turn settle (durability flushed) before the next prompt
     } catch (error) {
       rollbackMessage(messages, userMessage.id);
       const rendered = await renderResult;

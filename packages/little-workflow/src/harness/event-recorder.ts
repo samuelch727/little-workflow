@@ -1,4 +1,5 @@
 import type { LocalWorld } from "../authoring.js";
+import { canonicalHarnessEventRequestDigest } from "@little-stack/harness/events";
 import { sha256Digest } from "../canonical.js";
 import { checkHarnessManifestDrift, hashHarnessManifest } from "../manifests.js";
 import {
@@ -48,6 +49,20 @@ export function createHarnessEventRecorder(options: {
       return world.appendEvent(runId, {
         type: eventType,
         ...(event.occurrenceId === undefined ? {} : { occurrenceId: event.occurrenceId }),
+        ...(event.appendIdempotencyKey === undefined
+          ? {}
+          : {
+              appendIdempotencyKey: event.appendIdempotencyKey,
+              canonicalRequestDigest: canonicalHarnessEventRequestDigest({
+                type: event.type,
+                runId,
+                appendIdempotencyKey: event.appendIdempotencyKey,
+                ...(event.occurrenceId === undefined
+                  ? {}
+                  : { occurrenceId: event.occurrenceId }),
+                payload: event.payload,
+              }),
+            }),
         payload: event.payload,
       });
     },

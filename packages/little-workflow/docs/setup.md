@@ -4,28 +4,30 @@ Use the owned `little-workflow` CLI on Node.js 22+. `little setup` creates one r
 
 ```sh
 # Guided wizard: template, Workflow, provider/model, package manager, preview, install, verify
-npx little-workflow@alpha setup
+npx @little-stack/workflow@alpha setup
 
 # New Next.js app; definitions live beside src/app in src/agents
-npx little-workflow@alpha setup my-app --template next --workflow --yes --install --allow-native-build --verify
+npx @little-stack/workflow@alpha setup my-app --template next --workflow --yes --install --allow-native-build --verify
 cd my-app
 npm run dev
 # Open http://localhost:3000/little
 
 # Standalone agent; the same definitions run without a web UI
-npx little-workflow@alpha setup my-agents --template node --yes --install --verify
+npx @little-stack/workflow@alpha setup my-agents --template node --yes --install --verify
 cd my-agents
 npm run little:agent
 
 # Existing Next project: inspect the additive plan before applying
-npx little-workflow@alpha setup --here --workflow --plan
-npx little-workflow@alpha setup --here --workflow --yes --install --allow-native-build --verify
+npx @little-stack/workflow@alpha setup --here --template existing-next --workflow --plan
+npx @little-stack/workflow@alpha setup --here --template existing-next --workflow --yes --install --allow-native-build --verify
 # Existing dev/build scripts keep their original values.
 ```
 
-`--provider openai --model gpt-5.2` selects the live provider/model; any provider id supported by `little-harness/scaffold` is accepted. The generated `.env.little.example` has names/placeholders only. Setup never reads or stores credentials. Projects use a deterministic AI SDK mock by default. `LITTLE_DEMO=0` is the developer's explicit opt-in to real model calls and charges. `little:smoke` forces keyless mode even if live mode was enabled in the environment.
+The target is a directory argument, or `--here` for the current directory; `--here` never changes the template. A new-project template (`node`, the default, or `next`) needs an empty target. To add Little to an existing Next.js app, pass `--template existing-next`.
 
-Harness is always included. `--workflow` adds a fixed-plan, durable `starter.echo` workflow, registers its folder, adapts it into the agent as `starter_echo`, and tests execution both through Harness and directly. It needs Local World's `better-sqlite3` native binding. Installs disable lifecycle scripts; `--allow-native-build` permits only `npm rebuild better-sqlite3 --ignore-scripts=false`. That narrowly targeted rebuild also works with pnpm's node_modules layout. Setup does not disable pnpm's build policy or enable arbitrary scripts.
+`--provider openai --model gpt-5.2` selects the live provider/model. The default provider is `openai`, the same default as `little init` and `little-harness init`; any provider id supported by `@little-stack/harness/scaffold` is accepted. The generated `.env.little.example` has names/placeholders only. Setup never reads or stores credentials. Projects use a deterministic AI SDK mock by default. `LITTLE_DEMO=0` is the developer's explicit opt-in to real model calls and charges. `little:smoke` forces keyless mode even if live mode was enabled in the environment.
+
+Harness is always included. The agent is one `createHarness` call in `agent.ts`; `live-model.ts` exports the live provider's `model`, and `demo-model.ts` is the keyless mock used unless `LITTLE_DEMO=0`. `--workflow` adds a durable `starter_echo` workflow (`workflows/starter_echo/workflow.ts`): a `defineWorkflow({ id, input, tools, plan })` with a fixed one-step plan and no model. Setup registers its folder, loads it into the agent with `loadWorkflow`, where it is the `starter_echo` tool, and the generated smoke test runs it both through Harness and directly. It needs Local World's `better-sqlite3` native binding. Installs disable lifecycle scripts; `--allow-native-build` permits only `npm rebuild better-sqlite3 --ignore-scripts=false`. That narrowly targeted rebuild also works with pnpm's node_modules layout. Setup does not disable pnpm's build policy or enable arbitrary scripts.
 
 Supported automatic installs: npm, pnpm 10, Yarn Classic 1 with node_modules. Yarn Berry/PnP and workspace-root installs require manual integration (`--no-install`), because the filesystem loader and package-manager boundaries need deliberate configuration. Lockfiles and `packageManager` must agree. No existing dependency is upgraded: incompatible AI SDK/provider/Little major ranges are explicit conflicts. Resolve them yourself, then rerun. Existing Next, React, TypeScript, config, route, env and custom script values are preserved.
 
@@ -37,19 +39,22 @@ By default the API and page are `/api/little/chat` and `/little`. If a path coll
 
 `--plan` performs no writes. Every invocation prints the file plan and the before/after package manifest. Noninteractive mutation requires `--yes`. There is no `--force`. Identical reruns are no-ops; edited generated files are conflicts. Additions to unrelated package scripts/dependencies remain intact. The CLI rejects invalid JSON, ambiguous router/lockfile choices, path traversal and symlink targets. Dirty Git trees produce a warning and are never reset or cleaned.
 
-Writes use per-file atomic replacement and `.little/setup-transaction.json`, with preimage/content checks before each change. Failures during generation/install/verification restore only unchanged CLI-written files; concurrent user edits are kept and reported. Recovery after process termination is explicit:
+Writes use a v2 `.little/setup-transaction.json` journal to record temporary writes, captured preimages, and directory ownership before changing them. Existing destinations are moved to a recovery path and checked there; complete generated files are then placed atomically without replacing a concurrent destination. The destination can briefly be absent between capture and placement. Failures during generation/install/verification restore complete preimages without truncating the destination; concurrent user edits are kept and reported. Generated hard links let recovery distinguish CLI-owned files from independently created files with identical bytes. Successful rollback removes an empty recovery directory created by that invocation, allowing a fresh-project retry. Atomic journal updates use a unique temporary path recorded in the initial journal; partial or unrecognized updates are retained for manual recovery. After install/verification succeeds, a committed journal records that recovery should finish cleanup rather than undo the completed setup. Current recovery also reads first-alpha v1 journals; writing new recovery metadata upgrades them to v2. Older CLIs reject v2 journals rather than ignoring their ownership metadata. Use the current CLI for recovery after process termination:
 
 ```sh
-# Inspect the journal first; run after the installer process has stopped
-npx little-workflow@alpha setup --here --rollback
+# Inspect the journal first; run after the installer process has stopped.
+# Pass the same project directory the interrupted run used, or --here from inside it.
+npx @little-stack/workflow@alpha setup my-app --rollback
 ```
 
-Dependency artifacts (`node_modules`, package-manager caches and changed lockfiles) are preserved after failure/recovery. Review and reinstall as needed; rollback never removes arbitrary user files. The journal contains generated/package text, not credentials. Do not edit concurrently with installation. Low-level public planner/transaction APIs are exported from `little-workflow/scaffold`, alongside the legacy Workflow scaffold helpers; private dist imports are unnecessary.
+The interrupted-setup error prints this command with the real, shell-quoted project directory. Recovery reports one of four outcomes: no setup journal was found in that directory (nothing to recover), an uncommitted setup was rolled back, a committed setup's cleanup was finished with its generated files kept, or edited files were preserved and the remaining journal needs manual recovery (the command then exits with an error). Library callers get the same outcome from `recoverSetup()` in `@little-stack/workflow/scaffold`.
+
+Dependency artifacts (`node_modules`, package-manager caches and changed lockfiles) are preserved after failure/recovery. Review and reinstall as needed; rollback never removes arbitrary user files. The journal contains generated/package text, not credentials. Do not edit concurrently with installation. Low-level public planner/transaction APIs are exported from `@little-stack/workflow/scaffold`, alongside the legacy Workflow scaffold helpers; private dist imports are unnecessary.
 
 ## Local development and scope
 
 `.little-harness/` and `.little-workflow/` are single-process local filesystem persistence. They are not hosted multi-tenant state. The sample API has no login, strips/ignores browser identity, and assigns fresh server-generated sessions. Production live mode is refused until you implement server-verified authentication, authorization, rate limiting and a suitable persistent execution host. Explicit `LITTLE_DEMO=1` permits a keyless production smoke.
 
-Compute is unavailable: its public package/backend has not been qualified. LittleDB is unpublished. `little setup --compute` explains this and makes no changes. No paid provisioning, deployment or third-party channel setup occurs.
+Little Compute and LittleDB are not published on npm. `little setup --compute` explains this and makes no changes. No paid provisioning, deployment or third-party channel setup occurs.
 
 A headless CLI alone does not require a monorepo. A later workspace template could put shared definitions in `packages/agents`, web in `apps/web`, and independent channel/service entrypoints in other apps. Repository boundaries, runtimes, services and channels are separate choices. This alpha does not create that template or invent WhatsApp/Telegram/Slack adapters.

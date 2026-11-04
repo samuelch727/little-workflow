@@ -557,6 +557,7 @@ function runSummary(result: RuntimeRunResult | RunResult<unknown>): JsonRecord {
     status: result.status,
     ...("output" in result ? { output: result.output } : {}),
     ...("error" in result ? { error: result.error } : {}),
+    ...("plan" in result ? { plan: result.plan } : {}),
     usage: result.usage,
     artifacts: result.artifacts,
     eventCount: result.events.length,
@@ -596,8 +597,8 @@ function errorMessage(error: unknown): string {
 function usage(): string {
   return [
     "Usage:",
-    "  little setup [directory] [--template node|next|existing-next] [--here] [--workflow]",
-    "  little init [name] [--with-harness] [--provider <id>] [--model <id>]",
+    "  little setup [directory | --here] [--template node|next|existing-next] [--workflow]",
+    "  little init [name | --here] [--workflow-name <name>] [--with-harness] [--provider <id>] [--model <id>]",
     "  little add workflow <name> | little add harness",
     "  little validate <workflow.json>",
     "  little run <workflow.json> --input <input.json>",

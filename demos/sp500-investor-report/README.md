@@ -13,7 +13,7 @@ export DEEPSEEK_MODEL_ID=deepseek-v4-pro
 # optional; defaults to https://api.deepseek.com/v1
 export DEEPSEEK_BASE_URL=https://api.deepseek.com/v1
 
-pnpm --filter little-workflow build
+pnpm --filter @little-stack/workflow build
 pnpm --filter sp500-investor-report demo:live -- \
   --archive path/to/sp500_top50_reports.zip \
   --limit 50 \

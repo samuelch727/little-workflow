@@ -207,7 +207,7 @@ export type ChatSdkReactionOutcomeOptions = {
     event: ChatSdkReactionEvent,
     context: { adapterName: string },
   ) => string | undefined;
-  /** Best-effort downstream consumers of the outcome (e.g. littleDB's `reportOutcome`). */
+  /** Best-effort downstream consumers of the outcome (e.g. a sink that records it as a LittleDB score). */
   sinks?: readonly HarnessOutcomeSink[];
   /** Observe what was recorded, including swallowed delivery failures. Never throws onward. */
   onOutcome?: (

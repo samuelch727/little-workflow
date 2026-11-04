@@ -1,5 +1,4 @@
-import { createRequire } from "node:module";
-import type * as Zod from "zod";
+import * as Zod from "zod";
 import type { Schema } from "./authoring.js";
 
 type JsonPrimitive = string | number | boolean | null;
@@ -137,9 +136,6 @@ const HELPER_ARRAY_OUTPUT_MODE_KEYS = new Set(["name", "description", "element"]
 const HELPER_CHOICE_OUTPUT_MODE_KEYS = new Set(["name", "description", "values"]);
 const HELPER_JSON_OUTPUT_MODE_KEYS = HELPER_OBJECT_OUTPUT_MODE_KEYS;
 const AI_SDK_SCHEMA_SYMBOL = Symbol.for("vercel.ai.schema");
-const nodeRequire = createRequire(import.meta.url);
-
-let cachedZod: typeof Zod | undefined;
 
 export class UnsupportedSchemaError extends TypeError {
   readonly value?: unknown;
@@ -251,11 +247,7 @@ function normalizeAiSdkSchemaAt(
 }
 
 function getZod(): typeof Zod {
-  if (cachedZod !== undefined) {
-    return cachedZod;
-  }
-  cachedZod = nodeRequire("zod") as typeof Zod;
-  return cachedZod;
+  return Zod;
 }
 
 function hasZodDataBrand(value: object): boolean {

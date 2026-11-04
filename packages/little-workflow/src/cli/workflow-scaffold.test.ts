@@ -7,7 +7,7 @@ import {
   addWorkflowToProject,
   initWorkflowProject,
 } from "./workflow-scaffold.js";
-import { resolveProvider, scaffoldDependencyVersions } from "little-harness/scaffold";
+import { resolveProvider, scaffoldDependencyVersions } from "@little-stack/harness/scaffold";
 import packageManifest from "../../package.json" with { type: "json" };
 
 const littleWorkflowVersion = packageManifest.version;
@@ -57,7 +57,7 @@ it("initWorkflowProject creates a workflow-first project", async () => {
   // Pinned to the CLI's own version and the AI SDK major it peers on, never `latest`.
   const versions = scaffoldDependencyVersions();
   expect(packageJson.dependencies).toEqual({
-    "little-workflow": `^${littleWorkflowVersion}`,
+    "@little-stack/workflow": `^${littleWorkflowVersion}`,
     ai: versions.ai,
     zod: versions.zod,
     "@ai-sdk/deepseek": resolveProvider("deepseek").packageVersion,
@@ -72,11 +72,14 @@ it("initWorkflowProject creates a workflow-first project", async () => {
   });
   expect(packageJson.packageManager).toBe("pnpm@10.27.0");
   const workflowTs = await readFile(join(root, "workflows", "candidate-review", "workflow.ts"), "utf8");
-  expect(workflowTs).toContain("createLittleWorkflow");
+  expect(workflowTs).toContain("defineWorkflow({");
   expect(workflowTs).toContain('id: "candidate.review"');
   expect(workflowTs).toContain('model: deepseek("deepseek-chat")');
-  expect(workflowTs).toContain('input: { schema: {\n                      "type": "object"');
-  expect(workflowTs).not.toContain("input: { schema: true }");
+  expect(workflowTs).toContain("input: z.object({ value: z.string() })");
+  expect(workflowTs).toContain('tools: ["echo"]');
+  expect(workflowTs).toContain("plan: {");
+  // A fixed plan is data on the definition, not a hand-written planner harness or LWIR document.
+  expect(workflowTs).not.toMatch(/createLittleWorkflow|harnessId|apiVersion|permissions/);
 });
 
 it("addWorkflowToProject writes a workflow folder and updates little-workflow.json", async () => {
@@ -116,14 +119,14 @@ it("addWorkflowToProject refuses to clobber a manifest entry at a different path
   expect(after.workflows.foo).toBe("./custom/foo");
 });
 
-it("init default emits a model present in the DeepSeek catalog", async () => {
-  const { resolveProvider } = await import("little-harness/scaffold");
+it("init default emits a model present in the OpenAI catalog", async () => {
+  const { resolveProvider } = await import("@little-stack/harness/scaffold");
   const root = join(await tmp(), "demo");
   await initWorkflowProject(root, { workflowName: "candidate-review" });
   const ts = await readFile(join(root, "workflows", "candidate-review", "workflow.ts"), "utf8");
-  const emitted = ts.match(/deepseek\("([^"]+)"\)/u)?.[1];
+  const emitted = ts.match(/openai\("([^"]+)"\)/u)?.[1];
   expect(emitted).toBeDefined();
-  expect(resolveProvider("deepseek").models).toContain(emitted);
+  expect(resolveProvider("openai").models).toContain(emitted);
 });
 
 it("initWorkflowProject --here refuses to clobber an existing workflow without force", async () => {
@@ -198,13 +201,13 @@ it("initWorkflowProject withHarness creates an agent workflow shim", async () =>
   expect(await exists(join(root, "agents", "support", "agent.ts"))).toBe(true);
   expect(await exists(join(root, "agents", "support", "workflows", "ticket-triage.ts"))).toBe(true);
   const shim = await readFile(join(root, "agents", "support", "workflows", "ticket-triage.ts"), "utf8");
-  expect(shim).toContain('from "little-workflow"');
+  expect(shim).toContain('from "@little-stack/workflow"');
   expect(shim).toContain('new URL("../../../workflows/ticket-triage", import.meta.url)');
   expect(shim).toContain('executionMode: "durable"');
   const packageJson = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
   expect(packageJson.dependencies).toMatchObject({
-    "little-harness": scaffoldDependencyVersions().littleHarness,
-    "little-workflow": `^${littleWorkflowVersion}`,
+    "@little-stack/harness": scaffoldDependencyVersions().littleHarness,
+    "@little-stack/workflow": `^${littleWorkflowVersion}`,
   });
 });
 

@@ -11,17 +11,23 @@ import {
   type SuperviseDecision,
 } from "./compiler.js";
 import {
-  createLittleWorkflow,
   createToolRegistry,
   model,
   output,
   skill,
-  workflowHarness,
-  type Harness,
-  type HarnessResult,
-  type HarnessTask,
-  type ModelSelectionMetadata,
 } from "./index.js";
+import type {
+  ModelSelectionMetadata,
+} from "./index.js";
+import {
+  createLittleWorkflow,
+  workflowHarness,
+} from "./entries/internals.js";
+import type {
+  Harness,
+  HarnessResult,
+  HarnessTask,
+} from "./entries/internals.js";
 import type { LwirValidationFinding } from "./lwir.js";
 import {
   getPlanningDefinitionHash,
@@ -940,6 +946,47 @@ describe("compiler and planner repair loop", () => {
     expect(planner.draft).toHaveBeenCalledWith(
       expect.objectContaining({ kind: "OrchestrationRequest" }),
       undefined,
+    );
+  });
+
+  it("adds the needs a drafted plan left out instead of asking the planner to repair it", async () => {
+    const [lookup, summarize] = validLwir().steps;
+    const { needs: _needs, ...summarizeWithoutNeeds } = summarize!;
+    const draft = { ...validLwir(), steps: [lookup, summarizeWithoutNeeds] };
+    const planner: PlannerAdapter = { draft: vi.fn(async () => draft) };
+
+    const result = await compileWorkflow(workflow, {
+      input: { ticketId: "TIN-1", body: "Export failed." },
+      tools: workflowRegistry,
+      planner,
+    });
+
+    expect(planner.draft).toHaveBeenCalledTimes(1);
+    expect(result.revisions.map((revision) => revision.valid)).toEqual([true]);
+    expect(result.workflowVersion.lwir.steps[1]?.needs).toEqual(["lookup-customer"]);
+    expect(result.workflowVersion.lwirHash).toBe(sha256Digest(validLwir()));
+  });
+
+  it("still asks for a repair when a drafted plan reads a step that does not exist", async () => {
+    const [lookup, summarize] = validLwir().steps;
+    const draft = {
+      ...validLwir(),
+      steps: [lookup, { ...summarize!, with: { model: "model.fast", prompt: "Summarize {{ steps.ghost.output }}." } }],
+    };
+    const planner: PlannerAdapter = {
+      draft: vi.fn(async (_request, repair) => (repair === undefined ? draft : validLwir())),
+    };
+
+    const result = await compileWorkflow(workflow, {
+      input: { ticketId: "TIN-1", body: "Export failed." },
+      tools: workflowRegistry,
+      planner,
+      maxWorkflowRevisions: 2,
+    });
+
+    expect(result.revisions.map((revision) => revision.valid)).toEqual([false, true]);
+    expect(result.revisions[0]?.findings).toEqual(
+      expect.arrayContaining([expect.objectContaining({ code: "step.missing_dependency" })]),
     );
   });
 

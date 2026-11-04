@@ -1,12 +1,6 @@
-import { rm } from "node:fs/promises";
+import { runFilesFor } from "./run-files.js";
 
-const RETRY_SAFE_RM_OPTIONS = {
-  recursive: true,
-  force: true,
-  maxRetries: 3,
-  retryDelay: 50,
-} as const satisfies NonNullable<Parameters<typeof rm>[1]>;
-
+/** Disk-only utility for project/CLI callers; run-owned paths use their World's RunFiles. */
 export async function removeDirRetrySafe(path: string): Promise<void> {
-  await rm(path, RETRY_SAFE_RM_OPTIONS);
+  await runFilesFor({ dataDir: "/" }).removeDirRetrySafe(path);
 }

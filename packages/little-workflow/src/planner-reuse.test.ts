@@ -205,6 +205,42 @@ describe("planner reuse candidate selection", () => {
   });
 });
 
+describe("planner reuse grades", () => {
+  it("skips a malformed grade file instead of failing candidate selection", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const world = await tempWorld();
+    const version = storedWorkflowVersion("wfver_candidate_graded", "graded");
+    await registerStoredWorkflowVersion(world, version);
+    await appendCompletedRun(world, {
+      runId: "run_candidate_graded",
+      workflowId: "support.triage",
+      workflowVersionId: version.id,
+      completedAt: "2026-05-22T10:00:00.000Z",
+    });
+
+    const grades = join(world.dataDir, "run-grades", "run_candidate_graded");
+    await mkdir(grades, { recursive: true });
+    const good = {
+      gradeId: "grade_good",
+      runId: "run_candidate_graded",
+      workflowId: "support.triage",
+      workflowVersionId: version.id,
+      verdict: "fail",
+      reason: "Missed the customer name.",
+      gradedAt: "2026-05-22T11:00:00.000Z",
+    };
+    await writeFile(join(grades, "grade_good.json"), `${JSON.stringify(good)}\n`, "utf8");
+    await writeFile(join(grades, "grade_truncated.json"), "{\"gradeId\": \"grade_trun", "utf8");
+    await writeFile(join(grades, "grade_wrongshape.json"), JSON.stringify({ ...good, verdict: "maybe" }), "utf8");
+    await writeFile(join(grades, "grade_null.json"), "null", "utf8");
+    await mkdir(join(grades, "grade_dir.json"));
+    await writeFile(join(world.dataDir, "run-grades", "run_not_a_dir"), "x", "utf8");
+
+    await expect(selectPlannerReuseCandidates(world, { workflowId: "support.triage" }))
+      .resolves.toMatchObject([{ workflowVersionId: version.id, grades: [good] }]);
+  });
+});
+
 describe("planner reuse briefs", () => {
   it("includes the candidate id, Mermaid step graph, mounted paths, warnings, and a stable hash", () => {
     const version = storedWorkflowVersion("wfver_candidate_brief", "brief");
@@ -274,6 +310,11 @@ describe("planner reuse briefs", () => {
     expect(brief.text).toContain("/planner/reuse/wfver_candidate_brief/prior-output-summary.md");
     expect(brief.text).toContain("/planner/reuse/wfver_candidate_brief/feedback-summary.md");
     expect(brief.text).toContain("requested output hash changed");
+    // A real planner model only knows the decision format from the brief.
+    expect(brief.text).toContain('{"kind": "reuse_unchanged", "workflowVersionId": "wfver_candidate_brief"');
+    expect(brief.text).toContain('"acknowledgedWarnings": ["description changed","input schema hash changed"');
+    expect(brief.text).toContain('{"kind": "adapt", "baseWorkflowVersionId": "wfver_candidate_brief"');
+    expect(brief.text).toContain('{"kind": "draft_fresh"');
     expect(brief.warnings).toEqual([
       "description changed",
       "input schema hash changed",

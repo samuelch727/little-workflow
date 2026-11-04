@@ -1,3 +1,4 @@
+import type { IFileSystem } from "just-bash";
 import type {
   ArtifactInput,
   ArtifactManifest,
@@ -13,11 +14,14 @@ import type {
  *
  * Implementations:
  *  - localWorld()  — default embedded adapter (this package)
- *  - littleDB()    — Tracing World (separate `littledb` repo)
+ *  - virtualWorld() — single-process adapter over an IFileSystem
+ *  - db.tracingWorld(inner) — wraps any World to send runs to LittleDB (`@little-stack/littledb`)
  */
 export interface World {
   readonly kind: string;
   readonly dataDir: string;
+  /** Optional single-process filesystem backing all run data at POSIX paths. */
+  readonly files?: IFileSystem;
   readonly maxConcurrentSteps?: number;
   appendEvent(runId: RunId, event: EventInput): Promise<EventEnvelope>;
   listEvents(runId: RunId): Promise<readonly EventEnvelope[]>;

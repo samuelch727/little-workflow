@@ -8,13 +8,13 @@ const inter = Inter({
 });
 
 export const metadata = {
-  metadataBase: new URL('https://little-workflow.dev'),
+  metadataBase: new URL(process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'https://little-workflow.dev'),
   title: {
-    default: 'Little Workflow',
-    template: '%s | Little Workflow',
+    default: 'Little documentation',
+    template: '%s | Little documentation',
   },
   description:
-    'Documentation-first design for a TypeScript AI workflow compiler and durable runtime.',
+    'Documentation for the Little stack: LittleDB traces and improves agents, Little Harness and Little Workflow are the SDK, and workspaces (managed by the LittleDB hosted service or self-hosted with Little Compute) are where their work lives.',
 } satisfies Metadata;
 
 export default function Layout({ children }: LayoutProps<'/'>) {

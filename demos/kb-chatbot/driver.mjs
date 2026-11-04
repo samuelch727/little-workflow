@@ -2,8 +2,8 @@
 /**
  * kb-chatbot driver.
  *
- *   node driver.mjs            # offline: no littleDB, scripted conversation, PASS/FAIL
- *   node driver.mjs --loop     # the full littleDB self-improvement loop (needs the stack)
+ *   node driver.mjs            # offline: no LittleDB, scripted conversation, PASS/FAIL
+ *   node driver.mjs --loop     # the full LittleDB self-improvement loop (needs a server)
  *
  * The offline mode drives the SAME `run()` pipeline a real Slack message would, through
  * `simulateInbound`, with a `data`-backed attachment so the file upload needs no network.
@@ -171,7 +171,7 @@ async function loadConnector(ChatCtor) {
  */
 async function runSingleTurn(question, threadId) {
   const { createTestChat, createTestMessage, createTestThread } = await import(
-    "little-harness/connectors"
+    "@little-stack/harness/connectors"
   );
   const ChatCtor = createReactionAwareTestChat(createTestChat);
   const { connector } = await loadConnector(ChatCtor);
@@ -186,12 +186,15 @@ async function runSingleTurn(question, threadId) {
     const { librarianLittleDb } = await jiti.import(
       join(demoRoot, "agents", "librarian", "littledb.ts"),
     );
-    const config = librarianLittleDb()?.configFor(`${ADAPTER}:${threadId}`);
-    if (config !== undefined) {
+    const db = librarianLittleDb();
+    const session = db?.sessionFor(`${ADAPTER}:${threadId}`);
+    if (session !== undefined) {
+      const { resolution } = session;
       console.log(
-        `\npinned configVersionId: ${config.configVersionId} (channel ${config.channel}${config.staleConfig ? ", STALE" : ""})`,
+        `\nLittleDB version: ${resolution.versionId ?? "(none)"} v${resolution.number ?? "?"} (${resolution.mode}, channel ${resolution.channel}${resolution.fallback ? `, ${resolution.fallback.toUpperCase()}` : ""})`,
       );
     }
+    await db?.shutdown();
   } finally {
     await connector.close();
   }
@@ -201,7 +204,7 @@ async function runOffline() {
   if (!keepState) resetState();
 
   const { createTestChat, createTestMessage, createTestThread } = await import(
-    "little-harness/connectors"
+    "@little-stack/harness/connectors"
   );
   const ChatCtor = createReactionAwareTestChat(createTestChat);
   const { connector } = await loadConnector(ChatCtor);
@@ -336,8 +339,8 @@ if (args.has("--loop")) {
   console.log(`harness data:   ${dataDir}`);
   console.log(
     process.env.LITTLEDB_URL
-      ? "littleDB:       WIRED (managed config + trace reporter + outcome sink)."
-      : "littleDB:       off (LITTLEDB_URL unset) — plain createHarness + instructions.md.",
+      ? "LittleDB:       WIRED (resolve per session + traces + reaction scores)."
+      : "LittleDB:       off (LITTLEDB_URL unset) — plain createHarness + instructions.md.",
   );
   await runOffline();
 

@@ -14,7 +14,7 @@ queueing, and local Persistent Dir sources.
 ## Import
 
 ```ts
-import { localHost, localDir, projectDir } from "little-harness";
+import { localHost, localDir, projectDir } from "@little-stack/harness";
 ```
 
 ## Basic Usage
@@ -76,11 +76,7 @@ type LocalHostOptions = {
   projectRoot?: string;
   maxConcurrentSessions?: number;
   sameSession?: "queue" | "reject";
-  executionEnvironment?:
-    | "auto"
-    | "in-process"
-    | "subprocess"
-    | HarnessExecutionEnvironmentFactory;
+  sandbox?: HarnessSandboxMode | HarnessSandboxFactory;
   orchestration?: HarnessOrchestrationServices;
 };
 ```
@@ -151,11 +147,16 @@ localHost({ sameSession: "reject" })
 
 The invariant is fixed: one session never runs two turns at the same time.
 
-### `executionEnvironment`
+### `sandbox`
 
-`"auto" | "in-process" | "subprocess" | HarnessExecutionEnvironmentFactory | undefined`
+`HarnessSandboxMode | HarnessSandboxFactory | undefined`, where
+`HarnessSandboxMode` is `"auto" | "in-process" | "subprocess"`
 
-Where runtime (bash) turns run. Defaults to `"auto"`.
+The sandbox the agent's `bash` tool runs in. Defaults to `"auto"`.
+
+> **UNRELEASED:** published `0.2.0-alpha.0` names this option `executionEnvironment`
+> (and the types `HarnessExecutionEnvironmentMode` and
+> `HarnessExecutionEnvironmentFactory`). See [Alpha Migrations](/docs/v0.1.0-alpha/reference/alpha-migrations#one-name-per-concept).
 
 - `"auto"` — in-process just-bash only when the turn's `runtime.python` and
   `runtime.javascript` are both `false` and network is off; `subprocessSandbox()`
@@ -165,12 +166,12 @@ Where runtime (bash) turns run. Defaults to `"auto"`.
   compatibility layer for trusted tool patterns, not an isolation boundary.
 - `"subprocess"` — `subprocessSandbox()` with its defaults for every turn.
 - a factory — for example `subprocessSandbox({ env, initTimeoutMs })`,
-  `tieredExecutionEnvironment({ nextTier })`, or your own.
+  `tieredSandbox({ nextTier })`, `justBashSandbox()`, or your own.
 
 ```ts
 localHost() // "auto"
-localHost({ executionEnvironment: "in-process" })
-localHost({ executionEnvironment: subprocessSandbox({ watchdogGraceMs: 2_000 }) })
+localHost({ sandbox: "in-process" })
+localHost({ sandbox: subprocessSandbox({ watchdogGraceMs: 2_000 }) })
 ```
 
 See [Execution Environments](/docs/v0.1.0-alpha/runtime/execution-environments)
@@ -185,12 +186,16 @@ Durable orchestration ledgers (tasks, continuations, wakeups, workflow queues,
 results). Defaults to file-backed ledgers under `dataDir`.
 
 ```ts
-localHost({ orchestration: createInMemoryOrchestrationServices() })
+import { localHost } from "@little-stack/harness";
+import { createInMemoryOrchestrationServices } from "@little-stack/harness/host";
+
+localHost({ orchestration: createInMemoryOrchestrationServices() });
 ```
 
 Custom backends implement the five-method `DurableJsonStore` and pass it to
 `createDurableOrchestrationServices({ rootDir, store })` — both shipped
-backends share that same ledger core.
+backends share that same ledger core. `HarnessOrchestrationServices`,
+`DurableJsonStore` and both factories come from `@little-stack/harness/host`.
 
 ## Trace Inspection
 
@@ -258,6 +263,11 @@ Plain relative strings resolve under `localHost({ dataDir })`.
 ```ts
 sourceDir: "persistent/users/u_123/memory"
 ```
+
+A function's string result must be a relative path inside `dataDir`. A result that is
+absolute, contains `..`, or resolves to `dataDir` itself or outside it throws a
+`HarnessPathError`, so a request value such as a user id of `../company` cannot
+reach another folder. Validate ids before building the path.
 
 Project files use `projectDir(...)`.
 

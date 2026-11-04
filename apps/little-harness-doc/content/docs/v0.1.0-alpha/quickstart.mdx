@@ -3,10 +3,10 @@ title: Embedding in Your App
 description: Configure and run a Little Harness agent inside your own app — createHarness, streaming, non-chat runs, and sessions.
 ---
 
-Create a new Next.js/Node project with `npx little-workflow@alpha setup`, or preview additive existing Next integration with `npx little-workflow@alpha setup --here --workflow --plan`. Use `--yes --install --allow-native-build --verify` to apply, install and run the keyless smoke. The shared agent definitions support both CLI and web; authentication and local persistence assumptions are described in generated `LITTLE.md`.
+Create a new Next.js/Node project with `npx @little-stack/workflow@alpha setup`, or preview additive existing Next integration with `npx @little-stack/workflow@alpha setup --here --workflow --plan`. Use `--yes --install --allow-native-build --verify` to apply, install and run the keyless smoke. The shared agent definitions support both CLI and web; authentication and local persistence assumptions are described in generated `LITTLE.md`.
 
 
-Little Harness is a local-first agent runtime for teams that want useful sessions before choosing managed hosting, sandboxes, artifact plumbing, or workflow orchestration. Give it a Local Host, model, system prompt, tools, skills, and optional persistent directories; it creates or resumes the session, exposes the right harness directories, captures traces, and keeps each execution isolated by default.
+Little Harness is a local-first agent runtime for teams that want useful sessions before choosing managed hosting, sandboxes, artifact plumbing, or workflow orchestration. Give it a Local Host, model, system prompt, tools, skills, and optional persistent directories; it creates or resumes the session, exposes the right harness directories, captures traces, and runs each session in its own workspace. By default (`"auto"`), a turn that can run model-authored code or reach the network runs in the subprocess sandbox; other turns stay in-process, which is not an isolation boundary. See [Isolation And Security](/docs/v0.1.0-alpha/runtime/isolation-and-security).
 
 <Callout title="New here?">
   Start with [Getting Started](/docs/v0.1.0-alpha/getting-started) — scaffold an agent workspace and
@@ -27,7 +27,7 @@ Little Harness needs Node.js 22+ and AI SDK 7. `ai` is a peer dependency, so ins
 package (from the `alpha` dist-tag during the alpha) and an AI SDK 7 provider package:
 
 ```bash
-pnpm add little-harness@alpha ai@^7 zod @ai-sdk/openai
+pnpm add @little-stack/harness@alpha ai@^7 zod @ai-sdk/openai
 ```
 
 Swap `@ai-sdk/openai` for any AI SDK 7 provider (`@ai-sdk/anthropic`, `@ai-sdk/google`, ...).
@@ -37,7 +37,9 @@ Swap `@ai-sdk/openai` for any AI SDK 7 provider (`@ai-sdk/anthropic`, `@ai-sdk/g
 ```ts
 import { openai } from "@ai-sdk/openai";
 import type { UIMessage } from "ai";
-import { createHarness, localHost, skill, streamHarness } from "little-harness";
+import { createHarness, localHost, skill, streamHarness } from "@little-stack/harness";
+// Your own AI SDK tools (see Tools) and a skill folder in your project.
+import { queryCustomers, searchDocs } from "./tools";
 
 const system = "You help account teams find practical renewal risks.";
 
@@ -67,7 +69,7 @@ same harness with `generateHarness()` and await the completed result.
 
 ```ts
 import { Output } from "ai";
-import { generateHarness } from "little-harness";
+import { generateHarness } from "@little-stack/harness";
 
 const result = await generateHarness({
   harness,
@@ -76,7 +78,10 @@ const result = await generateHarness({
   output: Output.object({ schema: triageSchema }),
 });
 
-console.log(result.output.priority);
+// A turn parks only when a tool parks it; otherwise it completes.
+if (result.status === "completed") {
+  console.log(result.output.priority);
+}
 console.log(result.trace.id);
 console.log(result.trace.path);
 ```
@@ -125,7 +130,7 @@ When you use Persistent Dirs, writes land in the isolated session first and comm
 const result = streamHarness({ harness, messages, session, extraBody });
 const finished = await result.finished;
 
-if (finished.persistence.status === "failed") {
+if (finished.status === "completed" && finished.persistence.status === "failed") {
   // Show a warning, retry in the background, or page ops.
 }
 ```

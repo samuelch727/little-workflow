@@ -1,5 +1,5 @@
 import { tool } from "ai";
-import { extendTool, tryHarnessToolContext } from "little-harness/connectors/runtime";
+import { extendTool, tryHarnessToolContext } from "@little-stack/harness/connectors/runtime";
 import { z } from "zod";
 import type { SupportDiscordExtraBody } from "../connector";
 

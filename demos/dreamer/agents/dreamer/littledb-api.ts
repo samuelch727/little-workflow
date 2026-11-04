@@ -9,7 +9,7 @@ import {
 /**
  * The dreamer's whole view of littleDB: three HTTP calls, no client library.
  *
- * The demo deliberately does NOT import `@little-workflow/littledb`. That package is the
+ * The demo deliberately does NOT import `@little-stack/littledb`. That package is the
  * *producer* side — the tracing World and the managed-config harness adapter a product
  * harness wires in. The dreamer is a *consumer*: it reads an evidence pack, reads runs, and
  * posts a proposal. Keeping it to `fetch` means the LIT-52 seam is exercised as a wire

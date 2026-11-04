@@ -1,0 +1,57 @@
+---
+title: Glossary
+description: Shared terms across Little Harness, Little Workflow, Little Compute and LittleDB, and where each product uses the same word differently.
+---
+
+Each product also has its own glossary with more detail:
+[Harness](/docs/harness/v0.1.0-alpha/reference/glossary),
+[Workflow](/docs/workflow/v0.1.0-alpha/reference/glossary) and
+[Compute concepts](/docs/compute/concepts).
+
+## Units of work
+
+These are different things. A Compute Task can host a Harness Session, and a
+Harness agent can start a Workflow Run, but none of them is another name for the
+others.
+
+| Term | Product | Meaning |
+| --- | --- | --- |
+| Harness Session | Harness | One agent conversation or job, with a private `/session/` workspace. The caller owns the transcript and resends `messages` each turn. |
+| Turn | Harness | One `generateHarness()` or `streamHarness()` call within a session. |
+| Workflow Run | Workflow | One durable execution of a workflow version, recorded as events in a World. |
+| Operation | Compute | One user intent and its bounded agent graph. |
+| Task | Compute | One logical unit of agent work. It may have zero or more retry Attempts. |
+| Attempt | Compute | One durable try at a Task. It keeps lineage and a File Snapshot generation even while it holds no compute. |
+| Sandbox Lease | Compute | A time-bounded attachment to one isolated execution environment. An Attempt may hold sequential Leases, never more than one writable attachment. |
+
+## Storage and state
+
+| Term | Product | Meaning |
+| --- | --- | --- |
+| Local Host | Harness | The local host for sessions, traces, artifacts and Persistent Dirs, stored under a data directory you choose. |
+| Persistent Dir | Harness | A directory checked out into each session and committed back at a commit boundary. |
+| World | Workflow | Where Workflow stores run events and state. Local World is the default and records events in an embedded SQLite store. |
+| File Snapshot | Compute | Little-owned durable workspace state. A provider or VM snapshot is only an optional acceleration. |
+| Artifact | All | A stored file outside the model's context. In Harness, a file under `/artifacts/` such as a large tool result; in Workflow, a run output with an ID and manifest; in Compute, a content-addressed blob with retention rules. |
+| Memory | Harness, Workflow | Two different features. Harness memory is opt-in, model-authored memory backed by a Persistent Dir. Workflow Memory Stores are filesystem collections mounted at `/mnt/memory/...` for planners. |
+
+## Definitions and formats
+
+| Term | Product | Meaning |
+| --- | --- | --- |
+| Harness | Harness | The runtime `createHarness()` builds. In Workflow pages, "harness" also names the runtime each workflow role (planner, worker, fixer) runs in. |
+| Agent folder | Harness | A folder with `agent.ts` plus `tools/` and `skills/`, loaded by the `little-harness` CLI or `loadHarness()`. |
+| LWIR | Workflow | The JSON workflow format the planner drafts and the validator checks. |
+| WorkflowVersion | Workflow | An immutable, validated workflow that runs execute. |
+| Version | LittleDB | One state of a harness or workflow as plain JSON content, such as `{ system, model }`. An app resolves which version to run; the config in its code is the bootstrap that becomes version 1. Private source. |
+| Proposal | LittleDB | A candidate version with a rationale and evidence, gated by an experiment or a trial and approved by policy or a person. Private source. |
+| Eval worker | LittleDB | The loop in your app that claims LittleDB's experiment runs, runs a version on a dataset item and reports scores. Private source. |
+| User feedback | LittleDB | What an app's end users said about a turn (a thumbs, a rating, a comment, survey answers), stored as scores with source `user` and weighed by reviews, trials and rollback next to the judges. Private source. |
+
+## Integration and status
+
+| Term | Meaning |
+| --- | --- |
+| Port | An optional Harness integration point you can supply yourself, such as the execution environment or the durable session log. Little Compute implements several in its unpublished source. None is required. |
+| Agent Group | A parent agent's bounded set of child agents. The Harness `agents` option that starts one is UNRELEASED; Little Compute's Agent Groups are unpublished source. |
+| UNRELEASED | Exists only in the current source. No npm version includes it, and no version number has been assigned. See [Releases](/docs/releases). |

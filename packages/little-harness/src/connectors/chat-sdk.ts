@@ -38,6 +38,7 @@ import {
   selectSessionDeliveryTargets,
   type SessionConnectorAttachment,
 } from "./session-registry.js";
+import { chatTurnTrigger } from "./turn-trigger.js";
 import { rejectReservedDiscoveredToolNames } from "../workspace/tool-name-policy.js";
 
 type HarnessLoader = (agentDir: string) => Promise<Harness>;
@@ -819,6 +820,7 @@ export async function loadChatSdkConnector<TExtraBody = unknown>(
         ...(activeConnector === undefined ? {} : { connector: activeConnector }),
         ...(connectorTools === undefined ? {} : { connectorTools }),
         ...(descriptor.toolPolicy === undefined ? {} : { toolPolicy: descriptor.toolPolicy }),
+        trigger: chatTurnTrigger(descriptor, adapterName, message),
       });
       sent = await thread.post(result.textStream);
       await descriptor.afterReply?.({ ...runContext, sent });

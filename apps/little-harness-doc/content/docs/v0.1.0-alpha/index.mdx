@@ -3,7 +3,14 @@ title: v0.1.0-alpha
 description: The Little Harness alpha developer API and local runtime.
 ---
 
-These docs cover the Little Harness alpha line — currently `0.2.0-alpha.0` on npm (`little-harness@alpha`; the URL path keeps `v0.1.0-alpha`). Little Harness is a local-first agent runtime where the developer provides a host, model, system prompt, tools, skills, and optional Persistent Dirs. It requires Node.js 22+ and AI SDK 7 (`ai` is a peer dependency).
+These docs cover the Little Harness alpha line — currently `0.2.0-alpha.0` on npm as `little-harness@alpha` (the next release moves to `@little-stack/harness`; the URL path keeps `v0.1.0-alpha`). Little Harness is a local-first agent runtime where the developer provides a host, model, system prompt, tools, skills, and optional Persistent Dirs. It requires Node.js 22+ and AI SDK 7 (`ai` is a peer dependency).
+
+> **UNRELEASED review preview.** This documentation snapshot also covers changes
+> that exist only in the current source and are not in any npm version yet; no
+> version number has been assigned to them. Those sections are labeled
+> **UNRELEASED**, and [Alpha Migrations](/docs/v0.1.0-alpha/reference/alpha-migrations)
+> lists them with their migrations. The site is not an exact catalog of the npm
+> `0.2.0-alpha.0` API.
 
 ## What This Version Proves
 
@@ -34,4 +41,5 @@ These docs cover the Little Harness alpha line — currently `0.2.0-alpha.0` on 
 - [Cookbook](/docs/v0.1.0-alpha/cookbook/document-research-agent) — example recipes for common agent use cases.
 - [Runtime Overview](/docs/v0.1.0-alpha/runtime) — Local Host, just-bash, execution environments and tiers, commits, and isolation.
 - [Outcome Capture](/docs/v0.1.0-alpha/build-agents/outcomes) — record whether runs worked and read success rates.
+- [User Feedback](/docs/v0.1.0-alpha/build-agents/user-feedback) — preview: send your users' thumbs, ratings and surveys to LittleDB.
 - [API Reference](/docs/v0.1.0-alpha/reference/api-reference) — alpha package API shapes.

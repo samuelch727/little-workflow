@@ -1,0 +1,16 @@
+---
+title: User Feedback
+description: Sending your users' thumbs, ratings, comments and surveys to LittleDB is documented in the LittleDB section. Private source; not installable.
+---
+
+Your users' feedback on an agent's replies (thumbs on a message, a rating, a
+comment, a survey at the end of a conversation) can go to LittleDB as scores
+with source `user`, where reviews, trials and rollback weigh it next to the
+judges. Chat reactions and [outcomes](/docs/harness/v0.1.0-alpha/build-agents/outcomes)
+get there through `db.outcomeSink()`, your backend through `db.feedback()`, and
+the browser through `db.feedbackHandler()`. It is all documented in one place:
+[User feedback](/docs/littledb/feedback).
+
+LittleDB is private source and not installable. Little Harness works without it,
+including [Outcome Capture](/docs/harness/v0.1.0-alpha/build-agents/outcomes) to
+local traces. See [LittleDB](/docs/littledb) for status.

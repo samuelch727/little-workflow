@@ -1,8 +1,12 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createHarness, localHost } from "little-harness";
-import type { StreamHarnessFinished, StreamHarnessOptions } from "little-harness/execution";
+import {
+  createHarness,
+  localHost,
+  type StreamHarnessOptions,
+  type StreamHarnessTurnFinished,
+} from "@little-stack/harness";
 import { afterEach, describe, expect, test } from "vitest";
 
 const model = { modelId: "mock", specificationVersion: "v2", provider: "mock" } as any;
@@ -53,7 +57,7 @@ function slackToolStub(reply: string) {
             persistence: { status: "not-configured" },
             warnings: [],
             commitManual: async () => ({ status: "not-configured" }),
-          }) satisfies StreamHarnessFinished,
+          }) satisfies StreamHarnessTurnFinished,
       ),
     };
   };

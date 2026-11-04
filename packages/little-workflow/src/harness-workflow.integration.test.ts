@@ -10,12 +10,15 @@ import {
   createHarness,
   generateHarness,
   localHost,
-  resolveHarnessWorkflowTools,
   type HarnessWorkflow,
-} from "little-harness";
+} from "@little-stack/harness";
+import { resolveHarnessWorkflowTools } from "@little-stack/harness/internals";
 import { defineWorkflow } from "./authoring.js";
 import { asHarnessWorkflow, MAX_WORKFLOW_OUTPUT_SUMMARY_CHARACTERS } from "./harness-workflow.js";
-import type { Harness, WorkflowDefinition } from "./index.js";
+import type {
+  Harness,
+  WorkflowDefinition,
+} from "./entries/internals.js";
 import { loadWorkflow } from "./workspace/load-workflow.js";
 
 const dirs: string[] = [];
@@ -42,31 +45,13 @@ async function writeWorkflowFixture(
     export default tool({ description: "Score.", inputSchema: {}, execute: ${toolExecute} });
   `);
   await writeFile(join(dir, "workflow.ts"), `
-    import { createLittleWorkflow, model } from "little-workflow";
-    export default createLittleWorkflow({
+    import { defineWorkflow } from "@little-stack/workflow";
+    export default defineWorkflow({
       id: "candidate.review",
-      models: [model({ provider: "test", modelId: "planner" } as never)],
-      planner: {
-        model: model({ provider: "test", modelId: "planner" } as never),
-        harness: {
-          harnessId: "folder-planner@1.0.0",
-          async run() {
-            return {
-              kind: "plan",
-              lwir: {
-                apiVersion: "littleworkflow.dev/v0.1",
-                kind: "Workflow",
-                metadata: { name: "candidate.review" },
-                input: { schema: true },
-                output: { schema: true },
-                permissions: { models: [], tools: ["score"], secrets: [], network: [] },
-                steps: [{ id: "score", uses: "tool.call", with: { tool: "score", args: {} }, output: { mode: "json", schema: true } }]
-              }
-            };
-          }
-        }
+      tools: ["score"],
+      plan: {
+        steps: [{ id: "score", uses: "tool.call", with: { tool: "score", args: {} }, output: { mode: "json", schema: true } }],
       },
-      globalTools: ["score"],
     });
   `);
   return dir;
@@ -114,6 +99,7 @@ it("passes a folder-loaded workflow to createHarness and executes it as a workfl
   });
 
   const result = await generateHarness({ harness, type: "job", input: {} });
+  if (result.status !== "completed") throw new Error(`Expected a completed turn; received ${result.status}`);
   expect(result.text).toContain("review complete");
 });
 
@@ -363,6 +349,7 @@ it("runs an asHarnessWorkflow-wrapped workflow whose zod schemas use .describe()
 
   const result = await generateHarness({ harness, type: "job", input: {} });
 
+  if (result.status !== "completed") throw new Error(`Expected a completed turn; received ${result.status}`);
   expect(result.text).toContain("ingested");
   // Before the fix the run failed with `Unsupported JSON Schema keyword 'description' in alpha
   // LWIR.` before reaching any step, so these are the assertions that pin the regression:
@@ -544,6 +531,7 @@ it("runs an asHarnessWorkflow-wrapped workflow whose zod input is a z.record(), 
 
   const result = await generateHarness({ harness, type: "job", input: {} });
 
+  if (result.status !== "completed") throw new Error(`Expected a completed turn; received ${result.status}`);
   expect(result.text).toContain("compared");
   // Before the fix the run failed with `Unsupported JSON Schema keyword 'propertyNames' in
   // alpha LWIR.` before reaching any step, so these pin the regression: the step's tool ran

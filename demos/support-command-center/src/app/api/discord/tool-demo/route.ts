@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import { NextResponse } from "next/server";
-import { resolveToolExtension } from "little-harness/connectors/runtime";
-import { loadConnectorToolExtensions } from "little-harness/connectors/discovery";
+import { resolveToolExtension } from "@little-stack/harness/connectors/runtime";
+import { loadConnectorToolExtensions } from "@little-stack/harness/connectors/discovery";
 import sendChannelUpdateExtension, {
   type SendChannelUpdateOutput,
 } from "../../../../../agents/support/connectors/discord/tools/send-channel-update";

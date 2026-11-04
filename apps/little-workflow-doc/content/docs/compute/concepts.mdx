@@ -1,0 +1,147 @@
+---
+title: Concepts and Terminology
+description: Stable names for durable agent work and disposable execution attachments.
+---
+
+## Managed Agent Bundles
+
+A **Managed Agent Bundle** is an immutable, Project-scoped launch contract that
+pins one Agent Definition, Little Harness build, model selection, capabilities,
+workspace and execution profiles, output schema, and verification policy. Its
+catalog content is append-only; deprecation and revocation live in a separately
+fenced lifecycle head with immutable history, and revocation is terminal.
+
+The catalog retains the exact canonical bytes and normalized child/Artifact
+edges. Only the dedicated exec-evidence verifier may register immutable Bundle
+identities; generic API and Runner roles cannot register them. Persistence alone
+is not admission: the runtime must still resolve the pinned catalogs, model
+allowlist, kernel features, and any operator-signed trusted extension before an
+agent can run.
+
+For managed execution, a canonical v2 Agent profile grants one exact Bundle
+with `managedAgentBundleRef`. An Operation&apos;s managed root must name that exact
+Bundle and use the granting profile as its frozen default; Operation creation
+then atomically pins the Bundle to the root Task. Profiles without an exact
+Bundle remain inspectable but cannot launch managed work. Attached coordinators
+cannot carry this pin. Trusted-extension Bundles currently fail closed until
+frozen operator trust evidence is part of the authority contract.
+
+## Durable work
+
+- An **Operation** is one user intent and its bounded agent graph. During a writable
+  ownership epoch it has exactly one home Cell.
+- A **Task Scope** atomically declares an immutable group of Tasks, their dependencies,
+  join policy, structural grant, and bounded reduction policy.
+- A **Task** is one logical unit of agent work. It may have zero or more retry Attempts.
+- An **Attempt** is one durable try at a Task. It preserves lineage and a current File
+  Snapshot generation even when it holds no compute.
+- A **Harness Session** remains Little Harness&apos;s durable conversation and file abstraction.
+
+## Milestone observations
+
+A milestone may include complete **cost** and **externality** observations. Each
+observation is an optional whole object: `cost` contains cumulative token,
+currency-estimate, and compute-second fields, while `externalities` records the
+network-write, database-commit, and external-API flags (and optional notes).
+Producers include an object only when a trusted capture can provide every field.
+
+An omitted observation means **unknown**. It is not equivalent to zero cost or
+false side-effect flags, and a measured zero must remain explicitly distinguishable
+from omission. Existing milestones with complete observations retain their exact
+canonical serialization and digest, so readers can accept both legacy complete
+rows and newer rows that omit unavailable observations.
+
+This distinction is part of durable identity and recovery safety. A restore may
+re-execute a milestone only when its externality observation is present and all
+three flags are false. Retry placement records a reused historical prefix only
+when the selected green ancestor has a measured cost; it does not present that
+prefix as an exact avoided saving or invent a zero value when cost is unknown or
+when retrying from base generation.
+
+## Agent Groups
+
+An **Agent Group** is the durable authority for one parent agent to admit and
+coordinate a bounded set of managed child Tasks. Its immutable start receipt
+pins the parent Task fence, Managed Agent Bundle, member resources, join policy,
+reduction policy, and the authenticated Runner principal that originated the
+group. Start replay, page plan/seal, join observation/settlement, and
+cancellation must all present that same principal; sharing a tenant and Project
+does not grant another Runner access to receipts or mutations.
+
+Member pages accept an exact byte budget up to 8 MiB. At most 4,096 page calls
+may remain live at once; that condition is retryable after callers seal prior
+calls. The separate 65,536-call lifetime envelope is terminal. Page cursors are
+stored bearer identities with a 24-hour database-time expiry, while canonical
+Agent Group state remains in PostgreSQL rather than in a cursor or process.
+
+### Where children start
+
+By default a child starts from its parent's current files: when a group
+starts, the parent's workspace is forked on top of the Project head and every
+child starts from that fork. A parent that cannot be forked sends its children
+to the Project head instead, and the reason is recorded on the group. The
+`runtime.managedAgent.agentGroupChildBase` setting in `little-compute.yaml`
+changes this: `parent-workspace` requires the fork (a parent that cannot be
+forked fails the start) and `project-head` never forks, so a child does not
+see files the parent has written but not yet landed. [Fork and
+merge](/docs/compute/fork-and-merge) explains the whole path, including how the
+children's work merges back.
+
+Starting a group with a fork:
+
+1. Exports the parent's workspace. Only regular files and directories are
+   kept: `.git`, `node_modules`, symlinks, nested repositories, files the
+   Project's `.gitignore` excludes for new files, and Little's secret-bearing
+   paths are dropped.
+2. Records those files as one fork commit on the Project head and captures it
+   as a Repository Snapshot. A retried start replays the same fork.
+3. Starts every child from that fork.
+
+When the group completes, its integration merges the fork into the Project
+head first and the children's work after it, as one result. Children can
+therefore build on files the parent made. If the parent's files match the
+Project head, nothing is forked and children start from the head as usual.
+
+Limits of the fork:
+
+- The parent must be running on the current Project head. A group started
+  from any other base, including a group started by a child that runs on a
+  fork, starts its children from the Project head with the reason
+  `parent_not_on_project_head`; with `parent-workspace` it fails with
+  `local_parent_fork_base_not_project_head` instead.
+- Only files present at the moment of the fork are merged with the group.
+  Edits the parent makes later land with the parent's own result.
+- The export is crash-consistent: a file the parent is writing during the
+  export can be captured mid-write.
+- A child whose retry is placed on a different snapshot than its fork fails
+  closed instead of starting from the head.
+- This path is covered by unit and git-level tests but has not yet run end to
+  end against Podman and PostgreSQL.
+
+## Disposable execution
+
+- A **Sandbox Lease** is a time-bounded attachment to one isolated execution environment.
+  One Attempt may acquire sequential Leases but never has more than one writable attachment.
+- A **File Snapshot** is Little-owned durable workspace state. A provider or VM snapshot is
+  optional acceleration, never canonical durability.
+- A **Repository Snapshot** is immutable lineage. A **Repository Materialization** is only
+  a disposable checkout of an Attempt&apos;s canonical workspace head.
+
+“Sandbox” is the capability boundary; it does not promise one implementation. The selected
+isolation tier can use an OCI container, gVisor, Kata, or a later qualified VM-backed path.
+
+## File Snapshot mode boundary
+
+File Snapshot v1 transports ordinary POSIX access bits, not privilege. Its
+declared `strip_setuid_setgid_preserve_directory_sticky_v1` policy strips
+setuid and setgid everywhere, strips sticky from nondirectories, and preserves
+sticky on directories. Capture normalizes these bits and readers reject a
+manifest that claims the policy while carrying a forbidden mode. This is an
+intentional fidelity tradeoff so resuming an agent workspace cannot recreate a
+privilege-bearing executable.
+
+## Scheduling boundary
+
+Little Compute schedules agent Tasks and Sandbox Leases. Kubernetes may schedule nodes and
+pods below the provider adapter. Provider state never becomes canonical Little state, and
+provider-native task schedulers never decide Task winners.

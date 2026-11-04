@@ -1,0 +1,62 @@
+---
+title: Releases
+description: What each Little product has published, what is source-only, and what UNRELEASED means on this site.
+---
+
+Only Little Harness and Little Workflow are installable. Status below was
+checked on 2026-10-09.
+
+| Product | Package | Status | Install |
+| --- | --- | --- | --- |
+| [Little Harness](/docs/harness) | `@little-stack/harness` | Published on npm as `little-harness` `0.2.0-alpha.0` (2026-10-05). The next release is the first under `@little-stack/harness` | `pnpm add @little-stack/harness@alpha ai@^7 zod @ai-sdk/<provider>` once published; until then `little-harness@alpha` |
+| [Little Workflow](/docs/workflow) | `@little-stack/workflow` | Published on npm as `little-workflow` `0.2.0-alpha.1` (2026-10-06). The next release is the first under `@little-stack/workflow` | `pnpm add @little-stack/workflow@alpha ai@^7 zod @ai-sdk/<provider>` once published; until then `little-workflow@alpha` |
+| [LittleDB](/docs/littledb) | `@little-stack/littledb` | Private source, `0.1.0-alpha.2`, marked private. Not on npm, and no public repository | Not installable |
+| [Workspaces, managed](/docs/how-they-fit#workspaces) | none: part of LittleDB's hosted service | Private, with LittleDB. Not on npm | Not installable |
+| [Workspaces, self-hosted (Little Compute)](/docs/compute) | `@little-stack/compute` | Unpublished source; control plane frozen 2026-10-23. Not on npm, and not in the public `samuelch727/little-workflow` repository | Not installable |
+
+Both published packages need Node.js 22 or newer and an AI SDK 7 provider
+package. To create a project instead of installing by hand, use
+[Setup](/docs/get-started/setup).
+
+## Package names
+
+From the next release, every Little package is published under the
+`@little-stack` npm scope. Command names do not change.
+
+| Before | From the next release | Command |
+| --- | --- | --- |
+| `little-harness` | `@little-stack/harness` | `little-harness` |
+| `little-workflow` | `@little-stack/workflow` | `little` |
+| (unpublished) | `@little-stack/compute` | `little-compute` |
+| `@little-workflow/littledb` (private) | `@little-stack/littledb` (private) | none |
+
+To move an existing project, replace the dependency names in `package.json`
+and the module names in imports, including subpaths such as
+`little-harness/connectors`, which becomes `@little-stack/harness/connectors`.
+The packages already published under the old names stay installable.
+
+## Release notes and migrations
+
+- **Little Workflow:** [Changelog](/docs/workflow/v0.1.0-alpha/reference/changelog),
+  including the `0.2.0-alpha.1` release that added `little setup`.
+- **Little Harness:** [Alpha Migrations](/docs/harness/v0.1.0-alpha/reference/alpha-migrations)
+  lists the source changes that are not in `0.2.0-alpha.0` and how to migrate.
+- **Setup recovery:** [Setup Recovery](/docs/workflow/v0.1.0-alpha/reference/setup-recovery)
+  separates published rollback behavior from the UNRELEASED `recoverSetup()` API.
+
+## What UNRELEASED means
+
+A section labeled **UNRELEASED** describes something that exists only in the
+current source. No npm version includes it, and no version number has been
+assigned to it. Published code keeps working as documented for its version;
+UNRELEASED sections describe what changes when you move to a later build.
+
+This site is a review preview. It covers published APIs and source-only changes
+side by side, so it is not an exact catalog of any one npm version.
+
+## The `v0.1.0-alpha` URL segment
+
+Harness and Workflow pages live under `/docs/harness/v0.1.0-alpha/...` and
+`/docs/workflow/v0.1.0-alpha/...`. That segment is a historical URL kept so old
+links stay stable. It is not a package version: the published packages are
+`0.2.0-alpha.0` and `0.2.0-alpha.1`. There are no other version sections.

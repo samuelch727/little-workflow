@@ -2,10 +2,8 @@ import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import {
-  resolveSkills as rawResolveHarnessSkills,
-  type SkillInput,
-} from "little-harness";
+import type { SkillInput } from "@little-stack/harness";
+import { resolveSkills as rawResolveHarnessSkills } from "@little-stack/harness/internals";
 import { sha256Digest } from "./canonical.js";
 import type { SkillDescriptor } from "./harness/types.js";
 
@@ -425,11 +423,23 @@ function isStaleHarnessResolverError(error: unknown): boolean {
   return error instanceof Error && /Directory skills require path/u.test(error.message);
 }
 
+/**
+ * The monorepo's Harness source, tried before the installed package so a workspace checkout uses
+ * the resolver it is developing against. The path is assembled at run time: a literal
+ * `new URL("…", import.meta.url)` is resolved by bundlers such as Turbopack at build time, and
+ * this file does not exist in an installed package, which failed every Next.js route that
+ * imported Little Workflow.
+ */
+function sharedHarnessSkillSourceUrl(): string {
+  const path = ["..", "..", "little-harness", "src", "skills", "skill.js"].join("/");
+  return new URL(path, import.meta.url).href;
+}
+
 async function importSharedHarnessSourceResolver(): Promise<(
   inputs: readonly HarnessSkillInput[],
   options?: { readonly skillMaxRisk?: SkillRiskLevel; readonly skillOidcToken?: SkillOidcToken },
 ) => Promise<readonly HarnessResolvedSkill[]>> {
-  const moduleUrl = new URL("../../little-harness/src/skills/skill.js", import.meta.url).href;
+  const moduleUrl = sharedHarnessSkillSourceUrl();
   const module = await import(/* @vite-ignore */ moduleUrl) as { readonly resolveSkills: unknown };
   return module.resolveSkills as (
     inputs: readonly HarnessSkillInput[],
@@ -438,7 +448,7 @@ async function importSharedHarnessSourceResolver(): Promise<(
 }
 
 async function importSharedHarnessPackageResolverWithWarnings(): Promise<HarnessSkillsWithWarningsResolver | undefined> {
-  const module = await import("little-harness") as { readonly resolveSkillsWithWarnings?: unknown };
+  const module = await import("@little-stack/harness/internals") as { readonly resolveSkillsWithWarnings?: unknown };
   if (typeof module.resolveSkillsWithWarnings !== "function") {
     return undefined;
   }
@@ -446,7 +456,7 @@ async function importSharedHarnessPackageResolverWithWarnings(): Promise<Harness
 }
 
 async function importSharedHarnessSourceResolverWithWarnings(): Promise<HarnessSkillsWithWarningsResolver> {
-  const moduleUrl = new URL("../../little-harness/src/skills/skill.js", import.meta.url).href;
+  const moduleUrl = sharedHarnessSkillSourceUrl();
   const module = await import(/* @vite-ignore */ moduleUrl) as { readonly resolveSkillsWithWarnings: unknown };
   return module.resolveSkillsWithWarnings as HarnessSkillsWithWarningsResolver;
 }

@@ -1,0 +1,46 @@
+---
+title: URL migration
+description: Where pages from the separate Little Workflow, Little Harness and Little Compute docs sites live on this combined site.
+---
+
+The Workflow, Harness and Compute docs used to be separate sites. Their pages now
+live under product roots on this site. The complete page-by-page map is
+published as JSON at <a href="/docs-migration.json">/docs-migration.json</a>.
+
+## Rules
+
+| Old page | New page | Redirected on this host |
+| --- | --- | --- |
+| Workflow: `/docs/v0.1.0-alpha/<page>` | `/docs/workflow/v0.1.0-alpha/<page>` | Yes |
+| Workflow: `/docs/comparisons` | `/docs/workflow/comparisons` | Yes |
+| Workflow: `/docs/v0.1.0-alpha` (had no page) | `/docs/workflow/v0.1.0-alpha/getting-started` | Yes |
+| Workflow: `/docs` | `/docs/workflow` | No: `/docs` is now the family index |
+| Harness (`https://little-harness.dev`): `/docs/<page>` | `/docs/harness/<page>` | No: link migration only |
+| Compute: `/docs/<page>` | `/docs/compute/<page>` | Yes, for each old Compute page name |
+
+The same rules apply to each page's Markdown copy (`/llms.mdx/docs/...`) and
+Open Graph image (`/og/docs/...`) for the redirected rows. Redirects are
+permanent and keep the query string; browsers keep the `#` fragment.
+
+## Exceptions
+
+The two LittleDB integration pages moved to the new LittleDB root. Their old
+product paths on this site are short pointer pages.
+
+| Old page | New page |
+| --- | --- |
+| Workflow: `/docs/v0.1.0-alpha/running/using-littledb` | [`/docs/littledb/workflow`](/docs/littledb/workflow) (redirected) |
+| Harness: `/docs/v0.1.0-alpha/reference/using-littledb` | [`/docs/littledb/harness`](/docs/littledb/harness) (link migration only) |
+
+## Compute page names
+
+These old Compute pages redirect from `/docs/<page>` to `/docs/compute/<page>`:
+`architecture`, `artifacts`, `cli`, `concepts`, `http-api`,
+`planned-enforcement`, `providers`, `recovery`, `runtime-io`, `self-hosting` and
+`topology-credential-worker`.
+
+## Why the Harness site is not redirected
+
+This preview runs on the existing Little Workflow host. It cannot add redirects
+to the separate Little Harness domain, which stays as it is. Use the map to
+update links by hand.

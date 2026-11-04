@@ -3,7 +3,10 @@ import type { HarnessFailureCauseCode } from "../workflows.js";
 
 export type HarnessTaskId = `task_${number}`;
 export type HarnessTaskStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
-export type HarnessTaskKind = "workflow" | "tool" | "bash" | "code" | "mcp";
+/** Closed set admitted to the asynchronous tool queue. Agent work uses its launcher port. */
+export type HarnessAsyncToolTaskKind = "tool" | "bash" | "code" | "mcp";
+/** `input` is a question waiting for a person (`ask_person`). */
+export type HarnessTaskKind = "workflow" | "agent" | "input" | HarnessAsyncToolTaskKind;
 export type HarnessTaskFailureCauseCode = HarnessFailureCauseCode;
 
 export type HarnessTerminalDiagnostic = {
@@ -31,6 +34,33 @@ export type HarnessTaskRecord = HarnessTerminalDiagnostic & {
   readonly outputSummary?: string;
   readonly outputPath?: string;
   readonly error?: string;
+  /** Opaque launcher references are internal coordination data, never model-facing output. */
+  readonly externalAgentGroupRef?: string;
+  readonly externalAgentTaskRef?: string;
+  readonly externalAgentResultRef?: string;
+  readonly agentLaunchAcceptedAt?: string;
+  readonly agentMemberId?: string;
+  readonly agentMemberIndex?: number;
+  readonly agentGroupScopeIdentity?: string;
+  readonly agentJoinPolicyHandle?: string;
+  readonly agentJoinPolicyKind?: "all_success" | "all_terminal" | "any_success" | "quorum" | "first_verified";
+  readonly agentJoinQuorumCount?: number;
+  readonly agentVerifierHandle?: string;
+  readonly agentRequiredCheckSetHandle?: string;
+  readonly agentGroupRevision?: number;
+  readonly agentGroupStatus?: "queued" | "running" | "satisfied" | "failed" | "cancelled" | "deadline";
+  readonly agentGroupObservationDigest?: string;
+  readonly agentGroupObservedAt?: string;
+  readonly agentMemberRevision?: number;
+  readonly agentMemberObservationDigest?: string;
+  readonly agentMemberStateDigest?: string;
+  readonly agentMemberObservedAt?: string;
+  readonly agentJoinReductionRevision?: number;
+  readonly agentJoinReductionDigest?: string;
+  readonly agentReductionPolicyHandle?: string;
+  readonly agentMaxMemberSummaryBytes?: number;
+  readonly agentMaxGroupSummaryBytes?: number;
+  readonly agentMaxResultRefs?: number;
 };
 
 export type HarnessTaskReserveInput = {
@@ -44,6 +74,31 @@ export type HarnessTaskReserveInput = {
   readonly queueId?: string;
   readonly callIdentity?: string;
   readonly runId?: string;
+  readonly externalAgentGroupRef?: string;
+  readonly externalAgentTaskRef?: string;
+  readonly agentLaunchAcceptedAt?: string;
+  readonly agentMemberId?: string;
+  readonly agentMemberIndex?: number;
+  readonly agentGroupScopeIdentity?: string;
+  readonly agentJoinPolicyHandle?: string;
+  readonly agentJoinPolicyKind?: "all_success" | "all_terminal" | "any_success" | "quorum" | "first_verified";
+  readonly agentJoinQuorumCount?: number;
+  readonly agentVerifierHandle?: string;
+  readonly agentRequiredCheckSetHandle?: string;
+  readonly agentGroupRevision?: number;
+  readonly agentGroupStatus?: "queued" | "running" | "satisfied" | "failed" | "cancelled" | "deadline";
+  readonly agentGroupObservationDigest?: string;
+  readonly agentGroupObservedAt?: string;
+  readonly agentMemberRevision?: number;
+  readonly agentMemberObservationDigest?: string;
+  readonly agentMemberStateDigest?: string;
+  readonly agentMemberObservedAt?: string;
+  readonly agentJoinReductionRevision?: number;
+  readonly agentJoinReductionDigest?: string;
+  readonly agentReductionPolicyHandle?: string;
+  readonly agentMaxMemberSummaryBytes?: number;
+  readonly agentMaxGroupSummaryBytes?: number;
+  readonly agentMaxResultRefs?: number;
 };
 
 export type HarnessCallIdentityInput = {

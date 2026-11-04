@@ -1,0 +1,288 @@
+---
+title: Artifact storage
+description: Content-addressed filesystem and S3 storage with immutable retention and generation-fenced garbage collection.
+---
+
+Little Compute calculates the SHA-256 for every Artifact. The storage backend
+does not choose its identity, and an S3 ETag is never treated as a checksum.
+
+## Commit and read path
+
+The filesystem and S3 adapters share one `BlobStore` contract:
+
+1. write private staging bytes under size, chunk, and cancellation limits;
+2. verify the declared Little SHA-256 and storage checksum;
+3. publish the canonical digest only if it is absent;
+4. attach Artifact metadata, immutable provenance, and retention roots in one
+   PostgreSQL transaction; and
+5. remove abandoned staging data in bounded batches.
+
+Before registration, each adapter opens a durable, bounded, checksummed
+namespace marker and exposes its derived `physicalNamespaceId`. Filesystem
+markers have an inode-linked seal; S3 markers reject additional versions and
+delete-marker history. Concurrent opens converge, while an unmarked namespace
+with existing managed data fails closed. The tenant `trustDomain` cannot choose
+or split this identity. Runtime registration and PostgreSQL both reject one
+physical marker relabeled across tenants, so filesystem path aliases and S3
+endpoint aliases cannot create two delete owners for the same bytes.
+
+Marker validation happens when a store opens. Hot puts, reads, deletes, and
+cleanup calls bind every location to that already-verified ID without adding a
+filesystem stat or S3 marker HEAD to each operation. Treat namespace
+administration as a trusted boundary: drain every process using a root/prefix
+before moving, restoring, or replacing its marker. The next open revalidates
+the filesystem marker/seal pair or complete S3 marker version/delete-marker
+history and fails closed after rotation or deletion. Runtime credentials must
+not have storage-administration authority.
+
+S3 stages an exact object version. The portable publisher uses conditional PUT
+for small objects and bounded exact-version range GET -> UploadPart ->
+conditional multipart completion for large objects. Server-side copy is a
+separately probed acceleration. Multipart work has bounded part size and
+concurrency and aborts the entire set after one member fails. Empty blobs are
+supported. Full reads verify SHA-256 while streaming; ranges verify immutable
+whole-object metadata first. Presigned URLs cover one exact version and optional
+range and expire in at most 900 seconds by default.
+
+## S3-compatible preflight
+
+Every configured strategy starts unavailable. Run
+`S3BlobStore.qualifyConditionalPublish()` against the exact deployment before
+serving writes. `auto` proves the copy acceleration first, then the portable
+conditional-write path; both include a distinct multipart completion proof.
+Production also requires HTTPS, SHA-256 receipts, active object versioning,
+exact-version GET/HEAD/delete, range streaming, and an incomplete-multipart
+lifecycle rule. A checksum-less completion is accepted only through a returned
+non-null VersionId and checksum-bearing exact-version HEAD.
+
+The Little janitor accepts only its `staging/<UUIDv4>` namespace. Its cutoff is
+constructed by trusted control-plane code from a certain database safe-time
+record. It deletes exact object and delete-marker versions. A missing
+server-authoritative multipart age fails closed rather than trusting a node
+clock.
+
+The deployed GC worker invokes that janitor every non-overlapping cycle after
+normal and registration-orphan collection. PostgreSQL first re-authenticates
+the exact tenant-scoped worker claim, generation, fence, bearer, and sealed
+batch limit. For S3 it also leases one durable, generation-fenced listing page
+for the exact physical namespace, bucket, prefix, and trust-domain generation.
+Multipart and object-version marker tuples persist separately and their turns
+alternate after every settled page, including pages with no eligible deletes.
+The worker performs S3 I/O outside a database transaction, then CAS-advances
+the cursor; a crash replays the page safely and a completed scan wraps so later
+lower-key inserts are visible. Filesystem
+self-hosting also cleans exact Little-owned partial names in bounded batches by
+atomic rename, inode revalidation, unlink, and directory fsync. Because its age
+receipt is trusted host file metadata, filesystem remains a single-host
+profile; qualified S3 is the multi-host production surface.
+
+Both backends use a database-admitted cleanup deadline plus an explicit join
+margin. A worker whose authenticated claim expires too soon is denied before
+storage I/O. The runtime aborts at the deadline and waits for the real storage
+promise to settle before publishing completion, retrying, or shutting down;
+PostgreSQL then CAS-completes the exact S3 page or filesystem pass fence.
+S3 destructive calls have their own bounded concurrency, and all selected page
+outcomes settle before cursor advancement.
+
+The pinned SeaweedFS 4.29 arm64 target passed the portable protocol and live
+conformance suite on 2026-07-12, including empty blobs, a 12-writer race,
+ranges, forced multipart upload, and exact-version cleanup. Its copy path is not
+qualified, and its multipart listing omits age, so the lifecycle backstop is
+mandatory. OCI image SBOM/license closure and durability review remain separate
+promotion gates; source licensing alone is not enough.
+
+Use a tenant/key-epoch prefix for private data. A guessed digest is never an
+authorization grant; Artifact reads still require the matching tenant and
+Project metadata.
+
+## Runner upload permits
+
+Runner uploads use a separate least-authority Blob registrar. PostgreSQL
+first looks up exact durable recovery by raw request digest, Claim identity,
+and original bearer fingerprint. A consumed response returns before live auth,
+policy, writer selection, or PUT; an uploaded response reuses the durable
+location with no second PUT. New work authenticates the exact live Runner Claim
+and persists a preflight before Little evaluates server publication policy or
+resolves storage. The Project owner
+policy—not the request or registrar process—sets the per-Artifact byte ceiling,
+outstanding-byte reservation, permit lifetime, orphan grace, and policy
+version. A one-shot permit plus deterministic CAS upload intent commits before
+the Blob write, and no database connection or row lock remains open while bytes
+stream.
+
+After PUT, the registrar records the exact physical outcome, re-authenticates
+the Claim, and atomically consumes the permit into an opaque receipt. Read-only
+replay recovers lost responses, including after Claim revocation. Only an
+explicit PostgreSQL no-data result can trigger the initial PUT; an ambiguous
+database failure never causes a second write.
+
+The opaque physical receipt remains an active Blob root and keeps reservation
+bytes charged until Artifact metadata commits an immutable attachment
+acknowledgement. Attachment can restart after Claim revocation using the
+consumed permit and original bearer. A missing attachment is eventually handled
+as a fenced orphan after its grace period; a wrong bearer cannot resume it.
+
+Expired, unconsumed outcomes are swept under durable worker attempts and an
+exact global namespace/backend/key/version delete fence. A newer physical
+receipt wins that fence and cancels deletion before storage I/O. If the PUT
+outcome itself is missing, Little stats the planned identity and never deletes
+it: proven absence releases reservation, while present-but-unproven bytes are
+dead-lettered, preserved, and remain quota-charged until an operator resolves
+the debt.
+
+## Retention and GC
+
+Retention edges are immutable roots. Release is a separate append-only receipt
+anchored to database safe time. GC has two grace periods and an exact root
+generation:
+
+```text
+live -> candidate -> delete_fenced -> physical_deleting -> deleted
+          ^         |
+          +-- root -+
+```
+
+A new root before the physical-delete cut advances the generation and cancels
+collection. The cut into `physical_deleting` rechecks every active root and
+commits an immutable, worker-bound attempt receipt. PostgreSQL then releases the
+transaction and connection before bounded object-store I/O. A crash is retried
+after an immutable failure receipt and bounded exponential backoff against the
+same exact location/version; the configured final failure is dead-lettered.
+Timeouts abort and join the underlying operation before retry authority is
+published. A physical receipt may cancel a batch claim until dispatch; after
+dispatch the exact delete fence wins. A second CAS commits one terminal receipt.
+Competing sweepers report in-progress
+or replay that receipt. Roots after the cut fail closed and use verified source
+replay instead of blocking a database row lock. Runner and GC credentials have no direct DML over
+legacy Artifact tables, heads, or receipts. Runner mutations require the raw,
+Operation-scoped Runner Claim bearer; stored token hashes are not accepted.
+The shared GC role additionally needs a tenant-, generation-, expiry-, and
+batch-bounded worker claim whose hash table it cannot read.
+
+During upgrade, every legacy Blob is quarantined because pre-marker metadata
+cannot authenticate its physical namespace. Existing roots and audit metadata
+remain, but explicit verified republish/reconciliation is required before GC
+authority is created. Duplicate legacy backend/key/version aliases block the
+migration rather than being silently deduplicated.
+
+The same offline migration backfills one independent retention edge for every
+pre-v13 Artifact-backed Harness event before installing root-generation
+triggers. It never fabricates a GC head for quarantined legacy storage;
+authenticated reconciliation activates the head with all shared-event roots
+already visible.
+
+Large Harness payload spooling has no unrooted metadata-to-event window. The
+metadata transaction attaches a logical-append-bound pending root stamped to
+the authenticated Runner Claim expiry. Event insertion adds its indefinite
+per-event root before the transient root may be released. An exact replay under
+a successor Claim can append an immutable renewal root bound to that Claim's
+ID, generation, fence, and database expiry, cancelling candidate/fenced GC
+without weakening the security-admin-only boundary after physical deletion.
+Runner event-root mutations also require the event's exact non-NULL Operation
+to match the authenticated Claim. If a distributed finalizer releases the
+event root first, immutable event/edge existence still authorizes idempotent
+pending and renewal cleanup; the race cannot strand a transient root.
+
+Backfilled pre-v13 events can have a NULL Operation. Their canonical
+`hspayload:` roots use the typed product-lifecycle store with an exact
+non-superuser security-admin login. PostgreSQL verifies the complete
+tenant/Project/event/Artifact edge identity and active actor, then records the
+edge release plus an immutable actor/request audit receipt. The same boundary
+performs the only supported one-way release of active legacy `artifact_refs`.
+Exact receipt replay survives actor disablement; changed identity conflicts,
+already-released refs without lifecycle evidence fail closed, and no
+security-admin, runner, or GC credential receives direct receipt-table DML.
+
+Physical delete defaults to a 30-second repository-level timeout and explicit
+bounded concurrency. From `physical_deleting` onward reads report
+`artifact_bytes_deleted`; audit metadata remains immutable. A security-admin
+source replay puts and verifies the same digest first, records immutable proof,
+then advances storage/root generations to restore reads and attachment.
+Replay and legacy reconciliation verify the exact security-admin ACL manifest
+on the same database session as the mutation; extra direct/PUBLIC grants, TEMP,
+role membership, ownership, or replaced trusted helpers fail closed.
+Lifecycle release uses that same checked-out-session proof and repeats the
+exact LOGIN/membership check inside PostgreSQL, excluding superuser and
+`SET ROLE` callers.
+
+Monitor delete duration/outcome, checksum failures, candidate/fence backlog,
+staging age, and multipart abort failures.
+
+## Self-hosted registrar storage
+
+`little-compute-blob-registrar` supports
+`LITTLE_COMPUTE_BLOB_REGISTRAR_STORAGE_BACKEND=filesystem|s3`. Filesystem uses
+`..._FILESYSTEM_ROOT`. S3 requires bucket, prefix, and region settings, uses
+standard AWS credential discovery, optionally accepts a compatible endpoint,
+and runs active conditional-publication qualification before listening. The
+process verifies that its database login inherits exactly the Blob registrar
+role—and no extra role—and proves the complete v13 storage capability surface
+before opening storage. Its database statement/lock-wait timeout defaults to
+30 seconds and is bounded from 100 ms through 60 seconds. The production service does not
+expose the legacy or undurable compatibility paths.
+
+Give the registrar and GC separate S3 workload identities scoped to one exact
+bucket prefix. The registrar needs constrained list/version/multipart-list,
+get/get-version, put, exact delete/delete-version, and multipart-abort actions.
+GC needs the same constrained list/read actions plus exact delete/version-delete
+and multipart abort, but should not receive general put authority: provision the
+namespace marker before GC starts. Deny non-TLS transport and all bucket-policy,
+ACL, replication, and unrelated-prefix access. Capability probes validate S3
+semantics, not IAM least privilege; use separate workload identity or SDK
+credential sources and rotate them independently.
+
+## Self-hosted Artifact GC
+
+Run `little-compute-artifact-gc` with a login that inherits exactly
+`little_compute_gc`. The process proves that role before it opens a filesystem
+or S3 namespace. A security administrator must issue its tenant-scoped,
+generation-fenced, expiring GC worker claim; configure it with
+`LITTLE_COMPUTE_ARTIFACT_GC_WORKER_CLAIM_ID`,
+`LITTLE_COMPUTE_ARTIFACT_GC_CLAIM_GENERATION`,
+`LITTLE_COMPUTE_ARTIFACT_GC_CLAIM_FENCE_DIGEST` and
+`LITTLE_COMPUTE_ARTIFACT_GC_WORKER_BEARER` (the raw bearer), and set the
+maximum batch with `LITTLE_COMPUTE_ARTIFACT_GC_MAXIMUM_BATCH_SIZE`.
+GC likewise proves the v13 capability surface before storage I/O and applies a
+bounded database statement/lock-wait timeout (30 seconds by default).
+
+The same worker runs normal mark/fence/version-exact deletion, registration
+orphan reconciliation, and bounded crash-left staging cleanup without
+overlapping cycles. Configure the database,
+tenant, trust domain, and `..._STORAGE_BACKEND=filesystem|s3`; then provide a
+pre-provisioned filesystem root or the S3 region, bucket, and prefix. All age,
+grace, interval, concurrency, timeout, and retry controls are bounded. Set
+`..._STAGING_MINIMUM_AGE_MS`, `..._STAGING_MAXIMUM_ENTRIES`, and
+`..._STAGING_CLEANUP_TIMEOUT_MS`, `..._STAGING_CLEANUP_SAFETY_MARGIN_MS`, and
+`..._STAGING_CLEANUP_CONCURRENCY` for the janitor; the batch cannot exceed the
+worker claim's sealed maximum. The bounded cleanup deadline aborts a hung
+backend, joins its real I/O, and fail-stops before any overlapping destructive
+pass; it never extends database-time or worker-claim authority. A stale
+or uncertain database safe-time cut fail-stops the cycle, and SIGINT/SIGTERM
+aborts storage I/O before closing database and S3 resources.
+
+### Qualify the managed appliance
+
+Use the installed physical campaign to exercise the shipped generation owner
+against the target rootless Podman service:
+
+```bash
+little-compute-artifact-gc-physical-campaign \
+  --connection little-compute-m0 \
+  --image 'registry.example/little-compute@sha256:…' \
+  --postgres-image 'docker.io/library/postgres@sha256:…'
+```
+
+The command never pulls and requires digest-pinned images already present on
+the host. Its canonical receipt covers distinct worker/issuer kernel identities,
+generation-private credentials, overlap and retirement, global
+issuer-before-worker drain, persistent-storage fsync/replay, backup retention,
+restart, secure erasure, fail-closed drift, exact cleanup, and the PostgreSQL
+advisory writer lease. This is deliberately local, non-promoting evidence.
+Signed release-image provenance and production generation LOGIN/revocation
+evidence remain independent release gates.
+
+The filesystem backend is a single-host local-profile surface. Its janitor does
+not yet persist a directory cursor, so one GC process must own each root and
+simultaneous partial files must remain below the configured staging batch.
+Drain writers for an operator cleanup pass if that cap is exceeded. Use S3's
+durable fair cursor path for sustained high concurrency or multi-host storage.

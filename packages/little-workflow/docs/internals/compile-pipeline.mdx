@@ -9,10 +9,8 @@ Compilation is the process that turns a `WorkflowDefinition` into a hashed, immu
 
 ```ts
 // Dev-facing entry point (unchanged):
-const result = await runWorkflow({
+const result = await runWorkflow(myWorkflow, input, {
   world,
-  workflows: myWorkflow,    // single workflow → planner harness session runs compile
-  input,
   tools,
 });
 ```
@@ -36,7 +34,7 @@ This milestone introduces a second identity hash alongside `WorkflowVersion`:
 
 | Hash | Computed when | Covers |
 |---|---|---|
-| `WorkflowDefinitionHash` | `createLittleWorkflow()` (authoring time) | id, schemas, planner config, models, tools, memory config |
+| `WorkflowDefinitionHash` | `defineWorkflow()` (authoring time) | id, schemas, planner config, models, tools, memory config |
 | `WorkflowVersion` (= LWIR hash) | Planner emits LWIR (per run) | The complete LWIR graph |
 
 `WorkflowDefinitionHash` is stable across runs as long as the definition doesn't change. It is used in the `PlannerManifest`, `OrchestratorManifest` (which references each available workflow's hash), and drift detection (see [Identity + Manifests](/docs/v0.1.0-alpha/internals/identity-manifests)).
@@ -52,7 +50,7 @@ This milestone introduces a second identity hash alongside `WorkflowVersion`:
   classDef output fill:#dcfce7,stroke:#16a34a,color:#0f172a;
 
   Def["WorkflowDefinition + input"]:::stage
-  DefHash["WorkflowDefinitionHash<br/>computed once at createLittleWorkflow()"]:::stage
+  DefHash["WorkflowDefinitionHash<br/>computed once at defineWorkflow()"]:::stage
   Normalize["1. Normalize schemas<br/>schema.ts: normalizeSchema, normalizeOutputMode"]:::stage
   Validate1["2. Validate input vs schema<br/>Ajv (strict: false)"]:::gate
   Snapshot["3. Snapshot capabilities<br/>WorkflowDefinitionSnapshot"]:::stage
@@ -156,7 +154,7 @@ The session has access to:
 - **bash** — cwd-scoped to `/mnt/scratch/own/`. The planner can write draft LWIR to scratch, run `node` to test code bodies, and iterate.
 - **Memory** — `/mnt/memory/workflow/` (rw by default), `/mnt/memory/org/` (ro by default). Planner reads prior lessons when designing.
 - **Skills** — skill frontmatter injected into the system prompt; bodies readable via `cat .agents/skills/<name>/SKILL.md`.
-- **Tool descriptors** (read-only for planning) — planner sees tool descriptions + schemas to write valid LWIR step `with.tools` allowlists but does not execute tools.
+- **Tool descriptors** (read-only for planning) — planner sees tool descriptions + schemas to write valid `tool.call` steps but does not execute tools.
 
 The planner iterates within its own agent loop until it produces a valid LWIR. Validation happens inside the harness session (the model uses bash to test code bodies, introspects schemas, repairs its own output). The outer compile pipeline sees one final LWIR per planner session.
 
@@ -271,7 +269,7 @@ A concrete trace of one workflow through the compile pipeline. Every JSON snippe
   participant Validator as validateLwir + binding
   participant Lock as WorkflowVersion lock
 
-  Dev->>Compiler: createLittleWorkflow + input
+  Dev->>Compiler: defineWorkflow + input
   Compiler->>Compiler: normalize schemas, snapshot capabilities
   Compiler->>Compiler: compute WorkflowDefinitionHash + PlannerManifest
   Compiler->>Harness: HarnessTask{kind:"plan", workflowSnapshot, input}
@@ -290,20 +288,20 @@ A concrete trace of one workflow through the compile pipeline. Every JSON snippe
 
 
 ```ts
-import { createLittleWorkflow, model } from "little-workflow";
+import { defineWorkflow, model } from "@little-stack/workflow";
 import { openai } from "@ai-sdk/openai";
 import { z } from "zod";
 
-const summarizeTicket = createLittleWorkflow({
+const summarizeTicket = defineWorkflow({
   id: "support.summarize-ticket",
   description: "Summarize a support ticket and classify its severity.",
 
-  inputSchema: z.object({
+  input: z.object({
     ticketId: z.string(),
     transcript: z.string(),
   }),
 
-  outputSchema: z.object({
+  output: z.object({
     summary: z.string(),
     severity: z.enum(["low", "medium", "high"]),
   }),
@@ -404,7 +402,14 @@ Notes about the LWIR shape:
   "id": "compute-score",
   "uses": "code.run",
   "with": {
-    "source": "async ({ input, tools }) => { /* ... */ }"
+    "entrypoint": "score.ts",
+    "files": {
+      "score.ts": {
+        "content": "export async function run({ input }) {\n  return { score: input.signals.length / 10 };\n}",
+        "sha256": "sha256:1ed396c7cbeba5c323250026707a76c1e1ad3f62572334094e5167c357c6de7c"
+      }
+    },
+    "sandbox": { "network": "deny", "env": "deny", "fs": "deny" }
   },
   "output": {
     "mode": "object",

@@ -27,7 +27,18 @@ import {
   registerStoredEvalSet,
   registerStoredEvalSetWithLineageCheck,
 } from "./eval-set-store.js";
-import { localWorld, registerWorkflowVersion, WorldPathError, type LwirWorkflow } from "./index.js";
+import {
+  localWorld,
+} from "./index.js";
+import {
+  registerWorkflowVersion,
+} from "./entries/lwir.js";
+import type {
+  LwirWorkflow,
+} from "./entries/lwir.js";
+import {
+  WorldPathError,
+} from "./entries/internals.js";
 import { LWIR_INPUT_CONE_ALGORITHM } from "./lwir-input-cone.js";
 import { registerStoredWorkflowVersion } from "./workflow-version-store.js";
 

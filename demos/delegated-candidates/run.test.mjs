@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { localWorld } from "little-workflow";
+import { localWorld } from "@little-stack/workflow";
 import { runDelegatedCandidates } from "./run.mjs";
 import { LOCATIONS, EDUCATION, SOURCES, SENIORITY, STATUSES } from "./candidate-schema.mjs";
 

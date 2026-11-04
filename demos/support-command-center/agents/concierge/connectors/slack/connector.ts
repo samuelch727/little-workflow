@@ -1,6 +1,6 @@
 import { createSlackAdapter } from "@chat-adapter/slack";
 import { createMemoryState } from "@chat-adapter/state-memory";
-import { chatSdkConnector } from "little-harness/connectors/runtime";
+import { chatSdkConnector } from "@little-stack/harness/connectors/runtime";
 import { conciergeSessionIdFromRecord } from "../shared/session-id";
 
 export type ConciergeSlackExtraBody = {

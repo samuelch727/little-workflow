@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { localWorld } from "little-workflow";
+import { localWorld } from "@little-stack/workflow";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const childScript = join(here, "child.mjs");

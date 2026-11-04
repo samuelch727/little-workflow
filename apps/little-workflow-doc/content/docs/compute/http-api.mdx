@@ -1,0 +1,345 @@
+---
+title: HTTP API
+description: The bounded, versioned control-plane transport and its safety contract.
+---
+
+Little Compute’s HTTP service is loopback-first. The default listener is
+`127.0.0.1:7777`; production self-hosters expose it through trusted TLS ingress
+or a service mesh. It does not use cookie authentication or enable CORS.
+
+Versioned calls include `X-Little-Compute-Protocol-Version: v1alpha1` and, for
+protected routes, one Bearer token. `GET /healthz`, `GET /readyz`,
+`GET /readyz/destructive`, and `GET /v1alpha/version` are the only
+handshake-free routes; operator-added routes require the header too. JSON mutations use
+`Content-Type: application/json`. Health, readiness, and the version handshake
+are public but reveal no dependency names or secret details.
+
+The server bounds headers, paths, JSON bodies, concurrent requests, handler
+time, and shutdown drain. It accepts only origin-form targets, rejects path
+normalization aliases, gives literal routes deterministic precedence, and rejects
+duplicate credentials or duplicate decoded JSON object keys. Responses carry a server-generated request ID,
+`Cache-Control: no-store`, and only registry-owned safe errors. Internal error
+hooks receive allowlisted correlation metadata rather than exception messages.
+Credential and cookie headers are not exposed to route handlers.
+
+An HTTP timeout is not a rollback receipt. A mutation can commit after the
+connection closes, so clients retry the same idempotency key and request digest
+to recover the original result. Canonical PostgreSQL transactions and fences,
+not socket lifetime, decide success.
+
+The `@little-stack/compute/client` package entry point applies the same limits on the
+caller side. It allows plaintext only on loopback, refuses endpoint credentials
+and redirects, sends canonical JSON, bounds streamed responses, distinguishes
+registry API errors from transport failures, and verifies the protocol header
+and version handshake. It independently caps error bodies at 64 KiB and
+validates JSON MIME, registry HTTP status, bodyless responses, and request-path
+normalization before accepting a result.
+
+`@little-stack/compute/client` is the intended client entry point of the source
+package. It is not available through npm, because `@little-stack/compute` is not
+published.
+
+> **UNRELEASED: an explicit package root and typed client errors.** The package
+> root, `@little-stack/compute`, now exports about thirty names instead of the
+> whole source tree: `LittleComputeClient`, the error classes,
+> `isLittleComputeError`, `COMPUTE_ERROR_REGISTRY`, `protocolVersion`
+> (`"v1alpha1"`), and unversioned types such as `Operation`,
+> `CreateOperationBody`, `HealthStatus`, and `ReadinessStatus`. The rest of the
+> client vocabulary is in `@little-stack/compute/client`; versioned wire names
+> and zod schemas stay in `@little-stack/compute/protocol`. Server, database,
+> provider, CLI, and qualification code is no longer reachable from the root.
+>
+> Every client failure is a `LittleComputeError` with a closed `code` union and
+> a `retryable` flag. `LittleComputeApiError` adds the registry wire error and
+> HTTP `status`, and takes `retryable` from `COMPUTE_ERROR_REGISTRY`.
+> `LittleComputeTransportError` covers refused inputs, transport failures, and
+> responses that break the protocol. `isLittleComputeError` also recognizes an
+> error thrown by another copy of the package.
+>
+> `health()` returns a typed `HealthStatus`. `readiness()` and
+> `destructiveReadiness()` return a typed `ReadinessStatus` and report a 503
+> not-ready answer as `status: "not_ready"` or `"paused_safe_time_uncertain"`
+> instead of throwing. Request bodies are typed from the schemas' input form.
+> `createOperation({ tenantId, projectId, request })` takes the scope once: it
+> fills `tenantId`, `projectId`, and `schemaVersion`, computes `requestDigest`
+> when you leave it out, and still refuses a request that names a different
+> scope with `operation_scope_mismatch`.
+
+> **UNRELEASED: lighter client imports.** In the current source checkout,
+> importing `@little-stack/compute/client` no longer loads the HTTP server routes,
+> PostgreSQL, or qualification code when the module loads. The config and
+> Operation request schemas, digests and helpers moved to neutral protocol
+> modules. The two thousands-environment completion methods left the client;
+> they are qualification tooling, not application API. The refactor adds no
+> new public entry points. It retains the client's
+> existing external-IO authority-guard integration. A check of the built client
+> found no PostgreSQL, server, qualification or `node:sqlite` modules among the
+> 117 modules it loads. That check covers import time only. It does not verify
+> the guard's source bytes, and it does not cover request handling, database
+> access, qualification runs, performance or security. The PostgreSQL
+> session log's factory stays synchronous; it now loads its appliance-admission
+> module on the first append, and that append path has no dedicated runtime
+> test yet.
+
+## Project APIs
+
+The canonical public routes live under
+`/v1alpha/tenants/{tenantId}/projects/{projectId}`:
+
+| Method | Suffix | Purpose |
+| --- | --- | --- |
+| `POST` | `/config/plan` | Resolve and validate an exact v2 desired configuration. |
+| `POST` | `/config/apply` | Persist the exact planned record, or return its replay. |
+| `GET` | `/config/versions/{projectConfigVersionId}` | Inspect one immutable version. |
+| `POST` | `/config/diff` | Compare stored or desired versions without exposing values. |
+| `POST` | `/operations` | Create the Operation and atomic root graph. |
+| `GET` | `/operations/{operationId}` | Inspect an Operation. |
+| `GET` | `/operations/{operationId}/result` | Read the result view: `pending` until the Operation is terminal, then its outcome (`operation.inspect`). |
+| `GET` | `/operations` | List a bounded newest-first, stable-status-filtered page. |
+| `POST` | `/operations/{operationId}/cancel` | Submit an idempotent, path-bound cancellation. |
+| `GET` | `/operations/{operationId}/events` | Follow durable Operation events. |
+| `POST` | `/milestones` | Annotate an existing milestone; create or replay. |
+| `GET` | `/milestones` | List by optional `kind`, `after`, and `limit`. |
+| `GET` | `/milestones/{milestoneId}` | Inspect content and effective retention. |
+| `POST` | `/milestones/{milestoneId}/pin` | Pin with an expected retention version. |
+| `POST` | `/milestones/{milestoneId}/unpin` | Set finite retention with an expected version. |
+| `POST` | `/milestones/{milestoneId}/restore` | Queue fork/rollback intent (`202`) or replay admission (`200`). |
+| `GET` | `/milestone-restores/{restoreId}` | Read current restore status. |
+| `GET` | `/milestone-storage-policy` | Inspect the persisted finite Project milestone-storage policy. |
+| `PUT` | `/milestone-storage-policy` | Compare-and-swap the Project milestone-storage policy; returns `201` or replay `200`. |
+
+### Agent Groups
+
+A parent Task starts, observes, joins and cancels its Agent Group under
+`/operations/{operationId}/agent-groups`:
+
+| Method | Suffix | Purpose |
+| --- | --- | --- |
+| `POST` | `/agent-groups/start` | Start the group atomically; `201`, or `200` with the replayed receipt. |
+| `POST` | `/agent-groups/page` | Read one page of member changes behind an authenticated cursor. |
+| `POST` | `/agent-groups/join` | Wait for the join policy; returns the operation result, or a durable pending operation to continue. |
+| `POST` | `/agent-groups/cancel` | Cancel the group idempotently. |
+
+A start request may carry a `workspace`: where the children start and how
+their work merges back. Its digest is part of the request digest, so a replay
+with a different workspace is a conflict, not a replay.
+
+```json
+"workspace": {
+  "schemaVersion": "little.compute.agent-group-workspace-policy.v1",
+  "forkBase": { "kind": "parent_fork", "baseRevision": "…", "forkRevision": "…", "forkRecordDigest": "sha256:…" },
+  "mergePolicies": [
+    { "glob": "src/nav/**", "policy": "owner", "owner": "member_1" },
+    { "glob": "reports/**", "policy": "collect" }
+  ]
+}
+```
+
+`forkBase` is either `parent_fork` with the fork's revisions and record
+digest, or `project_head` with a `reason` (`configured`,
+`parent_files_unchanged`, `parent_sandbox_unknown`,
+`parent_not_on_project_head`, `fork_unavailable`). An `owner` policy must name
+one of the group's members. The group's completion receipt records the fork
+base, the policies and one outcome per member (`merged`, `branch` with its
+conflicting paths, or `resolved`); see [Fork and merge](/docs/compute/fork-and-merge).
+
+The server also has one reserved local-recovery route,
+`POST /operations/{operationId}/recover-prepared-overlay`. It is not part of the
+public API or the OpenAPI document: it answers `not_found` to every caller except
+the reserved local admin service on the reserved local tenant and Project.
+
+Unknown fields and duplicate queries are rejected. Results are checked against
+the exact request and URL scope before they cross the public boundary. Pending
+configuration references use the explicit `reject` or `persist_inert` policy;
+there is no caller-provided “authorized” switch. Cancellation digests include
+the tenant, Project, Operation, idempotency key, fixed reason, and expected
+version.
+
+The route factories take storage/service adapters rather than owning database
+transactions. Adapters return strict schemas and typed expected errors;
+malformed or cross-scope output becomes a redacted internal error. A production
+authentication adapter resolves canonical role and membership state—token
+grants limit capabilities but do not create roles.
+
+Milestone storage policy is a separate Project-scoped authority. `GET
+/milestone-storage-policy` requires `project:read` and returns only a persisted
+policy; before the first milestone admission it returns `not_found` rather than
+inventing an unlimited default. `PUT /milestone-storage-policy` requires
+`project:configure`, an idempotency key, and the exact expected policy version.
+The finite bootstrap policy is persisted by the first admitted milestone, while
+a caller may explicitly bootstrap-and-update from `expectedVersion: 1` before
+that first milestone. The SQL owner returns `applied` (`201`) or an
+actor-bound `replayed` result (`200`); a version, idempotency, or retention
+budget conflict is exposed as `conflict`. A timed-out PUT must be retried with
+the same request and key, never treated as proof of rollback.
+
+For local bearer tokens, `PostgresBearerPrincipalResolver` performs that
+resolution in one read-only, repeatable-read transaction at one PostgreSQL
+database-time cut. It matches the exact token hash, scope digest, issue time,
+expiry, tenant, and token ID; requires an active installation and tenant plus an
+enabled canonical identity; and loads only current Role bindings for the exact
+matched route scope. Revoked or expired tokens, suspended/deleted tenants,
+suspended installations, disabled identities, missing Projects, and ambiguous
+Project Roles fail closed. Legacy membership rows and Role-like request fields
+are not authority sources.
+
+Production servers use `createPostgresBearerAuthenticator`; the server checks
+that production auth came from this canonical composition. The separately
+named `unsafeTestAuthenticateBearer` option exists only for bounded transport
+tests and is rejected when `NODE_ENV=production`. The resolver bounds both
+pool acquisition (`acquisitionTimeoutMs`, five seconds by default) and SQL
+execution (`statementTimeoutMs`), and releases a client that arrives after a
+timeout or request cancellation. Operators should still configure finite pool
+socket/connection timeouts so the underlying attempt is reclaimed promptly. Concurrent
+revocation or regrant is seen as a coherent
+pre-commit or post-commit cut, never partly applied authority.
+
+`PostgresProjectConfigApiService` is the production configuration-route
+composition. A plan uses one repeatable-read catalog/database-time cut; apply
+locks and re-resolves all seven exact references and preserves the submitted
+receipt exactly, including under concurrent create/replay races. Pending
+references require explicit `persist_inert`. Configuration diff returns sorted
+JSON-pointer paths and domain-separated before/after digests only, not values.
+
+`PostgresOperationApiService` is the production Operation-route composition. It
+uses `PostgresOperationStore`, `PostgresFactCutBarrierStore`, and an
+operator-provided content-addressed resolver for the shared and root-Task
+execution-context documents. The service verifies those documents against the
+request digests before admission. Persisted replays are checked first, so a
+caller can recover a lost create response without reloading the original
+context source. New creates atomically persist the Operation, root Scope, root
+Task, any exact Managed Agent execution pin, grants, event, outbox record, and
+idempotency result. A managed root request must include the exact Bundle granted
+by its frozen default Agent profile; attached-coordinator roots must omit it.
+Active-but-ungranted, model-incompatible, verification-incompatible, and
+trusted-extension Bundles fail closed. Responses are rebuilt
+from committed rows, the exact configuration document, and creation authority
+rather than mutable catalog state.
+
+Get and list reads verify current authority and exact configuration pins. List
+pages contain at most 1,000 Operations and use signed, tenant-, Project-, and
+filter-bound keyset cursors. The cursor preserves PostgreSQL microseconds in the
+strict `(created_at, operation_id)` newest-first key, avoiding the gaps that a
+millisecond projection can introduce. Stable-status partial indexes serve open
+and terminal pages directly, and there is no `OFFSET` scan.
+
+Cancellation binds the tenant, Project, Operation, reason, idempotency key, and
+optional expected version into its request digest. It locks every Operation
+authority stripe and atomically advances cancellation authority, freezes the
+fact cut, and writes one immutable barrier receipt, event, and outbox record.
+Concurrent duplicates replay that receipt; a different request under the same
+key conflicts. Already-terminal Operations return idempotently. A terminal
+retention anchor is created only from a database-owned certain safe-time cut;
+uncertainty or observation lag produces no false evidence, and an already
+committed anchor remains replayable.
+
+Only exact expected persistence outcomes become public registry errors. Safe
+time or closed admission is retryable, idempotency and serialization races
+conflict, stale authority returns `stale_fence`, missing canonical pins return
+`project_not_ready`, and structural overrun returns
+`operation_envelope_exceeded`. Unknown failures remain redacted.
+
+## Milestones
+
+These routes are available in the Direction-v2 local/self-host runtime
+(`direction-v2-v137`). Look for `milestone-annotations-retention` in the version
+handshake. The advanced profile does not expose this extension.
+
+Milestone bodies use `schemaVersion: "v1alpha1"`. Reads require `project:read`
+and a canonical Role authorized to inspect that Project. User annotations,
+pin, and unpin require `project:configure` and the existing admin Role gate for
+configuration mutation. Both checks apply; token scopes never create Roles,
+and human/service identity kinds never bypass either check. Agent checkpoints
+remain on the separate trusted harness surface.
+
+Create a user annotation with `baseMilestoneId`, an idempotency key, `label`,
+and `kind`: `human_pinned`, `goal_reached`, or `pre_risky_op`. You may add a
+`rationale` and up to 64 unique `evidenceArtifactIds`. The server binds the
+authenticated principal as author, derives the workspace and parent from the
+base milestone, and chooses the tier. You cannot submit author, workspace,
+environment, verdict, grader, cost, or externality fields. Evidence references
+do not grant verification authority; only trusted system producers can create
+verified-green nodes.
+
+Responses separate immutable `milestone` plus `contentDigest` from effective
+`retention`. The milestone's own retention field is its initial policy and
+remains digest-bound. Pin/unpin change only the effective projection, using
+`expectedVersion` and an idempotency key. Unpin defaults to seven days; the
+maximum TTL is 365 days. A replay returns the original receipt even after a
+later mutation, so use GET to read current retention. Socket cancellation is
+not evidence of rollback; recover an uncertain mutation with its exact key
+and body.
+
+Legacy TTLs beyond the public timestamp range keep their exact `ttlSeconds`
+and `lastUsedAt`, with `expiryBeyondRange: true` and no invented
+`retentionUntil`. They retain conservative protection until a representable
+retention policy is selected.
+
+Lists default to 50 entries, with a maximum of 1,000, in strictly newest-first
+creation-time/ID order. Pass `nextCursor` as `after` on the next request with
+the same scope, kind filter, and requested limit. Pages may be shorter to fit
+the transport's byte/node bounds. There is no `tree=true` or offset query;
+derive the DAG from parent IDs, remembering that a filtered page may omit
+ancestors. The client provides `createMilestone`, `getMilestone`,
+`listMilestones`, `pinMilestone`, and `unpinMilestone`, and validates digests,
+scope, ordering, and mutation response bindings.
+
+### Restore and fork
+
+The `milestone-restores` feature exposes client methods `restoreMilestone` and
+`getMilestoneRestore`. Restore takes an idempotency key, `mode` (`fork` by
+default), `environment` (default `true`), and `session` (default `false`). Fork
+requires `operation:create` and canonical creation authority. Rollback requires
+`project:configure`, canonical admin authority, `environment: true`, and the
+full current `expectedProjectConfigVersionRef`.
+
+`202` means durably queued; follow `Location` to read status. The retained host
+worker owns effects, freezes its server-derived request, and reconciles exact
+receipts on restart. An ambiguous result stays `recovery_required`. An exact
+POST replay returns the original queued admission, not the current status, and
+does not repeat effects. Restore never starts an agent: all views explicitly
+say `running: false`. Polling, admission, replay, and neither-state inspection
+do not reset TTL; successful filesystem restore does.
+
+A prepared fork has a one-hour `restoredEnvironmentId`. Supply it on an ordinary
+canonical v2 `createOperation` with a managed-agent root, using the same
+authenticated principal. Consumption and root creation are atomic and the
+handle is single-Operation. Current Project configuration and policy remain in
+force; only the root snapshot changes, and repository identity/configuration
+must still match. Fresh use after expiry fails; exact replay of an already
+created Operation remains valid.
+
+Portable-fork staging is removed after consumption or expiry, while durable
+receipts and bindings remain replayable. Roots materialize their retained
+snapshot independently. Its Operation reference is released only after
+canonical terminal/resource cleanup under the frozen retention policy;
+unknown policies and unresolved effects retain it.
+
+Rollback creates a revert Change Set and a new base generation; it preserves
+history and returns the actual successor configuration and snapshot. Snapshot
+states are never merged. Environment restore is separate from Harness context:
+session restore needs a configured trusted source, returns a separate log
+prefix, and never silently replaces a running session. Without that source,
+session restore reports `unsupported_restore`.
+
+## Reconnectable events
+
+Subscribe with either `cursor` or `Last-Event-ID`. The signed cursor is bound to
+its tenant and partition. Polling provides correctness; notifier waits are only
+latency hints. Event pages must be bounded, contiguous, and scope-exact, and the
+server releases source resources when a client disconnects even if a read is
+blocked. The PostgreSQL source applies both a row ceiling and a worst-case
+decoded-byte budget. When the byte budget ends a page before its captured fact
+cut, the internal `hasMoreAtCut` marker makes the SSE route continue
+immediately rather than waiting for the next poll interval.
+
+Compacted history is never skipped. A source can provide an immutable snapshot
+Artifact through exactly the sequence before its retained tail; the server then
+emits `snapshot_plus_tail` before later events. Without an exact snapshot it
+returns `cursor_expired` and requires an explicit state resync. Time-expired
+cursors whose sequence remains available can receive a signed replacement.
+
+The typed client exposes config and Operation methods plus an async `events`
+iterator. It reconnects from the last validated ID with capped exponential
+jitter, handles snapshot baselines explicitly, and rejects duplicate, gapped,
+regressed, cross-scope, oversized, or malformed records.

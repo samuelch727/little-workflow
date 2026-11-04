@@ -14,6 +14,6 @@
   "dependencies": {
     "@ai-sdk/deepseek": "^3.0.58",
     "ai": "^7.0.126",
-    "little-workflow": "workspace:*"
+    "@little-stack/workflow": "workspace:*"
   }
 }

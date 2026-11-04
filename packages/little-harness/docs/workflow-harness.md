@@ -1,6 +1,6 @@
 # Workflow Harness Adapter
 
-`little-harness/workflow-harness` exposes the adapter contract used by `little-workflow`. Most Little Workflow apps should import from `little-workflow`; use this entry point when customizing the workflow harness itself.
+`@little-stack/harness/workflow-harness` exposes the adapter contract used by `@little-stack/workflow`. Most Little Workflow apps should import from `@little-stack/workflow`; use this entry point when customizing the workflow harness itself.
 
 ```ts
 import {
@@ -8,7 +8,7 @@ import {
   runWorkflowHarnessWithSession,
   workflowHarness,
   WORKFLOW_HARNESS_ID,
-} from "little-harness/workflow-harness";
+} from "@little-stack/harness/workflow-harness";
 ```
 
 ## Default Harness
@@ -27,7 +27,7 @@ It delegates unsupported workflow step kinds, such as runtime-owned `decision` o
 ## Custom Harness
 
 ```ts
-import { createWorkflowHarness } from "little-harness/workflow-harness";
+import { createWorkflowHarness } from "@little-stack/harness/workflow-harness";
 
 export const cloudHarness = createWorkflowHarness({
   aiLoop: {
@@ -46,7 +46,7 @@ Return `{ kind: "delegate_to_default" }` from your custom handling when a task s
 ## Step Behavior
 
 - `tool.call` executes one named tool and emits session, execute-step, and tool-call events.
-- `ai.generate` calls the configured AI loop with model, system, messages, tools, step, input, and abort signal.
+- `ai.generate` calls the configured AI loop once with model, system, messages, tools, step, input, and abort signal. `system` is the context's system prompt and skill list followed by the step's `with.system`; `messages` is the step input as one user message, which the default AI SDK loop prefixes with `with.prompt` and `Input:` when the step has a prompt. `tools` is empty: an `ai.generate` step is offered no workflow tools and no bash, so tool use is a `tool.call` step. Little Workflow resolves `{{ ... }}` expressions in `with.prompt` and `with.system` before the step reaches the harness.
 - `code.run` **is not executed.** `executeCodeRunStep` validates the step's sandbox declaration and then throws: `"Workflow code.run step '<id>' cannot safely execute code.run in the default workflow harness. The declared sandbox.env/fs/network deny policy requires an isolated runtime."` There is no built-in code executor; the default harness fails closed rather than running the step body in-process.
 
 `code.run` requires a restrictive sandbox declaration — network, env, and filesystem must all be `deny`, and any other sandbox key is rejected. That declaration is **validated, not enforced**: because nothing executes, there is nothing to confine.

@@ -1,5 +1,5 @@
-import { createHarness, localHost } from "little-harness";
-import { dynamicWorkflows } from "little-workflow";
+import { createHarness, localHost } from "@little-stack/harness";
+import { dynamicWorkflows } from "@little-stack/workflow";
 import { dataDir, dreamerModel } from "./env";
 
 /**

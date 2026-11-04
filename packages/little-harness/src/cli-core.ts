@@ -9,6 +9,7 @@ import {
   readLocalTrace,
 } from "./trace/inspect.js";
 import { connectorsCommand, initCommand, newCommand, testCommand } from "./cli/agent-commands.js";
+import { devCommand, schedulesCommand, startCommand } from "./cli/serve-commands.js";
 
 export type CliIo = {
   stdout?: (text: string) => void | Promise<void>;
@@ -54,6 +55,12 @@ export async function runCli(
         return testCommand(args, parsed.dataDir, io);
       case "connectors":
         return connectorsCommand(args, parsed.dataDir, io);
+      case "start":
+        return await startCommand(args, parsed.dataDir, io);
+      case "dev":
+        return await devCommand(args, parsed.dataDir, io);
+      case "schedules":
+        return await schedulesCommand(args, parsed.dataDir, io);
       default:
         throw new CliUsageError(`Unknown command: ${command}`);
     }
@@ -353,6 +360,14 @@ function usage(): string {
     "  test <name>              Interactively chat with an agent (REPL)",
     "                           Flags: --connector <id> (exercise a connector's toolset)",
     "  connectors <name>        List an agent's discovered connectors and skipped candidates",
+    "  start <name>             Serve an agent: its connectors at /connectors/<id>, an HTTP API,",
+    "                           its schedules, and turns that continue after a wait",
+    "                           Flags: --port (3000), --host (127.0.0.1), --token (or LITTLE_HARNESS_TOKEN)",
+    "  dev <name>               start, restarted when the agent folder changes, with a terminal chat",
+    "                           Flags: --port (3000)",
+    "  schedules <name>         List an agent's schedules with their next run",
+    "  schedules run <name> <id>",
+    "                           Run one schedule now",
     "",
   ].join("\n");
 }

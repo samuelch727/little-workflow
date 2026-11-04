@@ -18,7 +18,7 @@ to build, iterate, and test. (You can still embed Little Harness in your own app
 You need Node.js 22 or newer. While Little Harness is in alpha, run the CLI from the `alpha` dist-tag:
 
 ```bash
-npx little-harness@alpha init
+npx @little-stack/harness@alpha init
 ```
 
 The guided wizard asks for a project name, lets you search AI SDK language providers and model ids,
@@ -28,7 +28,7 @@ plus a custom OpenAI-compatible API scaffold. It then scaffolds a workspace with
 agent:
 
 After it finishes, `cd` into the generated project folder before running the remaining commands.
-The generated `package.json` pins `little-harness` to the CLI's version, `ai` to `^7.0.0` (AI SDK 7),
+The generated `package.json` pins `@little-stack/harness` to the CLI's version, `ai` to `^7.0.0` (AI SDK 7),
 and the provider package to a compatible range, so a later `latest` release cannot break the project.
 
 <Files>
@@ -53,7 +53,7 @@ Open `agents/support/agent.ts`. It default-exports a plain `createHarness(...)`;
 and model call match the provider and model you selected in the wizard:
 
 ```ts
-import { createHarness, localHost } from "little-harness";
+import { createHarness, localHost } from "@little-stack/harness";
 import { anthropic } from "@ai-sdk/anthropic";
 
 export default createHarness({
@@ -70,6 +70,10 @@ set the selected provider's required environment variables — for the default:
 ```bash
 export ANTHROPIC_API_KEY=sk-ant-...
 ```
+
+> **UNRELEASED:** in the current source, the default provider is `openai` (`gpt-5.2`) for
+> `little-harness init` and `little-harness new`, matching `little setup` and `little init`.
+> No npm version includes this yet.
 
 Provider packages and model ids come from AI SDK providers. For providers such as OpenAI-compatible
 APIs or Open Responses, the generated `agent.ts` also includes the required URL environment variable.
@@ -102,7 +106,7 @@ Anything you drop into the agent's folder is auto-discovered:
 - **Skills** — a folder under `skills/` with a `SKILL.md` (local), or a `skill.ts` that default-exports
   a `skill(...)` (for remote/GitHub skills).
 - **Workflows** — a file in `workflows/` that default-exports a Little Workflow adapted with
-  `asHarnessWorkflow(...)` from `little-workflow`. Each one becomes a tool; see
+  `asHarnessWorkflow(...)` from `@little-stack/workflow`. Each one becomes a tool; see
   [Triggering a workflow from an agent](/docs/v0.1.0-alpha/build-agents/workflows).
 
 <Files>

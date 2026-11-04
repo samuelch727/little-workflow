@@ -12,6 +12,7 @@
     "local-host",
     "cli",
     "events",
+    "alpha-migrations",
     "storage-adapters",
     "using-littledb",
     "glossary"

@@ -1,0 +1,233 @@
+---
+title: LittleDB with Little Workflow
+description: A tracing wrapper around any Workflow World that sends each run to LittleDB as a trace. Private source; not installable.
+---
+
+<Callout title="Private and UNRELEASED" type="warn">
+  `@little-stack/littledb` is private source and is not on npm, and it needs a
+  LittleDB server that is not publicly available. This page describes the client
+  as it exists in the private source, so you can see the API ahead of release.
+  You cannot install it, so use the default
+  [Local World](/docs/workflow/v0.1.0-alpha/running/local-world). See
+  [LittleDB](/docs/littledb) for status and the client.
+</Callout>
+
+`db.tracingWorld(inner, options)` wraps a Little Workflow `World` so each run is
+also sent to LittleDB as a trace. The wrapper is still the inner World: reads,
+artifacts, recovery and replay all go to it, and it stays the source of truth.
+It only watches the events the runtime appends.
+
+## Use
+
+```ts
+// Private, UNRELEASED.
+import { localWorld, runWorkflow } from "@little-stack/workflow";
+import { createLittleDB } from "@little-stack/littledb";
+
+const db = createLittleDB({ url: process.env.LITTLEDB_URL!, apiKey: process.env.LITTLEDB_API_KEY! });
+
+const world = db.tracingWorld(localWorld({ dataDir: ".little-workflow" }), {
+  workflow: "lending.preapproval",
+});
+
+await runWorkflow(preapproval, input, { world });
+await db.shutdown(); // in a script: send what is queued before the process exits
+```
+
+## What a run looks like
+
+Each run is one trace (by default `lw_<runId>`):
+
+- the run is the root span, with the run's input and output;
+- each step attempt is a child span (a retried step is one span per attempt);
+- each model call is an `llm` span under the step that made it, with the step's
+  resolved prompt, the model slot and its token usage, so LittleDB can price it;
+- each tool call is a `tool` span under its step.
+
+A run that fails closes its open spans as failed. Appending an event always
+completes first; the wrapper then observes it, and a problem observing it never
+reaches the run.
+
+## How a run started
+
+`runWorkflow(workflow, input, { trigger })` records how the run started on its
+`RunStarted` event, and the run's trace carries it. A run without one shows as
+started from your code.
+
+```ts
+// Private, UNRELEASED.
+await runWorkflow(preapproval, input, {
+  world,
+  trigger: { kind: "api", source: "POST /loans", from: applicant.email },
+});
+```
+
+A run a harness tool call started needs nothing more: `asHarnessWorkflow`,
+agent-defined workflows and one-shot plans record
+`{ kind: "harness", sessionId, turnId, toolCallId }`. The run's trace then:
+
+- joins the harness session (`sessionId`), unless you set `sessionId` on the
+  tracing World;
+- points at the turn's trace (`parentTraceId`) and at the tool call's span in it
+  (`parentSpanId`), so LittleDB shows the run nested under that tool call.
+
+The turn's trace id comes from the harness tracers made by the same
+`createLittleDB` client, so it is right under `traceIdFor` and `traceId` too;
+without one it is `turnTraceId(sessionId, turnId)`. A sub-run (one with a
+`parentRunId`) points at its parent run's trace instead, with the trigger
+`{ kind: "workflow", runId }`, and joins the parent's session.
+
+## Options
+
+| Option | Meaning |
+| --- | --- |
+| `workflow` | The workflow's slug in LittleDB, the same one you resolve. Required. |
+| `origin` | Who wrote it: `code` (default), `agent` (`define_workflow`) or `planner` (a one-shot plan). |
+| `resolution` | What `db.resolve({ kind: "workflow", ... })` returned: its version id goes on the trace, and trial traffic is marked `trial` (`holdout` for the project holdout). |
+| `versionId` | The version, when you have it without a resolution. |
+| `harness` | The harness the run belongs to, such as the one whose agent defined it. |
+| `sessionId` | The session the run belongs to. A run a harness tool call started joins that session on its own, and a sub-run its parent's; set it only to put the run somewhere else. |
+| `userId`, `environment` | As on a harness trace. `environment` is `production` by default, and `experiment` for a run inside an eval worker run. |
+| `traceId` | A fixed trace id, or a function of the run id. With a fixed id, runs after the first become child spans of the first run's root. |
+| `name`, `tags`, `metadata` | The trace and root span name (default: the workflow slug), and what to add to the trace. |
+| `captureContent` | `false` sends structure and numbers only: no step outputs, run input and output, prompts or tool arguments. |
+| `experimentId`, `datasetItemId` | Set by an [eval worker](/docs/littledb/experiments) run. |
+
+## Let LittleDB improve a workflow
+
+LittleDB's reviewer can improve a code-defined workflow the same way it improves
+a harness, when the workflow's step prompts and model slots come from the
+version's content. Keep them there and build the plan from what `resolve`
+returns:
+
+```ts
+// Private, UNRELEASED.
+const bootstrap = {
+  steps: {
+    classify: { model: "fast", prompt: "Classify this message: {{ input.message }}" },
+    reply: { model: "fast", prompt: "Reply to the customer. Category: {{ steps.classify.output }}" },
+  },
+};
+const resolution = await db.resolve({ kind: "workflow", slug: "support.triage", bootstrap });
+const config = resolution.content as typeof bootstrap;
+
+const triage = defineWorkflow({
+  id: "support.triage",
+  models: [model(haiku, { id: "fast" })],
+  plan: {
+    steps: [
+      { id: "classify", uses: "ai.generate", with: config.steps.classify, output: { mode: "choice", values: ["refund", "other"] } },
+      { id: "reply", uses: "ai.generate", needs: ["classify"], with: config.steps.reply, output: { mode: "text" } },
+    ],
+  },
+  // input, output...
+});
+
+const world = db.tracingWorld(localWorld({ dataDir }), { workflow: "support.triage", resolution });
+const result = await runWorkflow(triage, input, { world });
+db.score({ traceId: runTraceId(result.runId), name: "resolved", value: 1 });
+```
+
+### With a managed workflow
+
+`db.managedWorkflow()` does the resolve and the tracing for you. `prepare` answers
+which version a key runs and wraps your World with the version:
+
+```ts
+// Private, UNRELEASED.
+const triageVersions = db.managedWorkflow({ slug: "support.triage", bootstrap, schema: TriageContent });
+
+const run = await triageVersions.prepare({ stickyKey: ticketId });
+const result = await runWorkflow(buildTriage(run.content), input, { world: run.world(localWorld({ dataDir })) });
+```
+
+`memory: [db.memory.org({ space: "lending-rules" })]` on `managedWorkflow` reads org memory
+for each run, read-only: `run.memory.note()` is the text to give a step, and the run's trace
+records the revisions it read. See [Managed memory](/docs/littledb/memory#workflows).
+
+As with a harness, the bootstrap becomes version 1, a later edit to it becomes a
+"Changed in code" proposal, `schema` keeps candidates to what `buildTriage` can
+run, and inside an [eval worker](/docs/littledb/experiments#workflows) run
+`prepare` answers the run's version and `world` traces into the run's trace.
+
+### A workflow a harness calls
+
+A workflow passed to `createHarness({ workflows })` with `asHarnessWorkflow` is
+built once, from code, so LittleDB's changes to its steps never reach it. Build
+it per run instead with `versionedHarnessWorkflow`, from `@little-stack/workflow`:
+
+```ts
+// Private, UNRELEASED.
+import { versionedHarnessWorkflow } from "@little-stack/workflow";
+
+createHarness({
+  // ...
+  workflows: [versionedHarnessWorkflow(triageVersions, buildTriage)],
+});
+```
+
+Each run asks `prepare` with the harness session as the sticky key, so a session
+keeps one version of the workflow, builds the workflow from that content (cached
+per content), and runs it in the traced World. The tool's name, description and
+input schema come from the bootstrap build, so the agent sees the same tool
+whichever version runs.
+
+A run keeps the version it started on. Before its first step, the content and
+version are written next to the run's log (`run-pins/<runId>.json` in the World's
+`dataDir`). If the run resumes, for example after the process crashed, it is
+built from that pin and traced as that version, even if another version went live
+in between. A run that can't get its pin back fails rather than running the live
+version.
+
+The reviewer reads the step spans to find the first step that went wrong and
+proposes a change to that step's `prompt` or `model`. LittleDB judges a change by
+the fields it touches, wherever they sit in the content: a step's model slot is a
+low-risk model change and a step's prompt a medium-risk prompt change. Adding,
+removing or rewiring steps, or changing a schema or tool, is a workflow change
+(high risk), which waits for a person by default. The candidate is tested on your
+dataset by a [workflow eval worker](/docs/littledb/experiments#workflows) before
+the gates decide.
+
+## Workflows an agent makes
+
+`dynamicWorkflows({ world })` takes a World, or a function that picks one per
+run, for the runs of workflows an agent defined with `define_workflow` and of
+one-shot plans. Wrap the default store with the tracing World:
+
+```ts
+// Private, UNRELEASED.
+import { dynamicWorkflows, localWorld } from "@little-stack/workflow";
+
+dynamicWorkflows({
+  world: (run) =>
+    db.tracingWorld(localWorld({ dataDir: run.dataDir }), {
+      workflow: run.handle,
+      origin: run.kind === "defined" ? "agent" : "planner",
+      harness: "support-desk",
+    }),
+});
+
+// With LittleDB's registry, its `world` helper does the same and adds the version:
+const registry = db.agentWorkflowRegistry({ harness: "support-desk" });
+dynamicWorkflows({ registry, world: registry.world((run) => localWorld({ dataDir: run.dataDir })) });
+```
+
+The tracing World needs no `sessionId` here: the run's trigger names the harness
+session, turn and tool call, and the trace nests under that call. The function is
+told the run's `kind` (`defined` or `ad_hoc`), `workflowId`, `handle`, `runId`,
+`dataDir` (the store the harness would use), `sessionId`, `turnId`, `toolCallId`,
+and for a defined workflow its `definition`, `revision` and any `metadata` a
+registry attached. With LittleDB's registry, that metadata carries
+the LittleDB version the run uses, as `metadata.littledb.versionId`, and its
+`status` (`trial` for a candidate the session was routed to). See
+[Agent-made workflows behind review](/docs/littledb/harness#agent-made-workflows-behind-review).
+
+## Relation to Local World
+
+The tracing World adds nothing to storage: the `dataDir` layout, durability and
+replay are the inner World's. If LittleDB is unreachable, runs carry on and the
+traces are retried, then dropped once the client's queue is full; the run's
+events are still in the inner World.
+
+LittleDB is optional. Little Workflow works with the default Local World without
+it, and every feature on the other Workflow pages works without LittleDB.

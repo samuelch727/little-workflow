@@ -1,37 +1,46 @@
+/**
+ * `@little-stack/workflow`: define, run and replay durable workflows, and hand them to Little Harness.
+ *
+ * This root is the app-author surface. Eval sets live at `@little-stack/workflow/eval`, LWIR
+ * validation at `@little-stack/workflow/lwir`, and the building blocks the CLI, Little Harness,
+ * LittleDB, demos and tests use at `@little-stack/workflow/internals` (unstable, no semver
+ * guarantees). `src/index.test.ts` pins the runtime values below so the root cannot grow silently.
+ */
+
+// ── Define ────────────────────────────────────────────────────────────────────
+export { defineWorkflow, model, skill } from "./authoring.js";
+export { output } from "./schema.js";
+export { createToolRegistry } from "./tool-registry.js";
+
+// ── Run ───────────────────────────────────────────────────────────────────────
+export { localWorld, runOrchestration, runWorkflow } from "./authoring.js";
+export { virtualWorld, type VirtualWorldOptions } from "./world.js";
+export { isRunFailedError, RunFailedError } from "./runtime.js";
+export { replayRun } from "./replay.js";
+export { readWorkflowVersion } from "./run-plan.js";
+export { gradeRun, listRunGrades } from "./run-grades.js";
+
+// ── Compose with Little Harness ───────────────────────────────────────────────
+export { asHarnessWorkflow } from "./harness-workflow.js";
+export { loadWorkflow } from "./workspace/load-workflow.js";
+export { dynamicWorkflows } from "./dynamic-workflow.js";
+export type { DynamicWorkflowWorld, DynamicWorkflowWorldContext } from "./dynamic-workflow.js";
+export { agentWorkflow, type AgentWorkflowRunBindings } from "./dynamic-workflow-factory.js";
 export {
-  asHarnessWorkflow,
-  toHarnessWorkflowInputSchemaMarker,
-} from "./harness-workflow.js";
+  versionedHarnessWorkflow,
+  type VersionedHarnessWorkflowOptions,
+  type WorkflowVersionSource,
+} from "./versioned-harness-workflow.js";
+
+// ── Types ─────────────────────────────────────────────────────────────────────
 export type {
-  HarnessWorkflowAdapterOptions,
-  HarnessWorkflowSchemaMarkerOptions,
-} from "./harness-workflow.js";
-export {
-  buildRunWorkflowOptions,
-  createLittleWorkflow,
-  defineWorkflow,
-  localWorld,
-  model,
-  runWorkflow,
-  skill,
-} from "./authoring.js";
-export type {
+  DefinedWorkflow,
   DefineWorkflowInput,
   FailedRunResult,
-  HarnessMcpCapabilityManifest,
-  HarnessMcpClient,
-  HarnessMcpClientOptions,
-  HarnessMcpConfig,
-  HarnessMcpGatewayConfig,
-  HarnessMcpServerConfig,
-  HarnessMcpToolPolicy,
-  HarnessMcpToolSchema,
-  HarnessMcpToolSchemas,
-  HarnessMcpTransportConfig,
+  FixedPlan,
   InferWorkflowInput,
   InferWorkflowOutput,
   InputSchemaLike,
-  LocalWorld,
   LocalWorldOptions,
   MemoryConfig,
   ModelSelectionMetadata,
@@ -39,143 +48,44 @@ export type {
   OrchestratorConfig,
   OutputMode,
   OutputSchemaLike,
-  ParserSchemaLike,
   PlannerConfig,
+  RemoteSkillOptions,
+  RunOrchestrationOptions,
   RunResult,
+  RunTrigger,
   RunWorkflowOptions,
-  Schema,
-  SchemaLike,
   Skill,
   SkillGitAuth,
   SkillOidcToken,
   SkillRiskLevel,
-  RemoteSkillOptions,
-  ResolvedHarnessMcpGateway,
-  StandardSchemaLike,
   ToolSelectionPolicy,
   WorkerConfig,
-  WorkflowDefinition,
   WorkflowRunProgressEvent,
-  WorkflowRunTarget,
 } from "./authoring.js";
-export * from "./bash-tool.js";
-export * from "./canonical.js";
-export * from "./dynamic-workflow.js";
+export type { SuperviseDecision, SuperviseOuterLoopState } from "./compiler.js";
+export type { RunFailedCauseCode } from "./runtime.js";
+export type { ReplayResult } from "./replay.js";
+export type { RunPlan, StoredWorkflowPlan } from "./run-plan.js";
+export type { GradeRunInput, RunGrade } from "./run-grades.js";
+export type { World } from "./world-port.js";
 export type {
-  SuperviseDecision,
-  SuperviseOuterLoopState,
-} from "./compiler.js";
-export {
-  createHarnessEventRecorder,
-  createWorkflowHarness,
-  errorEnvelope,
-  hashHarnessPrompt,
-  hashHarnessToolCall,
-  normalizeHarnessEventType,
-  runWorkflowHarnessWithSession,
-  workflowHarness,
-  WORKFLOW_HARNESS_ID,
-} from "./harness/index.js";
-export type {
-  ErrorEnvelope,
-  ErrorEnvelopeValue,
-  ExecuteStepTask,
-  FixStepTask,
-  Harness,
-  HarnessContext,
-  HarnessEventInput,
-  HarnessEventRecorder,
-  HarnessResult,
-  HarnessRole,
-  HarnessScope,
-  HarnessTask,
-  OrchestrateTask,
-  OuterLoopContext,
-  PlanTask,
-  ResolvedModel,
-  SkillDescriptor,
-  ToolPermissions,
-  ToolSet,
-  WorkflowBashCapabilities,
-} from "./harness/index.js";
-export * from "./eval-set.js";
-export * from "./eval-set-store.js";
-export * from "./lwir.js";
-export * from "./lwir-input-cone.js";
-export * from "./manifests.js";
-export * from "./memory.js";
-export * from "./model-registry.js";
-export * from "./orchestrator.js";
-export * from "./pricing.js";
-export * from "./run-report.js";
-export * from "./planner-reuse.js";
-export {
-  resolveModelSlots,
-  slotIdForResolvedModel,
-} from "./model-slots.js";
-export type {
-  ResolvedModelSlot,
-} from "./model-slots.js";
-export * from "./replay.js";
-export {
-  executeWorkflowVersion,
-  runWorkflowCycle,
-  RunFailedError,
-  RuntimeMaxVisitsError,
-  stepPathFor,
-  visitIndexFor,
-} from "./runtime.js";
-export type {
-  ExecuteWorkflowVersionOptions,
-  RunFailedCauseCode,
-  RunWorkflowCycleOptions,
-  RuntimeCompletedRunResult,
-  RuntimeFailedRunResult,
-  RuntimeRunResult,
-  RuntimeStepContext,
-  RuntimeStepExecutionResult,
-  RuntimeToolHandler,
-  RuntimeUsage,
-} from "./runtime.js";
-export * from "./scratch.js";
-export * from "./schema.js";
-export {
-  resolveSkills,
-  skillPromptSection,
-  skillsHash,
-} from "./skills.js";
-export type {
-  ResolveSkillsOptions,
-  ResolvedSkillDescriptor,
-} from "./skills.js";
-export * from "./tool-registry.js";
-export {
-  loadWorkflow,
-} from "./workspace/load-workflow.js";
+  ArtifactInput,
+  ArtifactManifest,
+  ArtifactReadResult,
+  ArtifactRef,
+  EventEnvelope,
+  EventInput,
+  RunId,
+} from "./world.js";
+export type { UsageTotals } from "./pricing.js";
+export type { AiSdkTool, ToolRegistry } from "./tool-registry.js";
+export type { BashCapabilities } from "./bash-tool.js";
+export type { ToolPermissions } from "./permission.js";
+export type { WorkflowVersionReuseStrategy } from "./workflow-version-reuse.js";
+export type { HarnessWorkflowAdapterOptions } from "./harness-workflow.js";
 export type {
   LoadedWorkflow,
-  LoadedWorkflowRunOptions,
   LoadWorkflowOptions,
   WorkflowExecutionMode,
   WorkflowSourceIdentity,
 } from "./workspace/load-workflow.js";
-export * from "./world.js";
-export type { World } from "./world-port.js";
-export * from "./workflow-version-store.js";
-export {
-  getWorkflowDefinitionHash,
-  getWorkflowDefinitionSnapshot,
-  getPlanningDefinitionHash,
-  getPlanningDefinitionSnapshot,
-} from "./workflow-definition-hash.js";
-export type {
-  PlanningDefinitionSnapshot,
-  WorkflowDefinitionSnapshot,
-} from "./workflow-definition-hash.js";
-export {
-  DEFAULT_WORKFLOW_VERSION_REUSE_STRATEGY,
-  resolveWorkflowVersionReuseStrategy,
-} from "./workflow-version-reuse.js";
-export type {
-  WorkflowVersionReuseStrategy,
-} from "./workflow-version-reuse.js";

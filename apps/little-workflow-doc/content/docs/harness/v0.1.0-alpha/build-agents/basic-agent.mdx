@@ -1,0 +1,143 @@
+---
+title: Basic Agent
+description: The smallest useful Little Harness configuration.
+---
+
+The smallest useful Little Harness agent has three pieces:
+
+- instructions
+- tools
+- an execution call: `streamHarness()` for chat or `generateHarness()` for a completed result
+
+```ts
+import { openai } from "@ai-sdk/openai";
+import { tool, type UIMessage } from "ai";
+import { z } from "zod";
+import { createHarness, localHost, streamHarness } from "@little-stack/harness";
+
+// Replace with your own data source.
+const docs = [
+  { title: "Renewals", body: "Renewal notices go out 60 days before the contract end date." },
+  { title: "Billing", body: "Invoices are issued on the first business day of each month." },
+];
+
+const searchDocs = tool({
+  description: "Search the account team's documentation.",
+  inputSchema: z.object({ query: z.string() }),
+  execute: async ({ query }) =>
+    docs.filter((doc) => doc.body.toLowerCase().includes(query.toLowerCase())),
+});
+
+const harness = createHarness({
+  host: localHost(),
+  model: openai("gpt-5"),
+  system: "Answer account questions using the tools available to you.",
+  tools: { searchDocs },
+});
+
+export async function POST(req: Request) {
+  const { messages }: { messages: UIMessage[] } = await req.json();
+
+  const result = streamHarness({
+    harness,
+    messages,
+  });
+
+  return result.toUIMessageStreamResponse();
+}
+```
+
+## Add Continuity
+
+Pass a stable session key when the next request belongs to the same conversation. In a chat UI, this is usually your app's chat id or thread id.
+
+```ts
+const result = streamHarness({
+  harness,
+  messages,
+  session: chatId,
+});
+```
+
+The same session can keep working files, generated artifacts, and trace continuity.
+
+The client can stay on the normal AI SDK path.
+
+```ts
+import { useChat } from "@ai-sdk/react";
+import { DefaultChatTransport } from "ai";
+
+const { messages, sendMessage } = useChat({
+  transport: new DefaultChatTransport({ api: "/api/chat" }),
+});
+
+sendMessage({ text: "Turn that into a short action list." });
+```
+
+## Generate A Final Result
+
+Use `generateHarness()` when the caller does not need live UI streaming.
+
+```ts
+import { Output } from "ai";
+import { generateHarness } from "@little-stack/harness";
+
+const result = await generateHarness({
+  harness,
+  type: "account.brief",
+  input: { accountId },
+  output: Output.object({ schema: accountBriefSchema }),
+});
+
+if (result.status !== "completed") {
+  // A tool parked the turn; see generateHarness() for resuming it.
+  return Response.json({ status: result.status }, { status: 202 });
+}
+
+return Response.json({
+  brief: result.output,
+  artifacts: result.artifacts,
+  trace: result.trace,
+});
+```
+
+The same harness configuration, session workspace, tools, skills, artifacts, and Persistent Dir behavior should apply to both execution APIs.
+
+For a deeper walkthrough of streaming routes, final-result jobs, structured
+outputs, message files, and lifecycle callbacks, read
+[Generating And Streaming](/docs/harness/v0.1.0-alpha/build-agents/generating-and-streaming).
+
+## Define Input Types
+
+Use [Input Types](/docs/harness/v0.1.0-alpha/build-agents/input-types) when a caller is
+not naturally sending chat messages. Input Types give reusable meaning to open
+strings like `support.ticket_triage`, validate the input, and can provide a
+default structured output.
+
+## Add Skills
+
+Skills are useful when the model needs procedural knowledge.
+
+```ts
+import { skill } from "@little-stack/harness";
+
+const harness = createHarness({
+  host: localHost(),
+  model: openai("gpt-5"),
+  system: "Help account teams prepare customer briefs.",
+  tools: { searchDocs },
+  skills: [skill("./skills/customer-briefs")],
+});
+```
+
+Use skills for durable instructions like how to write a customer brief, how to interpret internal fields, or when to export a finished artifact.
+
+## Add Persistence Later
+
+Do not start with Persistent Dirs unless the agent needs cross-session files. The private session workspace is enough for most first agents.
+
+Add a Persistent Dir when you need the agent to remember user notes, project preferences, or app-managed files across sessions.
+
+## Next Steps
+
+To keep several agents in one repo — each a self-contained folder with auto-discovered tools and skills, plus a CLI to scaffold and chat with them — see [Agent Folders](/docs/harness/v0.1.0-alpha/build-agents/agent-folders).

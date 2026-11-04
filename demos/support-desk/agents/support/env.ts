@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { createAnthropic } from "@ai-sdk/anthropic";
 import { createDeepSeek } from "@ai-sdk/deepseek";
 import type { LanguageModel } from "ai";
 import { demoRoot } from "./episode";
@@ -56,10 +57,17 @@ export function loadSupportEnv(candidates: readonly string[] = envCandidates()):
 }
 
 /**
- * The model slot name littleDB's managed config resolves against. littleDB stores a SLOT
- * (`ConfigBundle.modelSlot`) and `modelFor` maps it back to a provider instance; a promoted
- * config naming a slot this map does not know throws at session creation.
+ * The model slots this demo knows. A LittleDB version's content names one (`{ system, model }`)
+ * and `modelForSlot` maps it to a provider, so a promoted version naming a slot this map does
+ * not know fails loudly at the turn instead of running on something else.
+ *
+ * DeepSeek slots read `DEEPSEEK_API_KEY`; Anthropic slots read `SUPPORT_ANTHROPIC_API_KEY`
+ * (a demo-specific name, so the demo never picks up a key meant for something else).
  */
+export const DEEPSEEK_SLOTS = ["deepseek-v4-flash", "deepseek-v4-pro"] as const;
+export const ANTHROPIC_SLOTS = ["claude-haiku-5-5", "claude-sonnet-5-5"] as const;
+
+/** The slot used when `SUPPORT_MODEL_SLOT` is unset. */
 export const DEFAULT_MODEL_SLOT = "deepseek-v4-flash";
 
 /**
@@ -89,15 +97,26 @@ export function supportModelOverride(): LanguageModel | undefined {
 }
 
 /**
- * Resolve a model for a littleDB model slot. `undefined` for a slot this demo does not know,
- * which is what makes a promoted config naming a strange slot fail loudly.
+ * Resolve a model for a slot name. `undefined` for a slot this demo does not know, which is
+ * what makes a promoted version naming a strange slot fail loudly.
  */
 export function modelForSlot(slot: string): LanguageModel | undefined {
   const override = supportModelOverride();
   if (override !== undefined) return withModelRetry(override);
 
-  const known = new Set([DEFAULT_MODEL_SLOT, "deepseek-v4-pro"]);
-  if (!known.has(slot)) return undefined;
+  if ((ANTHROPIC_SLOTS as readonly string[]).includes(slot)) {
+    loadSupportEnv();
+    const apiKey = process.env.SUPPORT_ANTHROPIC_API_KEY;
+    if (!apiKey) {
+      throw new Error(
+        `Set SUPPORT_ANTHROPIC_API_KEY in the environment or in one of: ${envCandidates().join(", ")}.`,
+      );
+    }
+    // The key is passed explicitly, so the provider never falls back to another variable.
+    return withModelRetry(createAnthropic({ apiKey })(slot));
+  }
+
+  if (!(DEEPSEEK_SLOTS as readonly string[]).includes(slot)) return undefined;
 
   loadSupportEnv();
   const apiKey = process.env.DEEPSEEK_API_KEY;
@@ -114,8 +133,13 @@ export function modelForSlot(slot: string): LanguageModel | undefined {
   return withModelRetry(provider(slot));
 }
 
+/** The slot the agent runs on when no LittleDB version names one. */
+export function defaultModelSlot(): string {
+  return process.env.SUPPORT_MODEL_SLOT ?? DEFAULT_MODEL_SLOT;
+}
+
 /**
- * The model the agent runs on when littleDB is not in the loop.
+ * The model the agent runs on when LittleDB is not in the loop.
  *
  * The retry wrapper is applied to the OVERRIDE as well as to the real provider (see
  * `modelForSlot`). It is transparent to a model that never throws a transport error, so the
@@ -123,7 +147,7 @@ export function modelForSlot(slot: string): LanguageModel | undefined {
  * test prove the wrapper is really in this path rather than merely present in the tree.
  */
 export function supportModel(): LanguageModel {
-  const slot = process.env.SUPPORT_MODEL_SLOT ?? DEFAULT_MODEL_SLOT;
+  const slot = defaultModelSlot();
   const model = modelForSlot(slot);
   if (model === undefined) throw new Error(`Unknown model slot "${slot}".`);
   return model;

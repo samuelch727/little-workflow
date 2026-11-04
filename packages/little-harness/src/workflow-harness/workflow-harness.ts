@@ -7,7 +7,10 @@ import {
   hashHarnessToolCall,
   type DurableHarnessEvent,
 } from "../events/durability.js";
-import { emitHarnessOccurrence } from "../events/occurrence.js";
+import {
+  createHarnessAppendIdempotencyKey,
+  emitHarnessOccurrence,
+} from "../events/occurrence.js";
 import { toolRefsForDurableRequest } from "../execution/model-events.js";
 import type { JsonObject } from "../types.js";
 import {
@@ -197,6 +200,12 @@ async function executeToolStep(
   );
 }
 
+/**
+ * Errors a tool itself raised while running (recorded as `harness.tool_call.failed`). A model-like
+ * task hands these back to the model; anything else, such as a permission refusal, ends the task.
+ */
+const recordedToolFailures = new WeakSet<object>();
+
 async function executeScopedToolCall(
   toolName: string,
   input: unknown,
@@ -240,7 +249,9 @@ async function executeScopedToolCall(
     return replay.result;
   }
   if (replay.kind === "failed") {
-    throw errorFromReplayEnvelope(replay.error);
+    const error = errorFromReplayEnvelope(replay.error);
+    recordedToolFailures.add(error);
+    throw error;
   }
   const callId = replay.kind === "inflight" ? replay.callId : createEventId();
   const occurrenceId = replay.kind === "inflight"
@@ -250,6 +261,11 @@ async function executeScopedToolCall(
     await emitHarnessOccurrence({
       type: "harness.tool_call.started",
       runId: ctx.session.runId,
+      appendIdempotencyKey: workflowAppendKey(
+        ctx.session.runId,
+        "harness.tool_call.started",
+        occurrenceId,
+      ),
       occurrenceId,
       payload: {
         callId,
@@ -294,6 +310,11 @@ async function executeScopedToolCall(
     await emitHarnessOccurrence({
       type: "harness.tool_call.succeeded",
       runId: ctx.session.runId,
+      appendIdempotencyKey: workflowAppendKey(
+        ctx.session.runId,
+        "harness.tool_call.succeeded",
+        occurrenceId,
+      ),
       occurrenceId,
       payload: {
         callId,
@@ -322,6 +343,11 @@ async function executeScopedToolCall(
     await emitHarnessOccurrence({
       type: "harness.tool_call.failed",
       runId: ctx.session.runId,
+      appendIdempotencyKey: workflowAppendKey(
+        ctx.session.runId,
+        "harness.tool_call.failed",
+        occurrenceId,
+      ),
       occurrenceId,
       payload: {
         callId,
@@ -344,6 +370,9 @@ async function executeScopedToolCall(
       },
       ...occurrenceSinks(ctx),
     });
+    if (isObject(error)) {
+      recordedToolFailures.add(error);
+    }
     throw error;
   }
 }
@@ -415,13 +444,17 @@ async function runAiGenerateStep(
     ? [{ role: "user", content: stepInput }]
     : [{ role: "user", content: stepInput }, { role: "user", content: outputRepairNote }];
   const model = ctx.model.model;
-  const system = systemWithSkills(ctx.system, ctx.skills);
+  // The step's own `with.system` (already resolved by the runtime) follows the worker's system.
+  const system = joinSystemPrompts(
+    systemWithSkills(ctx.system, ctx.skills),
+    typeof withConfig?.system === "string" ? withConfig.system : undefined,
+  );
   const scope = toolCallScopeForStepContext(stepContext);
-  // A structured-output ai.generate step must produce its declared output from its input.
-  // Offering it the workflow's action tools invites a spurious tool call that ends the
-  // single-shot generation with empty output (and could re-fire a side-effecting tool).
-  // Tool use in a workflow is expressed as explicit tool.call steps, so this is safe.
-  const executableTools = isStructuredAiGenerateStep(step) ? {} : workflowToolsForContext(ctx);
+  // An ai.generate step produces its output from its input in a single model call, and nothing
+  // executes a tool the model calls here. Offering the workflow's tools (or bash) only invites a
+  // call that ends the generation with empty output, and a custom aiLoop could re-fire a
+  // side-effecting tool. Tool use in a workflow is expressed as explicit tool.call steps.
+  const executableTools: Record<string, unknown> = {};
   const tools = workflowToolRefs(executableTools);
   const request = {
     model: ctx.model.modelId,
@@ -450,6 +483,11 @@ async function runAiGenerateStep(
     await emitHarnessOccurrence({
       type: "harness.model.called",
       runId: ctx.session.runId,
+      appendIdempotencyKey: workflowAppendKey(
+        ctx.session.runId,
+        "harness.model.called",
+        occurrenceId,
+      ),
       occurrenceId,
       payload: {
         callId,
@@ -490,6 +528,11 @@ async function runAiGenerateStep(
     await emitHarnessOccurrence({
       type: "harness.model.responded",
       runId: ctx.session.runId,
+      appendIdempotencyKey: workflowAppendKey(
+        ctx.session.runId,
+        "harness.model.responded",
+        occurrenceId,
+      ),
       occurrenceId,
       payload: {
         callId,
@@ -518,6 +561,11 @@ async function runAiGenerateStep(
     await emitHarnessOccurrence({
       type: "harness.model.failed",
       runId: ctx.session.runId,
+      appendIdempotencyKey: workflowAppendKey(
+        ctx.session.runId,
+        "harness.model.failed",
+        occurrenceId,
+      ),
       occurrenceId,
       payload: {
         callId,
@@ -542,7 +590,7 @@ async function runModelLikeTask(
   ctx: WorkflowHarnessContext,
   options: CreateWorkflowHarnessOptions,
 ): Promise<WorkflowHarnessResult> {
-  const messages: unknown[] = [{ role: "user", content: task }];
+  const messages: unknown[] = [{ role: "user", content: modelLikeUserContent(task) }];
   const system = modelLikeSystem(task, ctx);
   const executableTools = workflowToolsForContext(ctx);
   const tools = workflowToolRefs(executableTools);
@@ -582,6 +630,11 @@ async function runModelLikeTask(
         await emitHarnessOccurrence({
           type: "harness.model.called",
           runId: ctx.session.runId,
+          appendIdempotencyKey: workflowAppendKey(
+            ctx.session.runId,
+            "harness.model.called",
+            occurrenceId,
+          ),
           occurrenceId,
           payload: {
             callId,
@@ -617,6 +670,11 @@ async function runModelLikeTask(
         await emitHarnessOccurrence({
           type: "harness.model.failed",
           runId: ctx.session.runId,
+          appendIdempotencyKey: workflowAppendKey(
+            ctx.session.runId,
+            "harness.model.failed",
+            occurrenceId,
+          ),
           occurrenceId,
           payload: {
             callId,
@@ -641,6 +699,11 @@ async function runModelLikeTask(
       await emitHarnessOccurrence({
         type: "harness.model.responded",
         runId: ctx.session.runId,
+        appendIdempotencyKey: workflowAppendKey(
+          ctx.session.runId,
+          "harness.model.responded",
+          occurrenceId,
+        ),
         occurrenceId,
         payload: {
           callId,
@@ -665,34 +728,54 @@ async function runModelLikeTask(
       });
     }
 
+    // A turn that ends in tool calls is not terminal: AI SDK still reports `text: ""` (and a
+    // text fallback `output`) for it, so only a turn with no tool calls ends the loop.
     const toolCalls = result.toolCalls ?? [];
-    const hasTerminalOutput = result.output !== undefined || result.text !== undefined;
-    if (hasTerminalOutput) {
-      return modelLikeResultFromAiResult(task, result);
-    }
     if (toolCalls.length === 0) {
       return modelLikeResultFromAiResult(task, result);
     }
 
     const toolResults = [];
     for (const [index, toolCall] of toolCalls.entries()) {
-      const toolResult = await executeScopedToolCall(
-        toolCall.toolName,
-        toolCall.args,
-        scope,
-        index + 1,
-        ctx,
-        {
-          caller: "model",
-          turn: replayTurn,
-          toolSet: executableTools,
-        },
-      );
-      toolResults.push({
+      const resultFor = (outcome: { readonly result: unknown; readonly isError?: true }) => ({
         toolName: toolCall.toolName,
         ...(toolCall.toolCallId === undefined ? {} : { toolCallId: toolCall.toolCallId }),
-        result: toolResult,
+        ...outcome,
       });
+      // A call the model got wrong (a tool it made up, arguments that fail the tool's schema, a
+      // tool that throws) goes back to it as an error result so it can correct itself next turn.
+      const tool = executableTools[toolCall.toolName];
+      if (!isObject(tool) || typeof tool.execute !== "function") {
+        toolResults.push(resultFor({
+          result: `There is no tool named '${toolCall.toolName}'. Available tools: ${
+            Object.keys(executableTools).join(", ") || "(none)"
+          }.`,
+          isError: true,
+        }));
+        continue;
+      }
+      try {
+        toolResults.push(resultFor({
+          result: await executeScopedToolCall(
+            toolCall.toolName,
+            toolCall.args,
+            scope,
+            index + 1,
+            ctx,
+            {
+              caller: "model",
+              turn: replayTurn,
+              toolSet: executableTools,
+            },
+          ),
+        }));
+      } catch (error) {
+        if (!isObject(error) || !recordedToolFailures.has(error) || ctx.abortSignal?.aborted === true) {
+          throw error;
+        }
+        const failure = errorEnvelope(error);
+        toolResults.push(resultFor({ result: `${String(failure.name)}: ${String(failure.message)}`, isError: true }));
+      }
     }
     messages.push({
       role: "assistant",
@@ -726,11 +809,37 @@ function modelLikeResultFromAiResult(
     };
   }
   if (task.kind === "plan") {
-    const output = result.output;
-    const lwir = isObject(output) && Object.hasOwn(output, "lwir") ? output.lwir : output ?? result.text;
+    const raw = result.output ?? result.text;
+    const output = typeof raw === "string" ? jsonFromPlannerText(raw) : raw;
+    // `{ lwir }` is a bare wrapper; a reuse decision (`{ kind: "adapt", lwir, ... }`) keeps its shape.
+    const lwir = isObject(output) && Object.hasOwn(output, "lwir") && typeof output.kind !== "string"
+      ? output.lwir
+      : output;
     return { kind: "plan", lwir };
   }
   return { kind: "orchestrate", output: result.output ?? result.text };
+}
+
+/**
+ * Read the JSON document out of a planner's text reply: bare JSON, JSON in a markdown fence, or
+ * JSON with prose around it. Text that holds no JSON object is returned as is, so the validator
+ * reports it and the repair prompt shows the model what it sent.
+ */
+function jsonFromPlannerText(text: string): unknown {
+  const trimmed = text.trim();
+  const fenced = /^```[a-z]*\s*\n([\s\S]*?)\n?```$/iu.exec(trimmed);
+  const body = fenced?.[1] ?? trimmed;
+  const start = body.indexOf("{");
+  const end = body.lastIndexOf("}");
+  for (const candidate of [body, start >= 0 && end > start ? body.slice(start, end + 1) : undefined]) {
+    if (candidate === undefined) continue;
+    try {
+      return JSON.parse(candidate);
+    } catch {
+      // try the next candidate
+    }
+  }
+  return text;
 }
 
 function normalizeHarnessUsage(usage: AiLoopResult["usage"] | undefined): NormalizedUsage {
@@ -748,6 +857,20 @@ function modelResponseText(result: AiLoopResult, output: unknown): string {
     return text;
   }
   return (result.toolCalls?.length ?? 0) > 0 ? "[tool_calls]" : "[empty]";
+}
+
+/**
+ * The task as the model's first user message. A plan task's systemMessage already goes into the
+ * system prompt (see {@link modelLikeSystem}), so it is left out here rather than sent twice.
+ */
+function modelLikeUserContent(
+  task: Exclude<WorkflowHarnessTask, { kind: "execute_step" }>,
+): unknown {
+  if (task.kind !== "plan" || typeof task.systemMessage !== "string") {
+    return task;
+  }
+  const { systemMessage: _inSystemPrompt, ...rest } = task;
+  return rest;
 }
 
 function modelLikeSystem(
@@ -775,6 +898,13 @@ function systemWithSkills(system: string | undefined, skills: readonly WorkflowS
     return system;
   }
   return `${system}\n\n${skillSection}`;
+}
+
+function joinSystemPrompts(base: string, stepSystem: string | undefined): string {
+  if (stepSystem === undefined || stepSystem.length === 0) {
+    return base;
+  }
+  return base.length === 0 ? stepSystem : `${base}\n\n${stepSystem}`;
 }
 
 function skillPromptSection(skills: readonly WorkflowSkillDescriptor[]): string | undefined {
@@ -817,6 +947,12 @@ async function emitExecuteStep(
   await emitHarnessOccurrence({
     type,
     runId: ctx.session.runId,
+    appendIdempotencyKey: workflowAppendKey(
+      ctx.session.runId,
+      type,
+      `${stepContext.stepPath}:${stepContext.visitIndex}:attempt:${stepContext.attempt ?? 1}` +
+        (stepContext.repairAttempt === undefined ? "" : `:repair:${stepContext.repairAttempt}`),
+    ),
     payload: {
       runId: ctx.session.runId,
       stepId: step.id,
@@ -835,6 +971,10 @@ async function emitExecuteStep(
     },
     ...occurrenceSinks(ctx),
   });
+}
+
+function workflowAppendKey(runId: string, eventType: string, logicalEventId: string): string {
+  return createHarnessAppendIdempotencyKey({ runId, eventType, logicalEventId });
 }
 
 function eventSafeRecord(value: Record<string, unknown>): JsonObject {
@@ -876,18 +1016,6 @@ function occurrenceSinks(
 
 function workflowToolRefs(tools: Readonly<Record<string, unknown>>): JsonObject[] {
   return toolRefsForDurableRequest(tools as Parameters<typeof toolRefsForDurableRequest>[0]);
-}
-
-/** True when the ai.generate step declares a structured (non-text) output contract. */
-function isStructuredAiGenerateStep(step: unknown): boolean {
-  if (!isRecord(step)) {
-    return false;
-  }
-  const output = step.output;
-  if (!isRecord(output)) {
-    return false;
-  }
-  return typeof output.mode === "string" && output.mode !== "text";
 }
 
 function workflowToolsForContext(ctx: WorkflowHarnessContext): Record<string, unknown> {
@@ -1058,7 +1186,9 @@ function aiLoopFromAiSdkModule(aiSdkModule: AiSdkModuleLike | undefined): AiLoop
       const outputSpec = aiSdkOutputSpec(aiSdkModule, outputSpecForAiSdkStep(options.step));
       const request = stripUndefined({
         model: options.model,
-        instructions: options.system,
+        // An ai.generate step with no with.system and no harness system has "" here; Anthropic
+        // rejects an empty system block, so leave it out.
+        instructions: options.system?.trim() ? options.system : undefined,
         messages: toAiSdkMessages(options),
         tools: modelFacingTools(options.tools, aiSdkModule.jsonSchema),
         abortSignal: options.signal,
@@ -1084,25 +1214,47 @@ function aiLoopFromAiSdkModule(aiSdkModule: AiSdkModuleLike | undefined): AiLoop
 
 async function callAiSdkGenerate(aiSdkModule: AiSdkModuleLike, request: JsonObject): Promise<unknown> {
   if (typeof aiSdkModule.streamText === "function") {
-    const stream = aiSdkModule.streamText(request);
-    return resolveAiSdkStreamResult(stream);
+    // streamText reports a failed model call (auth, rate limit, overload) only to `onError`
+    // (default: console.error) and as an `error` stream part, then rejects its result promises
+    // with a generic NoOutputGeneratedError. Capture the call's own error so it is thrown.
+    const streamErrors: unknown[] = [];
+    const stream = aiSdkModule.streamText({
+      ...request,
+      onError: ({ error }: { readonly error: unknown }) => {
+        streamErrors.push(error);
+      },
+    });
+    return resolveAiSdkStreamResult(stream, streamErrors);
   }
   return aiSdkModule.generateText!(request);
 }
 
-async function resolveAiSdkStreamResult(stream: unknown): Promise<JsonObject> {
+async function resolveAiSdkStreamResult(stream: unknown, streamErrors: readonly unknown[]): Promise<JsonObject> {
   if (!isRecord(stream)) {
     throw new TypeError("workflowHarness aiSdkModule.streamText did not return an object.");
   }
+  // `text` and `finishReason` reject only when the call itself failed, so they propagate.
+  // The rest stay tolerant: `output` also rejects for a turn that ended in tool calls.
+  let text: unknown;
+  let finishReason: unknown;
+  try {
+    text = await stream.text;
+    finishReason = await stream.finishReason;
+  } catch (error) {
+    throw streamErrors[0] ?? error;
+  }
+  if (streamErrors.length > 0) {
+    throw streamErrors[0];
+  }
   return stripUndefined({
-    text: await settleValue(stream.text),
+    text,
     reasoningText: await settleValue(stream.reasoningText),
     toolCalls: await settleValue(stream.toolCalls),
     output: await settleValue(stream.output),
     object: await settleValue(stream.object),
     // AI SDK 7: `usage` totals every step (the deprecated `totalUsage` is its alias).
     usage: await settleValue(stream.usage),
-    finishReason: await settleValue(stream.finishReason),
+    finishReason,
     providerMetadata: await settleValue(stream.providerMetadata),
   });
 }
@@ -1118,11 +1270,11 @@ function outputSpecForAiSdkStep(step: unknown): JsonObject {
       return output;
     }
     if (step.kind === "plan") {
-      return {
-        mode: "object",
-        schema: { type: "object", additionalProperties: true },
-        name: "lwir",
-      };
+      // Plain text, parsed after the call (see jsonFromPlannerText). An open object schema
+      // doesn't survive native structured output: @ai-sdk/anthropic sets additionalProperties
+      // to false on every object, so Claude could only ever answer `{}`. The planning prompt
+      // already asks for the JSON document alone.
+      return { mode: "text" };
     }
     if (step.kind === "orchestrate") {
       return { mode: "text" };
@@ -1235,7 +1387,9 @@ function toAiSdkMessages(options: Parameters<AiLoopAdapter["generate"]>[0]): rea
           type: "tool-result",
           toolCallId: stringProperty(entry, "toolCallId") ?? `call_${index + 1}`,
           toolName: stringProperty(entry, "toolName") ?? "tool",
-          output: { type: "json", value: propertyValue(entry, "result") ?? null },
+          output: propertyValue(entry, "isError") === true
+            ? { type: "error-text", value: String(propertyValue(entry, "result")) }
+            : { type: "json", value: propertyValue(entry, "result") ?? null },
         })),
       });
       continue;

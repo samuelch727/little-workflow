@@ -1,3 +1,4 @@
+import { InMemoryFs } from "just-bash";
 import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -5,13 +6,17 @@ import { afterEach, describe, expect, it } from "vitest";
 import { localWorld } from "./authoring.js";
 import {
   appendEvent,
-  closeEventStoresForTest,
   listEvents,
-} from "./index.js";
+} from "./entries/internals.js";
+import {
+  closeEventStoresForTest,
+  virtualWorld,
+} from "./world.js";
 
 const tempDirs: string[] = [];
 
-async function tempWorld() {
+async function tempWorld(kind: "local" | "virtual") {
+  if (kind === "virtual") return virtualWorld({ fs: new InMemoryFs(), dataDir: "/test-world" });
   const dataDir = await mkdtemp(join(tmpdir(), "little-workflow-wal-"));
   tempDirs.push(dataDir);
   return localWorld({ dataDir });
@@ -24,9 +29,9 @@ afterEach(async () => {
   await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
 });
 
-describe("embedded WAL event store", () => {
+describe.each(["local", "virtual"] as const)("%s event store reopen", (kind) => {
   it("returns committed events in sequence order after the connection is reopened", async () => {
-    const world = await tempWorld();
+    const world = await tempWorld(kind);
 
     await appendEvent(world, "run_wal_reopen", {
       type: "RunStarted",
@@ -44,9 +49,12 @@ describe("embedded WAL event store", () => {
     const beforeReopen = await listEvents(world, "run_wal_reopen");
 
     // Close all cached connections; the next access reopens the DB from disk,
-    // proving the committed appends are durable (not just in-memory state).
+    // proving disk persistence for localWorld. For virtualWorld this is a reopen
+    // over the same filesystem, with no process-crash durability claim.
     closeEventStoresForTest();
-    const reopened = localWorld({ dataDir: world.dataDir });
+    const reopened = world.files === undefined
+      ? localWorld({ dataDir: world.dataDir })
+      : virtualWorld({ fs: world.files, dataDir: world.dataDir });
 
     const afterReopen = await listEvents(reopened, "run_wal_reopen");
     expect(afterReopen.map((event) => event.sequence)).toEqual([1, 2, 3]);
@@ -60,7 +68,7 @@ describe("embedded WAL event store", () => {
   });
 
   it("derives a deterministic eventId from runId + sequence + type + payload", async () => {
-    const world = await tempWorld();
+    const world = await tempWorld(kind);
 
     // Identical payload/type/sequence under two different runIds must yield
     // different eventIds (eventId is keyed on runId), and each must match the
@@ -82,7 +90,9 @@ describe("embedded WAL event store", () => {
 
     // The same logical event reproduced from a reopened store keeps its eventId.
     closeEventStoresForTest();
-    const reopened = localWorld({ dataDir: world.dataDir });
+    const reopened = world.files === undefined
+      ? localWorld({ dataDir: world.dataDir })
+      : virtualWorld({ fs: world.files, dataDir: world.dataDir });
     const [reread] = await listEvents(reopened, "run_wal_id_left");
     expect(reread!.eventId).toBe(left.eventId);
   });

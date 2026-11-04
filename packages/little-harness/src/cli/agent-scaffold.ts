@@ -3,7 +3,8 @@ import { basename, join } from "node:path";
 import { renderAgentSource, resolveProvider } from "./provider-catalog.js";
 import { providerDependency, scaffoldDependencyVersions } from "./scaffold-versions.js";
 
-const DEFAULT_PROVIDER = "anthropic";
+/** The provider every Little scaffolder (little-harness init, little setup, little init) defaults to. */
+export const DEFAULT_PROVIDER = "openai";
 
 const ECHO_TS = `import { tool } from "ai";
 import { z } from "zod";
@@ -130,7 +131,7 @@ export async function scaffoldProject(
   await mkdir(root, { recursive: true });
   const versions = scaffoldDependencyVersions();
   const dependencies: Record<string, string> = {
-    "little-harness": versions.littleHarness,
+    "@little-stack/harness": versions.littleHarness,
     ai: versions.ai,
     zod: versions.zod,
   };

@@ -1,6 +1,6 @@
 {
-  "name": "little-harness",
-  "version": "0.2.0-alpha.0",
+  "name": "@little-stack/harness",
+  "version": "0.2.0-alpha.2",
   "description": "Local-first agent runtime primitives for AI SDK sessions, tools, files, traces, persistence, and Little Workflow harness integration.",
   "license": "Apache-2.0",
   "repository": {
@@ -41,6 +41,26 @@
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
     },
+    "./sandbox": {
+      "types": "./dist/sandbox.d.ts",
+      "default": "./dist/sandbox.js"
+    },
+    "./host": {
+      "types": "./dist/host.d.ts",
+      "default": "./dist/host.js"
+    },
+    "./internals": {
+      "types": "./dist/internals.d.ts",
+      "default": "./dist/internals.js"
+    },
+    "./events": {
+      "types": "./dist/events/occurrence.d.ts",
+      "default": "./dist/events/occurrence.js"
+    },
+    "./agents": {
+      "types": "./dist/agents/index.d.ts",
+      "default": "./dist/agents/index.js"
+    },
     "./connectors": {
       "types": "./dist/connectors/index.d.ts",
       "default": "./dist/connectors/index.js"
@@ -53,17 +73,17 @@
       "types": "./dist/connectors/discovery.d.ts",
       "default": "./dist/connectors/discovery.js"
     },
-    "./execution": {
-      "types": "./dist/execution/index.d.ts",
-      "default": "./dist/execution/index.js"
-    },
-    "./workspace": {
-      "types": "./dist/workspace/index.d.ts",
-      "default": "./dist/workspace/index.js"
-    },
     "./workflow-harness": {
       "types": "./dist/workflow-harness/index.d.ts",
       "default": "./dist/workflow-harness/index.js"
+    },
+    "./remote-session": {
+      "types": "./dist/remote-session/index.d.ts",
+      "default": "./dist/remote-session/index.js"
+    },
+    "./server": {
+      "types": "./dist/server/index.d.ts",
+      "default": "./dist/server/index.js"
     },
     "./scaffold": {
       "types": "./dist/scaffold.d.ts",
@@ -82,6 +102,7 @@
   "dependencies": {
     "@ai-sdk/mcp": "^2.0.65",
     "@inquirer/prompts": "^8.5.2",
+    "@types/json-schema": "7.0.15",
     "jiti": "^2.7.0",
     "just-bash": "^3.0.1",
     "zod": "^4.4.3"

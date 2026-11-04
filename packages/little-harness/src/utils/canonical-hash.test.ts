@@ -1,5 +1,5 @@
 import { expect, it } from "vitest";
-import { canonicalJson as rootCanonicalJson, sha256Hex as rootSha256Hex } from "../index.js";
+import { canonicalJson as internalsCanonicalJson, sha256Hex as internalsSha256Hex } from "../internals.js";
 import {
   canonicalJson as durabilityCanonicalJson,
   sha256Hex as durabilitySha256Hex,
@@ -28,9 +28,9 @@ it("serializes sparse arrays as canonical JSON null entries", () => {
   expect(stableHash(Array(1))).not.toBe(stableHash([]));
 });
 
-it("keeps root canonicalJson and sha256Hex exports bound to durability helpers", () => {
-  expect(rootCanonicalJson).toBe(durabilityCanonicalJson);
-  expect(rootSha256Hex).toBe(durabilitySha256Hex);
+it("keeps the internals canonicalJson and sha256Hex exports bound to durability helpers", () => {
+  expect(internalsCanonicalJson).toBe(durabilityCanonicalJson);
+  expect(internalsSha256Hex).toBe(durabilitySha256Hex);
 });
 
 it("returns a stable sha256-prefixed hash by default", () => {

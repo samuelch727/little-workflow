@@ -1,5 +1,4 @@
-import { asHarnessWorkflow, defineWorkflow } from "little-workflow";
-import type { WorkflowDefinition } from "little-workflow";
+import { asHarnessWorkflow, defineWorkflow } from "@little-stack/workflow";
 import type { LanguageModel } from "ai";
 import { z } from "zod";
 import { dreamerModel } from "../env";
@@ -63,8 +62,7 @@ export function createClusterCardsWorkflow(model: LanguageModel, planner?: unkno
   });
 }
 
-// See `incident-card.ts` for why the cast is required.
 export default asHarnessWorkflow(
-  createClusterCardsWorkflow(dreamerModel()) as unknown as WorkflowDefinition,
+  createClusterCardsWorkflow(dreamerModel()),
   { executionMode: "inline", definitionIdentity: { notApplicable: true } },
 );

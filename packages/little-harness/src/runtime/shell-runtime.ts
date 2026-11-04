@@ -1,9 +1,10 @@
 import { tool } from "ai";
 import * as path from "node:path";
 import { z } from "zod";
-import { diffSnapshots, snapshotFolder, type FolderSnapshot } from "../files/diff.js";
+import { diffSnapshots, snapshotFolder, snapshotFs, type FolderSnapshot } from "../files/diff.js";
 import { toHarnessPath, type ManagedRoot } from "../files/path-policy.js";
-import { sha256Hex } from "../ids.js";
+import { createEventId, sha256Hex } from "../ids.js";
+import { createHarnessFileMutationEvents } from "../remote-session/file-events.js";
 import { captureTraceContent } from "../trace/content.js";
 import { createTraceDiff } from "../trace/diff.js";
 import { createTraceErrorEnvelope } from "../trace/error.js";
@@ -14,12 +15,14 @@ import type {
   FileWriter,
   HarnessEvent,
   HarnessEventInput,
-  HarnessRuntime,
+  HarnessExecutionTier,
+  HarnessSandbox,
   HarnessRuntimeOptions,
-  HarnessRuntimeSystemHintsOptions,
+  HarnessSandboxSystemHintsOptions,
+  HarnessSandboxTiering,
+  HarnessSandboxUsage,
   HarnessWorkspaceMount,
   HarnessWorkspaceSpec,
-  JsonObject,
 } from "../types.js";
 import type { RuntimeToolBridge } from "./tool-bridge.js";
 
@@ -39,31 +42,50 @@ export type CreateShellRuntimeOptions = {
   execute(input: ShellCommandInput, context: { toolCallId: string }): Promise<ShellCommandResult>;
   toolBridge?: RuntimeToolBridge | undefined;
   runtime?: HarnessRuntimeOptions | undefined;
+  /** More lines for the system prompt about this environment, after the workspace's own. */
+  hints?: readonly string[] | undefined;
   emit?: ((event: HarnessEventInput) => Promise<HarnessEvent | void>) | undefined;
   emitToolEvents?: boolean | undefined;
   /** Defaults to the harness's standard trace configuration when omitted. */
   traceOptions?: ResolvedHarnessTraceOptions | undefined;
   files: FileWriter;
   dispose?: (() => Promise<void>) | undefined;
+  /**
+   * The tier this environment is, for the turn's `harness.runtime.usage` event. The just-bash
+   * adapters are `"tier-0"`; anything else is a real execution environment, the default.
+   */
+  tier?: HarnessExecutionTier | undefined;
+  /** Where commands run, for the usage event's `sandbox.provider` (default `"unknown"`). */
+  provider?: string | undefined;
+  /**
+   * The adapter's own account of what the turn used, when it has one (a remote sandbox that
+   * knows its instance shape and awake time). Without it, or when it returns nothing, the
+   * runtime reports `provider` and the active time it measured around each command.
+   */
+  usage?: (() => HarnessSandboxUsage | undefined) | undefined;
 };
 
 /**
- * Builds a HarnessRuntime (system hints + the `bash` shell tool) around any command
+ * Builds a HarnessSandbox (system hints + the `bash` shell tool) around any command
  * executor. All observable behavior — harness.runtime.command.* events, tool-call events,
  * workspace file-change events — lives here once, so in-process, subprocess, and remote
  * execution environments emit identical traces.
  */
-export function createShellRuntime(options: CreateShellRuntimeOptions): HarnessRuntime {
+export function createShellRuntime(options: CreateShellRuntimeOptions): HarnessSandbox {
   const { workspace, toolBridge } = options;
   const traceOptions = options.traceOptions ?? resolveTraceOptions(undefined, undefined);
+  const tier: HarnessExecutionTier = options.tier ?? "next-tier";
+  // What the turn used, measured here so every adapter reports it the same way.
+  let commands = 0;
+  let activeMs = 0;
 
   return {
-    systemHints(hintOptions?: HarnessRuntimeSystemHintsOptions) {
+    systemHints(hintOptions?: HarnessSandboxSystemHintsOptions) {
       const advertiseToolBridge =
         toolBridge !== undefined &&
         options.runtime?.bash !== false &&
         (hintOptions?.activeTools === undefined || hintOptions.activeTools.includes("bash"));
-      const hints = workspaceHints(workspace);
+      const hints = [...workspaceHints(workspace), ...(options.hints ?? [])];
       if (advertiseToolBridge) {
         hints.push(
           `Runtime JavaScript can call configured harness tools with js-exec. Available tools: ${
@@ -123,6 +145,8 @@ export function createShellRuntime(options: CreateShellRuntimeOptions): HarnessR
             exitCode: result.exitCode,
           };
           const durationMs = Date.now() - startedAt;
+          commands += 1;
+          activeMs += durationMs;
           if (before && options.emit) {
             await emitTrackedMountChanges(
               before,
@@ -182,6 +206,16 @@ export function createShellRuntime(options: CreateShellRuntimeOptions): HarnessR
       });
     },
     ...(options.dispose === undefined ? {} : { dispose: options.dispose }),
+    usage() {
+      return options.usage?.() ?? { provider: options.provider ?? "unknown", activeMs };
+    },
+    tiering(): HarnessSandboxTiering {
+      return {
+        tier,
+        commands: tier === "tier-0" ? { tier0: commands, nextTier: 0, denied: 0 } : { tier0: 0, nextTier: commands, denied: 0 },
+        escalations: 0,
+      };
+    },
   };
 }
 
@@ -239,7 +273,8 @@ function formatPathList(paths: readonly string[]): string {
 export type TrackedMountSnapshot = Record<string, FolderSnapshot>;
 
 /**
- * Snapshot every `trackChanges` mount's backing directory.
+ * Snapshot every `trackChanges` mount's backing directory (or folder, when the workspace
+ * lives in a just-bash filesystem).
  *
  * Exported so an execution environment that mutates a mount OUTSIDE a shell command —
  * a sandbox syncing its workspace back to the host at dispose, say — can bracket that
@@ -254,7 +289,10 @@ export async function snapshotTrackedMounts(
     if (mount.trackChanges !== true) {
       continue;
     }
-    snapshot[trackedRootLabel(mount)] = await snapshotFolder(mount.backingPath);
+    snapshot[trackedRootLabel(mount)] =
+      workspace.filesystem === undefined
+        ? await snapshotFolder(mount.backingPath)
+        : await snapshotFs(workspace.filesystem, mount.backingPath);
   }
   return snapshot;
 }
@@ -307,16 +345,15 @@ async function emitTrackedMountChanges(
     }
 
     for (const file of changes.deleted) {
-      await emit({
-        type: "harness.file.deleted",
-        metadata: {
-          path: trackedHarnessPath(root, file),
-          root,
-          source: "tool",
-          before: binaryMetadata(beforeSnapshot[file]!),
-          diff: { available: false, reason: "content_unavailable" },
-        },
-      });
+      const harnessPath = trackedHarnessPath(root, file);
+      for (const event of createHarnessFileMutationEvents({
+        occurrenceId: createEventId(),
+        kind: "deleted",
+        file: { path: harnessPath },
+        source: "tool",
+        before: binaryMetadata(beforeSnapshot[file]!),
+        diff: { available: false, reason: "content_unavailable" },
+      })) await emit(event);
     }
   }
 }
@@ -345,47 +382,28 @@ async function emitWrittenFileEvents(
   files: FileWriter,
 ): Promise<void> {
   const harnessPath = trackedHarnessPath(root, file);
-  const metadata = await runtimeFileMetadata(root, harnessPath, before, content, traceOptions, files);
-
-  await emit({ type, metadata });
-  await emit({ type: "harness.file.written_by_tool", metadata });
-
-  if (root === "artifacts") {
-    await emit({
-      type: "harness.artifact.created",
-      metadata: {
-        ...metadata,
-        artifact: {
+  const after = binaryMetadata(content);
+  const diff = redactionReasonForPath(harnessPath, traceOptions)
+    ? { available: false as const, reason: "redacted" as const }
+    : await createTraceDiff(before, content, traceOptions, { files, path: harnessPath });
+  const artifact = root === "artifacts"
+    ? {
           id: harnessPath,
           path: harnessPath,
           bytes: content.byteLength,
           sha256: sha256Hex(content),
-        },
-      },
-    });
-  }
-}
-
-async function runtimeFileMetadata(
-  root: string,
-  harnessPath: string,
-  before: Uint8Array | undefined,
-  content: Uint8Array,
-  traceOptions: ResolvedHarnessTraceOptions,
-  files: FileWriter,
-): Promise<JsonObject> {
-  return {
-    path: harnessPath,
-    root,
-    bytes: content.byteLength,
-    sha256: sha256Hex(content),
+      }
+    : undefined;
+  for (const event of createHarnessFileMutationEvents({
+    occurrenceId: createEventId(),
+    kind: type === "harness.file.created" ? "created" : "updated",
+    file: { path: harnessPath, bytes: after.bytes, sha256: after.sha256 },
     source: "tool",
-    ...(before ? { before: binaryMetadata(before) } : {}),
-    after: binaryMetadata(content),
-    diff: redactionReasonForPath(harnessPath, traceOptions)
-      ? { available: false as const, reason: "redacted" as const }
-      : await createTraceDiff(before, content, traceOptions, { files, path: harnessPath }),
-  };
+    ...(before === undefined ? {} : { before: binaryMetadata(before) }),
+    after,
+    diff,
+    ...(artifact === undefined ? {} : { artifact }),
+  })) await emit(event);
 }
 
 function binaryMetadata(content: Uint8Array): { bytes: number; sha256: string } {

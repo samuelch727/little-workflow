@@ -28,7 +28,7 @@ Little Workflow does not introduce a custom tool shape. Existing AI SDK tools ar
 `model()` wraps an AI SDK model object into a `ModelSlot` — a planner-visible execution model option that LWIR steps reference by stable slot id.
 
 ```ts
-import { model } from "little-workflow";
+import { model } from "@little-stack/workflow";
 import { openai } from "@ai-sdk/openai";
 
 // Minimum — slot id auto-derived from model name.
@@ -145,7 +145,7 @@ Two properties matter when you read a total:
 You can inspect registry metadata programmatically:
 
 ```ts
-import { getModelInfoFor } from "little-workflow";
+import { getModelInfoFor } from "@little-stack/workflow/internals";
 
 const info = getModelInfoFor("openai", "gpt-4o-mini");
 // → { description, capabilities, pricing, contextWindow } | undefined
@@ -165,13 +165,13 @@ AI SDK `Output.*` describes the target output shape for `ai.generate` steps in L
 
 `ai.generate` steps declare output mode in the LWIR `step.output` field. The worker harness validates the model's output against the declared schema before passing it to downstream steps.
 
-The workflow-level `outputSchema` (on `createLittleWorkflow`) is a Zod schema — not an `Output.*` value. `Output.*` is a step-level concept.
+The workflow-level `output` (on `defineWorkflow`) is a schema or an `output.*` mode — not an AI SDK `Output.*` value. `Output.*` is a step-level concept.
 
 ## Worker Harness + AI Step Execution
 
 The runtime no longer has a separate `RuntimeAiAdapter`. The worker harness owns all step execution:
 
-- `ai.generate` steps — the worker runs an AI SDK agent loop in the harness session, calling the model with the step's prompt, tools allowlist, and output schema.
+- `ai.generate` steps — the worker makes one AI SDK model call (`streamText` or `generateText`) in the harness session, with the step's prompt, `with.system` and output schema. It offers the model no tools; tool use is a `tool.call` step.
 - `code.run` steps — the default worker harness refuses to execute them (it validates the sandbox policy, then throws). A custom `worker.harness` must run the source, which receives `{input, tools}`.
 - `tool.call` steps — the worker invokes the named tool from the registry directly.
 
@@ -184,7 +184,7 @@ The harness is substitutable: `workflowHarness` is the SDK default; you can prov
 The planner's model is configured under `WorkflowDefinition.planner.model` — separate from the `models` array (which lists execution model options for LWIR steps):
 
 ```ts
-createLittleWorkflow({
+defineWorkflow({
   models: [
     model(openai("gpt-4o-mini")),   // LWIR can use this for steps
   ],
@@ -200,5 +200,5 @@ If `planner.model` is a raw AI SDK model (not a `ModelSlot`), the SDK auto-wraps
 ## Cross-References
 
 - Tool() API + MCP + code.run proxy: [Tools](/docs/v0.1.0-alpha/authoring/tools-and-capabilities)
-- Full createLittleWorkflow config: [Create A Workflow](/docs/v0.1.0-alpha/authoring/advanced-createlittleworkflow)
+- Full workflow config: [Workflow Config](/docs/v0.1.0-alpha/authoring/advanced-createlittleworkflow)
 - Harness contract: [SDK Implementation Spec](/docs/v0.1.0-alpha/internals/sdk-implementation)

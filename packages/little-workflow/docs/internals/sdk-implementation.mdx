@@ -14,7 +14,7 @@ Alpha is intentionally local and narrow: compile one developer-authored workflow
 Build the smallest SDK that proves this loop:
 
 ```txt
-createLittleWorkflow()
+defineWorkflow()
 -> normalize OrchestrationRequest
 -> planner harness session generates LWIR
 -> validator repairs or rejects
@@ -36,11 +36,11 @@ Alpha must not try to solve production distribution, sharded fan-out, tree reduc
 
 ## Package Boundaries
 
-The alpha SDK keeps these internal modules separate, even if they ship from one `little-workflow` package:
+The alpha SDK keeps these internal modules separate, even if they ship from one `@little-stack/workflow` package:
 
 | Module | Responsibility |
 | --- | --- |
-| `authoring` | `createLittleWorkflow()`, `model()`, `skill()`, schema/output normalization, type inference helpers. Planner + worker config validation. |
+| `authoring` | `defineWorkflow()`, `model()`, `skill()`, schema/output normalization, type inference helpers. Planner + worker config validation. |
 | `compiler` | OrchestrationRequest creation, LWIR generation via planner harness, validation, repair, and WorkflowVersion hashing. |
 | `lwir` | JSON Schema definitions, canonicalization, graph validation, expression validation, and alpha step type definitions. |
 | `harness/types.ts` | `Harness`, `HarnessTask`, `HarnessContext`, `HarnessResult`, `HarnessScope`, `HarnessRole` types. |
@@ -99,13 +99,13 @@ Alpha exposes one authoring front door, a tool registry, and one runner:
 
 ```ts
 import {
-  createLittleWorkflow,
   createToolRegistry,
+  defineWorkflow,
   localWorld,
-  runWorkflow,
   model,
+  runWorkflow,
   skill,
-} from "little-workflow";
+} from "@little-stack/workflow";
 import { openai } from "@ai-sdk/openai";
 import { tool } from "ai";
 import { z } from "zod";
@@ -119,29 +119,27 @@ const tools = createToolRegistry({
   }),
 });
 
-const workflow = createLittleWorkflow({
+const workflow = defineWorkflow({
   id: "candidate.review",
   description: "Review candidates against a job requirement.",
-  inputSchema: CandidateReviewInput,
-  outputSchema: CandidateReviewOutput,
+  input: CandidateReviewInput,
+  output: CandidateReviewOutput,
   models: [model(openai("gpt-4o-mini"))],
-  globalTools: ["parsePdf"],
+  tools: ["parsePdf"],
   planner: {
     model: openai("gpt-5"),
     system: "You design candidate-review workflows.",
   },
 });
 
-const result = await runWorkflow({
+const result = await runWorkflow(workflow, input, {
   world: localWorld({ dataDir: ".little-workflow", maxConcurrentSteps: 8 }),
-  workflows: workflow,
-  input,
   tools,
   timeout: "30m",
 });
 ```
 
-Implementation types should be generic enough to infer workflow input and output from schemas:
+Implementation types should be generic enough to infer workflow input and output from schemas. `defineWorkflow` normalizes its options into this internal shape: `input` becomes `inputSchema`, `output` an output mode, `model`/`models` the model slots, `tools` the `globalTools` names (plus an inline registry for AI SDK tools), and `plan` a fixed-plan planner:
 
 ```ts
 type WorkflowDefinition<TInput = unknown, TOutput = unknown> = {
@@ -241,7 +239,7 @@ Worker execution is unified through the harness. The previous `RuntimeAiAdapter`
 
 ```txt
 execute_step dispatch in workflowHarness:
-  - ai.generate  → runAgentLoop (model in agent loop; tool allowlist enforced)
+  - ai.generate  → runAiGenerateStep (one model call; no tools or bash offered)
   - code.run     → executeCodeRunStep (direct execute; tools proxy injected; no agent loop)
   - tool.call    → executeToolCallStep (single named tool, direct invocation)
   - decision     → executeDecisionStep (expression evaluator; no model, no tools)
@@ -259,8 +257,10 @@ The `tools` proxy is constructed from the full `ToolRegistry`. Each tool invocat
 ```ts
 async function executeCodeRunStep(task, ctx): Promise<HarnessResult> {
   const toolsProxy = createCodeRunToolsProxy(ctx.tools, ctx.recorder, task.stepContext);
-  const fn = new Function("input", "tools", `return (${task.step.with.source})({ input, tools });`);
-  const output = await fn(task.stepInput, toolsProxy);
+  // Load task.step.with.files in an isolated runtime that enforces task.step.with.sandbox,
+  // then call the entrypoint's exported run({ input, tools }).
+  const run = await loadEntrypointInSandbox(task.step.with);
+  const output = await run({ input: task.stepInput, tools: toolsProxy });
   validateOutput(output, task.step.output.schema);
   return { kind: "execute_step", output, artifactRefs: [] };
 }
@@ -359,7 +359,7 @@ Event sequencing by task kind:
 | Task kind | Sequence |
 | --- | --- |
 | `plan` / `orchestrate` / `fix_step` | `harness.session.started` → (`harness.model.called` → `harness.model.responded` → `harness.tool_call.*` per turn) × turns → `harness.session.completed` |
-| `execute_step` (ai.generate) | `harness.session.started` → agent-loop events × turns → `harness.session.completed` |
+| `execute_step` (ai.generate) | `harness.session.started` → `harness.execute_step.started` → `harness.model.called` → `harness.model.responded` → `harness.execute_step.succeeded` → `harness.session.completed` (one model call, no tool calls) |
 | `execute_step` (code.run) | `harness.session.started` → `harness.execute_step.started` → `harness.tool_call.*` (caller: "code") → `harness.execute_step.succeeded` → `harness.session.completed` |
 | `execute_step` (tool.call) | `harness.session.started` → `harness.execute_step.started` → single `harness.tool_call.*` → `harness.execute_step.succeeded` → `harness.session.completed` |
 | `execute_step` (decision) | `harness.session.started` → `harness.execute_step.started` → `harness.execute_step.succeeded` → `harness.session.completed` |
@@ -372,7 +372,7 @@ Event sequencing by task kind:
 WorkflowDefinitionHash = sha256(canonicalJson(WorkflowDefinitionSnapshot));
 ```
 
-Stable at `createLittleWorkflow()` time. Includes: `id`, `description`, `inputSchemaHash`, `outputSchemaHash`, `modelSlots`, `plannerConfig` (model slot id + harness id + system hash + skills hash), `workerConfig`, `globalTools`, `memoryConfig`.
+Stable at `defineWorkflow()` time. Includes: `id`, `description`, `inputSchemaHash`, `outputSchemaHash`, `modelSlots`, `plannerConfig` (model slot id + harness id + system hash + skills hash), `workerConfig`, `globalTools`, `memoryConfig`.
 
 ### `WorkflowVersion` (unchanged)
 

@@ -12,7 +12,14 @@ The Fixer is a `fix_step` harness session spawned when a `code.run` step fails a
   "id": "compute-score",
   "uses": "code.run",
   "with": {
-    "source": "async ({ input, tools }) => { /* ... */ }"
+    "entrypoint": "score.ts",
+    "files": {
+      "score.ts": {
+        "content": "export async function run({ input }) {\n  return { score: input.signals.length / 10 };\n}",
+        "sha256": "sha256:1ed396c7cbeba5c323250026707a76c1e1ad3f62572334094e5167c357c6de7c"
+      }
+    },
+    "sandbox": { "network": "deny", "env": "deny", "fs": "deny" }
   },
   "output": {
     "mode": "object",
@@ -35,7 +42,8 @@ The Fixer is a `fix_step` harness session spawned when a `code.run` step fails a
 ```ts
 // In executeCodeRunStep():
 try {
-  result = await runCodeInSandbox(step.with.source, { input, tools });
+  // step.with holds the pinned `files`, the `entrypoint` and the `sandbox` policy.
+  result = await runCodeInSandbox(step.with, { input, tools });
   validateOutputAgainstSchema(result, step.output.schema);
 } catch (err) {
   if (step.onFailure?.fixer && priorFixAttempts < step.onFailure.fixer.maxAttempts) {
@@ -92,7 +100,7 @@ You are fixing a code.run step that failed. The original source, the error, and 
 Write modified source to scratch, run it with `node`, inspect output, iterate. When the output matches the schema, return the fixed source and the correct output.
 ```
 
-The original code body and error message are included in the initial conversation turn (via `task.step.with.source` and `task.originalAttemptError`).
+The original source files and error message are included in the initial conversation turn (via `task.step.with.files`, `task.step.with.entrypoint` and `task.originalAttemptError`).
 
 ## Fixer Session Lifecycle
 

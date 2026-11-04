@@ -1,6 +1,7 @@
 import defaultMdxComponents from 'fumadocs-ui/mdx';
 import type { MDXComponents } from 'mdx/types';
 import { ApiField, ApiParameters, ApiTypeBlock } from '@/components/api-reference';
+import { BoundaryCallout } from '@/components/boundary-callout';
 import { Mermaid } from '@/components/mermaid';
 
 export function getMDXComponents(components?: MDXComponents) {
@@ -9,6 +10,7 @@ export function getMDXComponents(components?: MDXComponents) {
     ApiField,
     ApiParameters,
     ApiTypeBlock,
+    BoundaryCallout,
     Mermaid,
     ...components,
   } satisfies MDXComponents;

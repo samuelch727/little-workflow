@@ -4,14 +4,20 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  localWorld,
+} from "./index.js";
+import {
+  registerWorkflowVersion,
+} from "./entries/lwir.js";
+import type {
+  LwirWorkflow,
+} from "./entries/lwir.js";
+import {
   appendEvent,
   canonicalJson,
   listRunIds,
-  localWorld,
-  registerWorkflowVersion,
   WorldPathError,
-  type LwirWorkflow,
-} from "./index.js";
+} from "./entries/internals.js";
 import {
   readStoredWorkflowVersion,
   registerStoredWorkflowVersion,

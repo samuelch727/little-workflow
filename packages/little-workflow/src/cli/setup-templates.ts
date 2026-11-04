@@ -1,32 +1,45 @@
-import { renderAgentSource } from "little-harness/scaffold";
+import { renderAgentSource } from "@little-stack/harness/scaffold";
+
+/** The starter workflow's id. It is also its Harness tool name, manifest key and folder name. */
+export const STARTER_WORKFLOW = "starter_echo";
 
 /** Both the headless CLI and Next import this server-neutral agent module. */
 export function agentSource(provider: string, model: string, workflow: boolean): Record<string, string> {
   return {
-    "agent.ts": `import { createHarness, localHost } from "little-harness";
-import { demoModel } from "./demo-model.ts";
-import echo from "./tools/echo.ts";
-${workflow ? 'import { asHarnessWorkflow } from "little-workflow";\nimport workflow from "./workflows/echo/workflow.ts";\n' : ''}
-// Explicit opt-in: LITTLE_DEMO=0 enables real provider calls and their charges.
-const base = process.env.LITTLE_DEMO === "0"
-  ? (await import("./live.ts")).default
-  : createHarness({ model: demoModel, host: localHost(), system: "Help the user." });
+    "agent.ts": `import { createHarness, localHost } from "@little-stack/harness";
+${workflow ? 'import { loadWorkflow } from "@little-stack/workflow";\n' : ""}import { demoModel } from "./demo-model.ts";
 
+// Keyless by default. Set LITTLE_DEMO=0 to call the live provider in live-model.ts (real calls and charges).
+const model = process.env.LITTLE_DEMO === "0" ? (await import("./live-model.ts")).model : demoModel;
+
+// The system prompt is instructions.md; tools/ is discovered next to this file.
 export default createHarness({
-  model: base.config.model,
-  system: base.config.system,
+  model,
   host: localHost(),
-  tools: { echo },
-${workflow ? `  workflows: [asHarnessWorkflow(workflow, {
-    // Increment this identity when changing the workflow definition.
-    definitionIdentity: "little-setup.echo@1",
-    executionMode: "durable",
-  })],\n` : ''}});
+${workflow ? `  workflows: [
+    await loadWorkflow(new URL("./workflows/${STARTER_WORKFLOW}", import.meta.url), { executionMode: "durable" }),
+  ],
+` : ""}});
 `,
-    "live.ts": renderAgentSource({ provider, model }),
+    "live-model.ts": liveModelSource(provider, model),
     "demo-model.ts": demoModelSource(workflow),
-    ...(workflow ? { "workflows/echo/workflow.ts": keylessWorkflowSource() } : {}),
+    ...(workflow ? { [`workflows/${STARTER_WORKFLOW}/workflow.ts`]: starterWorkflowSource() } : {}),
   };
+}
+
+/**
+ * The provider module exports the live `model` only. It reuses the Harness scaffold's provider
+ * rendering (imports, env checks, install comment) and drops the harness it wraps the model in.
+ */
+export function liveModelSource(provider: string, model: string): string {
+  const agent = renderAgentSource({ provider, model });
+  const harnessImport = 'import { createHarness, localHost } from "@little-stack/harness";\n';
+  const harness = /export default createHarness\(\{\n {2}model: (.+),\n {2}system: .*\n {2}host: localHost\(\),\n\}\);\n$/u;
+  const match = harness.exec(agent);
+  if (!agent.startsWith(harnessImport) || match === null) {
+    throw new Error(`Unexpected Harness agent template for provider '${provider}'.`);
+  }
+  return agent.slice(harnessImport.length, match.index) + `export const model = ${match[1]};\n`;
 }
 
 function demoModelSource(workflow: boolean): string {
@@ -45,7 +58,7 @@ export const demoModel = new MockLanguageModelV3({
       start(controller) {
         controller.enqueue({ type: "stream-start", warnings: [] });
 ${workflow ? `        if (!options.prompt.some((message) => message.role === "tool")) {
-          controller.enqueue({ type: "tool-call", toolCallId: "demo-echo", toolName: "starter_echo", input: JSON.stringify({ value: "hello" }) });
+          controller.enqueue({ type: "tool-call", toolCallId: "demo", toolName: "${STARTER_WORKFLOW}", input: JSON.stringify({ value: "hello" }) });
           controller.enqueue({ type: "finish", finishReason: { unified: "tool-calls", raw: "tool-calls" }, usage });
           controller.close();
           return;
@@ -62,44 +75,35 @@ ${workflow ? `        if (!options.prompt.some((message) => message.role === "to
 `;
 }
 
-/** Shared, deterministic workflow used by unified setup; no provider-dependent planning. */
-export function keylessWorkflowSource(): string {
-  return `import { defineWorkflow } from "little-workflow";
+/** The starter workflow: a fixed plan, so it runs durably without a model or a key. */
+export function starterWorkflowSource(): string {
+  return `import { defineWorkflow } from "@little-stack/workflow";
 import { tool } from "ai";
 import { z } from "zod";
-import { demoModel } from "../../demo-model.ts";
+
+const input = z.object({ value: z.string() });
 
 export default defineWorkflow({
-  id: "starter.echo",
-  description: "Run a durable, keyless echo example.",
-  model: demoModel,
-  input: { type: "object", properties: { value: { type: "string" } }, required: ["value"], additionalProperties: false },
+  id: "${STARTER_WORKFLOW}",
+  description: "Echo a value through a durable, keyless workflow.",
+  input,
   tools: {
     echo: tool({
-      description: "Return a deterministic starter response.",
-      inputSchema: z.object({}),
-      execute: async () => ({ ok: true, message: "Workflow completed without a model call." }),
+      description: "Return the value it was given.",
+      inputSchema: input,
+      execute: async ({ value }) => ({ echoed: value }),
     }),
   },
-  planner: {
-    model: demoModel,
-    harness: {
-      harnessId: "little-setup-echo@1",
-      async run() {
-        return {
-          kind: "plan",
-          lwir: {
-            apiVersion: "littleworkflow.dev/v0.1",
-            kind: "Workflow",
-            metadata: { name: "starter.echo" },
-            input: { schema: { type: "object", properties: { value: { type: "string" } }, required: ["value"], additionalProperties: false } },
-            output: { schema: true },
-            permissions: { models: [], tools: ["echo"], secrets: [], network: [] },
-            steps: [{ id: "echo", uses: "tool.call", with: { tool: "echo", args: {} }, output: { mode: "json", schema: true } }],
-          },
-        };
+  // A fixed plan runs as written, with no model. Replace it with \`model\` to let a planner draft the steps.
+  plan: {
+    steps: [
+      {
+        id: "echo",
+        uses: "tool.call",
+        with: { tool: "echo", args: { value: "{{ input.value }}" } },
+        output: { mode: "json", schema: true },
       },
-    },
+    ],
   },
 });
 `;
@@ -110,25 +114,23 @@ export function smokeSource(agents: string, workflow: boolean): string {
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { localHost, streamHarness, loadHarness } from "little-harness";
-
-// Set BEFORE importing definitions, even if the developer enabled a live provider.
+import { loadHarness, localHost, streamHarness } from "@little-stack/harness";
+${workflow ? 'import { loadWorkflow, localWorld } from "@little-stack/workflow";\n' : ""}
+// Keyless even when LITTLE_DEMO=0 is exported: loadHarness reads it when it imports agent.ts.
 process.env.LITTLE_DEMO = "1";
+const agentDir = join(process.cwd(), ${JSON.stringify(`${agents}/support`)});
 const dir = await mkdtemp(join(tmpdir(), "little-smoke-"));
 try {
-  const agent = await loadHarness(join(process.cwd(), "${agents}/support"));
-  const host = localHost({ dataDir: join(dir, "harness") });
-  const harness = { ...agent, sessions: host.sessions, config: { ...agent.config, host } };
+  const harness = await loadHarness(agentDir, { host: localHost({ dataDir: join(dir, "harness") }) });
   const result = streamHarness({ harness, messages: [{ id: "smoke", role: "user", parts: [{ type: "text", text: "hello" }] }] });
   const body = await result.toUIMessageStreamResponse().text();
   await result.finished;
   assert.match(body, /Hello from Little/);
-${workflow ? `  const { localWorld, loadWorkflow } = await import("little-workflow");
-  const workflow = await loadWorkflow(join(process.cwd(), "${agents}/support/workflows/echo"));
+${workflow ? `  assert.match(body, /${STARTER_WORKFLOW}/);
+  const workflow = await loadWorkflow(join(agentDir, "workflows/${STARTER_WORKFLOW}"));
   const run = await workflow.run({ value: "hello" }, { world: localWorld({ dataDir: join(dir, "workflow") }) });
   assert.equal(run.status, "completed");
-  assert.deepEqual(run.output, { ok: true, message: "Workflow completed without a model call." });
-  assert.match(body, /starter_echo/);
+  assert.deepEqual(run.output, { echoed: "hello" });
 ` : ''}  console.log("Little keyless smoke passed${workflow ? ' (Harness + durable Workflow)' : ''}.");
 } finally {
   await rm(dir, { recursive: true, force: true });
@@ -143,15 +145,13 @@ export function nextFiles(app: string, agents: string, route: string, page: stri
     [`${agents}/server.ts`]: `import "server-only";
 import * as nodeModule from "node:module";
 import { join } from "node:path";
-import type { Harness } from "little-harness";
-import type { StreamHarnessOptions } from "little-harness/execution";
+import type { Harness, StreamHarnessOptions } from "@little-stack/harness";
 
 // Native Node loading keeps filesystem/native runtime packages out of Next's bundle
 // without rewriting the application's config. Run from the project root.
 // Binding first prevents webpack from replacing this native runtime loader.
 const requirePackage = nodeModule.createRequire.bind(nodeModule)(join(process.cwd(), "package.json"));
-const { loadHarness } = requirePackage("little-harness/workspace") as typeof import("little-harness/workspace");
-const { streamHarness } = requirePackage("little-harness/execution") as typeof import("little-harness/execution");
+const { loadHarness, streamHarness } = requirePackage("@little-stack/harness") as typeof import("@little-stack/harness");
 let ready: Promise<Harness> | undefined;
 
 export function getAgent(): Promise<Harness> {

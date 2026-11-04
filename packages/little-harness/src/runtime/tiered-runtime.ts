@@ -1,10 +1,13 @@
 import { HarnessInputError } from "../errors.js";
 import type {
-  CreateExecutionEnvironmentOptions,
+  CreateSandboxOptions,
   HarnessEvent,
   HarnessEventInput,
-  HarnessExecutionEnvironmentFactory,
-  HarnessRuntime,
+  HarnessExecutionTier,
+  HarnessSandboxFactory,
+  HarnessSandbox,
+  HarnessSandboxTiering,
+  HarnessSandboxUsage,
   HarnessRuntimeOptions,
   HarnessWorkspaceSpec,
   JsonObject,
@@ -17,7 +20,7 @@ import {
   type Tier0ClassificationPolicy,
   type Tier0EmulationGap,
 } from "./command-classification.js";
-import { createJustBashRuntime } from "./just-bash-runtime.js";
+import { justBashSandbox } from "./just-bash-runtime.js";
 import {
   createShellRuntime,
   emitTrackedMountFileChanges,
@@ -27,13 +30,13 @@ import {
 } from "./shell-runtime.js";
 import type { Tier0CapabilityMatrix } from "./tier0-capability-matrix.js";
 
-export type TieredExecutionEnvironmentOptions<TExtraBody = unknown> = {
+export type TieredSandboxOptions<TExtraBody = unknown> = {
   /**
-   * The tier every command starts on. Defaults to `createJustBashRuntime` (in-process
+   * The tier every command starts on. Defaults to `justBashSandbox()` (in-process
    * just-bash), matching the package default; pass `subprocessSandbox()` for the hardened
    * Tier-0 adapter (see `defenseInDepthForAdapter`).
    */
-  readonly tier0?: HarnessExecutionEnvironmentFactory<TExtraBody> | undefined;
+  readonly tier0?: HarnessSandboxFactory<TExtraBody> | undefined;
   /**
    * The tier escalation switches to, provisioned lazily on the first escalation and never
    * before — a turn that never escalates never pays for it. When omitted, escalation is
@@ -41,7 +44,7 @@ export type TieredExecutionEnvironmentOptions<TExtraBody = unknown> = {
    * instead of running: a tiered environment without a higher tier is a misconfiguration,
    * not a silent downgrade to Tier-0.
    */
-  readonly nextTier?: HarnessExecutionEnvironmentFactory<TExtraBody> | undefined;
+  readonly nextTier?: HarnessSandboxFactory<TExtraBody> | undefined;
   /** Caller policy for {@link classifyCommand}. Denied commands run on no tier at all. */
   readonly policy?: Tier0ClassificationPolicy | undefined;
   /** Pin the capability matrix (tests, or a host pinning an older matrix version). */
@@ -49,7 +52,7 @@ export type TieredExecutionEnvironmentOptions<TExtraBody = unknown> = {
 };
 
 /** Which tier a command ran on. Recorded on tier events; never shown to the model. */
-export type HarnessExecutionTier = "tier-0" | "next-tier";
+export type { HarnessExecutionTier } from "../types.js";
 
 /** The out-of-band events this layer adds to a turn's trace. Never model-visible. */
 type HarnessTierEventType =
@@ -106,10 +109,10 @@ const MESSAGE_PREFIX = "little-harness:";
  * directory are the entire durable surface; functions, aliases, and shell options do not
  * survive a command boundary on Tier-0 and therefore have nothing to carry.
  */
-export function tieredExecutionEnvironment<TExtraBody = unknown>(
-  tiers: TieredExecutionEnvironmentOptions<TExtraBody> = {},
-): HarnessExecutionEnvironmentFactory<TExtraBody> {
-  const tier0Factory = tiers.tier0 ?? createJustBashRuntime;
+export function tieredSandbox<TExtraBody = unknown>(
+  tiers: TieredSandboxOptions<TExtraBody> = {},
+): HarnessSandboxFactory<TExtraBody> {
+  const tier0Factory = tiers.tier0 ?? justBashSandbox();
   return async (options) => {
     const innerOptions = subordinateTierOptions(options);
     const tier0 = tierExecutor(await tier0Factory(innerOptions));
@@ -140,6 +143,10 @@ export function tieredExecutionEnvironment<TExtraBody = unknown>(
       systemHints: (hintOptions) => tier0.runtime.systemHints(hintOptions),
       shellTool: () => shell.shellTool(),
       dispose: () => disposeTiers(tiering, options),
+      // What the turn used is the active tier's account, not the wrapper's: the wrapper
+      // measured every command too, but the infrastructure bill is the higher tier's.
+      usage: () => tiering.usage(),
+      tiering: () => tiering.tiering(),
     };
   };
 }
@@ -178,7 +185,7 @@ const TIER_OWNED_EVENT_TYPES: ReadonlySet<string> = new Set([
  */
 async function disposeTiers<TExtraBody>(
   tiering: { escalated(): boolean; dispose(): Promise<void> },
-  options: CreateExecutionEnvironmentOptions<TExtraBody>,
+  options: CreateSandboxOptions<TExtraBody>,
 ): Promise<void> {
   const emit = options.emit;
   // Snapshotting reads every file under every tracked mount, so a turn that
@@ -217,8 +224,8 @@ async function disposeTiers<TExtraBody>(
  * event to report, and no outer layer duplicates it.
  */
 function subordinateTierOptions<TExtraBody>(
-  options: CreateExecutionEnvironmentOptions<TExtraBody>,
-): CreateExecutionEnvironmentOptions<TExtraBody> {
+  options: CreateSandboxOptions<TExtraBody>,
+): CreateSandboxOptions<TExtraBody> {
   const emit = options.emit;
   return {
     ...options,
@@ -242,17 +249,22 @@ function untrackedWorkspace(workspace: HarnessWorkspaceSpec): HarnessWorkspaceSp
 
 /** One tier, reduced to the only thing the switch needs from it: a command executor. */
 type TierExecutor = {
-  readonly runtime: HarnessRuntime;
+  readonly runtime: HarnessSandbox;
   execute(input: ShellCommandInput, toolCallId: string): Promise<ShellCommandResult>;
+  /**
+   * The model's commands this tier ran, and the time it spent on them and on the switch's
+   * own probe and carry-over, measured here so a tier with no usage() is still accounted for.
+   */
+  readonly meter: { commands: number; activeMs: number };
 };
 
 /**
  * Adapts an execution-environment runtime to the executor port by calling its `bash` tool
  * directly. Going through the tool (rather than a private executor hook) is what lets any
- * `HarnessExecutionEnvironmentFactory` — including a remote or compute-backed one from
+ * `HarnessSandboxFactory` — including a remote or compute-backed one from
  * another package — be a tier without implementing anything extra.
  */
-function tierExecutor(runtime: HarnessRuntime): TierExecutor {
+function tierExecutor(runtime: HarnessSandbox): TierExecutor {
   const shell = runtime.shellTool();
   const execute = (shell as { execute?: unknown }).execute;
   if (typeof execute !== "function") {
@@ -261,10 +273,19 @@ function tierExecutor(runtime: HarnessRuntime): TierExecutor {
   const call = execute.bind(shell) as (input: ShellCommandInput, options: unknown) => Promise<unknown>;
   return {
     runtime,
+    meter: { commands: 0, activeMs: 0 },
     async execute(input, toolCallId) {
       return shellCommandResult(await call(input, { toolCallId, messages: [] }));
     },
   };
+}
+
+/**
+ * A tier's own account of the turn, or the one measured around its commands when it has
+ * none. "unknown" is the honest provider for a tier that did not say where it ran.
+ */
+function tierUsage(tier: TierExecutor): HarnessSandboxUsage {
+  return tier.runtime.usage?.() ?? { provider: "unknown", activeMs: tier.meter.activeMs };
 }
 
 function shellCommandResult(value: unknown): ShellCommandResult {
@@ -297,8 +318,8 @@ type EscalationCause = {
 
 type CreateTierSwitchOptions<TExtraBody> = {
   readonly tier0: TierExecutor;
-  readonly innerOptions: CreateExecutionEnvironmentOptions<TExtraBody>;
-  readonly nextTierFactory: HarnessExecutionEnvironmentFactory<TExtraBody> | undefined;
+  readonly innerOptions: CreateSandboxOptions<TExtraBody>;
+  readonly nextTierFactory: HarnessSandboxFactory<TExtraBody> | undefined;
   readonly runtime: HarnessRuntimeOptions | undefined;
   readonly policy: Tier0ClassificationPolicy | undefined;
   readonly matrix: Tier0CapabilityMatrix | undefined;
@@ -327,6 +348,9 @@ function createTierSwitch<TExtraBody>(options: CreateTierSwitchOptions<TExtraBod
   execute(input: ShellCommandInput, toolCallId: string): Promise<ShellCommandResult>;
   /** Whether a higher tier was actually built, and so could write at dispose. */
   escalated(): boolean;
+  /** The active tier's usage: the higher tier's once the turn escalated, else Tier-0's. */
+  usage(): HarnessSandboxUsage;
+  tiering(): HarnessSandboxTiering;
   dispose(): Promise<void>;
 } {
   const policyDenies = (options.policy?.denyCommands?.length ?? 0) > 0;
@@ -334,6 +358,8 @@ function createTierSwitch<TExtraBody>(options: CreateTierSwitchOptions<TExtraBod
   let tier0Executed = false;
   let next: NextTierState = { status: "unprovisioned" };
   let provisioning: Promise<ProvisionResult> | undefined;
+  let denied = 0;
+  let escalations = 0;
 
   const emit = async (type: HarnessTierEventType, metadata: JsonObject): Promise<void> => {
     await options.emit?.({ type, metadata });
@@ -400,6 +426,7 @@ function createTierSwitch<TExtraBody>(options: CreateTierSwitchOptions<TExtraBod
       // One switch, one event: a second command that reached the same conclusion joined a
       // switch that already happened rather than causing another.
       active = "next-tier";
+      escalations += 1;
       await emit("harness.runtime.tier.escalated", causeMetadata(cause));
     }
     return { ok: true, detail: "" };
@@ -411,6 +438,7 @@ function createTierSwitch<TExtraBody>(options: CreateTierSwitchOptions<TExtraBod
   ): Promise<ShellCommandResult> => {
     if (active === "tier-0") {
       tier0Executed = true;
+      options.tier0.meter.commands += 1;
       return runOnTier(options.tier0, input, toolCallId);
     }
     const tier = next.status === "ready" ? next.tier : undefined;
@@ -418,6 +446,7 @@ function createTierSwitch<TExtraBody>(options: CreateTierSwitchOptions<TExtraBod
       // Unreachable: `active` only leaves "tier-0" after a successful provision.
       return refusal("the higher tier is no longer available");
     }
+    tier.meter.commands += 1;
     return runOnTier(tier, input, toolCallId);
   };
 
@@ -425,6 +454,7 @@ function createTierSwitch<TExtraBody>(options: CreateTierSwitchOptions<TExtraBod
     async execute(input, toolCallId) {
       const classification = classify(input.command);
       if (classification?.decision === "deny") {
+        denied += 1;
         await emit("harness.runtime.command.denied", {
           command: input.command,
           reasons: classification.reasons,
@@ -468,6 +498,16 @@ function createTierSwitch<TExtraBody>(options: CreateTierSwitchOptions<TExtraBod
       return runOnActiveTier(input, toolCallId);
     },
     escalated: () => next.status === "ready",
+    usage: () => tierUsage(next.status === "ready" ? next.tier : options.tier0),
+    tiering: () => ({
+      tier: active,
+      commands: {
+        tier0: options.tier0.meter.commands,
+        nextTier: next.status === "ready" ? next.tier.meter.commands : 0,
+        denied,
+      },
+      escalations,
+    }),
     async dispose() {
       const tier = next.status === "ready" ? next.tier : undefined;
       try {
@@ -486,6 +526,8 @@ async function runOnTier(
   input: ShellCommandInput,
   toolCallId: string,
 ): Promise<ShellCommandResult> {
+  // The state probe and carry-over are not commands, but they are time the tier spent.
+  const startedAt = Date.now();
   try {
     return await tier.execute(input, toolCallId);
   } catch (error) {
@@ -496,6 +538,8 @@ async function runOnTier(
       stderr: `${MESSAGE_PREFIX} the execution tier failed to run this command: ${describeError(error)}\n`,
       exitCode: 1,
     };
+  } finally {
+    tier.meter.activeMs += Date.now() - startedAt;
   }
 }
 
@@ -632,7 +676,7 @@ function singleQuote(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
-async function disposeRuntime(runtime: HarnessRuntime, options?: { rethrow?: boolean }): Promise<void> {
+async function disposeRuntime(runtime: HarnessSandbox, options?: { rethrow?: boolean }): Promise<void> {
   try {
     await runtime.dispose?.();
   } catch (error) {

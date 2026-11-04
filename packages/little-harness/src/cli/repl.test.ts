@@ -330,6 +330,7 @@ it("prints parked continuation summaries and returns to the prompt", async () =>
     );
 
     expect(stream).toHaveBeenCalledOnce();
+    expect(stream).toHaveBeenCalledWith(expect.objectContaining({ trigger: { kind: "cli" } }));
     expect(out.join("")).toContain("Parked: cont_1 waiting for task_1");
     expect(out.join("")).not.toContain("unexpected");
   });

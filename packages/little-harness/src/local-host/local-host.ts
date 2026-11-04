@@ -1,8 +1,7 @@
 import type {
-  CreateExecutionEnvironmentOptions,
   HarnessEvent,
   HarnessEventInput,
-  HarnessExecutionEnvironmentFactory,
+  HarnessSandboxFactory,
   HarnessHost,
   HarnessOrchestrationServices,
   PersistentDir,
@@ -11,10 +10,11 @@ import { preparePersistentDirs } from "../persistent-dir/commit.js";
 import { stageResolvedSkills } from "../skills/stage-skills.js";
 import { createLocalHarnessDurableServices } from "./durable-services.js";
 import {
-  resolveExecutionEnvironment,
-  type HarnessExecutionEnvironmentMode,
+  resolveSandbox,
+  type HarnessSandboxMode,
 } from "./execution-environment.js";
 import { LocalSessionQueue, type LocalSessionQueueOptions } from "./queue.js";
+import { turnSandboxOptions } from "./sandbox-options.js";
 import { resolveLocalHostPaths, type LocalHostPathOptions } from "./paths.js";
 import { LocalSessionStore, type LocalHarnessSession } from "./session-store.js";
 import { LocalTrace } from "./trace.js";
@@ -23,18 +23,18 @@ import { localSessionWorkspace } from "./workspace-spec.js";
 export type LocalHostOptions<TExtraBody = unknown> = LocalHostPathOptions &
   LocalSessionQueueOptions & {
     /**
-     * Execution environment used for runtime (bash) turns: a built-in mode, or a factory to
-     * run agent commands elsewhere (subprocess, remote, …) without changing session or tool
-     * wiring.
+     * The sandbox agent (bash) commands run in: a built-in mode, or a sandbox builder such as
+     * `subprocessSandbox()`, `tieredSandbox({ ... })` or an adapter's, to run them elsewhere
+     * without changing session or tool wiring.
      *
      * Defaults to `"auto"`, which keeps Tier-0 just-bash in the host process only for turns
      * that can neither execute model-authored code nor reach the network, and takes the
      * subprocess sandbox otherwise. `"in-process"` forces the in-process path for every turn:
      * a compatibility layer for trusted tool patterns, not an isolation boundary.
      */
-    executionEnvironment?:
-      | HarnessExecutionEnvironmentMode
-      | HarnessExecutionEnvironmentFactory<TExtraBody>;
+    sandbox?:
+      | HarnessSandboxMode
+      | HarnessSandboxFactory<TExtraBody>;
     /**
      * Orchestration services (durable ledgers) backing tasks, continuations, wakeups, and
      * workflow queues. Defaults to the file-backed ledgers under the host's data dir;
@@ -57,6 +57,7 @@ export function localHost<TExtraBody = unknown>(
     kind: "local",
     sessions,
     durable,
+    dataDir: paths.dataDir,
     runExclusive(session, runOptions, fn) {
       return queue.run(session.id, fn, { rejectIfBusy: runOptions.rejectIfBusy ?? false });
     },
@@ -68,6 +69,7 @@ export function localHost<TExtraBody = unknown>(
       const preparedPersistentDirs = await preparePersistentDirs({
         hostPaths: paths,
         session: localSession,
+        roots: localSession.paths,
         persistentDirs: persistentDirs as PersistentDir<TExtraBody>[],
         extraBody,
       });
@@ -76,57 +78,22 @@ export function localHost<TExtraBody = unknown>(
 
       return {
         files: session.files,
+        dataDir: paths.dataDir,
         trace: trace.ref,
         orchestration: durable,
         emit,
         stageSkills: (skills) => stageResolvedSkills(localSession.paths.root, skills),
         loadPersistentDirs: preparedPersistentDirs.load,
         commitPersistentDirs: preparedPersistentDirs.commit,
-        createRuntime: async (runtimeOptions) => {
-          const environmentOptions: CreateExecutionEnvironmentOptions<TExtraBody> = {
-            workspace: localSessionWorkspace(localSession),
-            files: session.files,
-            emit: runtimeOptions.emit ?? emit,
-          };
-          if (runtimeOptions.tools !== undefined) {
-            environmentOptions.tools = runtimeOptions.tools;
-            // The environment factory never sees the session, so the host supplies the
-            // default execution context for bridge-invoked tools.
-            environmentOptions.toolContext = runtimeOptions.toolContext ?? {
-              session,
-              files: session.files,
-              artifacts: session.artifacts,
-              ...(runtimeOptions.extraBody === undefined
-                ? {}
-                : { extraBody: runtimeOptions.extraBody }),
-              ...(runtimeOptions.abortSignal === undefined
-                ? {}
-                : { abortSignal: runtimeOptions.abortSignal }),
-            };
-          }
-          if (runtimeOptions.runtimeToolReplay !== undefined) {
-            environmentOptions.runtimeToolReplay = runtimeOptions.runtimeToolReplay;
-          }
-          if (runtimeOptions.runtime !== undefined) {
-            environmentOptions.runtime = runtimeOptions.runtime;
-          }
-          if (runtimeOptions.mounts !== undefined) {
-            environmentOptions.mounts = runtimeOptions.mounts;
-          }
-          if (runtimeOptions.emitToolEvents !== undefined) {
-            environmentOptions.emitToolEvents = runtimeOptions.emitToolEvents;
-          }
-          if (runtimeOptions.traceOptions !== undefined) {
-            environmentOptions.traceOptions = runtimeOptions.traceOptions;
-          }
-          if (runtimeOptions.extraBody !== undefined) {
-            environmentOptions.extraBody = runtimeOptions.extraBody;
-          }
-          if (runtimeOptions.abortSignal !== undefined) {
-            environmentOptions.abortSignal = runtimeOptions.abortSignal;
-          }
-          const createEnvironment = resolveExecutionEnvironment(
-            options.executionEnvironment,
+        createSandbox: async (runtimeOptions) => {
+          const environmentOptions = turnSandboxOptions(
+            session,
+            localSessionWorkspace(localSession),
+            emit,
+            runtimeOptions,
+          );
+          const createEnvironment = resolveSandbox(
+            options.sandbox,
             environmentOptions.runtime,
           );
           return createEnvironment(environmentOptions);

@@ -19,8 +19,8 @@ Tools give the agent capabilities:
 Most tools are part of the agent's working loop. Their results may be summarized into context or written to `/artifacts/` when large.
 
 ```ts
+// Registered as `tools: { search_docs: searchDocs }`; AI SDK `tool()` has no `name` field.
 const searchDocs = tool({
-  name: "search_docs",
   description: "Search indexed company documents.",
   inputSchema: z.object({ query: z.string() }),
   execute: async ({ query }) => docs.search(query),
@@ -40,15 +40,16 @@ Examples:
 - commit a file to a repository
 
 ```ts
+// Registered as `tools: { save_report: saveReport }`.
+// harnessToolContext comes from "@little-stack/harness".
 const saveReport = tool({
-  name: "save_report",
   description: "Save a completed report to the app.",
   inputSchema: z.object({
     title: z.string(),
     artifactPath: z.string(),
   }),
-  execute: async ({ title, artifactPath }, ctx) => {
-    const file = await ctx.artifacts.read(artifactPath);
+  execute: async ({ title, artifactPath }, options) => {
+    const file = await harnessToolContext(options).artifacts.read(artifactPath);
     return reports.create({ title, content: file.text() });
   },
 });

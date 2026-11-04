@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { validateLwir } from "little-workflow";
+import { validateLwir } from "@little-stack/workflow/lwir";
 import {
   PLANNER_SYSTEM_PROMPT,
   VALID_PARALLEL_LWIR_EXAMPLE,
@@ -19,10 +19,13 @@ test("planner prompt forbids common non-alpha workflow shapes", () => {
   assert.match(PLANNER_SYSTEM_PROMPT, /Do not use "kind", "type", "map", "sort", "transform", or "core\.\*" for steps/u);
 });
 
-test("planner prompt keeps item templates out of ai.generate prompts", () => {
-  assert.doesNotMatch(PLANNER_SYSTEM_PROMPT, /prompt templates only.*item\.somePath/iu);
-  assert.match(PLANNER_SYSTEM_PROMPT, /Inside ai\.generate prompts, reference only "\{\{ input\.[^"]+ \}\}"/u);
-  assert.match(PLANNER_SYSTEM_PROMPT, /Use "\{\{ item\.\* \}\}" only for parallel item selectors/u);
+test("planner prompt says what input and item mean inside ai.generate prompts", () => {
+  // The runtime resolves prompt templates: `input` is the workflow input, `item` the parallel item.
+  assert.match(
+    PLANNER_SYSTEM_PROMPT,
+    /Inside ai\.generate prompts, "\{\{ input\.somePath \}\}" reads the workflow input, "\{\{ item\.somePath \}\}" the current parallel item/u,
+  );
+  assert.doesNotMatch(PLANNER_SYSTEM_PROMPT, /not inside ai\.generate prompts/u);
 });
 
 // ---------------------------------------------------------------------------

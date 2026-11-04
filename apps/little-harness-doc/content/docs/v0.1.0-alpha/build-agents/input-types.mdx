@@ -12,7 +12,7 @@ An Input Type gives an open string a reusable meaning.
 
 ```ts
 import { Output } from "ai";
-import { createHarness, inputType, localHost } from "little-harness";
+import { createHarness, inputType, localHost } from "@little-stack/harness";
 import { z } from "zod";
 
 const ticketSchema = z.object({
@@ -64,7 +64,7 @@ const result = await generateHarness({
   session: ticket.id,
 });
 
-result.output.priority;
+if (result.status === "completed") result.output.priority;
 ```
 
 ## Two Input Modes

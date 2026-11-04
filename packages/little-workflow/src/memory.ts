@@ -1,7 +1,7 @@
-import { mkdir } from "node:fs/promises";
-import { join } from "node:path";
 import type { LocalWorld, MemoryConfig } from "./authoring.js";
 import { sha256Digest } from "./canonical.js";
+import { runFilesFor } from "./run-files.js";
+import type { World } from "./world-port.js";
 
 export type MemoryAccessMode = "rw" | "ro";
 
@@ -26,9 +26,10 @@ export type MemoryMount = {
  */
 export async function ensureMemoryMounts(
   mounts: readonly MemoryMount[],
+  world: Pick<World, "dataDir" | "files"> = { dataDir: "/" },
 ): Promise<void> {
   await Promise.all(
-    mounts.map((mount) => mkdir(mount.backingPath, { recursive: true })),
+    mounts.map((mount) => runFilesFor(world).mkdir(mount.backingPath, { recursive: true })),
   );
 }
 
@@ -84,7 +85,7 @@ export function pipelineMemoryMounts(options: {
     {
       storeId: `pipeline:${pipelineKey}`,
       mountPath: "/mnt/memory/pipeline/",
-      backingPath: join(options.world.dataDir, "memory", "pipelines", pipelineKey),
+      backingPath: runFilesFor(options.world).path.join(options.world.dataDir, "memory", "pipelines", pipelineKey),
       mode: options.mode ?? "rw",
     },
   ];
@@ -119,7 +120,7 @@ function orgMemoryMount(world: LocalWorld, mode: MemoryAccessMode): MemoryMount 
   return {
     storeId: "org",
     mountPath: "/mnt/memory/org/",
-    backingPath: join(world.dataDir, "memory", "org"),
+    backingPath: runFilesFor(world).path.join(world.dataDir, "memory", "org"),
     mode,
   };
 }
@@ -129,7 +130,7 @@ function workflowStoreId(workflowId: string): string {
 }
 
 function workflowMemoryPath(world: LocalWorld, workflowId: string): string {
-  return join(world.dataDir, "memory", "workflows", workflowId);
+  return runFilesFor(world).path.join(world.dataDir, "memory", "workflows", workflowId);
 }
 
 function uniqueMemoryKeys<T extends object>(

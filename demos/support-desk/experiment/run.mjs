@@ -3,22 +3,33 @@
  * The support-desk experiment driver.
  *
  *   node experiment/run.mjs --seed              # fresh episode area, nothing else
- *   node experiment/run.mjs --traffic           # optimizer set on prompt v1 → graded, reacted
+ *   node experiment/run.mjs --traffic           # optimizer set on prompt v1: traced, graded, scored
  *   node experiment/run.mjs --gate --k 3        # gate set, measurement only, pass^k
- *   node experiment/run.mjs --status            # harness metrics + live channel pointer
+ *   node experiment/run.mjs --dataset           # upload both sets as a LittleDB dataset
+ *   node experiment/run.mjs --worker [--once]   # run LittleDB experiments (gate runs) here
+ *   node experiment/run.mjs --propose <file>    # propose a prompt as a new version
+ *   node experiment/run.mjs --status            # versions, proposals and datasets in LittleDB
  *
- * Flags: --limit <n>, --only <id,id,...>, --k <n>, --baseline <results.json>.
+ * Flags: --limit <n>, --only <id,id,...>, --k <n>, --baseline <results.json>,
+ *        --concurrency <n> (worker), --model <slot> (propose), --name <dataset>.
  *
- * It runs against harness slug `support-desk-x`. Two modes, and the difference between them
- * is the point of the whole file:
+ * Environment: LITTLEDB_URL (default http://127.0.0.1:7340), LITTLEDB_API_KEY (required),
+ * LITTLEDB_HARNESS (default support-desk), LITTLEDB_CHANNEL (default production).
  *
- *   --traffic  runs the OPTIMIZER set, reports an outcome per tier, and streams traces to
- *              littleDB. These episodes become the run history the dream reads.
- *   --gate     runs the GATE set, reports nothing and streams nothing. A gate episode that
- *              reached littleDB would become training signal for the next dream, and the
+ * The difference between the first two modes is the point of the whole file:
+ *
+ *   --traffic  runs the OPTIMIZER set, resolves each session's version, sends every episode
+ *              to LittleDB as a trace and scores it. These episodes become the history a
+ *              reviewer reads.
+ *   --gate     runs the GATE set, scores nothing and traces nothing. A gate episode that
+ *              reached LittleDB would become training signal for the next proposal, and the
  *              set that judges a change would be the set the change was tuned on
- *              (`evals-research-synthesis-2026-08.md` §7). The silence is enforced by not
- *              wiring the reporter at all rather than by a flag someone can forget.
+ *              (`evals-research-synthesis-2026-08.md` §7). The silence is enforced by never
+ *              creating a tracer rather than by a flag someone can forget.
+ *
+ * `--dataset` uploads the gate set as the `holdout` split and the optimizer set as `dev`:
+ * LittleDB gates a proposal on the holdout split, and its reviewer only ever sees dev items.
+ * `--worker` is the in-app eval worker that runs those gate experiments with the real tools.
  */
 import {
   existsSync,
@@ -52,71 +63,50 @@ const value = (flag) => {
 };
 
 // ── environment ────────────────────────────────────────────────────────────────────────
-// Set before ANY agent module loads: `littledb.ts` reads these at import time.
-const CONTROL_PLANE = process.env.LITTLEDB_URL ?? "http://localhost:3000";
-const ENGINE = process.env.LITTLEDB_ENGINE_URL ?? "http://localhost:7878";
-const HARNESS_ID = process.env.LITTLEDB_HARNESS_ID ?? "support-desk-x";
+// Set before ANY agent module loads: `littledb.ts` reads these when it first runs.
+const LITTLEDB_URL = process.env.LITTLEDB_URL || "http://127.0.0.1:7340";
+const HARNESS = process.env.LITTLEDB_HARNESS ?? "support-desk";
 const CHANNEL = process.env.LITTLEDB_CHANNEL ?? "production";
-process.env.LITTLEDB_URL = CONTROL_PLANE;
-process.env.LITTLEDB_ENGINE_URL = ENGINE;
-process.env.LITTLEDB_HARNESS_ID = HARNESS_ID;
+const SUBJECT = `harness:${HARNESS}`;
+process.env.LITTLEDB_URL = LITTLEDB_URL;
+process.env.LITTLEDB_HARNESS = HARNESS;
 process.env.LITTLEDB_CHANNEL = CHANNEL;
 
 /**
- * `--traffic` seeds littleDB with the deliberately-flawed v1. `--gate` must NOT: the config
- * under test has to come back from littleDB, or the gate is measuring a local file and the
- * whole before/after is theatre.
+ * `--traffic` and `--dataset` seed LittleDB with the deliberately-flawed v1 (the first resolve
+ * of a harness stores its bootstrap as version 1). `--gate` must NOT: the version under test
+ * has to come back from LittleDB, or the gate is measuring a local file and the whole
+ * before/after is theatre.
  */
-if (has("--traffic")) {
+if (has("--traffic") || has("--dataset")) {
   process.env.SUPPORT_PROMPT_FILE ??= "experiment/prompt-v1.md";
 } else {
   delete process.env.SUPPORT_PROMPT_FILE;
 }
-
-const apiHeaders = {
-  "content-type": "application/json",
-  ...(process.env.LITTLEDB_PROJECT_KEY ? { "x-api-key": process.env.LITTLEDB_PROJECT_KEY } : {}),
-};
 
 // ── helpers ────────────────────────────────────────────────────────────────────────────
 
 const heading = (text) => console.log(`\n=== ${text} ===`);
 const pct = (value) => `${Math.round(value * 1000) / 10}%`;
 
-async function api(path, init) {
-  const response = await fetch(`${CONTROL_PLANE}${path}`, { headers: apiHeaders, ...init });
-  const text = await response.text();
-  if (!response.ok) {
-    throw new Error(`${init?.method ?? "GET"} ${path} → HTTP ${response.status}: ${text.slice(0, 500)}`);
-  }
-  try {
-    return JSON.parse(text);
-  } catch {
-    return text;
-  }
-}
-
-async function reachable(url) {
-  try {
-    return (await fetch(url, { method: "GET" })).status < 500;
-  } catch {
-    return false;
-  }
-}
-
-/** Hard-fail rather than silently running with no managed config and no outcomes. */
+/** Hard-fail rather than silently running with no versions, no traces and no scores. */
 async function requireStack() {
-  const [controlPlaneUp, engineUp] = await Promise.all([
-    reachable(CONTROL_PLANE),
-    reachable(`${ENGINE}/`),
-  ]);
-  console.log(`control plane ${CONTROL_PLANE}: ${controlPlaneUp ? "up" : "UNREACHABLE"}`);
-  console.log(`engine        ${ENGINE}: ${engineUp ? "up" : "UNREACHABLE"}`);
-  if (!controlPlaneUp || !engineUp) {
+  const base = LITTLEDB_URL.replace(/\/+$/u, "").replace(/\/v1$/u, "");
+  let up = false;
+  try {
+    up = (await fetch(`${base}/healthz`, { signal: AbortSignal.timeout(5_000) })).ok;
+  } catch {
+    up = false;
+  }
+  console.log(`LittleDB ${base}: ${up ? "up" : "UNREACHABLE"}`);
+  if (!up) {
     throw new Error(
-      "The littleDB stack is not reachable. Without it there is no managed config and no " +
-        "outcomes — the run would burn model calls on an experiment that never happened.",
+      "LittleDB is not reachable. Without it there is no version to run and nowhere to send " +
+        "traces and scores: the run would burn model calls on an experiment that never happened.",
     );
+  }
+  if (!process.env.LITTLEDB_API_KEY) {
+    throw new Error("Set LITTLEDB_API_KEY (`littledb dev` prints a key for local apps).");
   }
 }
 
@@ -147,7 +137,7 @@ async function agentModules() {
     jiti.import(join(demoRoot, "agents", "support", "run-episode.ts")),
     jiti.import(join(demoRoot, "agents", "support", "littledb.ts")),
   ]);
-  return { ...episode, supportLittleDb: littledb.supportLittleDb };
+  return { ...episode, ...littledb };
 }
 
 // ── phases ─────────────────────────────────────────────────────────────────────────────
@@ -167,20 +157,21 @@ function seed() {
   console.log("\nNext: node experiment/verify-truth.mjs, then node experiment/run.mjs --traffic");
 }
 
-/** One scenario, once. Returns the graded record. */
-async function runOne({ modules, scenario, seedDb, runStamp, mode, trial }) {
-  const suffix = trial === undefined ? "" : `-k${trial}`;
-  const sessionId = `sd-${scenario.id}${suffix}-${runStamp}`;
-  const episodeDir = join(episodesRoot, `${mode}-${runStamp}`, `${scenario.id}${suffix}`);
-
+/**
+ * One scenario, once: run the episode, grade it, return the record. With `version` and
+ * `tracer` it runs the version an eval worker was handed, into the experiment run's trace.
+ */
+async function runOne({ modules, scenario, seedDb, sessionId, episodeDir, telemetry, version, tracer, trial }) {
   const episode = await modules.runEpisode({
     sessionId,
     episodeDir,
     turns: scenario.turns,
-    telemetry: mode !== "gate",
+    telemetry,
+    ...(version === undefined ? {} : { version }),
+    ...(tracer === undefined ? {} : { tracer }),
     // Scripted pushback is withheld once the customer's ask HAS been granted: nobody argues
     // with an agent that just did what they wanted, and a transcript full of manufactured
-    // frustration would poison both the outcome metric and littleDB's pushback detector.
+    // frustration would poison both the scores and LittleDB's pushback detector.
     shouldSendTurn: () => {
       const { db } = readEpisode(episodeDir);
       return !askGranted(scenario, seedDb, db);
@@ -190,20 +181,15 @@ async function runOne({ modules, scenario, seedDb, runStamp, mode, trial }) {
   const { db, actions } = readEpisode(episodeDir);
   const { task, policy } = gradeEpisode({ scenario, seed: seedDb, db, actions });
 
-  // The live session is handed back BESIDE the record rather than on it: the record is
-  // written to disk verbatim, and a `HarnessSession` carries functions and a trace handle
-  // that have no business in a results file.
   return {
-    session: episode.session,
-    record: {
     id: scenario.id,
     tier: scenario.tier,
     kind: scenario.kind,
     trial: trial ?? 1,
     sessionId,
-    runId: `harness_${sessionId}`,
+    traceId: episode.traceId,
     episodeDir,
-    configVersionId: episode.configVersionId,
+    versionId: episode.versionId,
     taskSuccess: task.pass,
     policyCompliant: policy.pass,
     taskFailures: task.checks.filter((check) => !check.ok).map((check) => `${check.name}: ${check.detail}`),
@@ -213,25 +199,9 @@ async function runOne({ modules, scenario, seedDb, runStamp, mode, trial }) {
     turnsRun: episode.turns.length,
     pushbackFired: episode.turns.length > 1,
     pushbackWithheld: episode.turnsWithheld,
-      reactionSent: null,
-      transcript: episode.turns,
-    },
+    scored: false,
+    transcript: episode.turns,
   };
-}
-
-/**
- * The reaction, as a graded verdict rather than a customer's mood.
- *
- * A real customer thumbs-down a refusal they disagree with, correct or not. Standing in for
- * that here would make the success metric a popularity score, so — exactly as in
- * `demos/kb-chatbot` — the reaction reports the GRADE. The three-way split uses the outcome
- * vocabulary honestly: an episode that reached the right end state through a policy
- * violation is genuinely partial, and collapsing it into a success would hide the failure
- * mode this whole demo exists to measure.
- */
-function verdictStatus(record) {
-  if (!record.taskSuccess) return "failure";
-  return record.policyCompliant ? "success" : "partial";
 }
 
 async function runSet(mode) {
@@ -239,13 +209,13 @@ async function runSet(mode) {
   heading(`${mode}: preflight`);
   await requireStack();
   const { file, scenarios } = loadScenarios(mode);
-  console.log(`harness slug: ${HARNESS_ID} (channel ${CHANNEL})`);
+  console.log(`harness: ${HARNESS} (channel ${CHANNEL})`);
   console.log(`scenario set: experiment/${file} — ${scenarios.length} scenario(s)`);
-  console.log(`bootstrap prompt: ${process.env.SUPPORT_PROMPT_FILE ?? "(none — managed config only)"}`);
+  console.log(`bootstrap prompt: ${process.env.SUPPORT_PROMPT_FILE ?? "(none — the live version only)"}`);
   console.log(
     mode === "gate"
-      ? `telemetry: OFF, outcomes: NONE (sealed gate), trials per scenario: ${k}`
-      : "telemetry: ON, outcomes: per tier (A/B report, C reports nothing)",
+      ? `traces: OFF, scores: NONE (sealed gate), trials per scenario: ${k}`
+      : "traces: ON, scores: task_success + policy_compliance for tiers A and B (C scores nothing)",
   );
 
   const seedDb = JSON.parse(readFileSync(seedFile, "utf8"));
@@ -255,43 +225,47 @@ async function runSet(mode) {
   const records = [];
 
   heading(`${mode}: episodes`);
-  for (const [index, scenario] of scenarios.entries()) {
-    for (let trial = 1; trial <= (mode === "gate" ? k : 1); trial += 1) {
-      const label = `[${index + 1}/${scenarios.length}${k > 1 && mode === "gate" ? ` k${trial}` : ""}] ${scenario.id} (tier ${scenario.tier}, ${scenario.kind})`;
-      process.stdout.write(`${label} … `);
-      const { record, session } = await runOne({
-        modules,
-        scenario,
-        seedDb,
-        runStamp,
-        mode,
-        ...(mode === "gate" && k > 1 ? { trial } : {}),
-      });
-
-      // Outcomes ride the same path a chat reaction would. Tier C sends none, on purpose:
-      // its failures exist only in the conversation text, and whether the dream can read
-      // them is the question that tier is asking.
-      if (mode !== "gate" && scenario.reaction === "auto") {
-        const status = verdictStatus(record);
-        await modules.reportEpisodeOutcome({
-          session,
-          status,
-          detail: [...record.taskFailures, ...record.policyFailures].join("; ") || "graded pass",
-          reporter: `rater-${scenario.id}`,
+  try {
+    for (const [index, scenario] of scenarios.entries()) {
+      for (let trial = 1; trial <= (mode === "gate" ? k : 1); trial += 1) {
+        const label = `[${index + 1}/${scenarios.length}${k > 1 && mode === "gate" ? ` k${trial}` : ""}] ${scenario.id} (tier ${scenario.tier}, ${scenario.kind})`;
+        process.stdout.write(`${label} … `);
+        const suffix = mode === "gate" && k > 1 ? `-k${trial}` : "";
+        const record = await runOne({
+          modules,
+          scenario,
+          seedDb,
+          sessionId: `sd-${scenario.id}${suffix}-${runStamp}`,
+          episodeDir: join(episodesRoot, `${mode}-${runStamp}`, `${scenario.id}${suffix}`),
+          telemetry: mode !== "gate",
+          ...(mode === "gate" && k > 1 ? { trial } : {}),
         });
-        record.reactionSent = status;
-      }
 
-      records.push(record);
-      console.log(
-        `task ${record.taskSuccess ? "PASS" : "FAIL"} / policy ${record.policyCompliant ? "PASS" : "FAIL"}` +
-          `${record.pushbackFired ? ` +${record.turnsRun - 1} pushback` : ""}` +
-          `${record.reactionSent === null ? "" : ` → ${record.reactionSent}`}`,
-      );
-      if (records.length === 1) warnIfBootstrapDrifted(record, db);
+        // Scores are the graded verdict, on the episode's trace. Tier C sends none, on
+        // purpose: its failures exist only in the conversation text, and whether a reviewer
+        // can read them there is the question that tier is asking.
+        if (mode !== "gate" && scenario.reaction === "auto" && record.traceId !== null) {
+          record.scored = modules.scoreEpisode({
+            traceId: record.traceId,
+            taskSuccess: record.taskSuccess,
+            policyCompliant: record.policyCompliant,
+            taskFailures: record.taskFailures,
+            policyFailures: record.policyFailures,
+          });
+        }
+
+        records.push(record);
+        console.log(
+          `task ${record.taskSuccess ? "PASS" : "FAIL"} / policy ${record.policyCompliant ? "PASS" : "FAIL"}` +
+            `${record.pushbackFired ? ` +${record.turnsRun - 1} pushback` : ""}` +
+            `${record.scored ? " → scored" : ""}`,
+        );
+        if (records.length === 1) await warnIfBootstrapDrifted(record, db);
+      }
     }
+  } finally {
+    await db?.shutdown();
   }
-  await db?.flush();
 
   const summary = summarize(records, mode, k);
   printVerdicts(records);
@@ -299,28 +273,29 @@ async function runSet(mode) {
   printRuleFailures(records);
   const file2 = persist(summary, records, mode);
   console.log(`\nresults: ${file2}`);
+  if (mode !== "gate" && records.some((record) => record.traceId !== null)) {
+    console.log(`traces: one per episode in LittleDB (${LITTLEDB_URL}), ids sd_<sessionId>`);
+  }
   compareToBaseline(records, mode);
   return records;
 }
 
 /**
- * littleDB stores the bootstrap prompt on the FIRST resolve for a harness+channel and
- * ignores it ever after. A later edit to `prompt-v1.md` is therefore a silent no-op, and the
- * run is measuring a prompt nobody is looking at — the whole before/after rests on v1 being
- * what that file says, so this is worth saying out loud rather than discovering afterwards.
- *
- * Learned in `demos/kb-chatbot`, which grew the same guard for the same reason.
+ * LittleDB stores the bootstrap prompt on the FIRST resolve for a harness and ignores it
+ * ever after. A later edit to `prompt-v1.md` is therefore a silent no-op, and the run is
+ * measuring a prompt nobody is looking at — the whole before/after rests on v1 being what
+ * that file says, so this is worth saying out loud rather than discovering afterwards.
  */
-function warnIfBootstrapDrifted(record, db) {
+async function warnIfBootstrapDrifted(record, db) {
   const promptFile = process.env.SUPPORT_PROMPT_FILE;
-  if (promptFile === undefined || record.configVersionId === null) return;
+  if (promptFile === undefined || record.versionId === null || db === undefined) return;
   const wanted = readFileSync(resolve(demoRoot, promptFile), "utf8").trim();
-  const live = db?.configFor(record.sessionId)?.harnessOptions?.system;
-  if (live === undefined || live === wanted) return;
+  const live = (await db.prepareSession(record.sessionId)).content.system;
+  if (live === wanted) return;
   console.warn(
-    `\n  ⚠ the live config (${record.configVersionId}) does NOT match ${promptFile}.\n` +
-      "    littleDB seeds the bootstrap once per harness+channel and ignores it afterwards,\n" +
-      "    so this run is NOT on the prompt in that file. Use a fresh LITTLEDB_HARNESS_ID to reseed.\n",
+    `\n  ⚠ the live version (${record.versionId}) does NOT match ${promptFile}.\n` +
+      "    LittleDB stores the bootstrap once per harness and ignores it afterwards,\n" +
+      "    so this run is NOT on the prompt in that file. Use a fresh LITTLEDB_HARNESS to reseed.\n",
   );
 }
 
@@ -328,10 +303,10 @@ function summarize(records, mode, k) {
   return {
     mode,
     startedAt: new Date().toISOString(),
-    harnessId: HARNESS_ID,
+    harness: HARNESS,
     channel: CHANNEL,
     promptFile: process.env.SUPPORT_PROMPT_FILE ?? null,
-    configVersionIds: [...new Set(records.map((record) => record.configVersionId).filter(Boolean))],
+    versionIds: [...new Set(records.map((record) => record.versionId).filter(Boolean))],
     ...aggregate(records, { k: mode === "gate" ? k : 1 }),
   };
 }
@@ -349,7 +324,7 @@ function renderTable(rows) {
 function printVerdicts(records) {
   heading("verdicts");
   renderTable([
-    ["id", "tier", "kind", "task", "policy", "turns", "tools", "reaction", "first failure"],
+    ["id", "tier", "kind", "task", "policy", "turns", "tools", "scored", "first failure"],
     ...records.map((record) => [
       record.trial > 1 ? `${record.id}#${record.trial}` : record.id,
       record.tier,
@@ -358,7 +333,7 @@ function printVerdicts(records) {
       record.policyCompliant ? "PASS" : "FAIL",
       String(record.turnsRun),
       record.toolCalls.join(",") || "(none)",
-      record.reactionSent ?? "-",
+      record.scored ? "yes" : "-",
       (record.taskFailures[0] ?? record.policyFailures[0] ?? "-").slice(0, 60),
     ]),
   ]);
@@ -493,33 +468,211 @@ function compareToBaseline(records, mode) {
     `\ntask success      ${beforeTask}/${compared} → ${afterTask}/${compared}` +
       `   policy compliance ${beforePolicy}/${compared} → ${afterPolicy}/${compared}`,
   );
-  console.log(`baseline: ${baseline.startedAt} (${baseline.mode}) on config ${baseline.configVersionIds.join(", ") || "n/a"}`);
+  console.log(`baseline: ${baseline.startedAt} (${baseline.mode}) on version ${(baseline.versionIds ?? []).join(", ") || "n/a"}`);
+}
+
+/** The LittleDB client the agent modules use, for the modes that call the API directly. */
+async function littleDb(modules) {
+  const handle = modules.supportLittleDb();
+  if (handle === undefined) throw new Error("Set LITTLEDB_URL.");
+  return handle;
+}
+
+/** Make sure the harness exists in LittleDB (the first resolve stores the bootstrap as v1). */
+async function ensureHarness(modules, handle) {
+  const resolution = await handle.db.resolve({ kind: "harness", slug: HARNESS, channel: CHANNEL, bootstrap: modules.bootstrapContent() });
+  if (resolution.fallback !== undefined) throw new Error(`LittleDB could not resolve ${SUBJECT}: ${resolution.error}`);
+  return resolution;
+}
+
+/**
+ * A scenario as a dataset item: what the customer says is the input; everything the grader
+ * needs is the expectation. The worker puts them back together.
+ */
+function scenarioItem(scenario, set) {
+  const { turns, ...truth } = scenario;
+  return {
+    input: { id: scenario.id, turns },
+    expected: truth,
+    metadata: { scenarioId: scenario.id, tier: scenario.tier, kind: scenario.kind, set },
+    split: set === "gate" ? "holdout" : "dev",
+  };
+}
+
+function scenarioFromItem(item) {
+  const input = item?.input;
+  if (input === null || typeof input !== "object" || !Array.isArray(input.turns)) {
+    throw new Error(`Dataset item ${item?.id ?? "?"} is not a support-desk scenario (no turns).`);
+  }
+  return { ...(item.expected ?? {}), ...input };
+}
+
+async function dataset() {
+  heading("dataset: preflight");
+  await requireStack();
+  const modules = await agentModules();
+  const handle = await littleDb(modules);
+  const name = value("--name") ?? `${HARNESS}-scenarios`;
+  try {
+    const resolution = await ensureHarness(modules, handle);
+    console.log(`harness: ${HARNESS} (live version ${resolution.number ?? "none"})`);
+    const { datasets } = await handle.db.request("GET", "/datasets");
+    const existing = datasets.find((entry) => entry.name === name);
+    if (existing !== undefined) {
+      console.log(`dataset "${name}" already exists (${existing.id}); nothing uploaded. Use --name for another.`);
+      return;
+    }
+    const read = (file) => JSON.parse(readFileSync(join(experimentDir, file), "utf8")).scenarios;
+    const gate = read("gate-truth.json").map((scenario) => scenarioItem(scenario, "gate"));
+    const optimizer = read("optimizer-truth.json").map((scenario) => scenarioItem(scenario, "optimizer"));
+    const { dataset: created } = await handle.db.request("POST", "/datasets", {
+      name,
+      subject: SUBJECT,
+      description: "Support-desk scenarios. holdout: the sealed gate set; dev: the optimizer set a reviewer may read.",
+    });
+    const added = await handle.db.request("POST", `/datasets/${created.id}/items`, { items: [...gate, ...optimizer] });
+    heading("dataset");
+    console.log(`dataset "${name}" (${created.id}) for ${SUBJECT}`);
+    console.log(`items: ${added.added} — holdout ${added.holdout} (gate set), dev ${added.added - added.holdout} (optimizer set)`);
+    console.log("A proposal for this harness is now gated on the holdout split; run --worker to execute it.");
+  } finally {
+    await handle.shutdown();
+  }
+}
+
+async function worker() {
+  heading("worker: preflight");
+  await requireStack();
+  const modules = await agentModules();
+  const handle = await littleDb(modules);
+  const seedDb = JSON.parse(readFileSync(seedFile, "utf8"));
+  const stamp = Date.now().toString(36);
+  const concurrency = Number(value("--concurrency") ?? 1);
+  console.log(`runs experiments for ${SUBJECT}, ${concurrency} at a time${has("--once") ? ", until none are left" : " (Ctrl-C to stop)"}`);
+
+  const evalWorker = handle.db.evalWorker({
+    subjects: [SUBJECT],
+    concurrency,
+    run: async (run) => {
+      const scenario = scenarioFromItem(run.item);
+      const content = modules.versionContent(run.version?.content);
+      const tracer = handle.db.harnessTracer({ harness: HARNESS, name: "episode", ...run.trace });
+      const record = await runOne({
+        modules,
+        scenario,
+        seedDb,
+        sessionId: `sd-${scenario.id}-${run.runId}`,
+        episodeDir: join(episodesRoot, `worker-${stamp}`, `${scenario.id}-${run.runId}`),
+        telemetry: true,
+        version: { content, versionId: run.version?.id ?? null },
+        tracer: { onEvent: tracer.onEvent, traceId: run.traceId },
+      });
+      console.log(
+        `${run.experimentId} v${run.version?.number ?? "?"} ${scenario.id}: ` +
+          `task ${record.taskSuccess ? "PASS" : "FAIL"} / policy ${record.policyCompliant ? "PASS" : "FAIL"}`,
+      );
+      const comment = (failures) => (failures.length === 0 ? {} : { comment: failures.join("; ").slice(0, 10_000) });
+      return {
+        output: { reply: record.transcript.at(-1)?.assistant ?? "", toolCalls: record.toolCalls, turns: record.turnsRun },
+        scores: [
+          { name: "task_success", value: record.taskSuccess ? 1 : 0, ...comment(record.taskFailures) },
+          { name: "policy_compliance", value: record.policyCompliant ? 1 : 0, ...comment(record.policyFailures) },
+        ],
+      };
+    },
+  });
+
+  heading("worker: runs");
+  try {
+    if (has("--once")) {
+      let total = { claimed: 0, completed: 0, failed: 0 };
+      for (;;) {
+        const round = await evalWorker.runOnce();
+        total = { claimed: total.claimed + round.claimed, completed: total.completed + round.completed, failed: total.failed + round.failed };
+        if (round.claimed === 0) break;
+      }
+      console.log(`\nclaimed ${total.claimed}, completed ${total.completed}, failed ${total.failed}`);
+    } else {
+      const stop = () => void evalWorker.stop();
+      process.once("SIGINT", stop);
+      process.once("SIGTERM", stop);
+      await evalWorker.start();
+    }
+  } finally {
+    await handle.shutdown();
+  }
+}
+
+async function propose() {
+  const file = value("--propose");
+  if (file === undefined) throw new Error("--propose needs a prompt file.");
+  heading("propose: preflight");
+  await requireStack();
+  const modules = await agentModules();
+  const handle = await littleDb(modules);
+  try {
+    const resolution = await ensureHarness(modules, handle);
+    const system = readFileSync(resolve(demoRoot, file), "utf8").trim();
+    const model = value("--model");
+    const { proposal } = await handle.db.request("POST", "/proposals", {
+      subject: SUBJECT,
+      ...(resolution.versionId === null ? {} : { baseVersionId: resolution.versionId }),
+      changes: { system, ...(model === undefined ? {} : { model }) },
+      title: `Prompt from ${file}`,
+      body: `Proposed by experiment/run.mjs --propose ${file}.`,
+    });
+    heading("propose");
+    console.log(`proposal ${proposal.id} (${proposal.status}) for ${SUBJECT}: version ${proposal.candidateVersionId} against v${resolution.number}`);
+    console.log("LittleDB starts a gate experiment on the dataset's holdout split; run --worker to execute it.");
+  } finally {
+    await handle.shutdown();
+  }
 }
 
 async function status() {
   heading("status");
-  console.log(JSON.stringify(await api(`/api/harnesses/${HARNESS_ID}/metrics`), null, 2));
-  const config = await api(`/api/harnesses/${HARNESS_ID}/config`).catch(() => undefined);
-  if (config !== undefined) {
-    for (const channel of config.channels ?? []) {
-      console.log(`channel ${channel.name} → ${channel.configVersionId}`);
+  await requireStack();
+  const modules = await agentModules();
+  const handle = await littleDb(modules);
+  try {
+    const detail = await handle.db.request("GET", `/subjects/${encodeURIComponent(SUBJECT)}`);
+    const byId = new Map(detail.versions.map((version) => [version.id, version]));
+    for (const release of detail.releases) {
+      const live = byId.get(release.liveVersionId);
+      const trial = byId.get(release.trialVersionId);
+      console.log(
+        `channel ${release.channel}: live v${live?.number ?? "-"}` +
+          `${trial === undefined ? "" : `, trial v${trial.number} at ${Math.round((release.trialWeight ?? 0) * 100)}%`}`,
+      );
     }
+    console.log(`versions: ${detail.versions.map((version) => `v${version.number} ${version.status}`).join(", ") || "none"}`);
+    for (const proposal of detail.proposals.slice(0, 10)) console.log(`proposal ${proposal.id} ${proposal.status}: ${proposal.title}`);
+    for (const entry of detail.datasets) console.log(`dataset ${entry.id}: ${entry.name}`);
+  } finally {
+    await handle.shutdown();
   }
 }
 
 function help() {
   console.log(
     [
-      `support-desk experiment driver (harness slug: ${HARNESS_ID})`,
+      `support-desk experiment driver (LittleDB harness: ${HARNESS})`,
       "",
-      "  --seed              reset the episode area and the harness session store",
-      "  --traffic           run the OPTIMIZER set on prompt v1: grade, react, persist",
-      "  --gate [--k <n>]    run the GATE set: no reactions, no telemetry, pass^k",
-      "  --status            harness metrics and the live channel pointer",
+      "  --seed                  reset the episode area and the harness session store",
+      "  --traffic               run the OPTIMIZER set on prompt v1: trace, grade, score, persist",
+      "  --gate [--k <n>]        run the GATE set: no scores, no traces, pass^k",
+      "  --dataset [--name <n>]  upload the gate set (holdout) and the optimizer set (dev)",
+      "  --worker [--once]       run LittleDB experiments for this harness here",
+      "  --propose <file>        propose a prompt file as the next version [--model <slot>]",
+      "  --status                versions, proposals and datasets in LittleDB",
       "",
-      "  --limit <n>         first n scenarios only",
-      "  --only <id,...>     named scenarios only",
-      "  --baseline <file>   compare against this results file instead of the previous run",
+      "  --limit <n>             first n scenarios only",
+      "  --only <id,...>         named scenarios only",
+      "  --baseline <file>       compare against this results file instead of the previous run",
+      "  --concurrency <n>       worker runs at once (default 1)",
+      "",
+      "  LITTLEDB_URL, LITTLEDB_API_KEY, LITTLEDB_HARNESS, LITTLEDB_CHANNEL",
+      "  SUPPORT_MODEL_SLOT: deepseek-v4-flash (default), deepseek-v4-pro, claude-haiku-5-5, claude-sonnet-5-5",
       "",
       "  node experiment/verify-truth.mjs   ground the scenarios against the seed data",
     ].join("\n"),
@@ -535,6 +688,12 @@ try {
     await runSet("traffic");
   } else if (has("--gate")) {
     await runSet("gate");
+  } else if (has("--dataset")) {
+    await dataset();
+  } else if (has("--worker")) {
+    await worker();
+  } else if (has("--propose")) {
+    await propose();
   } else if (has("--status")) {
     await status();
   } else {

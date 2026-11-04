@@ -9,26 +9,17 @@ import type { BashCapabilities } from "./bash-tool.js";
 import type { ToolPermissions } from "./permission.js";
 import type { World } from "./world-port.js";
 import type { WorkflowVersionReuseStrategy } from "./workflow-version-reuse.js";
-import type { HarnessMcpConfig } from "little-harness";
+import type { RunPlan } from "./run-plan.js";
+import type { HarnessMcpConfig } from "@little-stack/harness";
 import { normalizeSchema, output as outputBuilder } from "./schema.js";
 import { createToolRegistry, type AiSdkTool, type ToolRegistry } from "./tool-registry.js";
 import { runWorkflow as runWorkflowCore } from "./runtime.js";
+import { fixedPlanPlanner, type FixedPlan } from "./fixed-plan.js";
+import type { LwirWorkflow } from "./lwir.js";
 
-export { RunFailedError } from "./runtime.js";
+export { isRunFailedError, RunFailedError } from "./runtime.js";
+export type { FixedPlan } from "./fixed-plan.js";
 export type { RunFailedCauseCode } from "./runtime.js";
-export type {
-  HarnessMcpCapabilityManifest,
-  HarnessMcpClient,
-  HarnessMcpClientOptions,
-  HarnessMcpConfig,
-  HarnessMcpGatewayConfig,
-  HarnessMcpServerConfig,
-  HarnessMcpToolPolicy,
-  HarnessMcpToolSchema,
-  HarnessMcpToolSchemas,
-  HarnessMcpTransportConfig,
-  ResolvedHarnessMcpGateway,
-} from "little-harness";
 export type { Skill } from "./skills.js";
 export type { RemoteSkillOptions, SkillGitAuth, SkillOidcToken, SkillRiskLevel } from "./skills.js";
 
@@ -120,7 +111,7 @@ export type WorkerConfig = {
 };
 
 /**
- * Configures the orchestrator agent for `runWorkflow({ workflows: [...], orchestrator })`.
+ * Configures the orchestrator agent for `runOrchestration({ workflows: [...], orchestrator })`.
  *
  * @deprecated The orchestrator is one of two composition surfaces and the one being retired.
  * Compose with the Harness surface instead: author each workflow with `defineWorkflow`, adapt it
@@ -192,7 +183,8 @@ export type WorkflowDefinition<TInput = unknown, TOutput = unknown> = {
   output?: OutputMode<TOutput>;
   outputSchema?: OutputSchemaLike<TOutput>;
   suggestedInputSchema?: InputSchemaLike<unknown>;
-  models: NonEmptyModelSlotList;
+  /** Execution model slots. Empty only for a workflow with a fixed `plan` and no model steps. */
+  models: readonly ModelSlot[];
   planner: PlannerConfig;
   worker?: WorkerConfig;
   memory?: MemoryConfig;
@@ -226,8 +218,6 @@ type AuthoredWorkflow<TInput = unknown, TOutput = unknown> = WorkflowDefinitionI
 
 type AnyAuthoredWorkflow = AuthoredWorkflow<any, any>;
 
-type NonEmptyModelSlotList = readonly [ModelSlot, ...ModelSlot[]];
-
 type NonEmptyWorkflowList = readonly [AnyAuthoredWorkflow, ...AnyAuthoredWorkflow[]];
 
 export type LocalWorldOptions = {
@@ -246,7 +236,12 @@ export type LocalWorld = World; // kind === "local-world"
 export type RunResult<TOutput = unknown> = RunResultBase & {
   status: "completed";
   output: TOutput;
+  /** How this run got its plan: drafted, kept, adapted or fixed, and whether the planner model was called. */
+  plan: RunPlan;
 };
+
+/** INTERNAL. A completed run as the runtime builds it; `runWorkflow` adds `plan`. */
+export type UnplannedRunResult<TOutput = unknown> = Omit<RunResult<TOutput>, "plan">;
 
 export type FailedRunResult = RunResultBase & {
   status: "failed";
@@ -277,30 +272,57 @@ export type WorkflowRunProgressEvent = {
 type InferRunWorkflowInput<TWorkflow extends WorkflowRunTarget> =
   TWorkflow extends WorkflowRunList ? unknown : InferWorkflowInput<TWorkflow>;
 
-type BaseRunWorkflowOptions<TWorkflow extends WorkflowRunTarget> = {
-  world: LocalWorld;
-  workflows: TWorkflow;
-  input: NoInfer<InferRunWorkflowInput<TWorkflow>>;
-  runId?: RunId;
-  timeout?: string | number;
-  signal?: AbortSignal;
-  tools?: import("./tool-registry.js").ToolRegistry;
-  mcp?: HarnessMcpConfig;
-  bash?: BashCapabilities;
-  maxAttempts?: number;
-  maxOuterCycles?: number;
-  outerLoopId?: string;
-  maxConcurrentSubRuns?: number;
+/**
+ * How a run started, recorded as `trigger` on its `RunStarted` event for trace readers such as
+ * LittleDB. A run without one started from the app's own code. `asHarnessWorkflow` sets
+ * `{ kind: "harness", sessionId, turnId, toolCallId }`: the harness tool call that started it.
+ */
+export type RunTrigger = {
+  /** A short word: `harness`, `api`, `schedule`, `webhook`, or your own. */
+  readonly kind: string;
+  /** Where it came from: a route (`POST /loans`), a schedule id, a harness slug. */
+  readonly source?: string;
+  /** Who asked for it, as the channel names them. */
+  readonly from?: string;
+  /** A short label for people. */
+  readonly label?: string;
+  /** With kind `harness`: the harness session, turn and tool call that started the run. */
+  readonly sessionId?: string;
+  readonly turnId?: string;
+  readonly toolCallId?: string;
+};
+
+/**
+ * Options for `runWorkflow(workflow, input, options)` and its sugar `workflow.run(input, options)`.
+ * Every field is optional: `world` defaults to `localWorld()` (`.little-workflow` in the working
+ * directory) and `tools` to the tools declared on the workflow.
+ */
+export type RunWorkflowOptions = {
+  /** Where the run's events and artifacts are stored. Defaults to `localWorld()`. */
+  readonly world?: World;
+  /** Reuse an id to resume or replay that run. Omitted, a fresh `run_<uuid>` is used. */
+  readonly runId?: RunId;
+  readonly timeout?: string | number;
+  readonly signal?: AbortSignal;
+  /** Tools for this run. Defaults to the tools declared on the workflow. */
+  readonly tools?: ToolRegistry;
+  readonly mcp?: HarnessMcpConfig;
+  readonly bash?: BashCapabilities;
+  readonly maxAttempts?: number;
+  readonly maxOuterCycles?: number;
+  readonly outerLoopId?: string;
   /** Human-readable label for this run. Overrides the workflow definition label and defaults to the workflow id. */
-  label?: string;
+  readonly label?: string;
   /** Free-form tags for filtering in the trace store. */
-  tags?: readonly string[];
-  workflowVersionReuseStrategy?: WorkflowVersionReuseStrategy;
+  readonly tags?: readonly string[];
+  /** How this run started, recorded on its `RunStarted` event. Child runs record `parentRunId` instead. */
+  readonly trigger?: RunTrigger;
+  readonly workflowVersionReuseStrategy?: WorkflowVersionReuseStrategy;
   /**
    * Receives step lifecycle progress after runtime StepScheduled,
    * StepAttemptStarted, StepFailed, and StepCompleted events are recorded.
    */
-  progress?: (event: WorkflowRunProgressEvent) => void | Promise<void>;
+  readonly progress?: (event: WorkflowRunProgressEvent) => void | Promise<void>;
   /**
    * Runtime tool-call policy for the model (allow/deny/ask over tool names).
    * Governs the orchestrator's own tool calls; every sub-run inherits the
@@ -308,28 +330,49 @@ type BaseRunWorkflowOptions<TWorkflow extends WorkflowRunTarget> = {
    * tool. Absent means unrestricted (the compile-time tool contract still
    * applies).
    */
-  permissions?: ToolPermissions;
+  readonly permissions?: ToolPermissions;
 };
 
-type SingleRunWorkflowOptions<TWorkflow extends AnyAuthoredWorkflow> = BaseRunWorkflowOptions<TWorkflow> & {
+/**
+ * Options for {@link runOrchestration}: the run options plus the workflows the orchestrator agent
+ * may plan and run, the shared input, and the orchestrator config.
+ *
+ * @deprecated The orchestrator composition surface is being retired. Compose workflows with
+ * `asHarnessWorkflow` + `createHarness({ workflows })` instead.
+ */
+export type RunOrchestrationOptions<TWorkflows extends WorkflowRunList = WorkflowRunList> =
+  Omit<RunWorkflowOptions, "maxOuterCycles" | "outerLoopId"> & {
+    readonly workflows: TWorkflows;
+    readonly input: unknown;
+    readonly orchestrator: OrchestratorConfig;
+    /** Cap on concurrently running sub-workflow runs. Default 10. */
+    readonly maxConcurrentSubRuns?: number;
+  };
+
+type BaseRunWorkflowRequest<TWorkflow extends WorkflowRunTarget> = Omit<RunWorkflowOptions, "world"> & {
+  world: LocalWorld;
+  workflows: TWorkflow;
+  input: NoInfer<InferRunWorkflowInput<TWorkflow>>;
+  maxConcurrentSubRuns?: number;
+};
+
+type SingleRunWorkflowRequest<TWorkflow extends AnyAuthoredWorkflow> = BaseRunWorkflowRequest<TWorkflow> & {
   orchestrator?: never;
 };
 
-type MultiRunWorkflowOptions<TWorkflows extends WorkflowRunList> = BaseRunWorkflowOptions<TWorkflows> & {
-  /**
-   * @deprecated Passing an array of workflows plus an `orchestrator` config selects the
-   * deprecated orchestrator composition surface (`plan_workflow` / `run_workflow` /
-   * `start_workflow`). Compose with `asHarnessWorkflow` + `createHarness({ workflows })` instead.
-   * `runWorkflow` with a single workflow is not deprecated.
-   */
+type MultiRunWorkflowRequest<TWorkflows extends WorkflowRunList> = BaseRunWorkflowRequest<TWorkflows> & {
   orchestrator: OrchestratorConfig;
 };
 
-export type RunWorkflowOptions<TWorkflow extends WorkflowRunTarget = WorkflowRunTarget> =
+/**
+ * INTERNAL. The runtime's single request object (world, workflow or workflows, input, run options)
+ * that `runWorkflow` and `runOrchestration` build. Not a public calling convention.
+ */
+export type RunWorkflowRequest<TWorkflow extends WorkflowRunTarget = WorkflowRunTarget> =
   TWorkflow extends WorkflowRunList
-    ? MultiRunWorkflowOptions<TWorkflow>
+    ? MultiRunWorkflowRequest<TWorkflow>
     : TWorkflow extends AnyAuthoredWorkflow
-      ? SingleRunWorkflowOptions<TWorkflow>
+      ? SingleRunWorkflowRequest<TWorkflow>
       : never;
 
 export type RuntimeOptions = {
@@ -342,13 +385,15 @@ export type RuntimeOptions = {
 type WorkflowDefinitionInput = {
   id: string;
   description?: string;
+  /** Rules the runtime adds, word for word, to the system prompt of every `ai.generate` step. */
+  policy?: string;
   /** Human-readable label for runs of this workflow. Defaults to the workflow id if not set. */
   label?: string;
   inputSchema?: unknown;
   output?: LooseOutputModeInput;
   outputSchema?: unknown;
   suggestedInputSchema?: unknown;
-  models: NonEmptyModelSlotList;
+  models: readonly ModelSlot[];
   planner: PlannerConfig;
   worker?: WorkerConfig;
   memory?: MemoryConfig;
@@ -496,26 +541,70 @@ export function createLittleWorkflow(definition: WorkflowDefinitionInput): Workf
   return definition;
 }
 
+/**
+ * What `defineWorkflow` takes. Name the workflow, give its `input` and `output` schemas, and say
+ * how it gets a plan: a `model` (or several `models`) that a planner drafts a plan for, or a fixed
+ * `plan` you write yourself.
+ */
 export type DefineWorkflowInput = {
+  /** Stable identifier; hashed into the workflow definition hash. */
   readonly id: string;
+  /** Shown to the planner, and used as the tool description by `asHarnessWorkflow`. */
   readonly description?: string;
+  /**
+   * Rules every model step must follow, such as a lending policy. The runtime adds this text, word
+   * for word, to the system prompt of every `ai.generate` step, whoever wrote the plan. The planner
+   * sees it too, and a changed policy sends a saved plan back to the planner for review.
+   */
+  readonly policy?: string;
+  /** Human-readable run label; defaults to the workflow id. */
   readonly label?: string;
-  /** A schema for the workflow's input (mapped onto `inputSchema`). */
+  /** The input schema (Zod, Standard Schema or JSON Schema). Validated at run start. */
   readonly input?: unknown;
+  /** A schema hint shown to the planner. Not used to validate input. */
+  readonly suggestedInput?: unknown;
   /** A plain schema (array/object/text inferred) or an explicit `output.*` mode. */
   readonly output?: unknown;
-  /** A single AI-SDK model for the worker(s); wrapped into a one-slot `models` tuple. */
-  readonly model: unknown;
-  /** Optional planner override: a bare model (lifted into a PlannerConfig) or a full PlannerConfig. */
+  /** One AI SDK model (or `model(...)` slot) for the workflow's steps. Use `models` for several. */
+  readonly model?: unknown;
+  /**
+   * Several model slots the plan chooses between by slot id, for example
+   * `[model(fast, { id: "fast" }), model(deep, { id: "deep" })]`. Use `model` for one.
+   */
+  readonly models?: readonly unknown[];
+  /**
+   * The planner: a bare model, a `model(...)` slot, or a full `PlannerConfig` (system prompt,
+   * skills, custom harness, outer-loop `supervise`). Defaults to the first model.
+   */
   readonly planner?: unknown;
-  /** Inline tools keyed by name; built into a registry, names exposed via `globalTools`. */
-  readonly tools?: Record<string, AiSdkTool>;
+  /**
+   * A fixed plan: run these steps instead of asking a planner model. `{ steps }` is completed from
+   * this definition (name, input and output schemas); a complete LWIR document is used as written.
+   * A fixed-plan workflow needs no `model` unless its steps call one.
+   */
+  readonly plan?: FixedPlan | LwirWorkflow;
+  /**
+   * The tools the plan may call: AI SDK tools keyed by name, a `ToolRegistry`, or the names of
+   * tools the run supplies (through `runWorkflow(..., { tools })` or the `mcp` gateway).
+   */
+  readonly tools?: Record<string, AiSdkTool> | ToolRegistry | readonly string[];
+  /** Which declared tools the plan may reference. Default `"planner_selected"`. */
+  readonly toolSelection?: ToolSelectionPolicy;
+  /** Whether the planner may reuse a prior compiled version. Default `"planner_reviewed"`. */
+  readonly workflowVersionReuseStrategy?: WorkflowVersionReuseStrategy;
   readonly worker?: WorkerConfig;
   readonly memory?: MemoryConfig;
   readonly bash?: BashCapabilities;
 };
 
 const inlineToolRegistryByWorkflow = new WeakMap<object, ToolRegistry>();
+
+function definitionPolicy(options: DefineWorkflowInput): string {
+  if (typeof options.policy !== "string" || options.policy.trim().length === 0) {
+    throw new TypeError(`defineWorkflow '${options.id}': policy must be a non-empty string.`);
+  }
+  return options.policy;
+}
 
 /** The tool registry built from a `defineWorkflow` definition's inline `tools`, if any. */
 export function inlineToolRegistryFor(workflow: object): ToolRegistry | undefined {
@@ -524,8 +613,8 @@ export function inlineToolRegistryFor(workflow: object): ToolRegistry | undefine
 
 /** A workflow authored via {@link defineWorkflow}: the full definition plus a typed `run` method. */
 export type DefinedWorkflow<TInput = unknown, TOutput = unknown> = WorkflowDefinition<TInput, TOutput> & {
-  /** Run this workflow against a typed input, defaulting the world and inline tool registry. */
-  run(input: TInput, options?: ErgonomicRunWorkflowOptions): Promise<RunResult<TOutput>>;
+  /** Sugar for `runWorkflow(workflow, input, options)`: the same options and result. */
+  run(input: TInput, options?: RunWorkflowOptions): Promise<RunResult<TOutput>>;
 };
 
 type DefineWorkflowInputOf<TDefinition> = TDefinition extends { readonly input: infer TInputSchema }
@@ -539,36 +628,44 @@ type DefineWorkflowOutputOf<TDefinition> = TDefinition extends { readonly output
   : unknown;
 
 /**
- * Ergonomic, eve-style front door over {@link createLittleWorkflow}: a single `model`,
- * plain `input`/`output` schemas, and inline `tools` are normalized into the
- * fully-specified shape the runtime already expects (a `models` tuple, a synthesized
- * `planner`, an inferred `OutputMode`, and `globalTools`). The input/output schema types
- * flow through to the brand, so `runWorkflow(def, input).output` is fully typed. The engine
- * is unchanged.
+ * Define a workflow. Plain `input`/`output` schemas, one `model` or several `models`, an optional
+ * `planner`, a fixed `plan`, and the workflow's `tools` are normalized into the shape the runtime
+ * runs (model slots, a planner config, an output mode and the declared tool names). The schema
+ * types flow through, so `runWorkflow(workflow, input).output` is typed.
  */
 export function defineWorkflow<const TDefinition extends DefineWorkflowInput>(
   options: TDefinition,
 ): DefinedWorkflow<DefineWorkflowInputOf<TDefinition>, DefineWorkflowOutputOf<TDefinition>> {
-  const registry = options.tools === undefined ? undefined : createToolRegistry(options.tools);
-  const normalized: WorkflowDefinitionInput = {
+  const tools = definitionTools(options);
+  const models = definitionModelSlots(options);
+  const base = {
     id: options.id,
     ...(options.description === undefined ? {} : { description: options.description }),
+    ...(options.policy === undefined ? {} : { policy: definitionPolicy(options) }),
     ...(options.label === undefined ? {} : { label: options.label }),
     ...(options.input === undefined ? {} : { inputSchema: options.input }),
+    ...(options.suggestedInput === undefined ? {} : { suggestedInputSchema: options.suggestedInput }),
     ...(options.output === undefined ? {} : { output: inferOutputMode(options.output) }),
-    models: [model(options.model)] as readonly [ModelSlot, ...ModelSlot[]],
-    planner: normalizePlanner(options),
+  };
+  const normalized: WorkflowDefinitionInput = {
+    ...base,
+    models,
+    planner: definitionPlanner(options, base, models),
     ...(options.worker === undefined ? {} : { worker: options.worker }),
     ...(options.memory === undefined ? {} : { memory: options.memory }),
     ...(options.bash === undefined ? {} : { bash: options.bash }),
-    ...(registry === undefined ? {} : { globalTools: registry.names() }),
+    ...(tools.names === undefined ? {} : { globalTools: tools.names }),
+    ...(options.toolSelection === undefined ? {} : { toolSelection: options.toolSelection }),
+    ...(options.workflowVersionReuseStrategy === undefined
+      ? {}
+      : { workflowVersionReuseStrategy: options.workflowVersionReuseStrategy }),
   };
   const workflow = createLittleWorkflow(normalized);
-  if (registry !== undefined) {
-    inlineToolRegistryByWorkflow.set(workflow as object, registry);
+  if (tools.registry !== undefined) {
+    inlineToolRegistryByWorkflow.set(workflow as object, tools.registry);
   }
   return Object.assign(workflow, {
-    run(input: unknown, runOptions?: ErgonomicRunWorkflowOptions) {
+    run(input: unknown, runOptions?: RunWorkflowOptions) {
       return runWorkflowCore(
         buildRunWorkflowOptions(workflow as AnyAuthoredWorkflow, input as never, runOptions),
       );
@@ -579,11 +676,78 @@ export function defineWorkflow<const TDefinition extends DefineWorkflowInput>(
   >;
 }
 
-function normalizePlanner(options: DefineWorkflowInput): PlannerConfig {
+function definitionModelSlots(options: DefineWorkflowInput): readonly ModelSlot[] {
+  if (options.model !== undefined && options.models !== undefined) {
+    throw new TypeError(`defineWorkflow '${options.id}': pass either model or models, not both.`);
+  }
+  if (options.models !== undefined) {
+    if (!Array.isArray(options.models) || options.models.length === 0) {
+      throw new TypeError(`defineWorkflow '${options.id}': models must list at least one model.`);
+    }
+    return options.models.map(toModelSlot);
+  }
+  if (options.model !== undefined) {
+    return [toModelSlot(options.model)];
+  }
+  if (options.plan !== undefined) {
+    return [];
+  }
+  throw new TypeError(
+    `defineWorkflow '${options.id}': set model (or models) so a planner can draft the plan, or plan to fix it.`,
+  );
+}
+
+function definitionPlanner(
+  options: DefineWorkflowInput,
+  base: Parameters<typeof fixedPlanPlanner>[0],
+  models: readonly ModelSlot[],
+): PlannerConfig {
+  if (options.plan !== undefined) {
+    if (options.planner !== undefined) {
+      throw new TypeError(`defineWorkflow '${options.id}': a fixed plan replaces the planner; pass plan or planner, not both.`);
+    }
+    return fixedPlanPlanner(base, options.plan);
+  }
   if (isPlannerConfig(options.planner)) {
     return options.planner;
   }
-  return { model: options.planner ?? options.model };
+  return { model: options.planner ?? options.model ?? models[0] };
+}
+
+function definitionTools(options: DefineWorkflowInput): {
+  readonly registry?: ToolRegistry;
+  readonly names?: readonly string[];
+} {
+  const tools = options.tools;
+  if (tools === undefined) {
+    return {};
+  }
+  if (Array.isArray(tools)) {
+    if (!tools.every((name) => typeof name === "string" && name.length > 0)) {
+      throw new TypeError(`defineWorkflow '${options.id}': tool names must be non-empty strings.`);
+    }
+    return { names: [...tools] };
+  }
+  const registry = isToolRegistry(tools) ? tools : createToolRegistry(tools as Record<string, AiSdkTool>);
+  return { registry, names: registry.names() };
+}
+
+function isToolRegistry(value: unknown): value is ToolRegistry {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    typeof (value as Partial<ToolRegistry>).names === "function" &&
+    typeof (value as Partial<ToolRegistry>).get === "function" &&
+    typeof (value as Partial<ToolRegistry>).snapshotForManifest === "function"
+  );
+}
+
+function toModelSlot(value: unknown): ModelSlot {
+  return isModelSlot(value) ? value : model(value);
+}
+
+function isModelSlot(value: unknown): value is ModelSlot {
+  return typeof value === "object" && value !== null && "aiSdkModel" in value && "metadata" in value;
 }
 
 function isPlannerConfig(value: unknown): value is PlannerConfig {
@@ -619,18 +783,12 @@ function isOutputModeInput(value: unknown): value is LooseOutputModeInput {
   );
 }
 
-/** Ergonomic `runWorkflow(def, input, opts?)` options: everything but the implied workflow/input, with an optional world. */
-export type ErgonomicRunWorkflowOptions = Omit<
-  RunWorkflowOptions<AnyAuthoredWorkflow>,
-  "workflows" | "input" | "world"
-> & { readonly world?: LocalWorld };
-
-/** Build the runtime's options object for the ergonomic two-arg `runWorkflow(def, input)` form. */
+/** INTERNAL. Build the runtime request for `runWorkflow(workflow, input, options)`. */
 export function buildRunWorkflowOptions<TWorkflow extends AnyAuthoredWorkflow>(
   workflow: TWorkflow,
   input: InferWorkflowInput<TWorkflow>,
-  options?: ErgonomicRunWorkflowOptions,
-): RunWorkflowOptions<TWorkflow> {
+  options?: RunWorkflowOptions,
+): RunWorkflowRequest<TWorkflow> {
   const { world, tools, ...rest } = options ?? {};
   const resolvedTools = tools ?? inlineToolRegistryFor(workflow);
   return {
@@ -639,38 +797,55 @@ export function buildRunWorkflowOptions<TWorkflow extends AnyAuthoredWorkflow>(
     input,
     ...(resolvedTools === undefined ? {} : { tools: resolvedTools }),
     ...rest,
-  } as RunWorkflowOptions<TWorkflow>;
+  } as RunWorkflowRequest<TWorkflow>;
 }
 
 /**
- * Run a workflow. Accepts the power-user options object **or** the ergonomic
- * `runWorkflow(def, input, opts?)` form (defaults the world + inline tool registry).
+ * Run one workflow and return its typed result. `options.world` defaults to `localWorld()` and
+ * `options.tools` to the tools declared on the workflow; `workflow.run(input, options)` is the same
+ * call. A failed run throws {@link RunFailedError}; test for it with `isRunFailedError(error)`.
  */
-export async function runWorkflow<TWorkflow extends WorkflowRunTarget = WorkflowRunTarget>(
-  options: RunWorkflowOptions<TWorkflow>,
-): Promise<RunResult<InferWorkflowOutput<TWorkflow>>>;
 export async function runWorkflow<TWorkflow extends AnyAuthoredWorkflow>(
   workflow: TWorkflow,
   input: InferWorkflowInput<TWorkflow>,
-  options?: ErgonomicRunWorkflowOptions,
-): Promise<RunResult<InferWorkflowOutput<TWorkflow>>>;
-export async function runWorkflow(
-  optionsOrWorkflow: RunWorkflowOptions<WorkflowRunTarget> | AnyAuthoredWorkflow,
-  input?: unknown,
-  options?: ErgonomicRunWorkflowOptions,
-): Promise<RunResult<unknown>> {
-  if (isRunWorkflowOptionsObject(optionsOrWorkflow)) {
-    return runWorkflowCore<WorkflowRunTarget>(optionsOrWorkflow);
+  options?: RunWorkflowOptions,
+): Promise<RunResult<InferWorkflowOutput<TWorkflow>>> {
+  if (Array.isArray(workflow)) {
+    throw new TypeError(
+      "runWorkflow runs one workflow. Compose several with asHarnessWorkflow + createHarness({ workflows }), or use the deprecated runOrchestration({ workflows, orchestrator, input }).",
+    );
   }
-  return runWorkflowCore(
-    buildRunWorkflowOptions(optionsOrWorkflow, input as never, options),
-  );
+  if (typeof workflow === "object" && workflow !== null && "workflows" in workflow && !("id" in workflow)) {
+    throw new TypeError(
+      "runWorkflow(options) was removed: call runWorkflow(workflow, input, { world, ... }). For a workflow array use runOrchestration(options).",
+    );
+  }
+  return runWorkflowCore(buildRunWorkflowOptions(workflow, input, options)) as Promise<
+    RunResult<InferWorkflowOutput<TWorkflow>>
+  >;
 }
 
-function isRunWorkflowOptionsObject(
-  value: RunWorkflowOptions<WorkflowRunTarget> | AnyAuthoredWorkflow,
-): value is RunWorkflowOptions<WorkflowRunTarget> {
-  return typeof value === "object" && value !== null && "workflows" in value;
+/**
+ * Let an orchestrator agent plan and run several workflows (`plan_workflow` / `run_workflow` /
+ * `start_workflow`) for one input. `world` defaults to `localWorld()`.
+ *
+ * @deprecated The orchestrator composition surface is being retired. Adapt each workflow with
+ * `asHarnessWorkflow` and pass them to `createHarness({ workflows })` from `@little-stack/harness`.
+ * Calling this emits a one-time `DeprecationWarning` (`LWF_DEP_ORCHESTRATOR`).
+ */
+export async function runOrchestration<TWorkflows extends WorkflowRunList>(
+  options: RunOrchestrationOptions<TWorkflows>,
+): Promise<Omit<RunResult<unknown>, "plan">> {
+  if (!Array.isArray(options.workflows) || options.workflows.length === 0) {
+    throw new TypeError(
+      "runOrchestration requires a non-empty workflows array. Run a single workflow with runWorkflow(workflow, input).",
+    );
+  }
+  const { world, ...rest } = options;
+  return runWorkflowCore({
+    ...rest,
+    world: world ?? localWorld(),
+  } as unknown as RunWorkflowRequest<TWorkflows>) as Promise<Omit<RunResult<unknown>, "plan">>;
 }
 
 export function model<const TModel = unknown>(

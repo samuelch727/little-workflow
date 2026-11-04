@@ -44,6 +44,7 @@ CONTEXT.md
 spec.md
 docs/adr/
 
+
 # generated spec renders (source of truth is spec.md)
 little-workflow-spec.pdf
 spec-body.html
@@ -58,3 +59,7 @@ spec-review.md
 
 # generated little-workflow test session artifacts (see PR #8 notes)
 packages/little-workflow/session_*/
+
+# Python qualification helper caches are local execution artifacts.
+**/__pycache__/
+*.py[cod]

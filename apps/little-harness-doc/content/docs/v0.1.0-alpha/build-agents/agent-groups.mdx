@@ -1,0 +1,361 @@
+---
+title: Agent Groups
+description: Fan out isolated agents through a neutral, production-safe launcher contract.
+---
+
+Agent Groups let one Little Harness session start an ordered set of isolated workers, observe them, join on a
+trusted policy, and cancel outstanding work. Little Harness does not choose a container, VM, or scheduler.
+Your `HarnessAgentGroupLauncher` adapter can target any runtime that implements the contract.
+
+This separation keeps the model-facing surface stable while the execution layer can scale independently.
+The five generated names remain reserved for user tools, but they appear in the resolved manifest and model
+toolset only when `agents` is configured.
+
+> **UNRELEASED:** Agent Groups exist only in the current source. Published `0.2.0-alpha.0` (on npm as
+> `little-harness`) has no `agents` option and no `/agents` entry point, so the examples on this page do
+> not compile against it. No npm version includes Agent Groups yet.
+
+> **Experimental entry point.** The launcher port, its request and result types, the
+> `HarnessAgentGroup*Error` classes, the protocol-version constants and the task-ledger projection types
+> come from `@little-stack/harness/agents`, which may change between alpha releases. App code that only
+> passes a ready-made launcher (for example Little Compute's) to `createHarness({ agents })` needs nothing
+> from it; `HarnessAgentGroupsOptions` is exported from the root.
+>
+> The three error classes extend `LittleHarnessError`, so one `instanceof LittleHarnessError` check
+> catches them. Their `code` is `"agent_group_launch_rejected"` (`HarnessAgentGroupLaunchRejectedError`),
+> `"page_call_limit"` (`HarnessAgentGroupPageCallLimitError`), or `"invalid"`, `"expired"` or `"mismatch"`
+> (`HarnessAgentGroupCursorError`).
+
+## Configure Trusted Profiles
+
+```ts
+import { createHarness, localHost } from "@little-stack/harness";
+import type { HarnessAgentGroupLauncher } from "@little-stack/harness/agents";
+
+const launcher: HarnessAgentGroupLauncher = {
+  startAgentGroup: (request) => scheduler.start(request),
+  watchAgentGroup: (request) => scheduler.watch(request),
+  joinAgentGroup: (request) => scheduler.join(request),
+  cancelAgentGroup: (request) => scheduler.cancel(request),
+};
+
+const harness = createHarness({
+  host: localHost(),
+  model,
+  agents: {
+    launcher,
+    profiles: [{
+      handle: "repo-worker",
+      description: "Repository worker without production credentials.",
+      resourcesHandle: "cpu-medium",
+      secretsHandle: "repo-readwrite",
+      toolsHandle: "code-browser-tests",
+      networkHandle: "package-registries",
+      priorityHandle: "interactive",
+    }],
+    joinPolicies: [
+      { handle: "all", policy: { kind: "all_success" } },
+      { handle: "any", policy: { kind: "any_success" } },
+      { handle: "quorum-2", policy: { kind: "quorum", count: 2 } },
+      {
+        handle: "verified",
+        policy: { kind: "first_verified" },
+        verifierHandle: "signed-check-verifier",
+        requiredCheckSetHandle: "repo-checks-v1",
+      },
+    ],
+    defaultJoinPolicyHandle: "all",
+    reductionPolicies: [{
+      handle: "concise",
+      maxMemberSummaryBytes: 16_384,
+      maxGroupSummaryBytes: 32_768,
+      maxResultRefs: 32,
+    }],
+    defaultReductionPolicyHandle: "concise",
+    limits: {
+      maxMembers: 32,
+      maxPromptBytes: 65_536,
+      maxGroupPromptBytes: 2_097_152,
+      maxDeadlineMs: 3_600_000,
+      maxJoinWaitMs: 30_000,
+    },
+  },
+});
+```
+
+The model chooses `profileHandle`, `joinPolicyHandle`, and `reductionPolicyHandle`. It cannot construct raw
+CPU, memory, secret, tool, network, verifier, check-set, or priority requests. Resolve those trusted handles
+inside the adapter or scheduler.
+Generated model schemas enumerate those handles and trusted descriptions without revealing their internal
+capability bindings. Per-member and aggregate group prompt-byte limits are enforced, and reservations fan out
+concurrently.
+
+## Model Tools
+
+| Tool | Purpose |
+|---|---|
+| `start_agent_group` | Atomically start an immutable ordered member set. |
+| `spawn_agent` | Start one member through the exact same group path. |
+| `watch_agent_group` | Read bounded group state: a v1 snapshot or a cursor-paged aggregate/change page. |
+| `join_agent_group` | Apply the configured join once, then read its bounded result. |
+| `cancel_agent_group` | Apply cancellation once, then read its bounded result. |
+
+Agent work is a separate task kind. It is never admitted to the ordinary asynchronous tool queue.
+
+## Atomic, Idempotent Start
+
+`startAgentGroup(request)` must accept every ordered member or none. Persist `request.callIdentity` and return
+the same accepted group/member refs when the request is retried. Member ids, indexes, Harness task ids, and
+member call identities are deterministic.
+
+External group refs must be unique. After acceptance, Harness atomically commits the group ref, immutable
+member count, and every ordered member ref to one durable authority before task-file mirrors. A crash cannot
+leave accepted live work only partially bound to Harness tasks.
+
+Only throw `HarnessAgentGroupLaunchRejectedError` (from `@little-stack/harness/agents`) when the scheduler proves that no member was accepted. A
+generic exception may be response loss after acceptance, so Little Harness leaves reservations queued and a
+retry sends identical identities. `acceptedAt` must not predate the Harness reservations or exceed the
+bounded clock-skew allowance into the future.
+
+## Observation Modes
+
+The four required launcher methods are the `little-harness.agent-groups.v1` compatibility contract
+(`HARNESS_AGENT_GROUPS_PROTOCOL_VERSION`). Launchers that implement only those methods retain their output
+byte-for-byte: every watch, join, or cancel result is one complete ordered snapshot. Legacy launchers are
+capped at 1,024 configured members.
+
+For larger groups, add the optional `paged` capability. It is one object with all three page methods, so a
+launcher supplies all of them or none (the type enforces it). Paged requests carry
+`HARNESS_AGENT_GROUP_PAGES_PROTOCOL_VERSION`:
+
+```ts
+const launcher: HarnessAgentGroupLauncher = {
+  startAgentGroup: (request) => scheduler.start(request),
+  // Required v1 compatibility methods remain present.
+  watchAgentGroup: (request) => scheduler.watchSnapshot(request),
+  joinAgentGroup: (request) => scheduler.joinSnapshot(request),
+  cancelAgentGroup: (request) => scheduler.cancelSnapshot(request),
+  // `paged` selects the bounded change-page path.
+  paged: {
+    watch: (request) => scheduler.watchPage(request),
+    join: (request) => scheduler.joinPage(request),
+    cancel: (request) => scheduler.cancelPage(request),
+  },
+};
+```
+
+The paged path supports a configured `maxMembers` up to 10,000. Set hard response limits with
+`maxMemberPageChanges` (up to 1,024), `maxMemberPageBytes` (up to 4 MiB for the canonical result envelope), and
+`maxMemberCursorBytes` (up to 16 KiB). Defaults are 128 changes, 256 KiB, and 2 KiB. Prompt and reduction
+bounds still apply independently.
+
+### Legacy Snapshot Fences
+
+Every watch, join, or cancel result is one complete ordered snapshot:
+
+- `groupRevision` is a positive monotonic integer for the group snapshot.
+- Each member has its own positive monotonic `revision`.
+- Repeating a revision is allowed only when its snapshot bytes are identical.
+- Lower revisions, conflicting equal revisions, group status regressions, and terminal member changes fail
+  closed.
+- Join disposition, summary, and result refs have their own digest at the group revision. A watch can precede
+  join at that revision, but a conflicting join reduction replay is rejected.
+
+The task ledger applies all member projections under one group fence. If a slow watch with revision 4 arrives
+after a join with revision 5, revision 4 is rejected and cannot turn completed tasks back into running tasks.
+Durable orchestration backends must preserve that atomic compare-and-set behavior. Local Host commits one
+per-group authority record before mirroring task files, and task reads overlay that authority. A process crash
+halfway through task mirroring therefore resumes from the complete committed group snapshot.
+
+### Aggregate and Member-Change Pages
+
+A paged result contains an exact aggregate, an `aggregateVersion`, and only the changes after the requested
+cursor position. The v2 change union is either `{ kind: "member", member }` or
+`{ kind: "group_control", status, observedAt, controlDigest }`. Group-only deadline, return-partial, and
+cancellation transitions therefore consume the same group-global sequence without inventing a member update.
+Legacy v1 member-only changes remain readable during adapter upgrades. Changes use one group-global sequence
+starting at one. A valid page is contiguous:
+`throughSequence === afterSequence + changes.length`, every change has the next sequence, and
+`aggregateVersion === throughSequence`. The aggregate's status counts must sum to the immutable member count;
+verified-success and result-ref counts are checked separately. A `satisfied` aggregate must prove the trusted
+join policy without scanning all member output.
+
+Every response returns `nextPageCursor`, including at the current tail, so a later call can resume new changes.
+Treat cursors as opaque capabilities. An adapter must authenticate them or bind them to server-side state; a
+caller-provided sequence is never authority. The cursor must also be bound to the group, session, operation,
+position, and expiry. Throw `HarnessAgentGroupCursorError` with `invalid`, `expired`, or `mismatch` (its `code`) so callers can
+distinguish malformed bytes, an expired resume point, and a cursor copied from another stream. Little Harness
+independently enforces cursor, count, canonical-byte, sequence, aggregate, timestamp, and page-digest bounds.
+
+Harness durably binds the stable tool-call identity, input digest, request key, and starting high-water before
+adapter I/O. A cursorless call opens at the current durable high-water; it does not reconstruct old member output.
+The response echoes `requestIdempotencyKey`, and `pageDigest` covers the canonical page. Repeating a request
+must return byte-identical data. A conflicting replay, a skipped page, an aggregate-version regression, or a
+non-contiguous sequence fails closed. The in-memory task ledger keeps a compact per-group authority and applies
+only changed member records, so a watch is O(changes), not O(member count).
+
+Join and cancel requests carry `operation: "begin" | "continue"`. The presence of `operationRef`, not a page
+cursor, selects `continue`. Only `begin` may execute the mutation, and the adapter must deduplicate the exact
+max-wait/reason mutation by `operationIdempotencyKey`. A continuation reads the immutable versioned operation
+result and must never join or cancel again. Until `throughSequence >= resultVersion`, the model sees only the
+operation ref, result version, and `pending`; disposition, summary, and result refs remain hidden. Page replay
+likewise cannot repeat the mutation or produce a second logical terminal transition.
+
+A bounded join wait can also return `pendingOperation` before an immutable operation result exists. It contains
+the durable `operationRef`, observed aggregate version and timestamp, a bounded retry hint, and a canonical
+digest. Little Harness returns this as `operation.state: "waiting"`; it does not manufacture a group deadline
+or terminal disposition. Continue with that exact operation ref. A conflicting ref, a pending observation ahead
+of the page, or a retry/timestamp/digest outside the request bounds fails closed.
+
+A paged ledger must reserve each join-begin identity before invoking the launcher and share its active
+reservation fence with group garbage collection. If the adapter binds an operation ref but the response
+payload or terminal visibility is incomplete, the ledger returns an opaque `operation.state: "continue_required"`
+recovery; call `join_agent_group` again with that ref through the normal continuation path. The active
+reservation is not released until visibility is authorized, and the recovery does not expose response bytes.
+
+Little Compute has a paged launcher, `littleComputeAgentGroups(options)` from
+`@little-stack/compute/harness`. Compute is not published yet; its "Use from Little Harness" page covers the
+launcher's options. It implements only the paged path: its full-snapshot methods fail on purpose, and Little Harness
+does not call them once `paged` is present.
+
+Result refs use a global immutable owner index. Publication acquires canonical per-ref locks in sorted order and
+persists a recoverable claim before the group authority advances. A crash before authority commit releases the
+claim for another group; a crash after commit promotes the original owner during recovery. Two groups therefore
+cannot both commit the same ref. Claim recovery must prove the exact immutable sequence, member index and ID,
+first member revision, ref, and publication digest; matching only a page commit range is not sufficient. When a
+terminal member reports the same ref at a higher revision, its original
+publication sequence, member revision, and digest remain authoritative; clearing or replacing a published ref is
+an invalid transition. Join visibility compares `resultVersion` with that first publication sequence.
+
+Replay history is bounded to 4,096 group-global sequences and two bounded 4,096-call windows (live replay
+bindings, then stable expiry tombstones). An immutable digest marker keeps exact retired calls rejected after both
+windows; one group may issue at most 65,536 page calls over its lifetime. Exceeding that ceiling raises
+`HarnessAgentGroupPageCallLimitError` before launcher I/O. A call or cursor behind `minimumRetainedSequence` fails
+with typed `expired`; it is never silently rebound. Open a new cursorless call to resume from the current
+high-water. Cleanup runs only after committed sequences have been mirrored into the compact member authority. It
+may remove old page receipts, stages, and sequence records, but immutable terminal result-ref ownership and
+join/cancel operation results remain authoritative.
+
+The paged task ledger also exposes explicit terminal compare-and-set collection through
+`collectAgentGroupGarbage`. Supply the exact aggregate version and observation digest after the group reaches
+`satisfied`, `failed`, or `cancelled`. Collection removes member/task authorities, operation aliases/results,
+result-ref owners, and the launch batch journal, then leaves compact permanent group and start receipts. The group
+receipt is global to the external group ref, not scoped to one Harness session. Exact collection replay is
+idempotent; a different fence conflicts, an old start is rejected before launcher I/O, and no later session can
+reuse a collected external group ref. GC revalidates the exact version/digest immediately before transitioning
+from `prepared` to deletion. It preserves exact owner digests through `committed_cleanup`, conditionally removes
+owners under the same per-ref locks, and only then compacts the receipt. A crash during member deletion, after
+group deletion, or midway through owner cleanup cannot delete a ref that has since acquired a different owner.
+The prepared owner set is independently checked against every member's first-publication metadata and the exact
+aggregate result-ref count. Once `deleting` is durable it is an irreversible writer fence, including after process
+restart: page-call, operation-result, state-recovery, and projection paths refuse to advance the collected group.
+
+After launch binding, ordinary task-ledger mutation and cancellation are rejected. Use `cancel_agent_group`
+or project a newer launcher revision; this prevents generic task operations from appearing successful while
+the durable group authority still owns a different state.
+
+## Fork and Merge Back
+
+A launcher that can fork the parent's files for its children and merge their work back adds the optional
+`workspaces` capability. It is one object with a `read(request)` method. Without it, the tools, their schemas,
+and every call identity stay exactly as they are; with it, `start_agent_group` and `spawn_agent` take two more
+optional fields:
+
+| Field | Meaning |
+|---|---|
+| `from` | `parent` (the default): children start from a copy of the parent's current files when the launcher can fork them. `project`: they start from the Project head. |
+| `mergePolicy` | 1 to 64 rules `{ glob, policy, owner? }` deciding how members' changes merge back. `policy` is `three_way`, `collect`, or `owner`; `owner` names a member id of this group (`member_1` is the first) and is given exactly for `owner` rules. |
+
+Little Harness checks the fields before launcher I/O: a glob is at most 512 bytes with no control characters or
+backslashes, and an `owner` must name one of the group's members. A model that sets either field on a launcher
+without `workspaces` gets an input error. When set, the ask reaches the launcher as `request.workspace`
+(`from` and `mergePolicies`) and is part of the call identity, so the same launch with a different ask is a
+different call.
+
+The launcher decides what an ask means. Little Compute applies a host's `forkBase` over `from` and the host's
+merge policies ahead of the model's rules; see its "Fork and merge" page.
+
+Once a group has merged back, `workspaces.read(request)` returns where the children started and one row per
+member. The request carries the same identity fields as a watch. `join_agent_group` adds the outcome as a
+`workspace` field to a resolved join, and `watch_agent_group` adds it when the group is no longer queued or
+running:
+
+```json
+{
+  "workspace": {
+    "from": "parent",
+    "members": [
+      { "memberId": "member_1", "merge": "merged" },
+      { "memberId": "member_2", "merge": "branch", "branch": "refs/heads/little-compute/members/member_2", "conflictPaths": ["src/routes.ts"] }
+    ]
+  }
+}
+```
+
+`merge` is `merged`, `resolved` (it conflicted and a resolver merged it), or `branch` (kept unmerged, with up to 32
+conflicting paths). `reason`, a launcher-defined token of at most 128 bytes, may say why children started from the
+Project head and appears only with `from: "project"`. Return `undefined` until the group has merged. Little Harness
+rejects an outcome with unknown fields, a member outside the group, a repeated member, a `branch` row without its
+branch, `branch` or `conflictPaths` on any other row, or more canonical bytes than the smaller of 256 KiB and
+`maxMemberPageBytes`.
+
+The outcome is read each time the tool runs; it is not part of the immutable join result. A member a resolver
+merges after the join shows as `resolved` on the next watch.
+
+## Bounded Context, Not Child Transcripts
+
+Launcher observations may contain status, a bounded summary, a bounded opaque result ref, a bounded failure
+code on a terminal member, verification state, and timestamps. Queued and running members cannot report a
+failure code or result ref. They cannot contain raw child output or arbitrary fields. Little
+Harness also rejects reordered/foreign task refs, oversized summaries, duplicate or foreign result refs, and
+invalid timestamps before projecting the snapshot or returning it to the model.
+
+Use opaque result refs to let a trusted host fetch full artifacts outside model context. Do not encode a child
+transcript into a ref or summary.
+Adapter `taskRef` values stay internal and are removed from start/watch/join/cancel output. Start output keeps
+Harness `taskId`, which is the model-usable task identifier.
+
+## Trusted Join Policies
+
+Available policy kinds are `all_success`, `all_terminal`, `any_success`, `quorum`, and `first_verified`.
+`first_verified` must be declared with both `verifierHandle` and `requiredCheckSetHandle`; the model selects the
+policy handle only. A successful member proves verification with a receipt containing an opaque receipt ref,
+matching verifier/check-set handles, and a bounded timestamp. Bare booleans, mismatched receipts, and receipts
+under other policies are rejected. Receipt material stays internal; the model sees only derived
+`verified: true`. Join `terminal`/`deadline` dispositions are also checked against actual member state.
+
+`join_agent_group` waits only for `maxWaitMs` within the configured ceiling. It returns the bounded snapshot or
+aggregate/change page;
+it does not invent an implicit cross-turn continuation. Use the launcher/scheduler and session integration for
+durable wakeups that must outlive a turn.
+
+Atomic start-binding and full observation-projection methods are optional task-ledger capabilities. Existing
+custom orchestration services remain compatible while `agents` is absent; configuring `agents` requires both.
+A launcher with `paged` additionally requires `getAgentGroupPageState` and `projectAgentGroupPage` on the ledger; configuration
+fails early when the ledger cannot provide compact lookup and O(changes) projection. `createInMemoryTaskLedger()`
+and the shared Map/file durable orchestration services behind `localHost()` implement this path. The durable
+authority stores compact group metadata plus deterministic member, sequence, and replay-receipt records. Normal
+page two reads and writes only its bounded changes; response-loss recovery reads the committed sequence interval
+directly without listing every member. Receipts are replayable only when an authority-bound commit identity or its
+repaired commit marker proves that exact request and projection; a receipt or matching high-water number alone is
+not proof. This also fences zero-change join reductions. A custom durable backend must preserve those fences and
+must not rebuild a full snapshot for every page.
+
+Atomic launch remains O(member count): Harness must reserve every task, bind every immutable member ref, and
+initialize every per-member fence. Paged launch uses the direct group-ref index, so it does not scan historical
+tasks; the stored start-envelope digest binds accepted time, exact member/task refs, and policy metadata. That
+one-time O(group members) cost is separate from steady-state observation, which is
+O(page changes). A progressed legacy v1 snapshot is not silently rewritten into the new authority on read;
+migrate it explicitly or start a new paged group. Replaying an exact, still-queued atomic start may finish an
+interrupted page-authority initialization because that replay is an explicit start receipt. The prepared launch
+journal contains the ordered records only until commit; the committed journal retains their interval and digest,
+then validates immutable reservation projections through point reads instead of keeping a second 10,000-record
+copy. Later task status, start binding, and observation updates therefore cannot invalidate a third launch replay.
+After an accepted start, exact launch replay returns an immutable accepted-start receipt before launcher I/O. It
+does not expose mutable terminal task rows, call the launcher again, or rewind progressed task/member authority.
+
+The bundled file store assumes its durable root is private to the Harness process (for example, mode `0700` and
+not writable by untrusted tenants). JavaScript's portable filesystem APIs cannot make every ancestor check and
+subsequent path operation one fd-relative `O_NOFOLLOW` transaction, so the file backend is not a security boundary
+against a hostile local user racing path replacement. Use a database-backed orchestration service for mutually
+untrusted writers or hosts.

@@ -8,13 +8,17 @@ import {
   type WorkflowVersionLockSeed,
 } from "./compiler-lock.js";
 import {
+  localWorld,
+  model,
+} from "./index.js";
+import {
+  registerWorkflowVersion,
+} from "./entries/lwir.js";
+import {
   appendEvent,
   createLittleWorkflow,
   listEvents,
-  localWorld,
-  model,
-  registerWorkflowVersion,
-} from "./index.js";
+} from "./entries/internals.js";
 import { compileWorkflow } from "./compiler.js";
 import { runCli } from "./cli-core.js";
 
@@ -375,7 +379,7 @@ describe("little CLI", () => {
   it("routes init and add commands through the top-level little CLI", async () => {
     const root = await tempDir("little-workflow-cli-scaffold-");
 
-    const init = await invoke(["init", "--here", "--workflow", "alpha", "--yes", "--no-install"], { cwd: root });
+    const init = await invoke(["init", "--here", "--workflow-name", "alpha"], { cwd: root });
     const addWorkflow = await invoke(["add", "workflow", "beta"], { cwd: root });
     const addHarness = await invoke(["add", "harness", "--agent", "support", "--new-workflow", "gamma"], { cwd: root });
 

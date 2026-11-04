@@ -35,7 +35,8 @@ const result = await generateHarness({
 
 A session owns:
 
-- the transcript and model context policy
+- the model context policy (the transcript is caller-owned: the client resends
+  `messages[]` each turn, and the session does not store it)
 - a private `/session/` workspace
 - host-staged files for future turns
 - artifact references created during the session

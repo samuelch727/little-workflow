@@ -1,0 +1,174 @@
+---
+title: User feedback
+description: Send what your users say about an agent's replies (thumbs, ratings, comments, surveys) to LittleDB, where reviews, trials and rollback weigh it next to the judges. Private source; not installable.
+---
+
+<Callout title="Private and UNRELEASED" type="warn">
+  `@little-stack/littledb` is private source and is not on npm, and it needs a
+  LittleDB server, which is not publicly available. The examples below will not
+  work for you until both are released. Harness
+  [Outcome Capture](/docs/harness/v0.1.0-alpha/build-agents/outcomes) to local
+  traces works without it.
+</Callout>
+
+An LLM judge grades what it can see in a trace. Your users notice what it
+cannot: the refund amount was right but the reply never said when the money
+arrives, the page compiled but it is not what they asked for. **User feedback**
+sends what they said to LittleDB, next to the judges' scores, so the review loop
+hears it too.
+
+You build the feedback UI you want, whether that is a thumbs up and down on each
+message, a rating or a survey at the end of a conversation. The client gives you three ways to
+pass the answers on:
+
+1. **Reactions and outcomes, automatically**: give `db.outcomeSink()` to a
+   Harness chat connector or to `reportHarnessOutcome`.
+2. **From your backend**: `db.feedback()`.
+3. **From the browser**: mount `db.feedbackHandler()` on your backend, so the
+   browser never holds the API key.
+
+Each answer is stored as a **score with source `user`** on the trace of the turn
+it is about.
+
+## Reactions and outcomes
+
+Harness [chat connectors](/docs/harness/v0.1.0-alpha/build-agents/chat-connectors#reactions)
+record 👍 and 👎 on the agent's replies as
+[outcomes](/docs/harness/v0.1.0-alpha/build-agents/outcomes). The outcome sink
+turns each one into user feedback, and the same sink works for outcomes your
+code reports:
+
+```ts
+// Private, UNRELEASED.
+const tracer = db.harnessTracer({ harness: "support-desk" });
+const feedback = db.outcomeSink({ tracer });
+
+export default chatSdkConnector({
+  // ...
+  reactions: { sinks: [feedback] },
+});
+
+await reportHarnessOutcome({ session, status: "failure", detail: "Wrong refund amount.", sinks: [feedback] });
+```
+
+| Outcome field | Becomes |
+| --- | --- |
+| `status: "success"` / `"failure"` | A thumbs up / down |
+| `status: "partial"` | A rating of 3 out of 5 (stored as 0.5) |
+| `score` between 0 and 1 | A rating on the same 1..5 scale instead; the exact score stays in `metadata.outcome.score` |
+| `detail` | The comment |
+| `reporter` | The user id (reactions use `anon_<16 hex>`) |
+| `reportKey` | The stable id, so a changed reaction replaces the earlier one |
+| `retracted: true` | Withdraws it, unless the same person has since reacted the other way |
+| `turnId` | The trace the tracer wrote for that turn; with no turn (a reaction), the session's latest trace |
+
+Every outcome goes under one score name, `thumbs` (`feedbackName` changes it).
+Pass the `tracer` that traced the sessions so the sink uses its trace ids. The
+sink never throws into the run: a failure goes to `onError` and the harness
+counts it as a failed sink.
+
+## From your backend
+
+```ts
+// Private, UNRELEASED.
+import { feedbackId } from "@little-stack/littledb";
+
+await db.feedback({
+  traceId, // the turn the message came from
+  userId: hashedUserId, // pseudonymous
+  id: feedbackId(hashedUserId, messageId), // send again with the same id to change the answer
+  thumbs: "down",
+  comment: "Didn't say when I'd get my money",
+});
+
+// An end-of-conversation survey: the session's latest turn.
+await db.feedback({
+  sessionId,
+  userId: hashedUserId,
+  id: feedbackId(hashedUserId, `survey:${sessionId}`),
+  survey: "csat-v1",
+  answers: [
+    { question: "resolved", value: true },
+    { question: "ease", value: 4, scale: 5 },
+    { question: "reason", choice: "too slow" },
+    { question: "anything_else", text: "..." },
+  ],
+});
+
+await db.retractFeedback(feedbackId(hashedUserId, messageId));
+```
+
+Feedback needs a `traceId` or a `sessionId`, and at least one of `thumbs`,
+`rating` (`{ value, scale }`, 1 to `scale`, scale 2..10, default 5), `comment`
+(at most 4000 characters) or `answers` (at most 20). `name` renames the thumbs
+or rating score. A trace does not have to be sent yet: a click can arrive before
+it. `db.feedback()` is sent at once, not queued; it returns `{ traceId, scores }`
+and throws `LittleDBError`, or `TypeError` for feedback it can tell is invalid.
+
+The trace of a turn: right after the turn, `tracer.traceIdFor(sessionId)`; from
+the turn id every harness event carries, `tracer.traceIdForTurn(sessionId,
+turnId)`. Keep it with the message you show and send it back with the feedback.
+
+## From the browser
+
+```ts
+// app/api/feedback/route.ts. Private, UNRELEASED.
+const handler = db.feedbackHandler({
+  authorize: async (request) => {
+    const user = await currentUser(request);
+    return user === undefined ? null : { userId: hash(user.id) }; // null answers 401
+  },
+  // Optional: map the browser's message id to its turn, after checking it is theirs.
+  resolveTrace: async ({ messageId, sessionId }, { userId }) =>
+    messageId !== undefined ? await traceOfMessage(messageId, userId) : sessionId === undefined ? null : { sessionId },
+});
+
+export { handler as POST, handler as DELETE };
+```
+
+The browser posts the same fields as `db.feedback()`, plus `messageId`, as JSON
+to that route, and sends `DELETE ?id=<id>` to take an answer back. The handler is
+a plain Fetch handler (`Request` in, `Response` out). It stores the `userId` that
+`authorize` returns and ignores one in the body; sends an `id` (default:
+`messageId`) as `feedbackId(userId, id)`, so one user cannot replace or withdraw
+another's answers; refuses bodies over 16 KiB (`maxBodyBytes`) and requests
+without a JSON content type; answers 400 for invalid feedback and 404 when
+`resolveTrace` returns nothing; and answers LittleDB's own errors with a short
+message, never its error body or anything about the key.
+
+## Privacy
+
+- **User ids are pseudonymous.** LittleDB stores `userId` with each score. Send
+  a hash of your user id, never an email address or a name.
+- **Comments are stored as text.** LittleDB shows them to its reviewer as
+  quoted, untrusted data, never as instructions.
+- **Least privilege.** The backend that forwards feedback needs an API key with
+  the `feedback` scope, which can send and withdraw feedback and nothing else.
+  An `ingest` key works too.
+
+## What LittleDB does with it
+
+- **Scores.** A thumbs is 1 or 0. A rating is stored on 0..1 as
+  (value − 1) / (scale − 1), with the original in `metadata.raw` and
+  `metadata.scale`. A survey answer is a score named after its question. Below
+  0.5 is negative.
+- **Reviews.** A review reads a summary per signal for the live version and up
+  to 10 recent complaints with their comments, and can search traces by
+  feedback. After `policy.feedback.reviewAfterNegatives` negative answers since
+  the last review (default 10), LittleDB starts a review on its own when a model
+  is configured.
+- **Trials, release watch and rollback.** Feedback exists only on live traffic,
+  so offline experiments skip it. `policy.feedback.gate` is `"harm"` by default:
+  a change fails only when users are clearly less happy, with at least
+  `minResponses` answers per side (default 20), and too little feedback never
+  holds a change up. `"require"` waits until users are shown to be no less
+  happy, and fails if the trial ends first. `"off"` turns the gate off. A
+  clearly better user signal counts toward the improvement gate, and the
+  release watch rolls a version back when one is clearly worse.
+
+Read it back with `db.request()` and a `read` key: `GET /feedback/summary`,
+`GET /feedback`, `GET /feedback/themes`, and `GET /evaluators/:id/agreement`
+(how often a judge agrees with your users).
+
+See also [LittleDB with Little Harness](/docs/littledb/harness) and
+[LittleDB](/docs/littledb).

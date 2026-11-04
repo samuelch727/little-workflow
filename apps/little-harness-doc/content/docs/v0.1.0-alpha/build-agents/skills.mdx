@@ -65,6 +65,14 @@ The runtime puts skill names and descriptions in the prompt, then stages full sk
 cat .agents/skills/frontend-design/SKILL.md
 ```
 
+With `runtime: { bash: false }` the agent has no shell to read them with, so the
+harness adds a `load_skill` tool instead. It takes a skill's name and returns its
+`SKILL.md`, or another file of the skill when asked, and the skill list in the prompt
+says to open skills with it.
+
+Harness [memory](/docs/v0.1.0-alpha/build-agents/memory) adds a built-in `memory`
+skill. A skill of your own named `memory` replaces it.
+
 The helper that registers a skill is documented in [skill()](/docs/v0.1.0-alpha/reference/skill-helper).
 
 ## What Belongs In A Skill
@@ -77,4 +85,4 @@ Use skills for:
 - tool usage rules
 - review checklists
 
-Do not use skills for secrets, user-specific memory, or large raw datasets. Put persistent app data behind tools or Persistent Dirs.
+Do not use skills for secrets, user-specific memory, or large raw datasets. Put persistent app data behind tools or Persistent Dirs, and what the agent learns in [memory](/docs/v0.1.0-alpha/build-agents/memory).

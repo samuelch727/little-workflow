@@ -1,6 +1,6 @@
 {
-  "name": "little-workflow",
-  "version": "0.2.0-alpha.1",
+  "name": "@little-stack/workflow",
+  "version": "0.2.0-alpha.2",
   "description": "Local-first TypeScript workflow orchestration with validated LWIR, durable Local World execution, replay, and an alpha CLI.",
   "license": "Apache-2.0",
   "repository": {
@@ -30,6 +30,18 @@
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
     },
+    "./eval": {
+      "types": "./dist/entries/eval.d.ts",
+      "default": "./dist/entries/eval.js"
+    },
+    "./lwir": {
+      "types": "./dist/entries/lwir.d.ts",
+      "default": "./dist/entries/lwir.js"
+    },
+    "./internals": {
+      "types": "./dist/entries/internals.d.ts",
+      "default": "./dist/entries/internals.js"
+    },
     "./package.json": "./package.json",
     "./scaffold": {
       "types": "./dist/scaffold.d.ts",
@@ -49,7 +61,7 @@
   },
   "scripts": {
     "build": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && tsc -p tsconfig.build.json && node -e \"require('node:fs').copyFileSync('src/model-registry.json', 'dist/model-registry.json')\"",
-    "prepack": "pnpm --filter little-harness run build && pnpm run build",
+    "prepack": "pnpm --filter @little-stack/harness run build && pnpm run build",
     "lint": "tsc -p tsconfig.json --noEmit",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run"
@@ -63,12 +75,13 @@
     "@types/semver": "^7.7.1"
   },
   "dependencies": {
+    "@cfworker/json-schema": "4.1.1",
     "ajv": "^8.20.0",
     "better-sqlite3": "^12.10.0",
     "es-module-lexer": "^1.7.0",
     "just-bash": "^3.0.1",
     "jiti": "^2.7.0",
-    "little-harness": "workspace:*",
+    "@little-stack/harness": "workspace:^",
     "zod": "^4.4.3",
     "jsonc-parser": "^3.3.1",
     "semver": "^7.7.3"

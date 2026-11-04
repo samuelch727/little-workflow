@@ -3,7 +3,7 @@ import {
   loadChatSdkConnector,
   type LoadChatSdkConnectorOptions,
   type LoadedChatSdkConnector,
-} from "little-harness/connectors/runtime";
+} from "@little-stack/harness/connectors/runtime";
 import slackConnector, {
   type ConciergeSlackExtraBody,
 } from "../../../../../agents/concierge/connectors/slack/connector";

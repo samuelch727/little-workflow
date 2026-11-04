@@ -4,18 +4,28 @@ import { join } from "node:path";
 import { afterEach, describe, it, expect, vi } from "vitest";
 import { resolveRunLabel } from "./runtime.js";
 import {
-  createLittleWorkflow,
   createToolRegistry,
   localWorld,
-  listEvents,
   output,
-  runWorkflow,
-  runWorkflowCycle,
+  runOrchestration,
+  model,
 } from "./index.js";
+import type {
+  SuperviseDecision,
+} from "./index.js";
+import type {
+  LwirWorkflow,
+} from "./entries/lwir.js";
+import {
+  createLittleWorkflow,
+  listEvents,
+  runWorkflowCycle,
+} from "./entries/internals.js";
+import type {
+  Harness,
+} from "./entries/internals.js";
 import { runWorkflowWithLegacyPlannerAdapter } from "./runtime.js";
-import type { Harness, LwirWorkflow, SuperviseDecision } from "./index.js";
 import type { PlannerAdapter } from "./compiler.js";
-import { model } from "./index.js";
 import { cleanupTempDirs, workerScopedTempPrefix } from "./test-temp.js";
 
 const tempDirs: string[] = [];
@@ -224,7 +234,7 @@ describe("RunStarted label/tags — orchestration path", () => {
     } as unknown as Parameters<typeof createLittleWorkflow>[0]);
 
     const orchRunId = "run_label_orchestration_test";
-    await runWorkflow({
+    await runOrchestration({
       world,
       workflows: [workflowForOrchestration],
       orchestrator: {
@@ -270,5 +280,133 @@ describe("RunStarted label/tags — orchestration path", () => {
     const runStarted = events.find((e) => e.type === "RunStarted");
     expect(runStarted).toBeDefined();
     expect(runStarted?.payload.parentRunId).toBe(parentRunId);
+  });
+});
+
+describe("RunStarted trigger", () => {
+  const trigger = { kind: "api", source: "POST /labels", from: "ops@example.com" };
+
+  it("records the run's trigger on its RunStarted, and a rerun of the run keeps that one RunStarted", async () => {
+    const world = await tempWorld();
+    const runId = "run_trigger_rerun";
+    const options = {
+      world,
+      workflows: labelWorkflow,
+      input: { value: "hello" },
+      planner: plannerFor(echoLwir()),
+      tools: toolRegistry,
+      runId,
+      trigger,
+    };
+    const first = await runWorkflowWithLegacyPlannerAdapter(options);
+    const again = await runWorkflowWithLegacyPlannerAdapter(options);
+
+    expect(again.output).toEqual(first.output);
+    const started = (await listEvents(world, runId)).filter((e) => e.type === "RunStarted");
+    expect(started).toHaveLength(1);
+    expect(started[0]?.payload.trigger).toEqual(trigger);
+    expect(started[0]?.payload.label).toBe("label-test.workflow");
+  });
+
+  it("leaves RunStarted without a trigger when the run has none", async () => {
+    const world = await tempWorld();
+    const result = await runWorkflowWithLegacyPlannerAdapter({
+      world,
+      workflows: labelWorkflow,
+      input: { value: "hello" },
+      planner: plannerFor(echoLwir()),
+      tools: toolRegistry,
+    });
+    const runStarted = (await listEvents(world, result.runId)).find((e) => e.type === "RunStarted");
+    expect(runStarted?.payload).not.toHaveProperty("trigger");
+  });
+
+  it("records it on a run that fails before it starts", async () => {
+    const world = await tempWorld();
+    const runId = "run_trigger_bad_input";
+    await expect(runWorkflowWithLegacyPlannerAdapter({
+      world,
+      workflows: labelWorkflow,
+      input: { value: 123 } as never,
+      planner: plannerFor(echoLwir()),
+      tools: toolRegistry,
+      runId,
+      trigger,
+    })).rejects.toThrow();
+    const runStarted = (await listEvents(world, runId)).find((e) => e.type === "RunStarted");
+    expect(runStarted?.payload.trigger).toEqual(trigger);
+  });
+
+  it("keeps a World's maxConcurrentSteps shared by runs that each have a trigger", async () => {
+    const world = localWorld({ dataDir: (await tempWorld()).dataDir, maxConcurrentSteps: 1 });
+    let running = 0;
+    let most = 0;
+    const slowTools = createToolRegistry();
+    slowTools.register("echo", {
+      description: "Echo input, slowly.",
+      inputSchema,
+      execute: async (input) => {
+        running += 1;
+        most = Math.max(most, running);
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        running -= 1;
+        return { result: (input as { value: string }).value };
+      },
+    });
+    await Promise.all(["a", "b"].map((value) => runWorkflowWithLegacyPlannerAdapter({
+      world,
+      workflows: labelWorkflow,
+      input: { value },
+      planner: plannerFor(echoLwir()),
+      tools: slowTools,
+      trigger,
+    })));
+    expect(most).toBe(1);
+  });
+
+  it("gives an orchestrated run the trigger and its sub-runs only parentRunId", async () => {
+    const world = await tempWorld();
+    let subRunId: string | undefined;
+    const plannerHarness: Harness = {
+      run: async (task) => (task.kind === "plan" ? { kind: "plan", lwir: echoLwir() } : { kind: "delegate_to_default" }),
+    };
+    const orchestratorHarness: Harness = {
+      run: async (task, ctx) => {
+        if (task.kind !== "orchestrate") return { kind: "delegate_to_default" };
+        const planTool = ctx.tools.plan_workflow as { execute?: (input: unknown) => Promise<unknown> };
+        const runTool = ctx.tools.run_workflow as { execute?: (input: unknown) => Promise<unknown> };
+        const planned = await planTool.execute?.({ workflowId: "label-test.workflow", input: { value: "hello" } }) as { workflowVersionId: string };
+        const runResult = await runTool.execute?.({ workflowVersionId: planned.workflowVersionId, input: { value: "hello" } });
+        subRunId = (runResult as { runId?: string } | undefined)?.runId;
+        return { kind: "orchestrate", output: runResult };
+      },
+    };
+    const workflowForOrchestration = createLittleWorkflow({
+      id: "label-test.workflow",
+      description: "Workflow for label/tag testing.",
+      inputSchema,
+      output: output.object({ schema: outputSchema }),
+      models: [workerModel],
+      globalTools: ["echo"],
+      planner: { model: { provider: "test", modelId: "planner-model" }, harness: plannerHarness },
+    } as unknown as Parameters<typeof createLittleWorkflow>[0]);
+
+    const orchRunId = "run_trigger_orchestration";
+    await runOrchestration({
+      world,
+      workflows: [workflowForOrchestration],
+      orchestrator: { model: { provider: "test", modelId: "orchestrator-model" }, harness: orchestratorHarness },
+      input: { value: "hello" },
+      tools: toolRegistry,
+      runId: orchRunId,
+      trigger,
+    });
+
+    const runStarted = (await listEvents(world, orchRunId)).find((e) => e.type === "RunStarted");
+    expect(runStarted?.payload.trigger).toEqual(trigger);
+    expect(subRunId).toBeDefined();
+    const subRunStarted = (await listEvents(world, subRunId!)).find((e) => e.type === "RunStarted");
+    expect(subRunStarted?.payload.parentRunId).toBe(orchRunId);
+    expect(subRunStarted?.payload).not.toHaveProperty("trigger");
   });
 });

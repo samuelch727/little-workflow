@@ -1,0 +1,222 @@
+---
+title: Workflow Config
+description: Every defineWorkflow field — schemas, model slots, planner, fixed plan, worker, tools, and memory.
+---
+
+`defineWorkflow()` describes a job — the goal, the model options, the planner that designs the execution plan (or a fixed plan), the tools available, and the memory the planner can draw on. The runtime does the rest. [Define a Workflow](/docs/workflow/v0.1.0-alpha/authoring/define-a-workflow) covers the common shape; this page lists the full config.
+
+## Full Config
+
+```ts
+import { tool } from "ai";
+import { openai } from "@ai-sdk/openai";
+import { z } from "zod";
+import {
+  createToolRegistry,
+  defineWorkflow,
+  model,
+  skill,
+} from "@little-stack/workflow";
+
+// ── Model slots ─────────────────────────────────────────────────────────────
+// Slot id auto-derived from model name. Description auto-filled from the
+// bundled registry if the model is known; supply your own to override.
+const fastClassifier = model(openai("gpt-4o-mini"), {
+  description: "Fast classifier for short text outputs.",
+});
+
+const longContextSummarizer = model(openai("gpt-4o-mini"), {
+  description: "Long-document summarizer.",
+});
+// → slot ids: "gpt-4o-mini" (first), "gpt-4o-mini-tiger" (second, deterministic animal suffix)
+
+// ── Workflow definition ──────────────────────────────────────────────────────
+const candidateReview = defineWorkflow({
+  // Identity
+  id: "candidate.review",
+  description: "Review one candidate against a job description.",
+
+  // I/O schemas
+  input: z.object({
+    jobDescription: z.string(),
+    candidate: z.object({
+      id: z.string(),
+      name: z.string(),
+      resume: z.string(),
+    }),
+  }),
+  output: z.object({
+    passed: z.boolean(),
+    reasoning: z.string(),
+  }),
+
+  // Execution model options — the planner references these by slot id in LWIR steps.
+  models: [fastClassifier, longContextSummarizer],
+
+  // Planner — required; harness defaults to the SDK workflowHarness
+  planner: {
+    model: openai("gpt-5"),          // AI SDK model (SDK auto-wraps as a private ModelSlot)
+    system: "You design candidate-review workflows. Test code in scratch before committing.",
+    skills: [
+      skill("./skills/writing-loop-lwir/"),
+      skill("./skills/output-schema-validation.md"),
+    ],
+    // tools: optional — extra tools beyond what the SDK injects (bash, scratch, memory read)
+  },
+
+  // Worker — optional; defaults to the SDK workflowHarness.
+  // worker: { harness: customWorkerHarness, skills: [...] },
+
+  // Tool names the LWIR can reference; the run supplies them (runWorkflow(..., { tools })).
+  // Pass AI SDK tools keyed by name instead to declare and supply them in one place.
+  tools: ["fetchCandidates", "scoreCandidate"],
+
+  // Memory mounts — optional; these are the defaults.
+  memory: {
+    workflow: "rw",   // planner has read-write access to /mnt/memory/workflow/
+    org: "ro",        // planner has read-only access to /mnt/memory/org/
+  },
+});
+```
+
+## Field Reference
+
+| Field | Required | Type | Notes |
+|---|---|---|---|
+| `id` | yes | `string` | Stable identifier; hashed into `WorkflowDefinitionHash` |
+| `description` | recommended | `string` | Human-readable; shown to the planner, and used as the tool description by `asHarnessWorkflow` |
+| `policy` | no | `string` | Rules the runtime adds, word for word, to the system prompt of every `ai.generate` step; see [A policy](/docs/workflow/v0.1.0-alpha/authoring/define-a-workflow#a-policy) |
+| `label` | no | `string` | Run label; defaults to the workflow id |
+| `input` | no | Zod, Standard Schema, or JSON Schema | Validated at run start |
+| `suggestedInput` | no | schema | A hint shown to the planner; not used to validate input |
+| `output` | no | schema or `output.*` mode | Validated when the LWIR's final step output flows out |
+| `model` | one of `model`, `models`, `plan` | AI SDK model or `ModelSlot` | One execution model |
+| `models` | one of `model`, `models`, `plan` | `ModelSlot[]` (≥ 1) | Execution model options the planner can assign to LWIR steps |
+| `planner` | no | model or `PlannerConfig` | See below; defaults to the first model |
+| `plan` | no | `{ steps }` or `LwirWorkflow` | A fixed plan that replaces the planner; see [Define a Workflow → A fixed plan](/docs/workflow/v0.1.0-alpha/authoring/define-a-workflow#a-fixed-plan) |
+| `worker` | no | `WorkerConfig` | Defaults to the SDK `workflowHarness` |
+| `tools` | no | `Record<string, Tool>`, `ToolRegistry`, or `string[]` | Tools the LWIR can reference; defaults to none |
+| `toolSelection` | no | `ToolSelectionPolicy` | Which declared tools the plan may reference; default `"planner_selected"` |
+| `workflowVersionReuseStrategy` | no | `WorkflowVersionReuseStrategy` | Whether the planner may reuse a prior compiled version: `"planner_reviewed"` (default), `"planner_reviews_each_run"` or `"always_fresh"` |
+| `memory` | no | `MemoryConfig` | Defaults to `{ workflow: "rw", org: "ro" }` |
+| `bash` | no | `BashCapabilities` | Bash capabilities for the harness sessions |
+
+## The Four Roles
+
+Each role runs in a **Harness** — an agent runtime with a model, bash environment, scoped storage, tools, and an agent loop.
+
+| Role | Runs per | Decides | Configured at |
+|---|---|---|---|
+| **Planner** | Once per workflow run | LWIR for this run | `WorkflowDefinition.planner` |
+| **Orchestrator** *(deprecated)* | Once per pipeline run | Sequence + composition of sub-workflows | `runOrchestration({ orchestrator })` |
+| **Worker** | Once per LWIR step | Execution of one step | `WorkflowDefinition.worker` |
+| **Fixer** | When a `code.run` step fails | Repair the failed step's source | LWIR step's `onFailure.fixer` field |
+
+The Planner and Orchestrator are run-level decision-makers (one session each). The Worker runs once per step. The Fixer is per-step opt-in.
+
+### `PlannerConfig`
+
+```ts
+type PlannerConfig = {
+  readonly model: AiSdkModel | ModelSlot;    // raw AI SDK model OK; SDK auto-wraps
+  readonly harness?: Harness;                // defaults to workflowHarness
+  readonly system?: string;                  // role-specific system prompt; merged with SDK addendum
+  readonly skills?: readonly Skill[];        // workflow-declared skills
+  readonly skillMaxRisk?: SkillRiskLevel;    // max accepted remote-skill risk for this role
+  readonly skillOidcToken?: SkillOidcToken;  // token for the Skills API risk audit
+  readonly tools?: ToolSet;                  // extra tools beyond SDK-injected (bash, scratch, memory read)
+  readonly supervise?: (state: SuperviseOuterLoopState) => Promise<SuperviseDecision>; // outer loop
+};
+```
+
+If `planner.model` is a raw AI SDK model, the SDK wraps it via `model(planner.model)` with an auto-derived slot id. The resulting slot is NOT added to `WorkflowDefinition.models` — the planner's model is private, separate from the execution model options.
+
+The planner runs in a `workflowHarness` session by default. It has access to bash, scratch storage, memory reads, and the descriptions of the workflow's `tools` (for designing valid LWIR). It does not execute those tools — that's the Worker's job.
+
+### `WorkerConfig`
+
+```ts
+type WorkerConfig = {
+  readonly harness?: Harness;                // defaults to workflowHarness
+  readonly skills?: readonly Skill[];        // skills available to AI worker sessions
+  readonly tools?: ToolSet;                  // extra tools merged with the workflow's tools
+};
+```
+
+All fields optional. If `worker` is omitted, the SDK uses `workflowHarness`. Worker only needs explicit config if you want a custom harness or worker-specific skills.
+
+What the default worker does per step type:
+
+- `ai.generate` — one model call with the step's `with.prompt`, `with.system` and resolved input. It is offered no tools and no bash; use a `tool.call` step to call a tool.
+- `code.run` — **not executed by the default worker.** It validates the step's sandbox policy and then throws. Supply your own `worker.harness` implementing `execute_step` to run `code.run` bodies; see [Security Model](/docs/workflow/v0.1.0-alpha/internals/security-model).
+- `tool.call` — invokes the single named tool from the registry; no agent loop.
+
+### `MemoryConfig`
+
+```ts
+type MemoryConfig = {
+  readonly workflow?: "rw" | "ro" | "none";    // default: "rw"
+  readonly org?: "rw" | "ro" | "none";         // default: "ro"
+  readonly attach?: ReadonlyArray<{ id: string; mode: "ro" }>;
+};
+```
+
+The defaults reflect the trust boundary: a workflow writes its own memory; org memory is shared reference material (write access requires explicit opt-in via override). See [Memory](/docs/workflow/v0.1.0-alpha/authoring/memory).
+
+## Model Slots
+
+`models` is a list of `ModelSlot` values created with the `model()` factory. The planner references them by slot id in LWIR (e.g., `"with": { "model": "gpt-4o-mini" }`).
+
+Slot ids auto-derive from the model name. Multiple slots wrapping the same model get a deterministic animal suffix:
+
+```ts
+const a = model(openai("gpt-4o-mini"), { description: "Classifier." });
+// → slot id "gpt-4o-mini"
+
+const b = model(openai("gpt-4o-mini"), { description: "Summarizer." });
+// → slot id "gpt-4o-mini-tiger" (deterministic from description hash)
+```
+
+Supply `id: "my-alias"` to override auto-derivation. See [AI SDK Native](/docs/workflow/v0.1.0-alpha/authoring/ai-sdk-native) for the full `model()` API.
+
+## Running The Workflow
+
+```ts
+import { localWorld, runWorkflow } from "@little-stack/workflow";
+
+const result = await runWorkflow(candidateReview, { jobDescription, candidate }, {
+  world: localWorld({ dataDir: ".little-workflow" }),
+  tools,
+  timeout: "10m",
+});
+```
+
+`runWorkflow` runs the planner for the workflow, then executes the plan. The `world` option defaults to `localWorld()`, and `tools` defaults to the tools declared inline on the workflow. To compose workflows, use [Compose With Little Harness](/docs/workflow/v0.1.0-alpha/authoring/compose-with-harness). See [Run A Workflow](/docs/workflow/v0.1.0-alpha/running/run-a-workflow) for every option.
+
+## Skills
+
+Skills are procedurally-disclosed knowledge that steer the planner or worker without bloating the system prompt. Declare them under the role that uses them:
+
+```ts
+planner: {
+  skills: [
+    skill("./skills/writing-loop-lwir/"),       // directory form (SKILL.md + body)
+    skill("./skills/output-schema-validation.md"),  // single-file shorthand
+  ],
+},
+```
+
+The harness auto-injects skill summaries into the system prompt at session start; the model reads full bodies on-demand via bash from `.agents/skills/<name>/SKILL.md`. Skills for the Planner and AI Worker are declared separately (under `planner.skills` and `worker.skills` respectively). See [Skills](/docs/workflow/v0.1.0-alpha/authoring/skills).
+
+## Tools
+
+See [Tools](/docs/workflow/v0.1.0-alpha/authoring/tools-and-capabilities) for the full tool API: `tool()` from AI SDK, `createToolRegistry`, MCP integration, and the `code.run` tools proxy.
+
+## Cross-References
+
+- Model slots + factory: [AI SDK Native](/docs/workflow/v0.1.0-alpha/authoring/ai-sdk-native)
+- Tool registry, MCP, code.run proxy: [Tools](/docs/workflow/v0.1.0-alpha/authoring/tools-and-capabilities)
+- Memory stores + run scratch: [Memory](/docs/workflow/v0.1.0-alpha/authoring/memory)
+- Skills format + loading: [Skills](/docs/workflow/v0.1.0-alpha/authoring/skills)
+- Multi-workflow composition: [Compose With Little Harness](/docs/workflow/v0.1.0-alpha/authoring/compose-with-harness) (the [Orchestrator](/docs/workflow/v0.1.0-alpha/authoring/orchestrating-workflows) is deprecated)
+- `runWorkflow` options: [Run A Workflow](/docs/workflow/v0.1.0-alpha/running/run-a-workflow)

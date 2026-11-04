@@ -1,5 +1,4 @@
-import { asHarnessWorkflow, defineWorkflow } from "little-workflow";
-import type { WorkflowDefinition } from "little-workflow";
+import { asHarnessWorkflow, defineWorkflow } from "@little-stack/workflow";
 import { z } from "zod";
 import { librarianModel } from "../env";
 
@@ -41,13 +40,7 @@ const ingestFile = defineWorkflow({
   },
 });
 
-// The `as unknown as WorkflowDefinition` cast is NOT incidental: `defineWorkflow` returns a
-// `DefinedWorkflow<TInput, TOutput>` whose type brand is invariant, so it does not assign to
-// the un-parameterized `WorkflowDefinition` that `asHarnessWorkflow` takes — the documented
-// `defineWorkflow -> asHarnessWorkflow -> createHarness({ workflows })` composition does not
-// typecheck without it. The SDK's own `loadWorkflow` writes exactly the same cast
-// (packages/little-workflow/src/workspace/load-workflow.ts:139).
-export default asHarnessWorkflow(ingestFile as unknown as WorkflowDefinition, {
+export default asHarnessWorkflow(ingestFile, {
   executionMode: "inline",
   // Inline, demo-local, and never resumed across a definition change, so there is no
   // durable identity to protect. `loadWorkflow(folder)` is the path that derives a real

@@ -52,7 +52,7 @@ Org store lives at `<dataDir>/memory/org/`. Devs pre-populate it; no SDK-side au
 Granting the org store write access requires an explicit declaration:
 
 ```ts
-createLittleWorkflow({
+defineWorkflow({
   memory: { workflow: "rw", org: "rw" },  // explicit; accidental grant is a poisoning risk
 });
 ```
@@ -62,7 +62,7 @@ createLittleWorkflow({
 A workflow can mount another workflow's memory read-only:
 
 ```ts
-createLittleWorkflow({
+defineWorkflow({
   id: "candidate-scoring",
   memory: {
     workflow: "rw",
@@ -192,10 +192,10 @@ Scratch mounts (ephemeral, this run only):
 Dreaming — periodic consolidation of many run sessions into curated memory — is implementable as a workflow using the same primitives:
 
 ```ts
-const dreaming = createLittleWorkflow({
+const dreaming = defineWorkflow({
   id: "memory.dreaming",
-  inputSchema: z.object({ targetWorkflowId: z.string(), runIds: z.array(z.string()) }),
-  outputSchema: z.object({ writtenFiles: z.array(z.string()) }),
+  input: z.object({ targetWorkflowId: z.string(), runIds: z.array(z.string()) }),
+  output: z.object({ writtenFiles: z.array(z.string()) }),
 
   planner: {
     model: anthropic("claude-opus-4-7"),

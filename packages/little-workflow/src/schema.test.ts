@@ -1,18 +1,22 @@
 import { describe, expect, expectTypeOf, it } from "vitest";
 import { z } from "zod";
 import {
-  createLittleWorkflow,
   model,
   output as publicOutput,
 } from "./index.js";
 import type {
-  Harness,
   InferWorkflowInput,
   InferWorkflowOutput,
-  NormalizedSchemaDescriptor,
   OutputMode,
-  Schema,
 } from "./index.js";
+import {
+  createLittleWorkflow,
+} from "./entries/internals.js";
+import type {
+  Harness,
+  NormalizedSchemaDescriptor,
+  Schema,
+} from "./entries/internals.js";
 
 type SchemaApi = {
   UnsupportedSchemaError: new (
@@ -47,7 +51,9 @@ type SchemaApi = {
 };
 
 async function loadSchemaApi(): Promise<Partial<SchemaApi>> {
-  return import("./index.js") as Promise<Partial<SchemaApi>>;
+  // `output` is public; the normalizers and their error live on the internals entry.
+  const [root, internals] = await Promise.all([import("./index.js"), import("./entries/internals.js")]);
+  return { ...internals, output: root.output } as unknown as Partial<SchemaApi>;
 }
 
 const ticketSchema = {

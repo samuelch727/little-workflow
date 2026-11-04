@@ -1,14 +1,9 @@
 import { randomUUID } from "node:crypto";
-import {
-  mkdir,
-  readFile,
-  realpath,
-  rename,
-  stat,
-  writeFile,
-} from "node:fs/promises";
-import { createRequire } from "node:module";
-import { basename, dirname, join, resolve as resolvePath } from "node:path";
+import { getSchemaValidator as getAjv } from "./schema-validator.js";
+import { resolve as resolvePath } from "node:path";
+import type { IFileSystem } from "just-bash";
+import { runFilesFor, type RunFiles } from "./run-files.js";
+import { virtualStorageKey } from "./storage-identity.js";
 import { canonicalJson, sha256Digest } from "./canonical.js";
 import {
   createBashTool,
@@ -45,7 +40,11 @@ import {
   type PlannerAdapter,
   type WorkflowCompileResult,
 } from "./compiler.js";
-import { resolveExpressionValue, type ExpressionContext } from "./expressions.js";
+import {
+  resolveExpressionText,
+  resolveExpressionValue,
+  type ExpressionContext,
+} from "./expressions.js";
 import { model as createModelSlot, resolveModelSlots } from "./model-slots.js";
 import type {
   FailedRunResult,
@@ -54,12 +53,16 @@ import type {
   MemoryConfig,
   Skill,
   RunResult,
-  RunWorkflowOptions,
+  RunTrigger,
+  UnplannedRunResult,
+  RunWorkflowRequest,
   WorkflowRunProgressEvent,
   WorkflowRunTarget,
 } from "./authoring.js";
 import type { LwirStep, LwirStepRepairConfig, LwirWorkflow, WorkflowVersion } from "./lwir.js";
 import { materializeRunStateFromEvents } from "./run-state.js";
+import { isFixedPlanPlanner } from "./fixed-plan.js";
+import { runPlanFromEvents } from "./run-plan.js";
 import { remoteSkillIdentityFromValue } from "./skills.js";
 import {
   normalizeOutputMode,
@@ -75,13 +78,13 @@ import { normalizeHarnessEventType } from "./harness/event-names.js";
 import {
   runWorkflowHarnessWithSession,
   workflowHarness,
-} from "little-harness/workflow-harness";
+} from "@little-stack/harness/workflow-harness";
+import type { HarnessMcpConfig } from "@little-stack/harness";
 import {
   resolveHarnessMcpGateway,
   type HarnessMcpCapabilityManifest,
-  type HarnessMcpConfig,
   type ResolvedHarnessMcpGateway,
-} from "little-harness";
+} from "@little-stack/harness/internals";
 import type {
   ExecuteStepTask,
   FixStepTask,
@@ -124,7 +127,6 @@ import {
   workflowSnapshotsForOrchestrator,
 } from "./orchestrator.js";
 import { inheritPermissions, type ToolPermissions } from "./permission.js";
-import { removeDirRetrySafe } from "./fs-utils.js";
 import {
   buildReuseBrief,
   selectPlannerReuseCandidates,
@@ -137,6 +139,7 @@ import {
 import {
   assertWorkflowVersionInputCompatible,
   concreteInputStructure,
+  plannerReviewsEarlierPlans,
   resolveWorkflowVersionReuseStrategy,
   type AdaptiveArrayPath,
   type WorkflowVersionReusePolicy,
@@ -147,18 +150,6 @@ import {
 } from "./workflow-version-store.js";
 
 type JsonRecord = Record<string, unknown>;
-type AjvError = {
-  readonly instancePath?: string;
-  readonly schemaPath?: string;
-  readonly message?: string;
-};
-type AjvInstance = {
-  validate(schema: unknown, data: unknown): boolean | Promise<unknown>;
-  readonly errors?: readonly AjvError[] | null;
-  errorsText?(errors?: readonly AjvError[] | null): string;
-};
-type AjvConstructor = new (options?: Record<string, unknown>) => AjvInstance;
-
 /**
  * Token counts a step may report. Deliberately token-only — there is no `costUsd` field,
  * because cost is derived in exactly one place ({@link priceModelCall}) from recorded
@@ -213,6 +204,8 @@ export type ExecuteWorkflowVersionOptions = {
   readonly workerTools?: HarnessToolSet;
   readonly workflowId?: string;
   readonly workflowMemory?: MemoryConfig;
+  /** The workflow's `policy`, added to the system prompt of every `ai.generate` step. */
+  readonly workflowPolicy?: string;
   readonly bashCapabilities?: BashCapabilities;
   readonly workerSkills?: HarnessContext["skills"];
   readonly workerSkillWarnings?: readonly WorkflowSkillWarning[];
@@ -222,6 +215,8 @@ export type ExecuteWorkflowVersionOptions = {
   readonly maxAttempts?: number;
   /** Outer-loop session ID. When set, included in RunStarted.payload.outerLoopId (Spec §3.5). */
   readonly outerLoopId?: string;
+  /** How the run started, recorded as RunStarted.payload.trigger. Ignored for a sub-run (`parentRunId`). */
+  readonly trigger?: RunTrigger;
   readonly progress?: (event: WorkflowRunProgressEvent) => void | Promise<void>;
   /**
    * Runtime tool-call policy for this run's worker model. For a sub-run this is
@@ -435,13 +430,48 @@ function semaphoreForWorld(world: LocalWorld): GlobalStepSemaphore | undefined {
   if (world.maxConcurrentSteps === undefined) {
     return undefined;
   }
-  const existing = worldSemaphores.get(world);
+  // A run's trigger wrapper shares its World's step budget with every other run in it.
+  const key = triggerWorldInner.get(world) ?? world;
+  const existing = worldSemaphores.get(key);
   if (existing !== undefined) {
     return existing;
   }
   const semaphore = new GlobalStepSemaphore(world.maxConcurrentSteps);
-  worldSemaphores.set(world, semaphore);
+  worldSemaphores.set(key, semaphore);
   return semaphore;
+}
+
+const triggerWorldInner = new WeakMap<object, LocalWorld>();
+
+/**
+ * The World with `trigger` added to the run's own RunStarted. The many places that record
+ * RunStarted (compiled, reused, orchestrated, outer-loop cycles, pre-runtime failures) all
+ * append through this World, so none of them needs the trigger passed in. A sub-run's
+ * RunStarted carries `parentRunId` and is left as it is.
+ */
+function worldWithRunTrigger(world: LocalWorld, trigger: RunTrigger | undefined): LocalWorld {
+  if (trigger === undefined) {
+    return world;
+  }
+  const recorded = stripUndefined({ ...trigger }) as JsonRecord;
+  const appendEvent: LocalWorld["appendEvent"] = (runId, event) =>
+    world.appendEvent(
+      runId,
+      event.type === "RunStarted" &&
+        event.payload.parentRunId === undefined &&
+        event.payload.trigger === undefined
+        ? { ...event, payload: { ...event.payload, trigger: recorded } }
+        : event,
+    );
+  const wrapped = new Proxy(world, {
+    get(target, property) {
+      if (property === "appendEvent") return appendEvent;
+      const value: unknown = Reflect.get(target, property, target);
+      return typeof value === "function" ? (value as (...args: unknown[]) => unknown).bind(target) : value;
+    },
+  });
+  triggerWorldInner.set(wrapped, triggerWorldInner.get(world) ?? world);
+  return wrapped;
 }
 
 function assertNotCancelled(signal: AbortSignal | undefined): void {
@@ -606,10 +636,10 @@ const DEFAULT_MAX_ATTEMPTS = 1;
 const ALPHA_MAX_BRANCHES = 100;
 const LOCK_OWNER_GRACE_MS = 30_000;
 const INLINE_OUTPUT_THRESHOLD_BYTES = 256_000;
-const nodeRequire = createRequire(import.meta.url);
 const activeRunExecutions = new Set<string>();
+const activeVirtualLocks = new Map<string, symbol>();
+const lockFiles = runFilesFor({ dataDir: "/" });
 
-let cachedAjv: AjvInstance | undefined;
 
 function inlineOutputForEvent(value: unknown): unknown {
   if (value === undefined) return undefined;
@@ -632,10 +662,14 @@ export async function executeWorkflowVersion(
 async function executeWorkflowVersionWithReusePolicy(
   options: ExecuteWorkflowVersionInternalOptions,
 ): Promise<RuntimeRunResult> {
+  assertVirtualSkills(options.workerSkills, options.world);
   const runId = options.runId ?? `run_${randomUUID()}`;
-  const executionOptions: ExecuteWorkflowVersionInternalOptions = options.workerHarness === undefined
-    ? { ...options, workerHarness: workflowHarness }
-    : options;
+  const withTrigger: ExecuteWorkflowVersionInternalOptions = options.trigger === undefined
+    ? options
+    : { ...options, world: worldWithRunTrigger(options.world, options.trigger) };
+  const executionOptions: ExecuteWorkflowVersionInternalOptions = withTrigger.workerHarness === undefined
+    ? { ...withTrigger, workerHarness: workflowHarness }
+    : withTrigger;
   return withRunExecutionFence(options.world, runId, async () => {
     const terminalReplay = await existingExecuteWorkflowVersionTerminalReplay(executionOptions, runId);
     if (terminalReplay !== undefined) {
@@ -656,7 +690,7 @@ async function executeWorkflowVersionWithReusePolicy(
 }
 
 type RunWorkflowLegacyPlannerOptions<TWorkflow extends WorkflowRunTarget = WorkflowRunTarget> =
-  RunWorkflowOptions<TWorkflow> & {
+  RunWorkflowRequest<TWorkflow> & {
     readonly planner?: PlannerAdapter;
   };
 
@@ -669,7 +703,7 @@ export function resolveRunLabel(input: { runLabel?: string; defLabel?: string; i
 }
 
 export async function runWorkflow<TWorkflow extends WorkflowRunTarget = WorkflowRunTarget>(
-  options: RunWorkflowOptions<TWorkflow>,
+  options: RunWorkflowRequest<TWorkflow>,
 ): Promise<RunResult<InferWorkflowOutput<TWorkflow>>> {
   return runWorkflowInternal(options as RunWorkflowLegacyPlannerOptions<TWorkflow>, false);
 }
@@ -683,9 +717,13 @@ export async function runWorkflowWithLegacyPlannerAdapter<
 }
 
 async function runWorkflowInternal<TWorkflow extends WorkflowRunTarget = WorkflowRunTarget>(
-  options: RunWorkflowLegacyPlannerOptions<TWorkflow>,
+  requested: RunWorkflowLegacyPlannerOptions<TWorkflow>,
   allowLegacyPlannerAdapter: boolean,
 ): Promise<RunResult<InferWorkflowOutput<TWorkflow>>> {
+  // How the run started goes on its own RunStarted, whichever path below records it.
+  const options = requested.trigger === undefined
+    ? requested
+    : { ...requested, world: worldWithRunTrigger(requested.world, requested.trigger) } as RunWorkflowLegacyPlannerOptions<TWorkflow>;
   if (!allowLegacyPlannerAdapter) {
     assertNoLegacyPlannerOption(options);
     assertWorkflowModelsOption(options.workflows);
@@ -752,7 +790,7 @@ async function runWorkflowInternal<TWorkflow extends WorkflowRunTarget = Workflo
       });
     }
     const { runOuterLoop } = await import("./outer-loop.js");
-    return runOuterLoop({
+    return withRunPlan(workflow, runOuterLoop({
       world: options.world,
       workflow: workflow as CompilableWorkflowDefinition,
       input: options.input,
@@ -769,11 +807,11 @@ async function runWorkflowInternal<TWorkflow extends WorkflowRunTarget = Workflo
       workflowVersionReuseStrategy: options.workflowVersionReuseStrategy,
       mcp: options.mcp,
       progress: options.progress,
-    }) as Promise<RunResult<InferWorkflowOutput<TWorkflow>>>;
+    })) as Promise<RunResult<InferWorkflowOutput<TWorkflow>>>;
   }
 
   const runId = options.runId ?? `run_${randomUUID()}`;
-  return withRunExecutionFence(options.world, runId, async () => {
+  return withRunPlan(workflow, withRunExecutionFence(options.world, runId, async () => {
     const terminalReplay = await existingRunWorkflowTerminalReplay(
       options.world,
       runId,
@@ -792,7 +830,22 @@ async function runWorkflowInternal<TWorkflow extends WorkflowRunTarget = Workflo
         undefined,
       )
     );
-  }) as Promise<RunResult<InferWorkflowOutput<TWorkflow>>>;
+  })) as Promise<RunResult<InferWorkflowOutput<TWorkflow>>>;
+}
+
+/** Add `plan` to a single workflow's completed result, worked out from the run's events. */
+async function withRunPlan(
+  workflow: unknown,
+  pending: Promise<UnplannedRunResult<unknown>>,
+): Promise<RunResult<unknown>> {
+  const result = await pending;
+  return {
+    ...result,
+    plan: runPlanFromEvents(result.events, {
+      workflowVersionId: result.workflowVersionId,
+      fixedPlan: isRecord(workflow) && isFixedPlanPlanner(workflow.planner),
+    }),
+  };
 }
 
 function assertWorkflowModelsOption(workflows: unknown): void {
@@ -800,6 +853,11 @@ function assertWorkflowModelsOption(workflows: unknown): void {
   for (const workflow of workflowList) {
     const models = isRecord(workflow) ? workflow.models : undefined;
     if (Array.isArray(models) && models.length > 0) {
+      continue;
+    }
+    // A fixed-plan workflow needs no model unless its steps call one; plan validation rejects a
+    // step that names a model slot the workflow does not declare.
+    if (Array.isArray(models) && isRecord(workflow) && isFixedPlanPlanner(workflow.planner)) {
       continue;
     }
     const workflowId = isRecord(workflow) && typeof workflow.id === "string"
@@ -921,7 +979,7 @@ async function runOrchestratedWorkflowUnfenced(
     readonly progress?: (event: WorkflowRunProgressEvent) => void | Promise<void>;
   },
   runId: RunId,
-): Promise<RunResult<unknown>> {
+): Promise<UnplannedRunResult<unknown>> {
   const orchestrator = options.orchestrator;
   if (!isRecord(orchestrator)) {
     throw new Error("runWorkflow requires orchestrator config when workflows is an array.");
@@ -993,7 +1051,7 @@ async function runOrchestratedWorkflowUnfenced(
       "orchestrator"
     : stringProperty(model, "modelId") ?? "orchestrator";
 
-  const logDir = resolvePath(options.world.dataDir, "runs", runId);
+  const logDir = runFilesFor(options.world).path.resolve(options.world.dataDir, "runs", runId);
   const orchestratorScope: HarnessContext["scope"] = {
     runId,
     logDir,
@@ -1010,9 +1068,9 @@ async function runOrchestratedWorkflowUnfenced(
       workflows: available,
     }),
   ];
-  const orchestratorScratchMounts = scratchMountsForScope(orchestratorScope);
-  await ensureScratchMounts(orchestratorScratchMounts);
-  await ensureMemoryMounts(orchestratorMemoryMounts);
+  const orchestratorScratchMounts = scratchMountsForScope(orchestratorScope, options.world);
+  await ensureScratchMounts(orchestratorScratchMounts, options.world);
+  await ensureMemoryMounts(orchestratorMemoryMounts, options.world);
   const orchestratorResolvedSkills = await resolveRoleSkillsWithWarnings(
     propertyValue(orchestrator, "skills"),
     options.world,
@@ -1028,7 +1086,7 @@ async function runOrchestratedWorkflowUnfenced(
     tools: options.tools,
     maxConcurrentSubRuns,
     resultStore: {
-      backingDir: join(logDir, "scratch", "workflow-results"),
+      backingDir: runFilesFor(options.world).path.join(logDir, "scratch", "workflow-results"),
       mountDir: "/mnt/scratch/own/workflow-results",
     },
     planWorkflow: async ({ workflow, input, tools, signal }) => {
@@ -1067,9 +1125,9 @@ async function runOrchestratedWorkflowUnfenced(
         logDir: plannerLogDir,
         role: "planner",
       };
-      const plannerScratchMounts = scratchMountsForScope(plannerScope);
-      await ensureScratchMounts(plannerScratchMounts);
-      await ensureMemoryMounts(plannerMemoryMounts);
+      const plannerScratchMounts = scratchMountsForScope(plannerScope, options.world);
+      await ensureScratchMounts(plannerScratchMounts, options.world);
+      await ensureMemoryMounts(plannerMemoryMounts, options.world);
       const compiled = await compileWorkflow(workflow, {
         input,
         tools,
@@ -1143,6 +1201,7 @@ async function runOrchestratedWorkflowUnfenced(
           ...(workerConfig.workerHarness === undefined ? {} : { workerHarness: workerConfig.workerHarness }),
           workflowId: runOptions.workflow.id,
           workflowMemory: runOptions.workflow.memory,
+          ...(runOptions.workflow.policy === undefined ? {} : { workflowPolicy: runOptions.workflow.policy }),
           parentRunId: runId,
           pipelineWorkflowDefinitionHashes,
           workerSkills,
@@ -1208,7 +1267,7 @@ async function runOrchestratedWorkflowUnfenced(
     },
     model: {
       slotId: orchestratorModelSlotId,
-      providerId: stringProperty(model, "providerId") ?? stringProperty(model, "provider") ?? "runtime",
+      providerId: modelProviderId(model) ?? "runtime",
       modelId: stringProperty(model, "modelId") ?? orchestratorModelSlotId,
       model,
     },
@@ -1223,6 +1282,7 @@ async function runOrchestratedWorkflowUnfenced(
           orchestratorSkills,
         ),
         orchestratorBashCapabilities,
+        options.world.files,
       ),
     ),
     memoryMounts: orchestratorMemoryMounts,
@@ -1237,8 +1297,12 @@ async function runOrchestratedWorkflowUnfenced(
     durability: {
       append: async (event) => {
         const eventWithWarnings = eventWithSessionWarnings(event, orchestratorSkillWarnings);
+        if (eventWithWarnings.payload === undefined) {
+          throw new TypeError("Little Workflow recorder requires an inline Harness event payload.");
+        }
         await recorder.append({
           type: eventWithWarnings.type,
+          appendIdempotencyKey: eventWithWarnings.appendIdempotencyKey,
           ...(eventWithWarnings.occurrenceId === undefined ? {} : { occurrenceId: eventWithWarnings.occurrenceId }),
           payload: eventWithWarnings.payload,
         });
@@ -1366,10 +1430,14 @@ async function runOrchestratedWorkflowUnfenced(
       ...runHarnessContext,
       recorder: defaultRecorder,
       durability: {
-        append: async (event: { readonly type: string; readonly occurrenceId?: string; readonly payload: Record<string, unknown> }) => {
+        append: async (event: Parameters<HarnessContext["durability"]["append"]>[0]) => {
           const eventWithWarnings = eventWithSessionWarnings(event, orchestratorSkillWarnings);
+          if (eventWithWarnings.payload === undefined) {
+            throw new TypeError("Little Workflow recorder requires an inline Harness event payload.");
+          }
           await defaultRecorder.append({
             type: eventWithWarnings.type,
+            appendIdempotencyKey: eventWithWarnings.appendIdempotencyKey,
             ...(eventWithWarnings.occurrenceId === undefined ? {} : { occurrenceId: eventWithWarnings.occurrenceId }),
             payload: eventWithWarnings.payload,
           });
@@ -1504,6 +1572,10 @@ async function resolveRoleSkills(
     readonly skillOidcToken?: unknown;
   } = {},
 ): Promise<HarnessContext["skills"]> {
+  if (world.files !== undefined) {
+    assertVirtualSkills(value, world);
+    return [];
+  }
   return resolveSkills((Array.isArray(value) ? value : []) as never, {
     baseDir: process.cwd(),
     orgSkillDir: resolvePath(world.dataDir, "memory", "org", "skills"),
@@ -1523,6 +1595,10 @@ async function resolveRoleSkillsWithWarnings(
     readonly skillOidcToken?: unknown;
   } = {},
 ): Promise<ResolvedRoleSkills> {
+  if (world.files !== undefined) {
+    assertVirtualSkills(value, world);
+    return { skills: [], warnings: [] };
+  }
   const result = await resolveSkillsWithWarnings((Array.isArray(value) ? value : []) as never, {
     baseDir: process.cwd(),
     orgSkillDir: resolvePath(world.dataDir, "memory", "org", "skills"),
@@ -1535,6 +1611,12 @@ async function resolveRoleSkillsWithWarnings(
     skills: result.skills,
     warnings: result.warnings,
   };
+}
+
+function assertVirtualSkills(value: unknown, world: LocalWorld): void {
+  if (world.files !== undefined && Array.isArray(value) && value.length > 0) {
+    throw new RuntimeConfigError("runtime_config_error: skill folders and remote skills are not supported on a World with files.");
+  }
 }
 
 function roleSkillResolveDefaults(
@@ -1569,7 +1651,8 @@ async function resolveRuntimeMcp(
   }
   const gateway = await resolveHarnessMcpGateway(config);
   try {
-    const skills = await resolveHarnessSkillInputs(gateway.skills, {
+    if (options.world.files !== undefined) assertVirtualSkills(gateway.skills, options.world);
+    const skills = options.world.files !== undefined ? [] : await resolveHarnessSkillInputs(gateway.skills, {
       baseDir: process.cwd(),
       orgSkillDir: resolvePath(options.world.dataDir, "memory", "org", "skills"),
       skillsCacheDir: resolvePath(options.world.dataDir, "skills-cache"),
@@ -1703,9 +1786,9 @@ async function workerHarnessEnvironment(
           includeOrg: false,
         })),
   ];
-  const scratchMounts = scratchMountsForScope(scope);
-  await ensureScratchMounts(scratchMounts.filter((mount) => mount.mode === "rw"));
-  await ensureMemoryMounts(memoryMounts);
+  const scratchMounts = scratchMountsForScope(scope, options.world);
+  await ensureScratchMounts(scratchMounts.filter((mount) => mount.mode === "rw"), options.world);
+  await ensureMemoryMounts(memoryMounts, options.world);
   return {
     memoryMounts,
     scratchMounts,
@@ -1760,8 +1843,12 @@ function createRuntimeHarnessContext(options: {
     durability: {
       append: async (event) => {
         const eventWithWarnings = eventWithSessionWarnings(event, options.skillWarnings);
+        if (eventWithWarnings.payload === undefined) {
+          throw new TypeError("Little Workflow recorder requires an inline Harness event payload.");
+        }
         await options.recorder.append({
           type: eventWithWarnings.type,
+          appendIdempotencyKey: eventWithWarnings.appendIdempotencyKey,
           ...(eventWithWarnings.occurrenceId === undefined ? {} : { occurrenceId: eventWithWarnings.occurrenceId }),
           payload: payloadWithStepPath(eventWithWarnings.payload, options.stepPath),
         });
@@ -1786,6 +1873,7 @@ function createRuntimeHarnessContext(options: {
           options.skills,
         ),
         options.bashCapabilities,
+        options.world.files,
       ),
     ),
     recorder: options.recorder,
@@ -1811,11 +1899,15 @@ function payloadWithStepPath(
   return { ...payload, stepPath };
 }
 
-function eventWithSessionWarnings<TEvent extends { readonly type: string; readonly payload: Record<string, unknown> }>(
+function eventWithSessionWarnings<TEvent extends {
+  readonly type: string;
+  readonly payload?: Record<string, unknown>;
+}>(
   event: TEvent,
   warnings: readonly WorkflowSkillWarning[] | undefined,
 ): TEvent {
   if (
+    event.payload === undefined ||
     normalizeHarnessEventType(event.type) !== "harness.session.started" ||
     warnings === undefined ||
     warnings.length === 0 ||
@@ -1829,7 +1921,7 @@ function eventWithSessionWarnings<TEvent extends { readonly type: string; readon
       ...event.payload,
       warnings,
     },
-  };
+  } as TEvent;
 }
 
 function harnessRuntimeMounts(
@@ -1871,9 +1963,9 @@ function runLogDir(
   parentRunId?: RunId,
 ): string {
   if (parentRunId === undefined) {
-    return resolvePath(world.dataDir, "runs", runId);
+    return runFilesFor(world).path.resolve(world.dataDir, "runs", runId);
   }
-  return resolvePath(world.dataDir, "runs", parentRunId, "sub-runs", runId);
+  return runFilesFor(world).path.resolve(world.dataDir, "runs", parentRunId, "sub-runs", runId);
 }
 
 function skillFrontmatterHash(
@@ -1922,8 +2014,9 @@ function bashScopeForHarness(
 function withBashCapabilities(
   scope: Parameters<typeof createBashTool>[0],
   capabilities: BashCapabilities | undefined,
+  files?: IFileSystem,
 ): Parameters<typeof createBashTool>[0] {
-  return capabilities === undefined ? scope : { ...scope, capabilities };
+  return { ...scope, ...(capabilities === undefined ? {} : { capabilities }), ...(files === undefined ? {} : { files }) };
 }
 
 function mergedReadableRoots(
@@ -2014,7 +2107,7 @@ function rootPathForMount(backingPath: string): string {
  */
 export async function runWorkflowCycle(
   options: RunWorkflowCycleOptions,
-): Promise<RunResult<unknown>> {
+): Promise<UnplannedRunResult<unknown>> {
   return withRunExecutionFence(options.world, options.runId, async () => {
     const terminalReplay = await existingRunWorkflowTerminalReplay(
       options.world,
@@ -2036,6 +2129,46 @@ export async function runWorkflowCycle(
       )
     );
   });
+}
+
+const PLANNER_REVIEW_SKIPPED_RATIONALE =
+  "Kept without a planner call: the workflow definition, tools, models, output contract and input " +
+  "shape all match what the planner read when it last planned or kept this version.";
+
+/**
+ * True when the planner would read what it read when it planned the candidate, or when it last
+ * reviewed the candidate and kept it: the same planning definition (description, schemas, output,
+ * model slots, planner, visible tools) and an input of the same shape. Input values may differ; the
+ * plan reads them through its templates. A warning counts as seen only when that review
+ * acknowledged it.
+ */
+function plannerWouldSeeNoChange(
+  candidate: PlannerReuseCandidate,
+  currentPlanningDefinitionSnapshot: unknown,
+  input: unknown,
+  warnings: readonly string[],
+): boolean {
+  if (currentPlanningDefinitionSnapshot === undefined) {
+    return false;
+  }
+  const snapshotHash = sha256Digest(currentPlanningDefinitionSnapshot);
+  const inputStructureHash = sha256Digest(concreteInputStructure(JSON.parse(canonicalJson(input)) as unknown));
+  const plannedInputStructureHash = stringProperty(
+    propertyValue(candidate.workflowVersion, "lock"),
+    "plannedInputStructureHash",
+  );
+  if (
+    warnings.length === 0 &&
+    candidate.planningDefinitionSnapshotHash === snapshotHash &&
+    plannedInputStructureHash === inputStructureHash
+  ) {
+    return true;
+  }
+  const kept = candidate.lastKept;
+  return kept !== undefined &&
+    kept.planningDefinitionSnapshotHash === snapshotHash &&
+    kept.inputStructureHash === inputStructureHash &&
+    warnings.every((warning) => kept.acknowledgedWarnings.includes(warning));
 }
 
 function plannerReuseDecisionBlocks(
@@ -2210,30 +2343,32 @@ function stepsUseStepType(steps: unknown, uses: string): boolean {
 }
 
 async function materializePlannerReuseDetails(options: {
+  readonly world: LocalWorld;
   readonly logDir: string;
   readonly candidate: PlannerReuseCandidate;
 }): Promise<{ readonly mountPath: string; readonly backingPath: string; readonly mode: "ro" }> {
-  const backingRoot = join(options.logDir, "planner-reuse");
-  const candidateDir = join(backingRoot, options.candidate.workflowVersionId);
-  await mkdir(candidateDir, { recursive: true });
+  const files = runFilesFor(options.world);
+  const backingRoot = files.path.join(options.logDir, "planner-reuse");
+  const candidateDir = files.path.join(backingRoot, options.candidate.workflowVersionId);
+  await files.mkdir(candidateDir, { recursive: true });
   const workflowVersion = isRecord(options.candidate.workflowVersion)
     ? options.candidate.workflowVersion
     : {};
   await Promise.all([
-    writePlannerReuseJson(
-      join(candidateDir, "lwir.json"),
+    writePlannerReuseJson(files,
+      files.path.join(candidateDir, "lwir.json"),
       propertyValue(workflowVersion, "lwir") ?? null,
     ),
-    writePlannerReuseJson(
-      join(candidateDir, "lock.json"),
+    writePlannerReuseJson(files,
+      files.path.join(candidateDir, "lock.json"),
       propertyValue(workflowVersion, "lock") ?? null,
     ),
-    writePlannerReuseJson(
-      join(candidateDir, "planning-definition-snapshot.json"),
+    writePlannerReuseJson(files,
+      files.path.join(candidateDir, "planning-definition-snapshot.json"),
       options.candidate.planningDefinitionSnapshot ?? null,
     ),
-    writeFile(
-      join(candidateDir, "prior-input-summary.md"),
+    files.writeFile(
+      files.path.join(candidateDir, "prior-input-summary.md"),
       [
         `# Prior Input Summary`,
         ``,
@@ -2249,8 +2384,8 @@ async function materializePlannerReuseDetails(options: {
       ].join("\n"),
       "utf8",
     ),
-    writeFile(
-      join(candidateDir, "prior-output-summary.md"),
+    files.writeFile(
+      files.path.join(candidateDir, "prior-output-summary.md"),
       [
         `# Prior Output Summary`,
         ``,
@@ -2261,12 +2396,18 @@ async function materializePlannerReuseDetails(options: {
       ].join("\n"),
       "utf8",
     ),
-    writeFile(
-      join(candidateDir, "feedback-summary.md"),
+    files.writeFile(
+      files.path.join(candidateDir, "feedback-summary.md"),
       [
         `# Feedback Summary`,
         ``,
-        `No structured feedback is attached to this candidate.`,
+        ...((options.candidate.grades ?? []).length === 0
+          ? [`No grades are recorded for runs of this plan.`]
+          : (options.candidate.grades ?? []).map((grade) =>
+              `- ${grade.gradedAt} ${grade.runId}: ${grade.verdict}${
+                grade.gradedBy === undefined ? "" : ` (by ${grade.gradedBy})`
+              }${grade.reason === undefined ? "" : ` - ${grade.reason}`}`
+            )),
         ``,
       ].join("\n"),
       "utf8",
@@ -2279,8 +2420,8 @@ async function materializePlannerReuseDetails(options: {
   };
 }
 
-async function writePlannerReuseJson(path: string, value: unknown): Promise<void> {
-  await writeFile(path, `${canonicalJson(value)}\n`, "utf8");
+async function writePlannerReuseJson(files: RunFiles, path: string, value: unknown): Promise<void> {
+  await files.writeFile(path, `${canonicalJson(value)}\n`, "utf8");
 }
 
 function summaryLine(value: unknown): string {
@@ -2339,7 +2480,7 @@ async function executePartialPlannerReuseReplay(options: {
   readonly bash?: BashCapabilities;
   readonly workflowVersionId: string;
   readonly progress?: (event: WorkflowRunProgressEvent) => void | Promise<void>;
-}): Promise<RunResult<unknown>> {
+}): Promise<UnplannedRunResult<unknown>> {
   const workerResolvedSkills = options.preResolvedWorkerSkills === undefined
     ? await resolveRoleSkillsWithWarnings(
       isRecord(options.workflow.worker) ? options.workflow.worker.skills : undefined,
@@ -2400,6 +2541,7 @@ async function executePartialPlannerReuseReplay(options: {
     ...(workerConfig.workerHarness === undefined ? {} : { workerHarness: workerConfig.workerHarness }),
     workflowId: workflowForExecution.id,
     workflowMemory: workflowForExecution.memory,
+    ...(workflowForExecution.policy === undefined ? {} : { workflowPolicy: workflowForExecution.policy }),
     bashCapabilities: bashCapabilitiesForWorkflow(workflowForExecution, options.bash),
     workerSkills,
     workerSkillWarnings,
@@ -2434,7 +2576,7 @@ async function executePartialPlannerReuseReplay(options: {
     usage: runtimeResult.usage,
     events: runtimeResult.events,
     artifacts: runtimeResult.artifacts,
-  } satisfies RunResult<unknown>;
+  } satisfies UnplannedRunResult<unknown>;
 }
 
 async function appendPlannerReuseRegistrationIfMissing(
@@ -2481,7 +2623,8 @@ async function runWorkflowCycleUnfenced(
   outerLoop: import("./compiler.js").WorkflowCompileOptions["outerLoop"] | undefined,
   promptNote: string | undefined,
   outerLoopId: string | undefined = undefined,
-): Promise<RunResult<unknown>> {
+): Promise<UnplannedRunResult<unknown>> {
+    assertVirtualSkills(options.preResolvedWorkerSkills, options.world);
     const startedAt = Date.now();
     const timeoutMs = timeoutMsFor(options.timeout);
     const existingTerminalFailure = await existingRunWorkflowTerminalFailure(
@@ -2601,13 +2744,13 @@ async function runWorkflowCycleUnfenced(
       logDir,
       role: "planner",
     };
-    const basePlannerScratchMounts = scratchMountsForScope(plannerScope);
+    const basePlannerScratchMounts = scratchMountsForScope(plannerScope, options.world);
 
     const reuseStrategy = resolveWorkflowVersionReuseStrategy({
       call: options.workflowVersionReuseStrategy,
       workflow: workflow.workflowVersionReuseStrategy,
     });
-    const reuseCandidates = reuseStrategy === "planner_reviewed"
+    const reuseCandidates = plannerReviewsEarlierPlans(reuseStrategy)
       ? await selectPlannerReuseCandidates(options.world, { workflowId: workflowForCompile.id })
       : [];
     const briefedReuseCandidate = reuseCandidates[0];
@@ -2615,25 +2758,26 @@ async function runWorkflowCycleUnfenced(
       ? []
       : [briefedReuseCandidate];
     const currentPlanningDefinitionSnapshot =
-      reuseStrategy === "planner_reviewed" && briefedReuseCandidate !== undefined
+      plannerReviewsEarlierPlans(reuseStrategy) && briefedReuseCandidate !== undefined
         ? getPlanningDefinitionSnapshot(workflowForCompile, options.tools)
         : undefined;
     const currentRequestedOutputHash =
-      reuseStrategy === "planner_reviewed" && briefedReuseCandidate !== undefined
+      plannerReviewsEarlierPlans(reuseStrategy) && briefedReuseCandidate !== undefined
         ? requestedOutputHashForWorkflow(workflowForCompile)
         : undefined;
     const reuseDetailMount = briefedReuseCandidate === undefined
       ? undefined
       : await materializePlannerReuseDetails({
+          world: options.world,
           logDir,
           candidate: briefedReuseCandidate,
         });
     const plannerScratchMounts = reuseDetailMount === undefined
       ? basePlannerScratchMounts
       : [...basePlannerScratchMounts, reuseDetailMount];
-    await ensureScratchMounts(plannerScratchMounts);
-    await ensureMemoryMounts(plannerMemoryMounts);
-    const reuseBrief = reuseStrategy === "planner_reviewed" && briefedReuseCandidate !== undefined
+    await ensureScratchMounts(plannerScratchMounts, options.world);
+    await ensureMemoryMounts(plannerMemoryMounts, options.world);
+    const reuseBrief = plannerReviewsEarlierPlans(reuseStrategy) && briefedReuseCandidate !== undefined
       ? buildReuseBrief({
           candidate: briefedReuseCandidate,
           currentPlanningDefinitionSnapshot,
@@ -2645,6 +2789,42 @@ async function runWorkflowCycleUnfenced(
       : [promptNote, reuseBrief.text].filter((entry): entry is string =>
           typeof entry === "string" && entry.length > 0
         ).join("\n\n");
+    // Built only when a candidate is checked, so a run with nothing to reuse resolves models and
+    // the worker harness at the same point it always did.
+    const reuseCapabilities = (): PlannerReuseCapabilityContext => ({
+      tools: options.tools,
+      models: runtimeModelsForWorkflow(workflowForCompile),
+      workerHarness: runtimeWorkerConfigForWorkflow(workflowForCompile).workerHarness,
+      bashCapabilities,
+      mcpCapabilities: options.mcpCapabilities,
+    });
+    // When the planner would read exactly what it read when it planned the candidate, a review can
+    // only repeat its last answer, so keep the candidate without a model call. Anything it would
+    // need to weigh (a warning, a block, an outer-loop note) still goes to the planner.
+    const keepWithoutPlanner =
+      reuseStrategy === "planner_reviewed" &&
+        briefedReuseCandidate !== undefined &&
+        reuseBrief !== undefined &&
+        outerLoop === undefined &&
+        (promptNote === undefined || promptNote.length === 0) &&
+        plannerWouldSeeNoChange(
+          briefedReuseCandidate,
+          currentPlanningDefinitionSnapshot,
+          options.input,
+          reuseBrief.warnings,
+        ) &&
+        plannerReuseDecisionBlocks(
+          briefedReuseCandidate,
+          currentPlanningDefinitionSnapshot,
+          currentRequestedOutputHash,
+          reuseCapabilities(),
+        ).length === 0
+        ? {
+            workflowVersionId: briefedReuseCandidate.workflowVersionId,
+            rationale: PLANNER_REVIEW_SKIPPED_RATIONALE,
+            ...(reuseBrief.warnings.length === 0 ? {} : { acknowledgedWarnings: reuseBrief.warnings }),
+          }
+        : undefined;
 
     const cancellation = cancellationControllerFor(timeoutMs, options.signal);
     const compilerLifecycle = compilerLifecycleRecorderFor(options.world, runId);
@@ -2670,6 +2850,7 @@ async function runWorkflowCycleUnfenced(
             bash: bashCapabilities,
             outerLoop,
             promptNote: promptNoteForCompile,
+            ...(keepWithoutPlanner === undefined ? {} : { keepWithoutPlanner }),
             plannerHarnessRuntime: {
               world: options.world,
               runId,
@@ -2692,7 +2873,7 @@ async function runWorkflowCycleUnfenced(
         options.parentRunId,
       );
     } catch (error) {
-      if (error instanceof PlannerReuseUnchangedDecisionError && reuseStrategy === "planner_reviewed") {
+      if (error instanceof PlannerReuseUnchangedDecisionError && plannerReviewsEarlierPlans(reuseStrategy)) {
         const decision = validatePlannerReuseDecision(
           {
             kind: "reuse_unchanged",
@@ -2709,13 +2890,7 @@ async function runWorkflowCycleUnfenced(
               ),
               currentPlanningDefinitionSnapshot,
               currentRequestedOutputHash,
-              {
-                tools: options.tools,
-                models: runtimeModelsForWorkflow(workflowForCompile),
-                workerHarness: runtimeWorkerConfigForWorkflow(workflowForCompile).workerHarness,
-                bashCapabilities,
-                mcpCapabilities: options.mcpCapabilities,
-              },
+              reuseCapabilities(),
             ),
           },
         );
@@ -2768,6 +2943,10 @@ async function runWorkflowCycleUnfenced(
             inputStructure: concreteInputStructure(options.input),
             candidateBriefHash: reuseBrief?.briefHash,
             resultingWorkflowVersionId: reuseUnchangedDecision.workflowVersionId,
+            // What the version was kept against, so a later run with nothing new can keep it too.
+            planningDefinitionSnapshotHash: currentPlanningDefinitionSnapshot === undefined
+              ? undefined
+              : sha256Digest(currentPlanningDefinitionSnapshot),
           }),
         },
         {
@@ -2825,6 +3004,7 @@ async function runWorkflowCycleUnfenced(
         ...(workerConfig.workerHarness === undefined ? {} : { workerHarness: workerConfig.workerHarness }),
         workflowId: workflowForCompile.id,
         workflowMemory: workflowForCompile.memory,
+        ...(workflowForCompile.policy === undefined ? {} : { workflowPolicy: workflowForCompile.policy }),
         bashCapabilities,
         workerSkills,
         workerSkillWarnings,
@@ -2860,7 +3040,7 @@ async function runWorkflowCycleUnfenced(
         usage: runtimeResult.usage,
         events: runtimeResult.events,
         artifacts: runtimeResult.artifacts,
-      } satisfies RunResult<unknown>;
+      } satisfies UnplannedRunResult<unknown>;
     }
     if (compiled === undefined) {
       throw new Error("Workflow compile did not produce a WorkflowVersion.");
@@ -2934,6 +3114,7 @@ async function runWorkflowCycleUnfenced(
       ...(workerConfig.workerHarness === undefined ? {} : { workerHarness: workerConfig.workerHarness }),
       workflowId: workflowForCompile.id,
       workflowMemory: workflowForCompile.memory,
+      ...(workflowForCompile.policy === undefined ? {} : { workflowPolicy: workflowForCompile.policy }),
       bashCapabilities,
       workerSkills,
       workerSkillWarnings,
@@ -2969,7 +3150,7 @@ async function runWorkflowCycleUnfenced(
       usage: runtimeResult.usage,
       events: runtimeResult.events,
       artifacts: runtimeResult.artifacts,
-    } satisfies RunResult<unknown>;
+    } satisfies UnplannedRunResult<unknown>;
 }
 
 export type RunFailedCauseCode =
@@ -3014,6 +3195,21 @@ export class RunFailedError extends Error {
     this.lastCycleOutput = options.lastCycleOutput;
     Object.setPrototypeOf(this, new.target.prototype);
   }
+}
+
+/**
+ * True when `value` is the error a failed run throws. Prefer it to `instanceof` or a name check: it
+ * also recognizes a `RunFailedError` from another copy of this package (for example a workflow
+ * folder loaded by `loadWorkflow`).
+ */
+export function isRunFailedError(value: unknown): value is RunFailedError {
+  if (value instanceof RunFailedError) return true;
+  return (
+    value instanceof Error &&
+    value.name === "RunFailedError" &&
+    typeof (value as { readonly runId?: unknown }).runId === "string" &&
+    typeof (value as { readonly causeCode?: unknown }).causeCode === "string"
+  );
 }
 
 class RuntimeCauseError extends Error {
@@ -3259,7 +3455,7 @@ async function existingRunWorkflowTerminalReplay(
   runId: RunId,
   input: unknown,
   workflow?: CompilableWorkflowDefinition,
-): Promise<RunResult | undefined> {
+): Promise<UnplannedRunResult | undefined> {
   const existingTerminalFailure = await existingRunWorkflowTerminalFailure(
     world,
     runId,
@@ -3280,7 +3476,7 @@ async function existingRunWorkflowTerminalCompletion(
   runId: RunId,
   input: unknown,
   workflow: CompilableWorkflowDefinition,
-): Promise<RunResult | undefined> {
+): Promise<UnplannedRunResult | undefined> {
   const events = await world.listEvents(runId);
   if (events.length === 0) {
     return undefined;
@@ -3299,7 +3495,7 @@ async function existingGenericRunWorkflowTerminalCompletion(
   world: LocalWorld,
   runId: RunId,
   input: unknown,
-): Promise<RunResult | undefined> {
+): Promise<UnplannedRunResult | undefined> {
   const events = await world.listEvents(runId);
   if (events.length === 0) {
     return undefined;
@@ -3424,7 +3620,7 @@ async function completedRunResultFromState(
   runId: RunId,
   state: MaterializedRunState,
   events: readonly EventEnvelope[],
-): Promise<RunResult> {
+): Promise<UnplannedRunResult> {
   await assertCompletedRunArtifactsValid(world, runId, state, events);
   return {
     runId,
@@ -4308,7 +4504,9 @@ async function withRunExecutionFence<T>(
   runId: RunId,
   fn: () => Promise<T>,
 ): Promise<T> {
-  const key = `${await canonicalWorldDataDir(world.dataDir)}:${runId}`;
+  const key = world.files === undefined
+    ? `${await runFilesFor(world).canonicalDataDir()}:${runId}`
+    : virtualStorageKey(world.files, world.dataDir, `run:${runId}`);
   if (activeRunExecutions.has(key)) {
     throw new Error(`Run '${runId}' is already executing in this process.`);
   }
@@ -4328,22 +4526,69 @@ async function withRunExecutionFence<T>(
   }
 }
 
+/** Thrown when a live owner holds an execution lock. Keeps the plain Error name and message. */
+class ExecutionLockHeldError extends Error {
+  constructor(message: string) {
+    super(message);
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
+}
+
 async function acquireRunExecutionLock(
   world: LocalWorld,
   runId: RunId,
 ): Promise<() => Promise<void>> {
+  return acquireExecutionLock(world, runExecutionLockName(runId), `Run '${runId}'`);
+}
+
+/**
+ * Takes the cross-process lock that lets one caller at a time drive an outer loop. Returns
+ * undefined while a live owner holds it; a lock left by a dead process is recovered exactly as
+ * a run lock is.
+ */
+export async function tryAcquireOuterLoopExecutionLock(
+  world: LocalWorld,
+  outerLoopId: string,
+): Promise<(() => Promise<void>) | undefined> {
+  try {
+    return await acquireExecutionLock(
+      world,
+      outerLoopExecutionLockName(outerLoopId),
+      `Outer loop '${outerLoopId}'`,
+    );
+  } catch (error) {
+    if (error instanceof ExecutionLockHeldError) {
+      return undefined;
+    }
+    throw error;
+  }
+}
+
+async function acquireExecutionLock(
+  world: LocalWorld,
+  lockName: string,
+  owner: string,
+): Promise<() => Promise<void>> {
+  if (world.files !== undefined) {
+    const key = virtualStorageKey(world.files, world.dataDir, `lock:${lockName}`);
+    if (activeVirtualLocks.has(key)) throw new ExecutionLockHeldError(`${owner} is already executing.`);
+    const token = Symbol(lockName);
+    activeVirtualLocks.set(key, token);
+    return async () => {
+      if (activeVirtualLocks.get(key) === token) activeVirtualLocks.delete(key);
+    };
+  }
   const locksDir = resolvePath(world.dataDir, "locks");
-  const lockName = runExecutionLockName(runId);
   const lockDir = resolvePath(locksDir, lockName);
   const ownerToken = randomUUID();
-  await mkdir(locksDir, { recursive: true });
+  await lockFiles.mkdir(locksDir, { recursive: true });
   for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
-      await mkdir(lockDir);
+      await lockFiles.mkdir(lockDir);
       await writeRunExecutionLockOwner(lockDir, ownerToken);
       return async () => {
         if (await runExecutionLockOwnerMatches(lockDir, ownerToken)) {
-          await removeDirRetrySafe(lockDir);
+          await lockFiles.removeDirRetrySafe(lockDir);
         }
       };
     } catch (error) {
@@ -4354,18 +4599,18 @@ async function acquireRunExecutionLock(
         locksDir,
         lockName,
         ownerToken,
-        runId,
+        owner,
       );
       try {
         const lockSnapshot = await readRunExecutionLockSnapshot(lockDir);
         if (!(await isRunExecutionLockStale(lockDir, lockSnapshot))) {
-          throw new Error(`Run '${runId}' is already executing.`);
+          throw new ExecutionLockHeldError(`${owner} is already executing.`);
         }
         const claimedDir = resolvePath(locksDir, `${lockName}.${ownerToken}.${attempt}.stale`);
         try {
-          await rename(lockDir, claimedDir);
+          await lockFiles.rename(lockDir, claimedDir);
         } catch (claimError) {
-          await removeDirRetrySafe(claimedDir);
+          await lockFiles.removeDirRetrySafe(claimedDir);
           if (isErrno(claimError, "ENOENT")) {
             continue;
           }
@@ -4373,31 +4618,31 @@ async function acquireRunExecutionLock(
         }
         if (!(await runExecutionLockSnapshotMatches(claimedDir, lockSnapshot))) {
           await restoreClaimedRunExecutionLock(claimedDir, lockDir);
-          throw new Error(`Run '${runId}' is already executing.`);
+          throw new ExecutionLockHeldError(`${owner} is already executing.`);
         }
-        await removeDirRetrySafe(claimedDir);
+        await lockFiles.removeDirRetrySafe(claimedDir);
       } finally {
         await releaseRecoveryLock();
       }
     }
   }
-  throw new Error(`Run '${runId}' is already executing.`);
+  throw new ExecutionLockHeldError(`${owner} is already executing.`);
 }
 
 async function acquireRunExecutionRecoveryLock(
   locksDir: string,
   lockName: string,
   ownerToken: string,
-  runId: RunId,
+  owner: string,
 ): Promise<() => Promise<void>> {
   const recoveryDir = resolvePath(locksDir, `${lockName}.recovering`);
   for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
-      await mkdir(recoveryDir);
+      await lockFiles.mkdir(recoveryDir);
       await writeRunExecutionLockOwner(recoveryDir, ownerToken);
       return async () => {
         if (await runExecutionLockOwnerMatches(recoveryDir, ownerToken)) {
-          await removeDirRetrySafe(recoveryDir);
+          await lockFiles.removeDirRetrySafe(recoveryDir);
         }
       };
     } catch (error) {
@@ -4406,16 +4651,16 @@ async function acquireRunExecutionRecoveryLock(
       }
       const lockSnapshot = await readRunExecutionLockSnapshot(recoveryDir);
       if (!(await isRunExecutionLockStale(recoveryDir, lockSnapshot))) {
-        throw new Error(`Run '${runId}' is already executing.`);
+        throw new ExecutionLockHeldError(`${owner} is already executing.`);
       }
       const claimedDir = resolvePath(
         locksDir,
         `${lockName}.${ownerToken}.${attempt}.recovering.stale`,
       );
       try {
-        await rename(recoveryDir, claimedDir);
+        await lockFiles.rename(recoveryDir, claimedDir);
       } catch (claimError) {
-        await removeDirRetrySafe(claimedDir);
+        await lockFiles.removeDirRetrySafe(claimedDir);
         if (isErrno(claimError, "ENOENT")) {
           continue;
         }
@@ -4423,16 +4668,16 @@ async function acquireRunExecutionRecoveryLock(
       }
       if (!(await runExecutionLockSnapshotMatches(claimedDir, lockSnapshot))) {
         await restoreClaimedRunExecutionLock(claimedDir, recoveryDir);
-        throw new Error(`Run '${runId}' is already executing.`);
+        throw new ExecutionLockHeldError(`${owner} is already executing.`);
       }
-      await removeDirRetrySafe(claimedDir);
+      await lockFiles.removeDirRetrySafe(claimedDir);
     }
   }
-  throw new Error(`Run '${runId}' is already executing.`);
+  throw new ExecutionLockHeldError(`${owner} is already executing.`);
 }
 
 async function writeRunExecutionLockOwner(lockDir: string, ownerToken: string): Promise<void> {
-  await writeFile(
+  await lockFiles.writeFile(
     resolvePath(lockDir, "owner.json"),
     canonicalJson({ pid: process.pid, token: ownerToken, createdAt: new Date().toISOString() }),
     "utf8",
@@ -4441,7 +4686,7 @@ async function writeRunExecutionLockOwner(lockDir: string, ownerToken: string): 
 
 async function readRunExecutionLockOwnerSnapshot(lockDir: string): Promise<string | undefined> {
   try {
-    return await readFile(resolvePath(lockDir, "owner.json"), "utf8");
+    return await lockFiles.readFile(resolvePath(lockDir, "owner.json"), "utf8");
   } catch {
     return undefined;
   }
@@ -4458,7 +4703,7 @@ async function readRunExecutionLockSnapshot(
   lockDir: string,
 ): Promise<RunExecutionLockSnapshot | undefined> {
   try {
-    const lockStats = await stat(lockDir);
+    const lockStats = await lockFiles.stat(lockDir);
     return {
       owner: await readRunExecutionLockOwnerSnapshot(lockDir),
       dev: lockStats.dev,
@@ -4498,7 +4743,7 @@ async function runExecutionLockOwnerMatches(
   ownerToken: string,
 ): Promise<boolean> {
   try {
-    const owner = JSON.parse(await readFile(resolvePath(lockDir, "owner.json"), "utf8"));
+    const owner = JSON.parse(await lockFiles.readFile(resolvePath(lockDir, "owner.json"), "utf8"));
     return isRecord(owner) && owner.token === ownerToken;
   } catch {
     return false;
@@ -4523,7 +4768,7 @@ async function restoreClaimedRunExecutionLock(
   lockDir: string,
 ): Promise<void> {
   try {
-    await rename(claimedDir, lockDir);
+    await lockFiles.rename(claimedDir, lockDir);
   } catch (error) {
     if (!isErrno(error, "ENOENT")) {
       throw error;
@@ -4547,36 +4792,9 @@ function runExecutionLockName(runId: RunId): string {
   return sha256Digest(runId).replace(/[^A-Za-z0-9_-]/gu, "_");
 }
 
-async function canonicalWorldDataDir(dataDir: string): Promise<string> {
-  try {
-    return await realpath(dataDir);
-  } catch {
-    return canonicalMissingPath(dataDir);
-  }
-}
-
-async function canonicalMissingPath(path: string): Promise<string> {
-  const absolute = resolvePath(path);
-  const missingSegments: string[] = [];
-  let current = absolute;
-  while (!(await pathExists(current))) {
-    missingSegments.unshift(basename(current));
-    const parent = dirname(current);
-    if (parent === current) {
-      return absolute;
-    }
-    current = parent;
-  }
-  return resolvePath(await realpath(current), ...missingSegments);
-}
-
-async function pathExists(path: string): Promise<boolean> {
-  try {
-    await stat(path);
-    return true;
-  } catch {
-    return false;
-  }
+function outerLoopExecutionLockName(outerLoopId: string): string {
+  // Hashing an object keeps this name apart from every run lock, which hashes a bare string.
+  return sha256Digest({ outerLoopId }).replace(/[^A-Za-z0-9_-]/gu, "_");
 }
 
 function isErrno(error: unknown, code: string): error is NodeJS.ErrnoException {
@@ -4738,11 +4956,13 @@ async function appendCompilerLifecycleEvent(
   if (event.type === "OrchestrationRequested") {
     await appendEventPrefix(world, runId, [
       compilerLifecycleEventInput(event),
-      compilerLifecycleEventInput({
-        type: "PlannerStarted",
-        request: event.request,
-        revision: 1,
-      }),
+      ...(event.keepsWithoutPlanner === true
+        ? []
+        : [compilerLifecycleEventInput({
+            type: "PlannerStarted",
+            request: event.request,
+            revision: 1,
+          })]),
     ]);
     return;
   }
@@ -5795,10 +6015,7 @@ async function maybeRecoverCodeStepWithFixer(input: {
     manifest,
     model: {
       slotId: fixer.modelSlot,
-      providerId:
-        stringProperty(model, "providerId") ??
-        stringProperty(model, "provider") ??
-        "runtime",
+      providerId: modelProviderId(model) ?? "runtime",
       modelId: stringProperty(model, "modelId") ?? fixer.modelSlot,
       model,
     },
@@ -6001,7 +6218,7 @@ async function maybeRepairAiStep(input: {
       currentState,
       modelSlot,
       model,
-      true,
+      repairAttempt,
     );
     if (adapterResult === undefined) {
       return undefined;
@@ -6036,7 +6253,7 @@ async function maybeRepairAiStep(input: {
 /**
  * Build a copy of an `ai.generate` step whose prompt is augmented with the schema
  * validation findings (and, on the second and later repair attempts, the rejected
- * output) so the worker can correct itself. Only `with.prompt` is changed.
+ * output) so the worker can correct itself. Only `with.outputRepairNote` is added.
  */
 function augmentAiStepForRepair(
   step: LwirStep,
@@ -6052,8 +6269,8 @@ function augmentAiStepForRepair(
   const previousOutputNote = previousOutput === undefined
     ? ""
     : `\nYour previous (invalid) output was: ${JSON.stringify(previousOutput)}`;
-  // Carry the feedback in a dedicated `with.outputRepairNote` (NOT `with.prompt`, which the worker
-  // does not read) — the workflow harness surfaces this as a trailing user turn to the model.
+  // Carry the feedback in a dedicated `with.outputRepairNote` (NOT `with.prompt`, which stays the
+  // author's template) — the workflow harness surfaces this as a trailing user turn to the model.
   const outputRepairNote =
     `[OUTPUT REPAIR] Your previous output was REJECTED by schema validation: ` +
     `${joinedFindings}. Return ONLY a corrected value that exactly matches the required schema.` +
@@ -6381,12 +6598,14 @@ async function maybeExecuteAiStepWithWorkerHarness(
   runtimeState: RuntimeState,
   modelSlot: string,
   model: unknown,
-  // When true, the worker session for this step bypasses the manifest-drift check.
-  // The output self-repair loop re-runs an `ai.generate` step with an augmented prompt
-  // (a deliberately different stepConfig), which would otherwise trip drift detection
-  // against the original failed session for the same stepPath.
-  skipManifestDriftCheck = false,
+  // Set by the output self-repair loop, which re-runs an `ai.generate` step with an augmented
+  // prompt (a deliberately different stepConfig). The worker session then bypasses the
+  // manifest-drift check, which would otherwise trip against the original session for the same
+  // stepPath, and the harness keys its step events by the repair attempt, so a repair's events
+  // are not mistaken for a different request under the original attempt's keys.
+  repairAttempt?: number,
 ): Promise<StepAdapterResult | undefined> {
+  const skipManifestDriftCheck = repairAttempt !== undefined;
   const harness = options.workerHarness;
   if (harness === undefined) {
     return undefined;
@@ -6439,10 +6658,7 @@ async function maybeExecuteAiStepWithWorkerHarness(
     manifest,
     model: {
       slotId: modelSlot,
-      providerId:
-        stringProperty(model, "providerId") ??
-        stringProperty(model, "provider") ??
-        "runtime",
+      providerId: modelProviderId(model) ?? "runtime",
       modelId: stringProperty(model, "modelId") ?? modelSlot,
       model,
     },
@@ -6459,14 +6675,26 @@ async function maybeExecuteAiStepWithWorkerHarness(
   });
 
   const taskVisitIndex = visitIndexFromStepPath(context.stepPath);
+  const workerStep = withWorkflowPolicy(
+    await resolveAiStepText(
+      options.world,
+      step,
+      options.workflowVersion.lwir,
+      options.input,
+      runtimeState.materialized,
+      scopeFromContext(context),
+    ),
+    options.workflowPolicy,
+  );
   const task = {
     kind: "execute_step",
-    step: step as ExecuteStepTask["step"],
+    step: workerStep as ExecuteStepTask["step"],
     stepInput: context.input,
     stepContext: {
       stepPath: context.stepPath,
       visitIndex: taskVisitIndex,
       attempt: context.attempt,
+      ...(repairAttempt === undefined ? {} : { repairAttempt }),
       toolCallScope: toolCallScopeForRuntimeContext(context),
       toolExecutionContext: toolExecutionContextForHarness(context),
     },
@@ -8906,15 +9134,35 @@ async function resolveStepInput(
   return scope.hasItem === true ? scope.item : workflowInput;
 }
 
-async function resolveStepConfig(
+// The `ai.generate` fields that reach the model as text. Their `{{ }}` expressions resolve
+// against the same context as `step.input`; every other `with` field is passed through as-is.
+const AI_STEP_TEXT_FIELDS = ["prompt", "system"] as const;
+
+/**
+ * The `ai.generate` step as the worker should see it: string `with.prompt` and `with.system`
+ * values with their expressions resolved to text. The WorkflowVersion keeps the template; only
+ * the copy handed to the worker changes. A field that is not a string is left for the worker to
+ * ignore, as before.
+ */
+async function resolveAiStepText(
   world: LocalWorld,
-  config: JsonRecord,
   step: LwirStep,
   workflow: LwirWorkflow,
   workflowInput: unknown,
   state: MaterializedRunState,
   scope: StepExecutionScope = {},
-): Promise<JsonRecord> {
+): Promise<LwirStep> {
+  const config = step.with;
+  if (!isRecord(config)) {
+    return step;
+  }
+  const templated = AI_STEP_TEXT_FIELDS.filter((field) => {
+    const value = config[field];
+    return typeof value === "string" && (value.includes("{{") || value.includes("}}"));
+  });
+  if (templated.length === 0) {
+    return step;
+  }
   const expressionContext = await expressionContextFor(
     world,
     step,
@@ -8923,7 +9171,38 @@ async function resolveStepConfig(
     state,
     scope,
   );
-  return resolveExpressionValue(config, expressionContext) as JsonRecord;
+  const resolved: JsonRecord = { ...config };
+  for (const field of templated) {
+    try {
+      resolved[field] = resolveExpressionText(config[field], expressionContext);
+    } catch (error) {
+      // The same template and run state fail the same way on every attempt: don't retry it.
+      throw new RuntimeConfigError(
+        `runtime_config_error: ai.generate step '${step.id}' with.${field}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  }
+  return { ...step, with: resolved } as LwirStep;
+}
+
+/**
+ * Put the workflow's policy at the top of an `ai.generate` step's `with.system`, so every model step
+ * follows it word for word whoever wrote the plan. Only the copy handed to the worker changes: the
+ * WorkflowVersion and the worker manifest keep the plan as written.
+ */
+function withWorkflowPolicy(step: LwirStep, policy: string | undefined): LwirStep {
+  if (policy === undefined) {
+    return step;
+  }
+  const config = isRecord(step.with) ? step.with : {};
+  const system = typeof config.system === "string" && config.system.length > 0 ? config.system : undefined;
+  const policyBlock = `Follow this policy exactly:\n${policy}`;
+  return {
+    ...step,
+    with: { ...config, system: system === undefined ? policyBlock : `${policyBlock}\n\n${system}` },
+  } as LwirStep;
 }
 
 async function expressionContextFor(
@@ -9333,6 +9612,14 @@ function stringArrayProperty(value: unknown, key: string): readonly string[] {
     : [];
 }
 
+/**
+ * An AI SDK model's provider id. The AI SDK's model classes define `provider` as a getter, so it is
+ * read through the prototype; an own-property read misses it and the call goes unpriced.
+ */
+function modelProviderId(model: unknown): string | undefined {
+  return stringLikeProperty(model, "providerId") ?? stringLikeProperty(model, "provider");
+}
+
 function stringLikeProperty(value: unknown, key: string): string | undefined {
   if ((typeof value !== "object" && typeof value !== "function") || value === null) {
     return undefined;
@@ -9361,21 +9648,7 @@ function branchIndexProperty(value: unknown): number | undefined {
     : undefined;
 }
 
-function getAjv(): AjvInstance {
-  if (cachedAjv !== undefined) {
-    return cachedAjv;
-  }
 
-  const ajvModule = nodeRequire("ajv") as
-    | AjvConstructor
-    | { readonly default?: AjvConstructor };
-  const Ajv = typeof ajvModule === "function" ? ajvModule : ajvModule.default;
-  if (Ajv === undefined) {
-    throw new TypeError("Ajv default export is unavailable.");
-  }
-  cachedAjv = new Ajv({ allErrors: true, strict: false, validateSchema: true });
-  return cachedAjv;
-}
 
 function configFor(step: LwirStep): JsonRecord {
   return isRecord(step.with) ? step.with : {};

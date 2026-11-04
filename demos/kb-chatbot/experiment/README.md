@@ -1,7 +1,14 @@
 # The dream-catch experiment
 
 A rigged knowledge base, a plausible-but-flawed prompt, and a scripted driver that measures
-whether littleDB's dreaming can **find a systematic failure and fix it**.
+whether LittleDB's reviewer ("dreaming", in this document's older vocabulary) can **find a
+systematic failure and fix it**.
+
+> **LittleDB was rebuilt after this experiment was written.** The driver now talks to the
+> rebuilt `/v1` API: `--dream` runs LittleDB's built-in reviewer (`POST /v1/reviews`) and
+> `--promote` approves a proposal. §6–§8 describe the earlier dream implementation and the
+> runs made against it; the rebuilt reviewer reads traces and scores differently, and has not
+> been run on this experiment yet.
 
 The polished demo (`driver.mjs`, `seed-knowledge/`, harness slug `kb-librarian`) is
 untouched. Everything here runs against slug **`kb-librarian-x`** and its own knowledge
@@ -10,11 +17,11 @@ base, so a broken experiment can never damage the demo's story.
 ```
 node experiment/run.mjs --seed                 # install the adversarial KB
 node experiment/run.mjs --traffic              # 20 OPTIMIZER scenarios on v1 → graded, reacted
-node experiment/run.mjs --dream                # reflect; print the proposal + prompt diff
-node experiment/run.mjs --promote <proposalId> # canary, then promote
+node experiment/run.mjs --dream                # LittleDB's reviewer; print each proposal + prompt diff
+node experiment/run.mjs --promote <proposalId> # approve: the proposal's version goes live
 node experiment/run.mjs --retest               # rerun the optimizer set → BEFORE/AFTER
 node experiment/run.mjs --gate                 # 25 HELD-OUT scenarios × k → pass^k
-node experiment/run.mjs --status               # harness metrics + live channel pointer
+node experiment/run.mjs --status               # releases, versions and proposals
 ```
 
 Flags: `--limit <n>`, `--only <id,id,...>`, `--baseline <results.json>`; and for `--gate`:
@@ -143,22 +150,21 @@ tier B → **tier C last**. See the risk section for why.
 **`LIBRARIAN_PROMPT_FILE`** — `agents/librarian/littledb.ts`'s `bootstrapPrompt()` reads
 `instructions.md` unless that env var names another file (absolute, or relative to the demo
 root), in which case it reads that one. Five lines, additive, and scoped: it changes only
-the **littleDB bootstrap**. A run with `LITTLEDB_URL` unset still uses `instructions.md`,
-and littleDB ignores a bootstrap once the harness+channel has a config version.
+the **LittleDB bootstrap**. A run with `LITTLEDB_URL` unset still uses `instructions.md`,
+and LittleDB ignores a bootstrap once the harness has a live version.
 
 `run.mjs` sets it to `experiment/prompt-v1.md` for `--traffic` and **deletes it** for
-`--retest` — the retested prompt has to come back from littleDB, or the comparison proves
+`--retest` — the retested prompt has to come back from LittleDB, or the comparison proves
 nothing. After the first scenario, `--traffic` compares the live resolved system prompt
 against the file and warns loudly if they differ.
 
-**Bootstrap seeds once.** The first `/api/config/resolve` for `kb-librarian-x` stores v1
-forever; later edits to `prompt-v1.md` are silent no-ops. To reseed, use a fresh
-`LITTLEDB_HARNESS_ID`.
+**Bootstrap seeds once.** The first resolve for `kb-librarian-x` stores the bootstrap as
+version 1; later edits to `prompt-v1.md` are silent no-ops. To reseed, use a fresh
+`LITTLEDB_HARNESS`.
 
-**One scenario = one thread = one session = one engine run** (`x-<id>-<runstamp>` →
-`slack:x-<id>-<runstamp>` → `harness_slack:x-<id>-<runstamp>`). Multi-turn scenarios stay
-inside one run; the dream reads a run's **last** output, so a tier-B/C run shows the model's
-reply to the pushback.
+**One scenario = one thread = one session** (`x-<id>-<runstamp>` → session
+`slack:x-<id>-<runstamp>`), and each turn of it is one trace in LittleDB. The 👍/👎 is a
+`user_feedback` score on the first answer's trace.
 
 **Grading.** PASS iff every `mustContain` keyword appears in the first answer **and** the
 cited `Source:` names the expected file. Bare numbers match on word boundaries, so `20` is
@@ -166,16 +172,16 @@ not satisfied by the `2019` all over the wrong policy. Citations compare by base
 bare filename, a relative path, and a `/persistent/knowledge/...` path all count. No
 citation is a fail; the right file with the wrong numbers is a fail.
 
-**Environment.** As the demo: `LITTLEDB_URL`, `LITTLEDB_ENGINE_URL`, plus
-`LITTLEDB_HARNESS_ID=kb-librarian-x` and `LITTLEDB_CHANNEL=production`, all defaulted by
-`run.mjs`. `--traffic`/`--retest` hard-fail when the stack is unreachable rather than
-silently running with no managed config and no outcomes. They also refuse to run until
+**Environment.** `LITTLEDB_URL` (default `http://127.0.0.1:7340`), `LITTLEDB_API_KEY`
+(required), `LITTLEDB_HARNESS` (default `kb-librarian-x`) and `LITTLEDB_CHANNEL` (default
+`production`). `--traffic`/`--retest` hard-fail when LittleDB is unreachable rather than
+silently running with no version, no traces and no scores. They also refuse to run until
 `--seed` has installed the KB. In a git worktree without a repo-root `.env.local`, point
 `KB_CHATBOT_ENV_FILE` at the main checkout's copy.
 
 Results land in `experiment/.results/<mode>-<timestamp>.json` (gitignored): per-scenario
-verdicts, every exchange in full, per-tier and per-kind stats, and the pinned config
-version.
+verdicts, every exchange in full, per-tier and per-kind stats, and the version each session
+resolved.
 
 ## 6. What success means
 
@@ -222,8 +228,8 @@ claim.
   citations compare by basename, so the AMER file would satisfy the citation check for a
   per-diem question. The `mustContain` keyword (`65`, `180`) is what actually disambiguates.
   Deliberate: two regions with the same filename is what a real knowledge base looks like.
-- **The judge is separate.** `judgeAvg` in `--status` comes from littleDB's own scheduler
-  and is not this experiment's grading. Do not conflate them.
+- **The judge is separate.** Any judge LittleDB runs over these traces is not this
+  experiment's grading. Do not conflate them.
 
 ## 8. Verified so far
 
@@ -346,28 +352,28 @@ Known and accepted: requiring the citation to be repeated after the pushback can
 that keeps the right number but drops its `Source:` line. That is the stated rule, and the
 recorded `cited`/`missing` fields make the two failure shapes distinguishable in analysis.
 
-### Gate runs never touch the trace plane
+### Gate runs never reach LittleDB
 
-A gate conversation that reached littleDB would become dream evidence, and the held-out set
-would stop being held out the first time anyone ran `--dream` again. So a gate run is
+A gate conversation that reached LittleDB would become reviewer evidence, and the held-out
+set would stop being held out the first time anyone ran `--dream` again. So a gate run is
 **measurement-only**, structurally:
 
-1. **The promoted prompt is read over plain HTTP** — `GET /api/harnesses/<id>/config`, the
-   same read `--status` does — and the channel's `configVersionId` is pinned. A control-plane
-   read is fine; run telemetry is not. (If the channel is canarying, the gate says so and
-   still pins one version: a measurement that sampled two prompts would report the average of
-   two different systems.) The bundle's `modelSlot` is resolved through the agent's own
-   `env.ts`, so the gate runs the promoted **prompt and model**, as `--retest` does.
+1. **The live version is read over plain HTTP** (`GET /v1/subjects/harness:<slug>` and the
+   live version's content, the same read `--status` does) and pinned. Reading it is fine;
+   run telemetry is not. (If the channel is in a trial, the gate says so and still pins the
+   live version: a measurement that sampled two prompts would report the average of two
+   different systems.) The version's `model` slot is resolved through the agent's own
+   `env.ts`, so the gate runs the live **prompt and model**, as `--retest` does.
 2. **Every `LITTLEDB_*` variable is deleted before any agent module loads** (plus
    `LIBRARIAN_PROMPT_FILE`, which exists only to seed a bootstrap). This is the whole
    mechanism: `agents/librarian/littledb.ts` builds its handle *only* when `LITTLEDB_URL` is
    set, and both consumers — `connectors/slack/connector.ts` at module scope, where
-   `reactions.sinks` comes from, and `load.ts` in the stream seam, where the event reporter
-   comes from — go through that one function. No config resolve, no reporter, no outcome sink,
-   no engine run. See `offline.mjs`; `offline.test.mjs` covers it.
+   `reactions.sinks` comes from, and `load.ts` in the stream seam, where the tracer comes
+   from — go through that one function. No resolve, no tracer, no score. See `offline.mjs`;
+   `offline.test.mjs` covers it.
 3. **The driver asserts it**, twice — after the scrub and again after the agent loads — and
    refuses to run unless `librarianLittleDb()` returns `undefined`.
-4. **The connector is built without `loadLibrarianConnector`**, which exists to wire littleDB
+4. **The connector is built without `loadLibrarianConnector`**, which exists to wire LittleDB
    overrides and an end-of-turn flush. `--gate` calls `loadChatSdkConnector` directly and
    injects the measured prompt through the same `streamHarness` seam.
 5. **The chat double has no `onReaction`.** `--traffic` uses a subclass that adds one; the

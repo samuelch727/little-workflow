@@ -3,6 +3,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  localWorld,
+  replayRun,
+} from "./index.js";
+import {
   ArtifactNotFoundError,
   ArtifactHashMismatchError,
   RunNotFoundError,
@@ -10,14 +14,12 @@ import {
   buildRunStateFromEvents,
   hydrateArtifactRefs,
   listEvents,
-  localWorld,
   materializeRunState,
   readArtifact,
-  replayRun,
   stepPathFor,
   visitIndexFor,
   writeArtifact,
-} from "./index.js";
+} from "./entries/internals.js";
 
 const tempDirs: string[] = [];
 

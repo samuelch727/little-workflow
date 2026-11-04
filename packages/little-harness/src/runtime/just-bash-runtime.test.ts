@@ -12,11 +12,11 @@ import { resolveTraceOptions } from "../trace/options.js";
 import {
   bashOptionsForRuntime,
   buildWorkspaceFs,
-  createJustBashRuntime,
+  justBashSandbox,
   defenseInDepthForAdapter,
 } from "./just-bash-runtime.js";
 
-describe("createJustBashRuntime", () => {
+describe("justBashSandbox()", () => {
   it("runs shell commands against /session and /artifacts", async () => {
     await withTempDir(async (dir) => {
       const session = await new LocalSessionStore(resolveLocalHostPaths({ dataDir: dir }, dir)).getOrCreate({
@@ -24,7 +24,7 @@ describe("createJustBashRuntime", () => {
       });
       await session.files.writeText("/session/input.txt", "hello");
 
-      const runtime = await createJustBashRuntime({ workspace: localSessionWorkspace(session), files: session.files });
+      const runtime = await justBashSandbox()({ workspace: localSessionWorkspace(session), files: session.files });
       const shell = runtime.shellTool();
       const result = await (shell as any).execute(
         { command: "cat /session/input.txt > /artifacts/out.txt" },
@@ -36,13 +36,30 @@ describe("createJustBashRuntime", () => {
     });
   });
 
+  it("reports itself as Tier 0 with the time its commands took", async () => {
+    await withTempDir(async (dir) => {
+      const session = await new LocalSessionStore(resolveLocalHostPaths({ dataDir: dir }, dir)).getOrCreate({
+        id: "chat",
+      });
+
+      const runtime = await justBashSandbox()({ workspace: localSessionWorkspace(session), files: session.files });
+      expect(runtime.usage?.()).toEqual({ provider: "just-bash", activeMs: 0 });
+      const shell = runtime.shellTool();
+      await (shell as any).execute({ command: "echo hi" }, {});
+      await (shell as any).execute({ command: "echo again" }, {});
+
+      expect(runtime.tiering?.()).toEqual({ tier: "tier-0", commands: { tier0: 2, nextTier: 0, denied: 0 }, escalations: 0 });
+      expect(runtime.usage?.()?.activeMs).toBeGreaterThanOrEqual(0);
+    });
+  });
+
   it("rejects shell writes outside managed harness roots", async () => {
     await withTempDir(async (dir) => {
       const session = await new LocalSessionStore(resolveLocalHostPaths({ dataDir: dir }, dir)).getOrCreate({
         id: "chat",
       });
 
-      const runtime = await createJustBashRuntime({ workspace: localSessionWorkspace(session), files: session.files });
+      const runtime = await justBashSandbox()({ workspace: localSessionWorkspace(session), files: session.files });
       const shell = runtime.shellTool();
       const result = await (shell as any).execute({ command: "echo nope > /tmp/out.txt" }, {});
 
@@ -60,7 +77,7 @@ describe("createJustBashRuntime", () => {
       await session.files.writeText("/persistent/work/.keep", "");
       session.setReadOnlyPersistentDirs(["/persistent/knowledge/"]);
 
-      const runtime = await createJustBashRuntime({ workspace: localSessionWorkspace(session), files: session.files });
+      const runtime = await justBashSandbox()({ workspace: localSessionWorkspace(session), files: session.files });
       const shell = runtime.shellTool();
       const read = await (shell as any).execute({ command: "cat /persistent/knowledge/source.txt" }, {});
       const write = await (shell as any).execute(
@@ -87,7 +104,7 @@ describe("createJustBashRuntime", () => {
       await session.files.writeText("/session/large-diff.md", "before\n");
       const events: any[] = [];
 
-      const runtime = await createJustBashRuntime({
+      const runtime = await justBashSandbox()({
         workspace: localSessionWorkspace(session),
         files: session.files,
         traceOptions: resolveTraceOptions(
@@ -122,7 +139,7 @@ describe("createJustBashRuntime", () => {
         id: "chat",
       });
 
-      const runtime = await createJustBashRuntime({ workspace: localSessionWorkspace(session), files: session.files });
+      const runtime = await justBashSandbox()({ workspace: localSessionWorkspace(session), files: session.files });
       const shell = runtime.shellTool();
       const result = await (shell as any).execute({ command: "cat /skills/new.txt" }, {});
 
@@ -139,7 +156,7 @@ describe("createJustBashRuntime", () => {
       await mkdir(skillDir, { recursive: true });
       await writeFile(path.join(skillDir, "SKILL.md"), "remote skill", "utf8");
 
-      const runtime = await createJustBashRuntime({ workspace: localSessionWorkspace(session), files: session.files });
+      const runtime = await justBashSandbox()({ workspace: localSessionWorkspace(session), files: session.files });
       const shell = runtime.shellTool();
       const read = await (shell as any).execute({ command: "cat /.agents/skills/remote/SKILL.md" }, {});
       const write = await (shell as any).execute(
@@ -161,7 +178,7 @@ describe("createJustBashRuntime", () => {
       await mkdir(skillDir, { recursive: true });
       await writeFile(path.join(skillDir, "SKILL.md"), "relative remote skill", "utf8");
 
-      const runtime = await createJustBashRuntime({ workspace: localSessionWorkspace(session), files: session.files });
+      const runtime = await justBashSandbox()({ workspace: localSessionWorkspace(session), files: session.files });
       const shell = runtime.shellTool();
       const read = await (shell as any).execute({
         command: "cat .agents/skills/remote/SKILL.md && echo working > note.txt",
@@ -203,7 +220,7 @@ describe("createJustBashRuntime", () => {
         turnId: "turn_1",
         persistentDirs: [],
       });
-      const runtime = await prepared.createRuntime({});
+      const runtime = await prepared.createSandbox({});
       const shell = runtime.shellTool() as any;
       const hook = createHook({
         init() {
@@ -232,7 +249,7 @@ describe("createJustBashRuntime", () => {
         persistentDirs: [],
       });
 
-      const runtime = await prepared.createRuntime({});
+      const runtime = await prepared.createSandbox({});
       const result = await (runtime.shellTool() as any).execute({ command: "cat /session/input.txt" }, {});
 
       expect(result).toMatchObject({ exitCode: 0, stdout: "ok" });
@@ -248,7 +265,7 @@ describe("createJustBashRuntime", () => {
         turnId: "turn_1",
         persistentDirs: [],
       });
-      const runtime = await prepared.createRuntime({});
+      const runtime = await prepared.createSandbox({});
       const shell = runtime.shellTool() as any;
 
       const setup = await shell.execute(
@@ -275,7 +292,7 @@ describe("createJustBashRuntime", () => {
         turnId: "turn_1",
         persistentDirs: [],
       });
-      const runtime = await prepared.createRuntime({
+      const runtime = await prepared.createSandbox({
         mounts: [{ mountPath: "/mnt/custom/", backingPath: external, mode: "ro" }],
       });
 
@@ -305,7 +322,7 @@ describe("createJustBashRuntime", () => {
         turnId: "turn_1",
         persistentDirs: [],
       });
-      const runtime = await prepared.createRuntime({
+      const runtime = await prepared.createSandbox({
         mounts: [{ mountPath: "/mnt/scratch/peer-steps/", backingPath: path.join(steps, "*", "scratch"), mode: "ro" }],
       });
       const shell = runtime.shellTool() as any;
@@ -340,7 +357,7 @@ describe("createJustBashRuntime", () => {
         turnId: "turn_1",
         persistentDirs: [],
       });
-      const runtime = await prepared.createRuntime({
+      const runtime = await prepared.createSandbox({
         mounts: [{ mountPath: "/mnt/skills/review/SKILL.md", backingPath: backingFile, mode: "ro" }],
       });
       const shell = runtime.shellTool() as any;
@@ -376,7 +393,7 @@ describe("createJustBashRuntime", () => {
         turnId: "turn_1",
         persistentDirs: [],
       });
-      const runtime = await prepared.createRuntime({
+      const runtime = await prepared.createSandbox({
         mounts: [{ mountPath: "/mnt/state.json", backingPath: backingFile, mode: "rw" }],
       });
       const shell = runtime.shellTool() as any;
@@ -404,7 +421,7 @@ describe("createJustBashRuntime", () => {
       });
       const events: any[] = [];
 
-      const runtime = await createJustBashRuntime({
+      const runtime = await justBashSandbox()({
         workspace: localSessionWorkspace(session),
         files: session.files,
         emit: async (event) => {
@@ -458,7 +475,7 @@ describe("createJustBashRuntime", () => {
         turnId: "turn_1",
         persistentDirs: [],
       });
-      const runtime = await prepared.createRuntime({
+      const runtime = await prepared.createSandbox({
         tools: {
           add: tool({
             description: "Add two numbers.",
@@ -531,7 +548,7 @@ describe("createJustBashRuntime", () => {
         turnId: "turn_1",
         persistentDirs: [],
       });
-      const runtime = await prepared.createRuntime({
+      const runtime = await prepared.createSandbox({
         tools: {
           add: tool({
             description: "Add two numbers.",
@@ -575,9 +592,9 @@ describe("createJustBashRuntime", () => {
         }),
       };
 
-      const enabled = await prepared.createRuntime({ tools });
-      const disabled = await prepared.createRuntime({ tools, runtime: { toolBridge: false } });
-      const bashDisabled = await prepared.createRuntime({ tools, runtime: { bash: false } });
+      const enabled = await prepared.createSandbox({ tools });
+      const disabled = await prepared.createSandbox({ tools, runtime: { toolBridge: false } });
+      const bashDisabled = await prepared.createSandbox({ tools, runtime: { bash: false } });
 
       expect(enabled.systemHints().join("\n")).toContain("tools.add");
       expect(enabled.systemHints().join("\n")).toContain("js-exec");

@@ -15,7 +15,7 @@ import {
   memory,
   skill,
   streamHarness,
-} from "little-harness";
+} from "@little-stack/harness";
 ```
 
 ## Core APIs
@@ -23,27 +23,31 @@ import {
 | API | Use it for |
 |---|---|
 | [`createHarness()`](/docs/v0.1.0-alpha/reference/create-harness) | Define the reusable runtime surface: model, system prompt, tools, MCP gateway tools, skills, input types, file staging, persistence, and runtime policy. |
-| [`memory(...)`](/docs/v0.1.0-alpha/build-agents/memory) | Add opt-in model-authored long-term memory backed by a Persistent Dir, bounded index, and optional `remember` tool. |
+| [`memory(...)`](/docs/v0.1.0-alpha/build-agents/memory) | Add opt-in long-term memory: a Persistent Dir of plain files, listed in every turn's prompt, with a built-in `memory` skill. |
 | [`localHost()`](/docs/v0.1.0-alpha/reference/local-host) | Configure the zero-service local development host, local sessions, local traces, and local Persistent Dir sources. |
+| [`virtualHost()`](/docs/v0.1.0-alpha/runtime/virtual-host) | Keep each session's workspace in a just-bash filesystem instead of on disk. `dataFs` selects the filesystem for `localDir()` and memory backing folders (default: the session's `fs`, under `/.little-harness/data/`); takes a filesystem or async `(sessionId) => fs`. Shared storage is not transactional across sessions. Agent-defined workflows still need `localHost()`. |
 | [`streamHarness()`](/docs/v0.1.0-alpha/reference/stream-harness) | Stream an interactive agent turn, usually from a chat route using raw AI SDK `UIMessage[]`. |
 | [`generateHarness()`](/docs/v0.1.0-alpha/reference/generate-harness) | Run the same harness to completion and return a final result, usually for workers, jobs, tests, or server actions. |
 | [`HarnessSession`](/docs/v0.1.0-alpha/reference/harness-session) | Continue a private workspace, inspect session status, and stage files outside a model turn. |
 | [`FileWriter`](/docs/v0.1.0-alpha/reference/file-writer) | Write files into `/session/`, `/artifacts/`, or Persistent Dir harness directories from message staging, host code, or tools. |
 | [`little-harness` CLI](/docs/v0.1.0-alpha/reference/cli) | Scaffold and test agent folders, and inspect Local Host sessions, traces, files, artifacts, diffs, debug summaries, and outcome rates. |
-| [`subprocessSandbox()` / `tieredExecutionEnvironment()`](/docs/v0.1.0-alpha/runtime/execution-environments) | Choose where the agent's `bash` tool runs (`localHost({ executionEnvironment })`, default `"auto"`) and escalate commands just-bash cannot run. Classification helpers: `classifyCommand`, `detectEmulationGap`, `tier0CapabilityMatrix`. |
+| [`subprocessSandbox()` / `tieredSandbox()`](/docs/v0.1.0-alpha/runtime/execution-environments) | Choose the sandbox the agent's `bash` tool runs in (`localHost({ sandbox })`, default `"auto"`) and escalate commands just-bash cannot run. To write your own sandbox, use [`@little-stack/harness/sandbox`](#other-subpaths). |
 | [`reportHarnessOutcome()` / `createHarnessOutcomeReporter()`](/docs/v0.1.0-alpha/build-agents/outcomes) | Record a run's outcome as an `outcome.reported` trace event; read rates with `aggregateLocalOutcomes`. |
-| [`workflows` + `asHarnessWorkflow`](/docs/v0.1.0-alpha/build-agents/workflows) | Expose Little Workflow workflows as typed tools (`asHarnessWorkflow` comes from `little-workflow`). |
+| [`workflows` + `asHarnessWorkflow`](/docs/v0.1.0-alpha/build-agents/workflows) | Expose Little Workflow workflows as typed tools (`asHarnessWorkflow` comes from `@little-stack/workflow`). |
+| [`loadHarness()` / `loadWorkspace()`](/docs/v0.1.0-alpha/build-agents/agent-folders#loading-from-code) | Load an agent folder into a runnable harness (`loadHarness(dir, { host })` runs it on another host) and enumerate a workspace's agents. |
+| [`harnessToolContext()`](#tool-context-helpers) | Read the Little Harness context (`files`, `artifacts`, `session`, `extraBody`, …) from a tool's `execute(input, options)`, typed and without a cast. |
 
-The root entry also re-exports the AI SDK `LanguageModel`, `ModelMessage`, and `UIMessage` types. `ai`
-is a peer dependency (`^7.0.0`); install with `pnpm add little-harness@alpha ai@^7 zod @ai-sdk/<provider>`
+The root entry exports only what an app needs to build and run an agent. Everything else has its own
+subpath, listed under [Other subpaths](#other-subpaths). The root also re-exports the AI SDK `LanguageModel`, `ModelMessage`, and `UIMessage` types. `ai`
+is a peer dependency (`^7.0.0`); install with `pnpm add @little-stack/harness@alpha ai@^7 zod @ai-sdk/<provider>`
 on Node.js 22+.
 
-### `little-harness/connectors`
+### `@little-stack/harness/connectors`
 
-The connector subpath is optional. It exports `chatSdkConnector`, `loadChatSdkConnector`,
+The connector subpath is optional. It exports `chatSdkConnector`, `emailConnector`, `loadChatSdkConnector`,
 `webRichConnector`, `loadWebRichConnector`, `discoverConnectors`, portable session helpers such as
-`attachSessionConnector`, connector tool helpers such as `extendTool` and `harnessToolContext`, and
-type helpers for tool UI parts. It does not make Chat SDK a required dependency for `createHarness`,
+`attachSessionConnector`, connector tool helpers such as `extendTool` and `harnessToolContext` (also on
+the root entry), and type helpers for tool UI parts. It does not make Chat SDK a required dependency for `createHarness`,
 `streamHarness`, or `loadHarness`.
 
 Both `/connectors` and `/connectors/runtime` statically reach `node:fs/promises` (through the shared
@@ -51,29 +55,56 @@ Both `/connectors` and `/connectors/runtime` statically reach `node:fs/promises`
 browser-safe. A **types-only** import (`import type`) from any subpath is always safe. Pick the subpath
 by which helpers you need:
 
-- `little-harness/connectors/runtime` — descriptors, loaders, session registry, tool-context helpers,
+- `@little-stack/harness/connectors/runtime` — descriptors, loaders, session registry, tool-context helpers,
   and tool-UI types. It omits the filesystem **discovery** helpers, so a bundler never statically links
   the connector-module dynamic-import machinery through this subpath — the reason it is the right
   surface for server route bundles. String connector ids still work here because the loaders import
   discovery dynamically at call time.
-- `little-harness/connectors` — everything above **plus** the discovery helpers
+- `@little-stack/harness/connectors` — everything above **plus** the discovery helpers
   (`discoverConnectors`, `loadConnectorDescriptor`, `loadConnectorToolExtensions`,
   `loadConnectorToolExtensionsFromDir`) and the attachment and reaction helpers listed under
   [Attachment and reaction helpers](#attachment-and-reaction-helpers). A value import statically links
   the discovery module (and its connector-module traversal) into the graph.
-- `little-harness/connectors/discovery` — just the discovery helpers.
-- `little-harness/execution` — streaming helpers such as `streamHarness` when a route needs no
-  connector code.
+- `@little-stack/harness/connectors/discovery` — just the discovery helpers.
 
-Other subpaths:
+A route that needs no connector code imports `streamHarness` from the root entry.
 
-- `little-harness/workspace` — the agent-folder loader (`loadHarness`, `loadWorkspace`) and
-  `discoverTools`, `discoverSkills`, `discoverWorkflows`.
-- `little-harness/scaffold` — what `little-harness init`/`new` use: `initWorkspace`, `scaffoldAgent`,
+### Other subpaths
+
+- `@little-stack/harness/sandbox` — for writing your own sandbox: `createShellRuntime`,
+  `createEnvironmentToolBridge`, `createRuntimeToolBridge`, `localSessionWorkspace`,
+  `resolveSandbox`, the just-bash building blocks, tracked-mount helpers
+  (`snapshotTrackedMounts`, `emitTrackedMountFileChanges`) and tier-0 command classification
+  (`classifyCommand`, `detectEmulationGap`, `tier0CapabilityMatrix`). See
+  [Sandboxes](/docs/v0.1.0-alpha/runtime/execution-environments).
+- `@little-stack/harness/host` — for writing or tuning a host: `createInMemoryOrchestrationServices`,
+  `createDurableOrchestrationServices`, the durable stores, `resolveLocalHostPaths`,
+  `LocalSessionStore` and `LocalSessionQueue`, `LocalHarnessSession`, `sessionKeyToPathKey`, the
+  session file writers (`createLocalFileWriter` for folders on disk, `createFsFileWriter` for a
+  just-bash filesystem), and the local trace readers (`readLocalTrace`, `listLocalSessions`,
+  `doctorSession`, …). See [Local Host](/docs/v0.1.0-alpha/reference/local-host).
+- `@little-stack/harness/events` — the durable event contract for a custom session log:
+  `HarnessSessionLog`, `DurableHarnessEventInput`, `PersistedDurableHarnessEvent`,
+  `createHarnessAppendIdempotencyKey`, `canonicalHarnessEventRequestDigest`,
+  `normalizePersistedDurableHarnessEvent`, `emitHarnessOccurrence`, the event names
+  (`HARNESS_EVENT_TYPES`, `isHarnessEventType`, and the side-channel equivalents), the
+  `HARNESS_SESSION_EVENT_*` schema versions, and their errors. See [Events](/docs/v0.1.0-alpha/reference/events).
+- `@little-stack/harness/remote-session` — ready-made session logs and the remote session-log service:
+  `fileSessionLog`, `inMemorySessionLog`, `remoteSessionLog`, `startSessionLogServer`,
+  `createHarnessFileMutationEvents`, and the `lh.remote-session.v1` protocol helpers
+  (`REMOTE_SESSION_LOG_PROTOCOL_VERSION`, `RemoteSessionProtocolError`).
+- `@little-stack/harness/agents` — **experimental**: the Agent Group launcher port
+  (`HarnessAgentGroupLauncher`), its request/result types, the `HarnessAgentGroup*Error` classes, the
+  `HARNESS_AGENT_GROUPS_PROTOCOL_VERSION` / `HARNESS_AGENT_GROUP_PAGES_PROTOCOL_VERSION` constants, and
+  the task-ledger projection types. See [Agent Groups](/docs/v0.1.0-alpha/build-agents/agent-groups).
+- `@little-stack/harness/scaffold` — what `little-harness init`/`new` use: `initWorkspace`, `scaffoldAgent`,
   `scaffoldProject`, `renderAgentSource`, `resolveProvider`, `resolveModelChoice`, and the pinned
   dependency table `scaffoldDependencyVersions()` / `providerDependency()`.
-- `little-harness/workflow-harness` — the Little Workflow harness adapter.
-- `little-harness/package.json` — exported for tooling. Every entry uses the `default` export
+- `@little-stack/harness/workflow-harness` — the Little Workflow harness adapter.
+- `@little-stack/harness/internals` — what Little Workflow and Little Compute build on (hashing and
+  id helpers, skill and MCP resolution, workflow-tool plumbing, folder discovery). It has **no
+  stability promise**: names can change in any release. Apps should not import from it.
+- `@little-stack/harness/package.json` — exported for tooling. Every entry uses the `default` export
   condition, so `require()` works through Node's `require(esm)`.
 
 A string connector reference is the shortest way for a route to opt into connector folder discovery:
@@ -102,7 +133,7 @@ before treating connector attachment as globally atomic.
 ```ts
 import { openai } from "@ai-sdk/openai";
 import type { UIMessage } from "ai";
-import { createHarness, localHost, skill, streamHarness } from "little-harness";
+import { createHarness, localHost, skill, streamHarness } from "@little-stack/harness";
 
 const harness = createHarness({
   host: localHost({ dataDir: ".little-harness" }),
@@ -139,7 +170,7 @@ For a final-result caller, use the same harness with `generateHarness()`.
 
 ```ts
 import { Output } from "ai";
-import { generateHarness } from "little-harness";
+import { generateHarness } from "@little-stack/harness";
 
 const result = await generateHarness({
   harness,
@@ -149,7 +180,9 @@ const result = await generateHarness({
   session: "acct_123-renewal",
 });
 
-console.log(result.output.risks);
+if (result.status === "completed") {
+  console.log(result.output.risks);
+}
 console.log(result.trace.id);
 console.log(result.trace.path);
 ```
@@ -223,7 +256,7 @@ Field-by-field reference for the connector descriptor and loader option surface.
 
 Exactly **two** connector kinds exist today — `"chat-sdk"` and `"web-rich"` — and the `ConnectorKind`
 union is closed in this alpha. `chatSdkConnector(...)` produces the first; `webRichConnector(...)`
-produces the second.
+produces the second. `emailConnector(...)` is a `"chat-sdk"` descriptor with email defaults.
 
 ### `ChatSdkConnectorOptions`
 
@@ -249,6 +282,29 @@ Passed to `chatSdkConnector(options)`.
 | `toolPolicy` | `{ allow?; deny? }` | Narrows the structure-derived toolset. `deny` wins over `allow`; unknown names ignored. |
 
 Chat-sdk has no `afterRun` and no `transport` option (the `transport` field was removed).
+
+### `EmailConnectorOptions`
+
+Passed to `emailConnector(options)`. Every `ChatSdkConnectorOptions` field except `triggers` and
+`reactions` (set for email), plus the fields below. `userName` becomes optional. See
+[Email Connector](/docs/v0.1.0-alpha/build-agents/email-connector) for the guided walkthrough.
+
+| Field | Type | Notes |
+|---|---|---|
+| `address` | `string` | The address the agent owns; replies are sent from it. Required. |
+| `senders` | `{ allow: string[] \| "anyone"; requireDmarc?; authServId? }` | Who may trigger the agent. Entries are addresses or `@domain` (exact domain). `requireDmarc` defaults to `true`, and then `authServId` (the receiving server's `Authentication-Results` id) is required: only its verdicts count. Required. |
+| `accept` | `(email: InboundEmail) => boolean \| { skip } \| Promise<…>` | A last check of your own after the built-in ones. |
+| `transform` | `(email: InboundEmail) => string \| Promise<string>` | The text the agent reads. Default removes quoted replies and the signature (`stripQuotedReply`). |
+| `maxRepliesPerThread` | `number` | Default 20. Further mail in the thread is refused with `"reply-limit"`. |
+| `requireAddressedTo` | `boolean` | Default `true`: `address` must be in `To` or `Cc`. |
+| `readEmail` | `(message) => InboundEmail` | Default `readInboundEmail`, which reads Resend's message shape. |
+| `onSkip` | `(skip: EmailSkip) => void` | Observes refused email: `{ reason, detail, email, threadId }`. Default logs one `console.info` line. |
+
+`EmailSkipReason` is `"automated" | "not-addressed" | "sender-not-allowed" | "dmarc-not-passed" |
+"other-sender" | "reply-limit" | "duplicate" | "rejected"`. The email helpers `readInboundEmail`, `parseEmailAddress`,
+`automatedEmailReason`, `senderAllowed`, `dmarcResult`, `authenticationResults`, and `stripQuotedReply` are exported alongside.
+Unverified in this alpha: no real email has been received through Resend Inbound yet, and whether Resend adds
+`Authentication-Results` (and its authserv-id) is unconfirmed.
 
 ### `WebRichConnectorOptions`
 
@@ -358,7 +414,7 @@ option — passable on `loadWebRichConnector` (forwarded to `streamHarness`) as 
 ### Session registry
 
 Endpoints are recorded in `/session/.harness/connectors.json`. Exported from
-`little-harness/connectors` and `.../runtime`:
+`@little-stack/harness/connectors` and `.../runtime`:
 
 | Function | Signature | Notes |
 |---|---|---|
@@ -376,7 +432,7 @@ Endpoints are recorded in `/session/.harness/connectors.json`. Exported from
 
 ### Attachment and reaction helpers
 
-Exported from `little-harness/connectors` (not `/runtime`); the Chat SDK loader already uses them, so
+Exported from `@little-stack/harness/connectors` (not `/runtime`); the Chat SDK loader already uses them, so
 call them directly only when building a custom chat pipeline.
 
 | Export | Notes |
@@ -389,6 +445,26 @@ call them directly only when building a custom chat pipeline.
 | `DEFAULT_POSITIVE_REACTIONS` / `DEFAULT_NEGATIVE_REACTIONS` | The default verdict emoji spellings. |
 
 ### Tool-context helpers
+
+These are exported from the root `@little-stack/harness` entry and from both connector subpaths.
+(**UNRELEASED:** the root export is in the current source only; published `0.2.0-alpha.0` exports
+them from the connector subpaths.)
+
+```ts
+import { tool } from "ai";
+import { z } from "zod";
+import { harnessToolContext } from "@little-stack/harness";
+
+const saveNote = tool({
+  description: "Save a note to the session workspace.",
+  inputSchema: z.object({ text: z.string() }),
+  execute: async ({ text }, options) => {
+    const { files } = harnessToolContext(options);
+    await files.writeText("/session/note.txt", text);
+    return { saved: true };
+  },
+});
+```
 
 - `harnessToolContext<TExtraBody>(options)` — reads the harness execution context out of a tool's
   `execute(input, options)` second argument. Throws outside a harness run.
@@ -406,7 +482,8 @@ call them directly only when building a custom chat pipeline.
 
 - [Generating And Streaming](/docs/v0.1.0-alpha/build-agents/generating-and-streaming) shows complete route, worker, and callback examples.
 - [Chat Connectors](/docs/v0.1.0-alpha/build-agents/chat-connectors) explains Chat SDK platform connectors, web text mode, web-rich mode, and typed tool UI helpers.
-- [Memory](/docs/v0.1.0-alpha/build-agents/memory) shows opt-in model-authored memory for durable lessons discovered during a turn.
+- [Email Connector](/docs/v0.1.0-alpha/build-agents/email-connector) gives an agent its own email address.
+- [Memory](/docs/v0.1.0-alpha/build-agents/memory) shows opt-in long-term memory the agent keeps as plain files, in one folder or in layers.
 - [Message Files](/docs/v0.1.0-alpha/build-agents/message-files) explains uploaded chat files.
 - [Input Types](/docs/v0.1.0-alpha/build-agents/input-types) explains non-chat `type + input` calls.
 - [Local Host](/docs/v0.1.0-alpha/reference/local-host) documents local sessions, local storage, `localDir()`, and `projectDir()`.

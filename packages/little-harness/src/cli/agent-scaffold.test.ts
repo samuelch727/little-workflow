@@ -39,7 +39,7 @@ it("scaffolded agent.ts default-exports createHarness and echo.ts is an AI SDK t
   const agentTs = await readFile(join(root, "agents", "billing", "agent.ts"), "utf8");
   const echoTs = await readFile(join(root, "agents", "billing", "tools", "echo.ts"), "utf8");
   expect(agentTs).toMatch(/export default createHarness\(/);
-  expect(agentTs).toContain('from "little-harness"');
+  expect(agentTs).toContain('from "@little-stack/harness"');
   expect(echoTs).toMatch(/export default tool\(/);
 });
 
@@ -74,7 +74,7 @@ it("scaffoldProject creates a runnable gateway project without a gateway package
   // Pinned, never `latest`: npm's latest `ai` is a major this package may not run.
   const versions = scaffoldDependencyVersions();
   expect(packageJson.dependencies).toEqual({
-    "little-harness": versions.littleHarness,
+    "@little-stack/harness": versions.littleHarness,
     ai: versions.ai,
     zod: versions.zod,
   });
@@ -101,7 +101,7 @@ it("scaffoldProject creates an OpenAI-compatible project with its provider depen
   const packageJson = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
   expect(packageJson.dependencies).toMatchObject({
     "@ai-sdk/openai-compatible": resolveProvider("openai-compatible").packageVersion,
-    "little-harness": scaffoldDependencyVersions().littleHarness,
+    "@little-stack/harness": scaffoldDependencyVersions().littleHarness,
     ai: scaffoldDependencyVersions().ai,
   });
 

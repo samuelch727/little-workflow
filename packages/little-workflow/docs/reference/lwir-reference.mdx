@@ -91,6 +91,40 @@ Alpha modes are:
 
 `ai.generate` supports all alpha output modes (`text`, `object`, `array`, `choice`, `json`).
 
+## `ai.generate` Step
+
+An `ai.generate` step makes one model call on a model slot and validates the reply against the step's `output` contract.
+
+```jsonc
+{
+  "id": "summarize",
+  "uses": "ai.generate",
+  "needs": ["credit"],
+  "with": {
+    "model": "gpt-4o-mini",
+    "system": "You are a loan analyst. Answer in two sentences.",
+    "prompt": "Summarize the application. Credit score: {{ steps.credit.output.score }}"
+  },
+  "input": { "applicant": "{{ input.applicant }}" },
+  "output": { "mode": "text" }
+}
+```
+
+| `with` field | Rule |
+| --- | --- |
+| `model` | Required. A model slot in the workflow's allowlist (`model.missing`, `model.disallowed`). |
+| `prompt` | Optional string. The step's instruction. `{{ ... }}` expressions are resolved at run time. |
+| `system` | Optional string. Appended to the worker's system prompt. `{{ ... }}` expressions are resolved at run time. |
+
+`with.prompt` and `with.system` use the same expression roots as `input` (`input`, `steps.<id>.output`, `item`, `workflow`, `step`). They always resolve to text: an embedded expression gives a string, and a template-only value that resolves to an object or array is JSON-stringified. See [Expressions](/docs/v0.1.0-alpha/internals/expressions).
+
+The model sees the step as:
+
+- **System prompt:** the worker's system prompt and skill list, then `with.system` after a blank line. The default runtime gives the worker no system prompt of its own, so without skills the system prompt is `with.system` alone.
+- **One user message:** `with.prompt`, a blank line, `Input:`, and the resolved step input. The step input is `input`, else `with.args`, else the workflow input (or the current item inside a `parallel` body); a non-string value is sent as JSON. Without `with.prompt`, the message is the input alone.
+
+An `ai.generate` step gets no tools. The default worker harness does not offer it the workflow's tools or `bash`, whatever its output mode: it makes a single model call and never executes a tool the model asks for. To call a tool, add a `tool.call` step and read its result with `{{ steps.<id>.output }}`. A custom `worker.harness` receives the tools in its context and decides what to do with them.
+
 ## Decision Step
 
 A `decision` step evaluates an ordered list of expressions and routes execution to the first matching target, or to the `default` target if none match.
@@ -120,7 +154,7 @@ Shape rules:
 
 ## `code.run` Step
 
-`code.run` executes a JavaScript source body. The runtime injects `{input, tools}` — where `tools` is a proxy giving direct access to all globally-registered tools without routing through the model.
+`code.run` declares pinned TypeScript source files and an entrypoint. A worker harness that executes it passes `{input, tools}`, where `tools` is a proxy giving direct access to all globally-registered tools without routing through the model.
 
 > **Not executed by the default worker harness.** A `code.run` step validates and compiles, but the default `workflowHarness` checks the step's sandbox policy and then throws (`cannot safely execute code.run in the default workflow harness`). To run one, supply a `worker.harness` that implements `execute_step`. Execution and isolation are then your responsibility. See [Security Model](/docs/v0.1.0-alpha/internals/security-model).
 
@@ -130,7 +164,14 @@ Shape rules:
   "uses": "code.run",
   "needs": ["fetch"],
   "with": {
-    "source": "async ({ input, tools }) => {\n  const candidates = await tools.fetchCandidates({ jobId: input.jobId });\n  return candidates.filter(c => c.score > 0.8);\n}"
+    "entrypoint": "filter.ts",
+    "files": {
+      "filter.ts": {
+        "content": "export async function run({ input, tools }) {\n  const candidates = await tools.fetchCandidates({ jobId: input.jobId });\n  return candidates.filter((c) => c.score > 0.8);\n}",
+        "sha256": "sha256:d1b406298a017e69f3a7cee8b94f6c37b7fee907fcc07772a59065ebf615e35d"
+      }
+    },
+    "sandbox": { "network": "deny", "env": "deny", "fs": "deny" }
   },
   "input": { "jobId": "{{ input.jobId }}" },
   "output": {
@@ -140,7 +181,13 @@ Shape rules:
 }
 ```
 
-The code body signature is `async ({ input, tools }) => output`. Tool calls from code are event-logged with `caller: "code"` (distinguishable from model-driven tool calls). The model never sees the raw tool results.
+| `with` field | Rule |
+| --- | --- |
+| `entrypoint` | A safe relative path ending in `.ts` that is a key of `files`. |
+| `files` | At least one entry. Each key is a safe relative path; each value is `{ content, sha256 }`, where `sha256` is `sha256:` plus the lowercase hex SHA-256 of `content` encoded as UTF-8. |
+| `sandbox` | Required. `network` must be `"deny"` (or `false`); `env` and `fs`, when present, must be `"deny"` (or `false`). |
+
+By convention the entrypoint exports `async function run({ input, tools })` and returns the step output; the worker harness that executes `code.run` decides how to load and call it. Tool calls from code are event-logged with `caller: "code"` (distinguishable from model-driven tool calls). The model never sees the raw tool results.
 
 ### `onFailure.fixer`
 
@@ -151,7 +198,14 @@ A `code.run` step may declare a fixer for self-recovery. When the step's source 
   "id": "compute-score",
   "uses": "code.run",
   "with": {
-    "source": "async ({ input, tools }) => { /* ... */ }"
+    "entrypoint": "score.ts",
+    "files": {
+      "score.ts": {
+        "content": "export async function run({ input }) {\n  return { score: input.signals.length / 10 };\n}",
+        "sha256": "sha256:1ed396c7cbeba5c323250026707a76c1e1ad3f62572334094e5167c357c6de7c"
+      }
+    },
+    "sandbox": { "network": "deny", "env": "deny", "fs": "deny" }
   },
   "output": {
     "mode": "object",
@@ -169,9 +223,9 @@ A `code.run` step may declare a fixer for self-recovery. When the step's source 
 
 | Field | Type | Notes |
 | --- | --- | --- |
-| `fixer.model` | `string` | Slot id from the workflow's `models` list |
-| `fixer.maxAttempts` | `number` | Max fix iterations before escalating |
-| `fixer.system` | `string` | System prompt for the fixer harness session |
+| `fixer.model` | `string` | Required. A model slot in the workflow's allowlist (`fixer.model.missing`, `fixer.model.disallowed`) |
+| `fixer.maxAttempts` | `number` | Required positive integer, with no upper cap; max fix iterations before escalating (`fixer.max_attempts_invalid`) |
+| `fixer.system` | `string` | Required non-empty system prompt for the fixer harness session (`fixer.system_missing`) |
 
 The fixer's fix applies to the current run only (LWIR is immutable). Persistent fixes should be written by the fixer to `/mnt/memory/workflow/` for future planners to incorporate.
 
@@ -223,7 +277,7 @@ Every step accepts an optional `maxVisits` integer. Default is `1` (DAG behavior
 }
 ```
 
-- `maxVisits` must be an integer in `[1, 100]`. Values outside this range are rejected at validation time (`lwir.invalid_max_visits`).
+- `maxVisits` must be an integer in `[1, 100]`. Values outside this range are rejected at validation time (`step.max_visits_out_of_range`).
 - Default `1` preserves existing DAG semantics. Step paths are unchanged when `maxVisits === 1`.
 - When `maxVisits > 1`, step paths gain a `.visit[N]` suffix (0-indexed): `review-cands[cand_123].worker.visit[0]`, `…visit[1]`, etc. Pure DAG steps are unaffected.
 - If a step is about to start its `maxVisits + 1`-th execution, the run fails with `RunFailedError { causeCode: "max_visits_exceeded", failedStepPath }`. The failed run is preserved in Local World for inspection.
@@ -262,6 +316,18 @@ When a step has `maxVisits > 1`, two additional accessors are available:
 `{{ steps.X.output }}` retains its existing meaning for single-visit steps. Referencing `{{ steps.X.output }}` on a step with `maxVisits > 1` is a validation error (`lwir.output_ambiguous_for_multi_visit`). The planner must use `lastOutput` or `allVisits` explicitly for multi-visit steps.
 
 References via `lastOutput` or `allVisits` are exempt from the `needs`-declaration requirement when the referenced step can reach the referencing step through the execution-flow graph (needs-edges plus decision-transition-edges). This covers the back-edge-in-a-cycle pattern, where an earlier step in a loop reads the output of a later step without declaring a `needs` entry for it.
+
+## Needs A Planner Left Out
+
+A step that reads `{{ steps.X.output }}` must list X in `needs`. Planners often write the reference and forget the `needs` entry. Before the compiler validates a planner's draft, it adds the entry for every step the draft reads from the same step list, including steps inside a `parallel` body that read each other. The plan then validates on the first try instead of costing a repair call, and the stored WorkflowVersion carries the added entries. A draft that already validates is unchanged.
+
+These are not inferred, so they stay validation errors that go back to the planner:
+
+- a reference to a step that does not exist (`step.missing_dependency`);
+- a reference from a `parallel` body to a step outside it;
+- a reference whose `needs` entry would close a cycle.
+
+A fixed plan (`defineWorkflow({ plan })`) runs as written, so it must list its own `needs`.
 
 ## Bounded Parallel Nodes — Updates
 
@@ -448,14 +514,15 @@ LWIR also rejects fields that are declared but not implemented, rather than acce
 
 ## Validators
 
-The LWIR validator enforces the following error codes (additions from prior milestones preserved):
+These are the validator finding codes for the rules on this page. Other findings (for example `schema.*`, `step.*`, `parallel.*` and `output.*`) cover the rest of the format.
 
 | Code | Description |
 | --- | --- |
-| `lwir.invalid_max_visits` | `maxVisits` outside `[1, 100]` |
-| `lwir.invalid_cycle` | Cycle with no `decision` step, or cycle step missing `maxVisits ≥ 2` |
+| `step.max_visits_out_of_range` | `maxVisits` is not an integer in `[1, 100]` |
+| `lwir.invalid_cycle` | Cycle with no `decision` step, or a cycle step without `maxVisits ≥ 2` |
 | `lwir.output_ambiguous_for_multi_visit` | `{{ steps.X.output }}` used on a step with `maxVisits > 1` |
-| `lwir.unknown_tool` | `step.with.tools` references a tool not in `globalTools` |
-| `lwir.unknown_model` | `step.with.model` references a slot id not in `permissions.models` |
-| `lwir.invalid_decision_target` | `to` references a step outside the current scope |
-| `lwir.invalid_code_run_source` | `code.run` source is not a valid async function expression |
+| `tool.missing`, `tool.disallowed` | A `tool.call` step has no `with.tool`, or names a tool outside the workflow allowlist |
+| `model.missing`, `model.disallowed` | An `ai.generate` step has no `with.model`, or names a slot outside the workflow allowlist |
+| `decision.target_not_in_scope` | A decision `to` target is outside the decision step's scope |
+| `code.missing_entrypoint`, `code.invalid_entrypoint`, `code.missing_files`, `code.invalid_file_path`, `code.invalid_file`, `code.invalid_file_hash`, `code.missing_sandbox`, `code.invalid_sandbox` | A `code.run` step's `with` breaks the rules in the `code.run` section |
+| `fixer.model.missing`, `fixer.model.disallowed`, `fixer.max_attempts_invalid`, `fixer.system_missing` | An `onFailure.fixer` breaks the rules in its table |

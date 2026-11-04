@@ -16,22 +16,25 @@ to a replayed run.
 Grade a run you just finished with `reportHarnessOutcome`:
 
 ```ts
-import { generateHarness, reportHarnessOutcome } from "little-harness";
+import { generateHarness, reportHarnessOutcome } from "@little-stack/harness";
 
 const result = await generateHarness({ harness, messages, session: "ticket:TCK-1" });
 
-const accepted = await reviewDraft(result.text);
-await reportHarnessOutcome({
-  session: result.session,
-  status: accepted ? "success" : "failure",
-});
+// A parked turn has not finished yet; grade it when it completes.
+if (result.status === "completed") {
+  const accepted = await reviewDraft(result.text);
+  await reportHarnessOutcome({
+    session: result.session,
+    status: accepted ? "success" : "failure",
+  });
+}
 ```
 
 Or bind a reporter to a harness once and report by session id later — from a webhook, a review queue,
 or a feedback button:
 
 ```ts
-import { createHarnessOutcomeReporter } from "little-harness";
+import { createHarnessOutcomeReporter } from "@little-stack/harness";
 
 const outcomes = createHarnessOutcomeReporter({ harness, source: "review-queue" });
 
@@ -55,6 +58,9 @@ await outcomes.report({ sessionId: "ticket:TCK-1", status: "partial", score: 0.5
 Both functions resolve to `{ recorded, event?, delivered, failed, errors }` instead of throwing: a missing
 session, an unwritable trace, or a failing sink is reported in `errors` and counted, and your code can
 ignore the result entirely.
+
+To send outcomes to LittleDB as user feedback, where reviews, trials and rollback weigh them, pass
+LittleDB's `db.outcomeSink()` as a sink. See [User Feedback](/docs/v0.1.0-alpha/build-agents/user-feedback).
 
 ## Chat Reactions
 
@@ -84,7 +90,8 @@ export default chatSdkConnector({
 
 `reactions` also accepts `session(event, { adapterName })` (map a reaction to a harness session; the
 default is `<adapter>:<threadId>`, matching the connector's own session ids), `reporterId(event, ctx)`,
-and `onOutcome(result, event)` to observe what was recorded.
+and `onOutcome(result, event)` to observe what was recorded. `reactions: { sinks: [db.outcomeSink()] }`
+sends each reaction to LittleDB as a thumbs up or down ([User Feedback](/docs/v0.1.0-alpha/build-agents/user-feedback)).
 
 ## Read The Rates
 
@@ -98,7 +105,7 @@ little-harness outcomes ticket:TCK-1 --data-dir .little-harness
 From code, `aggregateLocalOutcomes` returns the same report:
 
 ```ts
-import { aggregateLocalOutcomes } from "little-harness";
+import { aggregateLocalOutcomes } from "@little-stack/harness";
 
 const report = await aggregateLocalOutcomes({ dataDir: ".little-harness" });
 
@@ -117,3 +124,4 @@ trace lines that failed validation. For events you already hold, `aggregateOutco
 - [Events](/docs/v0.1.0-alpha/reference/events#outcome-events) — the `outcome.reported` event.
 - [CLI](/docs/v0.1.0-alpha/reference/cli#outcomes-session-id) — the `outcomes` command.
 - [Chat Connectors](/docs/v0.1.0-alpha/build-agents/chat-connectors#reactions) — reactions on the descriptor.
+- [User Feedback](/docs/v0.1.0-alpha/build-agents/user-feedback) — send outcomes, reactions and your own feedback UI to LittleDB.

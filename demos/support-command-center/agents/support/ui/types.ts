@@ -1,5 +1,5 @@
 import type { UIMessage } from "ai";
-import type { ToolOutputPart, ToolUI } from "little-harness/connectors";
+import type { ToolOutputPart, ToolUI } from "@little-stack/harness/connectors";
 
 export type LookupCustomerTool = typeof import("../tools/lookup-customer").default;
 export type LookupOrdersTool = typeof import("../tools/lookup-orders").default;

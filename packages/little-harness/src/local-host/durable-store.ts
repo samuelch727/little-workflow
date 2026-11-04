@@ -7,6 +7,8 @@ export type DurableJsonStore = {
   readJson<T>(path: string): Promise<T | undefined>;
   /** Serialize and persist a JSON document; the value must survive a JSON round-trip. */
   writeJson(path: string, value: unknown): Promise<void>;
+  /** Optional stronger acknowledgement for logical-turn model budgets. File adapters fsync before resolving. */
+  writeJsonDurable?(path: string, value: unknown): Promise<void>;
   /** Delete a document; removing a missing path is a no-op. */
   remove(path: string): Promise<void>;
   /** List the direct child names under a directory-like prefix; a missing dir lists as empty. */
@@ -31,6 +33,10 @@ export function createInMemoryDurableStore(): DurableJsonStore {
       return serialized === undefined ? undefined : JSON.parse(serialized) as T;
     },
     async writeJson(path, value) {
+      documents.set(path, JSON.stringify(value));
+    },
+    async writeJsonDurable(path, value) {
+      // Instance-only persistence: a fresh Map cannot restore a previous logical turn.
       documents.set(path, JSON.stringify(value));
     },
     async remove(path) {

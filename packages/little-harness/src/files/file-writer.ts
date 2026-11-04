@@ -15,7 +15,7 @@ import type {
   WriteFileOptions,
 } from "../types.js";
 import { fileSize } from "./diff.js";
-import { resolveHarnessPath, toHarnessPath, type ManagedRoot } from "./path-policy.js";
+import { resolveHarnessPath, toHarnessPath, type ManagedRoot, type ResolvedHarnessPath } from "./path-policy.js";
 
 export type LocalFileWriterOptions = {
   getReadOnlyPersistentDirs?: () => readonly string[];
@@ -58,6 +58,15 @@ async function writeFileAt(
   await mkdir(path.dirname(resolved.realPath), { recursive: true });
   await writeFile(resolved.realPath, bytes);
 
+  return writtenFileRef(resolved, bytes, options);
+}
+
+/** The FileRef a FileWriter returns for `bytes` written at `resolved`. */
+export function writtenFileRef(
+  resolved: ResolvedHarnessPath,
+  bytes: Uint8Array,
+  options: WriteFileOptions,
+): FileRef {
   const sha256 = sha256Hex(bytes);
   const ref: FileRef = {
     path: resolved.harnessPath,
@@ -162,7 +171,7 @@ async function collect(
   }
 }
 
-async function toUint8Array(content: FileContent): Promise<Uint8Array> {
+export async function toUint8Array(content: FileContent): Promise<Uint8Array> {
   if (typeof content === "string") {
     return new TextEncoder().encode(content);
   }

@@ -1,15 +1,17 @@
 # little-workflow
 
-For a guided Next.js or standalone setup, including additive existing Next.js integration, use `npx little-workflow@alpha setup`. See [unified setup](docs/setup.md).
+For a guided Next.js or standalone setup, including additive existing Next.js integration, use `npx @little-stack/workflow@alpha setup`. See [unified setup](docs/setup.md).
 
 Local-first TypeScript workflows that an AI planner designs for itself. You describe the goal, schemas, a model, and tools. The planner compiles a bounded workflow graph (LWIR), and Little Workflow validates it, runs it durably in a local event store, and lets you replay and inspect every step.
 
 > **Alpha.** Breaking changes to the LWIR wire format, public APIs, and persistence formats are expected between alpha releases.
 
+In the Little stack, Workflow and Harness are the SDK and LittleDB is the product. A workflow's planner, worker and fixer roles run in a harness, so a run lives in the same workspace as the agent that started it (managed by LittleDB's hosted service, private for now, or self-hosted with Little Compute (not included in this public source snapshot)), and LittleDB (private for now; client in [`packages/littledb-client`](../littledb-client)) records each run as a trace and improves the workflow's step prompts and models the same way it improves an agent. Workflow runs fully without either.
+
 ## Install
 
 ```sh
-pnpm add little-workflow@alpha ai@^7 zod @ai-sdk/anthropic   # or any AI SDK 7 provider
+pnpm add @little-stack/workflow@alpha ai@^7 zod @ai-sdk/anthropic   # or any AI SDK 7 provider
 ```
 
 - **Node.js 22 or later.**
@@ -20,7 +22,7 @@ pnpm add little-workflow@alpha ai@^7 zod @ai-sdk/anthropic   # or any AI SDK 7 p
   { "pnpm": { "onlyBuiltDependencies": ["better-sqlite3"] } }
   ```
 
-Or scaffold a project with pinned versions and this setting already in place: `npx little-workflow@alpha init my-app`.
+Or scaffold a project with pinned versions and this setting already in place: `npx @little-stack/workflow@alpha init my-app`.
 
 ## Example
 
@@ -28,7 +30,7 @@ Or scaffold a project with pinned versions and this setting already in place: `n
 import { anthropic } from "@ai-sdk/anthropic";
 import { tool } from "ai";
 import { z } from "zod";
-import { defineWorkflow, runWorkflow } from "little-workflow";
+import { defineWorkflow, runWorkflow } from "@little-stack/workflow";
 
 const summarizeTicket = defineWorkflow({
   id: "support.summarize-ticket",
@@ -58,20 +60,57 @@ result.usage.costUsd; // real USD from the bundled model registry, or null if un
 result.runId;         // inspect with `little events <runId>` or `little report <runId> --table`
 ```
 
-Runs are stored in `.little-workflow/` by default. Calling `runWorkflow` again with the same `runId` replays the recorded result without calling models or tools again.
+`runWorkflow(workflow, input, options?)` is the one way to run a workflow; `summarizeTicket.run(input, options?)` is the same call. Runs are stored in `.little-workflow/` by default; pass `{ world: localWorld({ dataDir }) }` to choose another directory. Calling `runWorkflow` again with the same `runId` replays the recorded result without calling models or tools again. A failed run throws an error that `isRunFailedError(err)` recognizes.
 
-To give workflows to an agent as typed tools, adapt them with `asHarnessWorkflow` and pass them to `createHarness({ workflows })` from [`little-harness`](https://github.com/samuelch727/little-workflow/tree/main/packages/little-harness).
+To skip the planner, give the workflow a fixed `plan` instead of a model:
+
+```ts
+const echo = defineWorkflow({
+  id: "echo",
+  input: z.object({ value: z.string() }),
+  tools: {
+    echo: tool({
+      inputSchema: z.object({ value: z.string() }),
+      execute: async ({ value }) => ({ echoed: value }),
+    }),
+  },
+  plan: {
+    steps: [
+      {
+        id: "echo",
+        uses: "tool.call",
+        with: { tool: "echo", args: { value: "{{ input.value }}" } },
+        output: { mode: "json", schema: true },
+      },
+    ],
+  },
+});
+
+await runWorkflow(echo, { value: "hi" }); // output: { echoed: "hi" }, no model call
+```
+
+To give workflows to an agent as typed tools, adapt them with `asHarnessWorkflow` and pass them to `createHarness({ workflows })` from [`@little-stack/harness`](https://github.com/samuelch727/little-workflow/tree/main/packages/little-harness).
 
 ## Docs
 
-- Docs ship in the package under [`docs/`](./docs/README.md) (`node_modules/little-workflow/docs`).
+- Docs ship in the package under [`docs/`](./docs/README.md) (`node_modules/@little-stack/workflow/docs`).
 - [Quickstart](./docs/getting-started/quickstart.mdx), [Compose With Little Harness](./docs/authoring/compose-with-harness.mdx), [API reference](./docs/reference/api-reference.mdx), [CLI](./docs/reference/cli.mdx), [Changelog](./docs/reference/changelog.mdx)
 - Runnable demos: [`demos/`](https://github.com/samuelch727/little-workflow/tree/main/demos)
 - Source and issues: [github.com/samuelch727/little-workflow](https://github.com/samuelch727/little-workflow)
 
+## Entry Points
+
+| Import | For |
+|---|---|
+| `@little-stack/workflow` | Defining, running and replaying workflows, and handing them to Little Harness: `defineWorkflow`, `runWorkflow`, `localWorld`, `asHarnessWorkflow`, `loadWorkflow`, `isRunFailedError`, and their types. |
+| `@little-stack/workflow/lwir` | Validating and versioning LWIR plan documents: `validateLwir`, `assertValidLwir`, `registerWorkflowVersion`. |
+| `@little-stack/workflow/eval` | Eval sets: validate, content-address and store eval items in a World. |
+| `@little-stack/workflow/scaffold` | The project generators behind `little setup` and `little init`. |
+| `@little-stack/workflow/internals` | Unstable building blocks for the CLI, Little Harness, LittleDB and tests (the lower-level `createLittleWorkflow`, the runtime, world storage functions, pricing). No semver guarantees. |
+
 ## Storage Note
 
-The public World API is `appendEvent`, `listEvents`, and `materializeRunState`. The local alpha implementation stores events in `<dataDir>/events/events.db` using SQLite WAL mode. `little events <runId>` prints newline-delimited JSON for inspection, but raw event files are not part of the storage contract.
+A World stores a run's events and artifacts: `world.appendEvent`, `world.listEvents`, `world.writeArtifact`, `world.readArtifact`. The local alpha implementation from `localWorld()` stores events in `<dataDir>/events/events.db` using SQLite WAL mode. `little events <runId>` prints newline-delimited JSON for inspection, but raw event files are not part of the storage contract.
 
 ## License
 

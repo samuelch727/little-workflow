@@ -34,6 +34,30 @@ Little Harness is not:
 - a reason to expose arbitrary host paths to the model
 - a requirement that developers define containers or microVMs before their first agent works
 
+> **UNRELEASED review preview.** Some pages document source changes that are not
+> in any npm version yet. They are labeled **UNRELEASED**; see
+> [Alpha Migrations](/docs/v0.1.0-alpha/reference/alpha-migrations).
+
+## Where It Sits In The Stack
+
+Little Harness is the SDK half of the Little stack, with Little Workflow. You
+build the agent here; LittleDB, the product, traces what the agent does, scores
+it (code checks, AI judges, people, and what your users said), and improves it
+by testing a proposed change on your own past conversations before it goes
+live. Harness needs nothing from LittleDB to run, and the connection is one
+`onEvent` hook; see [Using LittleDB](/docs/v0.1.0-alpha/reference/using-littledb).
+LittleDB is private source for now.
+
+An agent's work lives in a **workspace**: each user's own folder, kept between
+visits. Most turns run on the folder tier, which is Harness's own just-bash
+sandbox over the user's files, and a container joins only when a command needs
+a real machine (git, a package manager, a build, tests), as the `nextTier` of
+[`tieredSandbox()`](/docs/v0.1.0-alpha/runtime/execution-tiers). Managed
+workspaces come with LittleDB's hosted service (private for now), and
+self-hosted ones with Little Compute; the same agent folder runs on a laptop or
+a Podman box today and on the managed service as it lands, and only the sandbox
+builder differs.
+
 ## Start Here
 
 - [v0.1.0-alpha](/docs/v0.1.0-alpha) — the alpha developer API and local runtime (currently `0.2.0-alpha.0` on npm)

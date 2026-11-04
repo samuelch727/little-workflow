@@ -9,9 +9,14 @@
     "input-types",
     "generating-and-streaming",
     "agent-folders",
+    "serving-agents",
     "chat-connectors",
+    "email-connector",
     "outcomes",
+    "user-feedback",
+    "asking-a-person",
     "workflows",
-    "dynamic-workflows"
+    "dynamic-workflows",
+    "agent-groups"
   ]
 }

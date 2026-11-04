@@ -9,9 +9,9 @@ import { createShellRuntime, type ShellCommandInput, type ShellCommandResult } f
 import type { RuntimeToolBridge } from "../../runtime/tool-bridge.js";
 import { resolveTraceOptions } from "../../trace/options.js";
 import type {
-  CreateExecutionEnvironmentOptions,
-  HarnessExecutionEnvironmentFactory,
-  HarnessRuntime,
+  CreateSandboxOptions,
+  HarnessSandboxFactory,
+  HarnessSandbox,
   JsonObject,
 } from "../../types.js";
 import {
@@ -27,8 +27,9 @@ export type SubprocessSandboxOptions = {
   workerPath?: string;
   /**
    * Environment variables for the worker process. Replaces (never merges with) the parent
-   * environment: the default is an empty environment so the parent's credentials (API keys,
-   * tokens) never reach the sandbox process.
+   * environment: the default passes an empty environment to spawn so the parent's
+   * credentials (API keys, tokens) never reach the sandbox process. The operating system
+   * may still inject non-secret process metadata such as macOS `__CF_USER_TEXT_ENCODING`.
    */
   env?: Record<string, string>;
   /**
@@ -54,8 +55,14 @@ export type SubprocessSandboxOptions = {
  */
 export function subprocessSandbox(
   sandboxOptions: SubprocessSandboxOptions = {},
-): HarnessExecutionEnvironmentFactory {
+): HarnessSandboxFactory {
   return async (options) => {
+    if (options.workspace.filesystem !== undefined) {
+      throw new HarnessInputError(
+        "subprocessSandbox() needs a workspace on disk, and this host keeps it in a just-bash filesystem. Use justBashSandbox() with virtualHost().",
+        { sessionId: options.workspace.sessionId },
+      );
+    }
     const traceOptions = options.traceOptions ?? resolveTraceOptions(undefined, undefined);
     // Tool-call scope must come from the exec actually running in the worker, not from
     // whichever shell tool call last started: the AI SDK executes a step's tool calls
@@ -71,7 +78,7 @@ export function subprocessSandbox(
           : { parentToolCallId: worker.activeParentToolCallId },
     );
 
-    const runtime: HarnessRuntime = createShellRuntime({
+    const runtime: HarnessSandbox = createShellRuntime({
       workspace: options.workspace,
       toolBridge,
       runtime: options.runtime,
@@ -79,6 +86,8 @@ export function subprocessSandbox(
       emitToolEvents: options.emitToolEvents,
       traceOptions,
       files: options.files,
+      tier: "tier-0",
+      provider: "just-bash",
       execute: (input, context) => worker.exec(input, context.toolCallId),
       dispose: () => worker.dispose(),
     });
@@ -155,7 +164,7 @@ class SubprocessWorkerClient {
 
   constructor(
     private readonly sandboxOptions: SubprocessSandboxOptions,
-    private readonly environmentOptions: CreateExecutionEnvironmentOptions<unknown>,
+    private readonly environmentOptions: CreateSandboxOptions<unknown>,
     private readonly getToolBridge: () => RuntimeToolBridge | undefined,
   ) {}
 

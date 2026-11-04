@@ -1,11 +1,21 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import type { DurableHarnessEventInput, HarnessPriorEventQuery } from "../events/occurrence.js";
+import {
+  HarnessAppendIdempotencyConflictError,
+  HarnessSessionEventValidationError,
+  normalizePersistedDurableHarnessEvent,
+  type HarnessPriorEventQuery,
+} from "../events/occurrence.js";
 import type { HarnessEventType } from "../events/names.js";
-import { createInMemorySessionLog, type SessionLogStore } from "./session-log-store.js";
+import {
+  REMOTE_SESSION_LOG_PROTOCOL_VERSION,
+  RemoteSessionProtocolError,
+  parseRemoteAppendRequest,
+} from "./protocol.js";
+import { inMemorySessionLog, type SessionLogStore } from "./session-log-store.js";
 
 export type SessionLogServerOptions = {
-  /** Backing store; defaults to an in-memory log (see createFileSessionLog for a durable one). */
+  /** Backing store; defaults to an in-memory log (see fileSessionLog for a durable one). */
   store?: SessionLogStore;
   /** Bind host; defaults to 127.0.0.1. */
   host?: string;
@@ -25,18 +35,11 @@ export type SessionLogServer = {
 
 const DEFAULT_MAX_BODY_BYTES = 4 * 1024 * 1024;
 
-/**
- * A minimal HTTP session-log service: the append-only event log lives behind two routes
- * (`POST /v1/events`, `GET /v1/events?runId=...`), decoupled from every harness process.
- * Any number of stateless harnesses can append to and replay from the same log, which is
- * what makes kill-and-resume work across process (and machine) boundaries. This server is
- * a reference implementation — pass a durable `store` (e.g. createFileSessionLog) and an
- * `authToken` before pointing real workloads at it.
- */
+/** Strict HTTP reference service for the versioned Harness Session protocol. */
 export async function startSessionLogServer(
   options: SessionLogServerOptions = {},
 ): Promise<SessionLogServer> {
-  const store = options.store ?? createInMemorySessionLog();
+  const store = options.store ?? inMemorySessionLog();
   const server = createServer((request, response) => {
     void handleRequest(store, options, request, response);
   });
@@ -59,12 +62,8 @@ export async function startSessionLogServer(
 }
 
 function connectableHost(bindHost: string): string {
-  if (bindHost === "0.0.0.0") {
-    return "127.0.0.1";
-  }
-  if (bindHost === "::") {
-    return "[::1]";
-  }
+  if (bindHost === "0.0.0.0") return "127.0.0.1";
+  if (bindHost === "::") return "[::1]";
   return bindHost.includes(":") ? `[${bindHost}]` : bindHost;
 }
 
@@ -77,80 +76,190 @@ async function handleRequest(
   try {
     const url = new URL(request.url ?? "/", "http://localhost");
     if (request.method === "GET" && url.pathname === "/v1/health") {
-      // Health stays unauthenticated so load balancers can probe liveness.
-      sendJson(response, 200, { ok: true });
+      if ([...url.searchParams].length !== 0) {
+        sendError(response, 400, "invalid_query", "health route accepts no query fields");
+        return;
+      }
+      sendJson(response, 200, {
+        schemaVersion: REMOTE_SESSION_LOG_PROTOCOL_VERSION,
+        ok: true,
+      });
       return;
     }
     if (options.authToken !== undefined && !isAuthorized(request, options.authToken)) {
-      sendJson(response, 401, { error: "unauthorized" });
+      sendError(response, 401, "unauthorized", "valid bearer authorization is required");
       return;
     }
 
     if (request.method === "POST" && url.pathname === "/v1/events") {
+      if ([...url.searchParams].length !== 0) {
+        sendError(response, 400, "invalid_query", "append route accepts no query fields");
+        return;
+      }
+      if (!isJsonContentType(request.headers["content-type"])) {
+        sendError(response, 415, "unsupported_media_type", "content-type must be application/json");
+        return;
+      }
       let body: string;
       try {
         body = await readBody(request, options.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES);
       } catch (error) {
         if (error instanceof BodyTooLargeError) {
-          sendJson(response, 413, { error: "request body too large" });
+          sendError(response, 413, "body_too_large", "request body too large");
           request.destroy();
           return;
         }
         throw error;
       }
-      let event: DurableHarnessEventInput;
+      let untrusted: unknown;
       try {
-        event = JSON.parse(body) as DurableHarnessEventInput;
+        untrusted = JSON.parse(body);
       } catch {
-        sendJson(response, 400, { error: "invalid json" });
+        sendError(response, 400, "invalid_json", "request body is not valid JSON");
         return;
       }
-      if (
-        typeof event.type !== "string" ||
-        typeof event.runId !== "string" ||
-        typeof event.payload !== "object" ||
-        event.payload === null ||
-        Array.isArray(event.payload)
-      ) {
-        sendJson(response, 400, { error: "invalid event" });
-        return;
+      let appendRequest;
+      try {
+        appendRequest = parseRemoteAppendRequest(untrusted);
+      } catch (error) {
+        if (
+          error instanceof RemoteSessionProtocolError ||
+          error instanceof HarnessSessionEventValidationError
+        ) {
+          sendError(response, 400, "invalid_event", error.message);
+          return;
+        }
+        throw error;
       }
-      const persisted = await store.append(event);
-      sendJson(response, 200, { event: persisted });
+      try {
+        const persisted = normalizePersistedDurableHarnessEvent(
+          await store.append(appendRequest.event),
+        );
+        sendJson(response, 200, {
+          schemaVersion: REMOTE_SESSION_LOG_PROTOCOL_VERSION,
+          event: persisted,
+        });
+      } catch (error) {
+        if (error instanceof HarnessAppendIdempotencyConflictError) {
+          sendError(response, 409, "append_idempotency_conflict", error.message);
+          return;
+        }
+        if (error instanceof HarnessSessionEventValidationError) {
+          sendError(response, 400, "invalid_event", error.message);
+          return;
+        }
+        throw error;
+      }
       return;
     }
     if (request.method === "GET" && url.pathname === "/v1/events") {
-      const query: HarnessPriorEventQuery = {
-        ...(url.searchParams.has("runId") ? { runId: url.searchParams.get("runId")! } : {}),
-        ...(url.searchParams.has("type")
-          ? { type: url.searchParams.get("type") as HarnessEventType }
-          : {}),
-        ...(url.searchParams.has("occurrenceId")
-          ? { occurrenceId: url.searchParams.get("occurrenceId")! }
-          : {}),
-      };
-      const events = await store.priorEvents(query);
-      sendJson(response, 200, { events });
+      let query: HarnessPriorEventQuery;
+      try {
+        query = parseReplayQuery(url);
+      } catch (error) {
+        sendError(
+          response,
+          400,
+          "invalid_query",
+          error instanceof Error ? error.message : "invalid replay query",
+        );
+        return;
+      }
+      const events = (await store.priorEvents(query)).map((event) =>
+        normalizePersistedDurableHarnessEvent(event));
+      sendJson(response, 200, {
+        schemaVersion: REMOTE_SESSION_LOG_PROTOCOL_VERSION,
+        events,
+      });
       return;
     }
 
-    sendJson(response, 404, { error: "not found" });
+    sendError(response, 404, "not_found", "route not found");
   } catch {
     // Store internals must not leak to clients.
-    sendJson(response, 500, { error: "internal error" });
+    sendError(response, 500, "internal_error", "internal error");
   }
+}
+
+function parseReplayQuery(url: URL): HarnessPriorEventQuery {
+  const allowed = new Set([
+    "runId",
+    "type",
+    "occurrenceId",
+    "operationId",
+    "taskId",
+    "attemptId",
+    "afterSequence",
+    "limit",
+  ]);
+  for (const [key] of url.searchParams) {
+    if (!allowed.has(key)) throw new TypeError(`unknown query field ${key}`);
+    if (url.searchParams.getAll(key).length !== 1) throw new TypeError(`duplicate query field ${key}`);
+  }
+  return {
+    ...optionalQueryString(url, "runId"),
+    ...optionalQueryString(url, "occurrenceId"),
+    ...optionalQueryString(url, "operationId"),
+    ...optionalQueryString(url, "taskId"),
+    ...optionalQueryString(url, "attemptId"),
+    ...(url.searchParams.has("type")
+      ? { type: boundedQueryString(url, "type") as HarnessEventType }
+      : {}),
+    ...optionalQueryInteger(url, "afterSequence", 0, Number.MAX_SAFE_INTEGER),
+    ...optionalQueryInteger(url, "limit", 1, 10_000),
+  };
+}
+
+function optionalQueryString<Name extends string>(
+  url: URL,
+  name: Name,
+): { [Key in Name]?: string } {
+  return (url.searchParams.has(name)
+    ? { [name]: boundedQueryString(url, name) }
+    : {}) as { [Key in Name]?: string };
+}
+
+function boundedQueryString(url: URL, name: string): string {
+  const value = url.searchParams.get(name);
+  if (value === null || value.length === 0 || value.length > 2_048 || value.includes("\0")) {
+    throw new TypeError(`invalid query field ${name}`);
+  }
+  return value;
+}
+
+function optionalQueryInteger<Name extends string>(
+  url: URL,
+  name: Name,
+  minimum: number,
+  maximum: number,
+): { [Key in Name]?: number } {
+  if (!url.searchParams.has(name)) return {};
+  const raw = url.searchParams.get(name)!;
+  if (!/^(?:0|[1-9][0-9]*)$/u.test(raw)) throw new TypeError(`invalid query field ${name}`);
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < minimum || value > maximum) {
+    throw new TypeError(`invalid query field ${name}`);
+  }
+  return { [name]: value } as { [Key in Name]?: number };
+}
+
+function isJsonContentType(header: string | undefined): boolean {
+  return header?.split(";", 1)[0]?.trim().toLowerCase() === "application/json";
 }
 
 function isAuthorized(request: IncomingMessage, authToken: string): boolean {
   const header = request.headers.authorization;
-  if (header === undefined) {
-    return false;
-  }
-  // Hash both sides so timingSafeEqual gets equal-length buffers and the comparison
-  // leaks nothing about the token's length or content.
+  if (header === undefined) return false;
   const presented = createHash("sha256").update(header).digest();
   const expected = createHash("sha256").update(`Bearer ${authToken}`).digest();
   return timingSafeEqual(presented, expected);
+}
+
+function sendError(response: ServerResponse, status: number, code: string, message: string): void {
+  sendJson(response, status, {
+    schemaVersion: REMOTE_SESSION_LOG_PROTOCOL_VERSION,
+    error: { code, message },
+  });
 }
 
 function sendJson(response: ServerResponse, status: number, body: unknown): void {
@@ -162,6 +271,8 @@ function sendJson(response: ServerResponse, status: number, body: unknown): void
   response.writeHead(status, {
     "content-type": "application/json",
     "content-length": Buffer.byteLength(text),
+    "cache-control": "no-store",
+    "x-content-type-options": "nosniff",
   });
   response.end(text);
 }
@@ -169,6 +280,9 @@ function sendJson(response: ServerResponse, status: number, body: unknown): void
 class BodyTooLargeError extends Error {}
 
 function readBody(request: IncomingMessage, maxBytes: number): Promise<string> {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) {
+    throw new TypeError("maxBodyBytes must be a positive safe integer");
+  }
   return new Promise((resolve, reject) => {
     const declared = Number(request.headers["content-length"]);
     if (Number.isFinite(declared) && declared > maxBytes) {
@@ -177,16 +291,29 @@ function readBody(request: IncomingMessage, maxBytes: number): Promise<string> {
     }
     const chunks: Buffer[] = [];
     let received = 0;
+    let settled = false;
     request.on("data", (chunk: Buffer) => {
+      if (settled) return;
       received += chunk.byteLength;
       if (received > maxBytes) {
+        settled = true;
         reject(new BodyTooLargeError());
         return;
       }
       chunks.push(chunk);
     });
-    request.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
-    request.on("error", reject);
+    request.on("end", () => {
+      if (!settled) {
+        settled = true;
+        resolve(Buffer.concat(chunks).toString("utf8"));
+      }
+    });
+    request.on("error", (error) => {
+      if (!settled) {
+        settled = true;
+        reject(error);
+      }
+    });
   });
 }
 

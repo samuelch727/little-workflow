@@ -7,6 +7,50 @@ import { withTempDir } from "../test/temp.js";
 import { wrapToolsWithHarnessContext } from "./tools.js";
 
 describe("wrapToolsWithHarnessContext", () => {
+  it("injects Harness-owned model positions into tool execution context", async () => {
+    await withTempDir(async (dir) => {
+      const session = await new LocalSessionStore(resolveLocalHostPaths({ dataDir: dir }, dir)).getOrCreate({
+        id: "chat",
+      });
+      let executionContext: unknown;
+      const wrapped = wrapToolsWithHarnessContext(
+        {
+          inspectPosition: tool({
+            description: "Inspect the execution position.",
+            inputSchema: z.object({}),
+            execute: async (_input, options) => {
+              executionContext = options.context;
+              return {};
+            },
+          }),
+        },
+        {
+          session,
+          files: session.files,
+          artifacts: session.artifacts,
+        },
+        new Map([
+          ["call_1", { modelStepId: "step_2", sequenceIndex: 3 }],
+        ]),
+      );
+
+      await (wrapped.inspectPosition as any).execute({}, {
+        toolCallId: "call_1",
+        context: {
+          modelStepId: "provider-controlled",
+          sequenceIndex: 999,
+          preserved: true,
+        },
+      });
+
+      expect(executionContext).toEqual({
+        modelStepId: "step_2",
+        sequenceIndex: 3,
+        preserved: true,
+      });
+    });
+  });
+
   it("passes files, extraBody, session, and abortSignal into AI SDK tool execute functions", async () => {
     await withTempDir(async (dir) => {
       const session = await new LocalSessionStore(resolveLocalHostPaths({ dataDir: dir }, dir)).getOrCreate({

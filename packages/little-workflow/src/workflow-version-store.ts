@@ -1,8 +1,7 @@
 import { randomUUID } from "node:crypto";
-import { link, mkdir, open, readFile, stat, unlink } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
 import type { LocalWorld } from "./authoring.js";
 import { canonicalJson } from "./canonical.js";
+import { runFilesFor, type RunFiles } from "./run-files.js";
 import type { WorkflowVersion } from "./lwir.js";
 import { WorldPathError } from "./world.js";
 
@@ -32,28 +31,29 @@ export async function registerStoredWorkflowVersion(
   workflowVersion: StoredWorkflowVersion,
 ): Promise<void> {
   validateWorkflowVersionId(workflowVersion.id);
-  const directory = join(world.dataDir, "workflow-versions");
+  const files = runFilesFor(world);
+  const directory = files.path.join(world.dataDir, "workflow-versions");
   const path = workflowVersionPath(world, workflowVersion.id);
   const contents = `${canonicalJson(workflowVersion)}\n`;
-  await withWriteChain(resolve(path), async () => {
-    await ensureDirectory(directory);
+  await withWriteChain(files.storageKey(files.path.resolve(path)), async () => {
+    await files.ensureDirectory(directory);
     const tempPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
-    await writeFileDurably(tempPath, contents);
+    await files.writeFileDurably(tempPath, contents);
     try {
-      await link(tempPath, path);
-      await syncDirectory(directory);
+      await files.link(tempPath, path);
+      await files.syncDirectory(directory);
     } catch (error) {
       if (!isErrno(error, "EEXIST")) {
         throw error;
       }
-      const existing = await readIfPresent(path);
+      const existing = await readIfPresent(files, path);
       if (existing === contents) {
         return;
       }
       throw new WorkflowVersionStoreConflictError(workflowVersion.id);
     } finally {
-      await unlinkIfPresent(tempPath);
-      await syncDirectory(directory);
+      await unlinkIfPresent(files, tempPath);
+      await files.syncDirectory(directory);
     }
   });
 }
@@ -63,12 +63,12 @@ export async function readStoredWorkflowVersion(
   workflowVersionId: string,
 ): Promise<StoredWorkflowVersion> {
   validateWorkflowVersionId(workflowVersionId);
-  return JSON.parse(await readFile(workflowVersionPath(world, workflowVersionId), "utf8")) as StoredWorkflowVersion;
+  return JSON.parse(await runFilesFor(world).readFile(workflowVersionPath(world, workflowVersionId), "utf8")) as StoredWorkflowVersion;
 }
 
 function workflowVersionPath(world: LocalWorld, workflowVersionId: string): string {
   validateWorkflowVersionId(workflowVersionId);
-  return join(world.dataDir, "workflow-versions", `${workflowVersionId}.json`);
+  return runFilesFor(world).path.join(world.dataDir, "workflow-versions", `${workflowVersionId}.json`);
 }
 
 function validateWorkflowVersionId(workflowVersionId: string): void {
@@ -77,84 +77,20 @@ function validateWorkflowVersionId(workflowVersionId: string): void {
   }
 }
 
-async function readIfPresent(path: string): Promise<string | undefined> {
+async function readIfPresent(files: RunFiles, path: string): Promise<string | undefined> {
   try {
-    return await readFile(path, "utf8");
+    return await files.readFile(path, "utf8");
   } catch (error) {
-    if (isErrno(error, "ENOENT")) {
-      return undefined;
-    }
+    if (isErrno(error, "ENOENT")) return undefined;
     throw error;
   }
 }
 
-async function writeFileDurably(path: string, data: string): Promise<void> {
-  const handle = await open(path, "w");
+async function unlinkIfPresent(files: RunFiles, path: string): Promise<void> {
   try {
-    await handle.writeFile(data, "utf8");
-    await handle.sync();
-  } finally {
-    await handle.close();
-  }
-}
-
-async function unlinkIfPresent(path: string): Promise<void> {
-  try {
-    await unlink(path);
+    await files.unlink(path);
   } catch (error) {
-    if (!isErrno(error, "ENOENT")) {
-      throw error;
-    }
-  }
-}
-
-async function ensureDirectory(path: string): Promise<void> {
-  const missingDirectories = await findMissingDirectories(path);
-  await mkdir(path, { recursive: true });
-  await syncDirectory(path);
-  await syncDirectory(dirname(path));
-  await Promise.all(
-    missingDirectories.map((directory) => syncDirectory(dirname(directory))),
-  );
-}
-
-async function syncDirectory(path: string): Promise<void> {
-  const handle = await open(path, "r");
-  try {
-    await handle.sync();
-  } finally {
-    await handle.close();
-  }
-}
-
-async function findMissingDirectories(path: string): Promise<readonly string[]> {
-  const missingDirectories: string[] = [];
-  for (const directory of directoryChain(path)) {
-    try {
-      const entry = await stat(directory);
-      if (!entry.isDirectory()) {
-        throw new WorldPathError(`Expected directory path, received file path: ${directory}`);
-      }
-    } catch (error) {
-      if (!isErrno(error, "ENOENT")) {
-        throw error;
-      }
-      missingDirectories.push(directory);
-    }
-  }
-  return missingDirectories;
-}
-
-function directoryChain(path: string): readonly string[] {
-  const directories: string[] = [];
-  let current = resolve(path);
-  while (true) {
-    directories.unshift(current);
-    const parent = dirname(current);
-    if (parent === current) {
-      return directories;
-    }
-    current = parent;
+    if (!isErrno(error, "ENOENT")) throw error;
   }
 }
 

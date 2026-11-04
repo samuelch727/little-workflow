@@ -42,10 +42,9 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { link, mkdir, open, readFile, readdir, stat, unlink } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
 import type { LocalWorld } from "./authoring.js";
 import { canonicalJson, sha256Digest } from "./canonical.js";
+import { runFilesFor, type RunFiles } from "./run-files.js";
 import type {
   EvalItemBody,
   EvalSetValidationFinding,
@@ -97,20 +96,20 @@ export async function registerStoredEvalSet(
   version: EvalSetVersion,
 ): Promise<void> {
   validateEvalSetId(version.id);
-  const directory = join(world.dataDir, EVAL_SETS_DIRECTORY);
-  await writeOnce(directory, evalSetPath(world, version.id), `${canonicalJson(version)}\n`, version.id);
+  const directory = runFilesFor(world).path.join(world.dataDir, EVAL_SETS_DIRECTORY);
+  await writeOnce(world, directory, evalSetPath(world, version.id), `${canonicalJson(version)}\n`, version.id);
 }
 
 export async function readStoredEvalSet(
   world: LocalWorld,
   evalSetId: string,
 ): Promise<EvalSetVersion> {
-  return JSON.parse(await readFile(evalSetPath(world, evalSetId), "utf8")) as EvalSetVersion;
+  return JSON.parse(await runFilesFor(world).readFile(evalSetPath(world, evalSetId), "utf8")) as EvalSetVersion;
 }
 
 /** Ids of every locally stored eval set, in directory order. */
 export async function listStoredEvalSetIds(world: LocalWorld): Promise<readonly string[]> {
-  const entries = await readdirIfPresent(join(world.dataDir, EVAL_SETS_DIRECTORY));
+  const entries = await readdirIfPresent(world, runFilesFor(world).path.join(world.dataDir, EVAL_SETS_DIRECTORY));
   return entries
     .filter((entry) => entry.endsWith(".json"))
     .map((entry) => entry.slice(0, -".json".length))
@@ -127,8 +126,9 @@ export async function registerStoredEvalItemBody(
   registered: RegisteredEvalItemBody,
 ): Promise<void> {
   const hex = digestHex(registered.bodySha);
-  const directory = join(world.dataDir, EVAL_ITEMS_DIRECTORY, hex.slice(0, 2));
+  const directory = runFilesFor(world).path.join(world.dataDir, EVAL_ITEMS_DIRECTORY, hex.slice(0, 2));
   await writeOnce(
+    world,
     directory,
     evalItemBodyPath(world, registered.bodySha),
     `${registered.canonicalJson}\n`,
@@ -141,7 +141,7 @@ export async function readStoredEvalItemBody(
   world: LocalWorld,
   bodySha: string,
 ): Promise<EvalItemBody> {
-  const contents = await readFile(evalItemBodyPath(world, bodySha), "utf8");
+  const contents = await runFilesFor(world).readFile(evalItemBodyPath(world, bodySha), "utf8");
   const body = JSON.parse(contents) as EvalItemBody;
   const actual = sha256Digest(body);
   if (actual !== bodySha) {
@@ -245,12 +245,12 @@ export async function registerStoredEvalSetWithLineageCheck(
 
 function evalSetPath(world: LocalWorld, evalSetId: string): string {
   validateEvalSetId(evalSetId);
-  return join(world.dataDir, EVAL_SETS_DIRECTORY, `${evalSetId}.json`);
+  return runFilesFor(world).path.join(world.dataDir, EVAL_SETS_DIRECTORY, `${evalSetId}.json`);
 }
 
 function evalItemBodyPath(world: LocalWorld, bodySha: string): string {
   const hex = digestHex(bodySha);
-  return join(world.dataDir, EVAL_ITEMS_DIRECTORY, hex.slice(0, 2), `${hex}.json`);
+  return runFilesFor(world).path.join(world.dataDir, EVAL_ITEMS_DIRECTORY, hex.slice(0, 2), `${hex}.json`);
 }
 
 function validateEvalSetId(evalSetId: string): void {
@@ -275,36 +275,38 @@ function digestHex(digest: string): string {
 }
 
 async function writeOnce(
+  world: LocalWorld,
   directory: string,
   path: string,
   contents: string,
   address: string,
 ): Promise<void> {
-  await withWriteChain(resolve(path), async () => {
-    await ensureDirectory(directory);
+  const files = runFilesFor(world);
+  await withWriteChain(files.storageKey(files.path.resolve(path)), async () => {
+    await files.ensureDirectory(directory);
     const tempPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
-    await writeFileDurably(tempPath, contents);
+    await files.writeFileDurably(tempPath, contents);
     try {
-      await link(tempPath, path);
-      await syncDirectory(directory);
+      await files.link(tempPath, path);
+      await files.syncDirectory(directory);
     } catch (error) {
       if (!isErrno(error, "EEXIST")) {
         throw error;
       }
-      const existing = await readIfPresent(path);
+      const existing = await readIfPresent(files, path);
       if (existing === contents) {
         return;
       }
       throw new EvalSetStoreConflictError(address);
     } finally {
-      await unlinkIfPresent(tempPath);
-      await syncDirectory(directory);
+      await unlinkIfPresent(files, tempPath);
+      await files.syncDirectory(directory);
     }
   });
 }
 
 async function listStoredWorkflowNames(world: LocalWorld): Promise<readonly string[]> {
-  const entries = await readdirIfPresent(join(world.dataDir, "workflow-versions"));
+  const entries = await readdirIfPresent(world, runFilesFor(world).path.join(world.dataDir, "workflow-versions"));
   const names: string[] = [];
   for (const entry of entries) {
     if (!entry.endsWith(".json")) {
@@ -352,95 +354,29 @@ async function storedWorkflowName(
   }
 }
 
-async function readdirIfPresent(path: string): Promise<readonly string[]> {
+async function readdirIfPresent(world: LocalWorld, path: string): Promise<readonly string[]> {
   try {
-    return await readdir(path);
+    return await runFilesFor(world).readdir(path);
   } catch (error) {
-    if (isErrno(error, "ENOENT")) {
-      return [];
-    }
+    if (isErrno(error, "ENOENT")) return [];
     throw error;
   }
 }
 
-async function readIfPresent(path: string): Promise<string | undefined> {
+async function readIfPresent(files: RunFiles, path: string): Promise<string | undefined> {
   try {
-    return await readFile(path, "utf8");
+    return await files.readFile(path, "utf8");
   } catch (error) {
-    if (isErrno(error, "ENOENT")) {
-      return undefined;
-    }
+    if (isErrno(error, "ENOENT")) return undefined;
     throw error;
   }
 }
 
-async function writeFileDurably(path: string, data: string): Promise<void> {
-  const handle = await open(path, "w");
+async function unlinkIfPresent(files: RunFiles, path: string): Promise<void> {
   try {
-    await handle.writeFile(data, "utf8");
-    await handle.sync();
-  } finally {
-    await handle.close();
-  }
-}
-
-async function unlinkIfPresent(path: string): Promise<void> {
-  try {
-    await unlink(path);
+    await files.unlink(path);
   } catch (error) {
-    if (!isErrno(error, "ENOENT")) {
-      throw error;
-    }
-  }
-}
-
-async function ensureDirectory(path: string): Promise<void> {
-  const missingDirectories = await findMissingDirectories(path);
-  await mkdir(path, { recursive: true });
-  await syncDirectory(path);
-  await syncDirectory(dirname(path));
-  await Promise.all(
-    missingDirectories.map((directory) => syncDirectory(dirname(directory))),
-  );
-}
-
-async function syncDirectory(path: string): Promise<void> {
-  const handle = await open(path, "r");
-  try {
-    await handle.sync();
-  } finally {
-    await handle.close();
-  }
-}
-
-async function findMissingDirectories(path: string): Promise<readonly string[]> {
-  const missingDirectories: string[] = [];
-  for (const directory of directoryChain(path)) {
-    try {
-      const entry = await stat(directory);
-      if (!entry.isDirectory()) {
-        throw new WorldPathError(`Expected directory path, received file path: ${directory}`);
-      }
-    } catch (error) {
-      if (!isErrno(error, "ENOENT")) {
-        throw error;
-      }
-      missingDirectories.push(directory);
-    }
-  }
-  return missingDirectories;
-}
-
-function directoryChain(path: string): readonly string[] {
-  const directories: string[] = [];
-  let current = resolve(path);
-  while (true) {
-    directories.unshift(current);
-    const parent = dirname(current);
-    if (parent === current) {
-      return directories;
-    }
-    current = parent;
+    if (!isErrno(error, "ENOENT")) throw error;
   }
 }
 

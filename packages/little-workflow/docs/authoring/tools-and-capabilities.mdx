@@ -3,7 +3,7 @@ title: Tools
 description: AI SDK tool() as the primitive, MCP integration, and code.run tools proxy.
 ---
 
-Tools in Little Workflow are AI SDK `tool({...})` values. The developer registers them in a `ToolRegistry`; the workflow references them by name in `globalTools`; the harness dispatches them at execution time.
+Tools in Little Workflow are AI SDK `tool({...})` values. A workflow declares the tools its plan may call in `tools` — inline, keyed by name, or as names the run supplies in a `ToolRegistry` — and the harness dispatches them at execution time.
 
 ## Defining A Tool
 
@@ -39,7 +39,7 @@ Little Workflow does not introduce a custom descriptor shape. Any AI SDK `tool()
 `createToolRegistry` is a thin typed wrapper around a `Record<string, AiSdkTool>`. Pass your tools as the initial map:
 
 ```ts
-import { createToolRegistry } from "little-workflow";
+import { createToolRegistry } from "@little-stack/workflow";
 import { tool } from "ai";
 
 const tools = createToolRegistry({
@@ -54,25 +54,25 @@ The registry is mutable (new tools can be registered at any time) but immutable 
 ## Workflow Tool Scope
 
 ```ts
-import { createLittleWorkflow } from "little-workflow";
+import { defineWorkflow } from "@little-stack/workflow";
 import { z } from "zod";
 
-const candidateReview = createLittleWorkflow({
+const candidateReview = defineWorkflow({
   id: "candidate.review",
-  inputSchema: z.object({ /* ... */ }),
-  outputSchema: z.object({ /* ... */ }),
+  input: z.object({ /* ... */ }),
+  output: z.object({ /* ... */ }),
   // ...
-  globalTools: ["fetchCandidates", "scoreCandidate"],  // names only
+  tools: ["fetchCandidates", "scoreCandidate"],  // names only; the run supplies the registry
 });
 ```
 
-`globalTools` is a `readonly string[]` of names registered in the registry. Every name must exist in the registry when `runWorkflow` starts; a missing name throws `WorkflowMissingToolError`.
+`tools` takes AI SDK tools keyed by name (wired into every run automatically), a `ToolRegistry`, or a `readonly string[]` of names. Every named tool must exist in the run's registry (`runWorkflow(workflow, input, { tools })`) when the run starts; a missing name throws `WorkflowMissingToolError`.
 
-The planner sees tool descriptions and schemas (to design valid LWIR steps with `with.tools` allowlists) but does not execute them — tools are for the Worker role. LWIR steps reference tools from this allowlist; the harness enforces the constraint at runtime.
+The planner sees tool descriptions and schemas (to design valid `tool.call` steps) but does not execute them — tools are for the Worker role, which calls them from `tool.call` steps (and from `code.run` bodies). An `ai.generate` step is not offered tools. LWIR steps reference tools from this allowlist; the harness enforces the constraint at runtime.
 
 ## MCP Integration
 
-For ordinary workflow runs, prefer declarative MCP on `runWorkflow({ mcp })`. Little Workflow delegates MCP connection, tool discovery, guide-skill staging, tracing, spooling, and cleanup to Little Harness.
+For ordinary workflow runs, prefer declarative MCP on `runWorkflow(workflow, input, { mcp })`. Little Workflow delegates MCP connection, tool discovery, guide-skill staging, tracing, spooling, and cleanup to Little Harness.
 
 ```ts
 const tools = createToolRegistry({
@@ -80,10 +80,7 @@ const tools = createToolRegistry({
   scoreCandidate,
 });
 
-await runWorkflow({
-  world,
-  workflows,
-  input,
+await runWorkflow(workflow, input, {
   tools,
   mcp: {
     servers: [
@@ -101,7 +98,7 @@ await runWorkflow({
 });
 ```
 
-MCP is not a parallel execution API. It is exposed as ordinary gateway tools, normally `mcp_list_tools` and `mcp_call_tool`; include those names in `globalTools` when workflow steps need MCP access. Guide skills are guidance only and do not grant capability. Oversized MCP outputs use normal Little Harness tool result spooling and artifact paths.
+MCP is not a parallel execution API. It is exposed as ordinary gateway tools, normally `mcp_list_tools` and `mcp_call_tool`; include those names in the workflow's `tools` when workflow steps need MCP access. Guide skills are guidance only and do not grant capability. Oversized MCP outputs use normal Little Harness tool result spooling and artifact paths.
 
 ### Manual MCP Attachment
 
@@ -112,7 +109,7 @@ The MCP client lives in AI SDK 7's companion package `@ai-sdk/mcp` (not the `ai`
 ```ts
 import { createMCPClient } from "@ai-sdk/mcp";
 import { Experimental_StdioMCPTransport as StdioMCPTransport } from "@ai-sdk/mcp/mcp-stdio";
-import { createToolRegistry, runWorkflow } from "little-workflow";
+import { createToolRegistry, runWorkflow } from "@little-stack/workflow";
 
 const atlasClient = await createMCPClient({
   transport: new StdioMCPTransport({
@@ -125,7 +122,7 @@ const atlasTools = await atlasClient.tools();
 const tools = createToolRegistry({ fetchCandidates, scoreCandidate });
 tools.attachMcpTools(atlasTools, { prefix: "atlas" });
 
-await runWorkflow({ world, workflows, input, tools });
+await runWorkflow(workflow, input, { tools });
 await atlasClient.close();
 ```
 
@@ -137,23 +134,29 @@ If a name still collides after prefixing (or if you attach without a prefix and 
 
 `code.run` steps receive `{ input, tools }`. The `tools` object is a proxy over all globally-registered tools — callable as async functions, no model in the loop. This saves tokens vs routing through the model for deterministic data operations:
 
-```ts
-// LWIR step (shown in expanded form for readability):
+```jsonc
+// LWIR step. The pinned file's content, shown decoded:
+//   export async function run({ input, tools }) {
+//     const { candidates } = await tools.fetchCandidates({ jobId: input.jobId });
+//     const filtered = candidates.filter((c) => c.score > 0.8);
+//     const enriched = await Promise.all(
+//       filtered.map((c) => tools.lookupBackgroundCheck({ candidateId: c.id })),
+//     );
+//     return { count: enriched.length, top: enriched.slice(0, 5) };
+//   }
 {
   "id": "filter-top-candidates",
   "uses": "code.run",
   "needs": ["fetch"],
   "with": {
-    "source": `
-      async ({ input, tools }) => {
-        const { candidates } = await tools.fetchCandidates({ jobId: input.jobId });
-        const filtered = candidates.filter(c => c.score > 0.8);
-        const enriched = await Promise.all(
-          filtered.map(c => tools.lookupBackgroundCheck({ candidateId: c.id }))
-        );
-        return { count: enriched.length, top: enriched.slice(0, 5) };
+    "entrypoint": "filter.ts",
+    "files": {
+      "filter.ts": {
+        "content": "export async function run({ input, tools }) {\n  const { candidates } = await tools.fetchCandidates({ jobId: input.jobId });\n  const filtered = candidates.filter((c) => c.score > 0.8);\n  const enriched = await Promise.all(\n    filtered.map((c) => tools.lookupBackgroundCheck({ candidateId: c.id })),\n  );\n  return { count: enriched.length, top: enriched.slice(0, 5) };\n}",
+        "sha256": "sha256:8cf724f6f08ce056655852300621c42cff6eee61c79082dcb02f45e1b8646f26"
       }
-    `
+    },
+    "sandbox": { "network": "deny", "env": "deny", "fs": "deny" }
   },
   "input": { "jobId": "{{ input.jobId }}" },
   "output": {
@@ -165,7 +168,7 @@ If a name still collides after prefixing (or if you attach without a prefix and 
 
 The model never sees the raw candidate list. Every tool invocation from code is event-logged with `caller: "code"` — distinguishable from model-driven calls in `little events`.
 
-`code.run` steps have access to all `globalTools` (no per-step allowlist). The code body is auditable (visible in the LWIR's `with.source`), so unrestricted tool access is intentional.
+`code.run` steps have access to all of the workflow's `tools` (no per-step allowlist). The code is auditable (pinned by content and SHA-256 in the LWIR's `with.files`), so unrestricted tool access is intentional.
 
 ### Signature Change vs Prior Alpha
 
@@ -184,7 +187,7 @@ If your existing code body doesn't call tools, the change is just the destructur
 
 At compile time:
 
-- Each name in `globalTools` is read from the registry and its descriptor (`description` + `inputSchema` + `outputSchema`) is hashed into the `WorkflowVersion` capability snapshot.
+- Each name in the workflow's `tools` is read from the registry and its descriptor (`description` + `inputSchema` + `outputSchema`) is hashed into the `WorkflowVersion` capability snapshot.
 - Names not in the registry fail with `WorkflowMissingToolError`.
 - The planner sees tool descriptions and schemas when designing LWIR; it cannot invent new tools.
 

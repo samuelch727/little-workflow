@@ -1,6 +1,7 @@
 import { tool, type ToolSet } from "ai";
 import { z } from "zod";
 import { createContinuationId, createParkedToolResult } from "../execution/park-resume.js";
+import { presentInputTask } from "../human-input/requests.js";
 import { stableHash } from "../utils/canonical-hash.js";
 import type {
   HarnessContinuationLedger,
@@ -38,14 +39,14 @@ export function createTaskControlTools(config: {
       inputSchema: z.object({}),
       execute: async () => {
         const tasks = await ledger.listTasks({ sessionId });
-        return { tasks: tasks.map(presentTask) };
+        return { tasks: await presentTasks(tasks, results) };
       },
     }),
     get_task: tool({
       description: "Inspect one background harness task in the current session.",
       inputSchema: z.object({ taskId: taskIdSchema }),
       execute: async ({ taskId }) => {
-        return presentTask(await requireTask(ledger, sessionId, taskId));
+        return presentAnyTask(await requireTask(ledger, sessionId, taskId), results);
       },
     }),
     task_result: tool({
@@ -60,6 +61,9 @@ export function createTaskControlTools(config: {
         const task = await requireTask(ledger, sessionId, taskId);
         if (!isTerminal(task.status)) {
           return { status: "pending", taskId: task.taskId };
+        }
+        if (task.kind === "input" && results !== undefined) {
+          return presentInputTask({ results }, task);
         }
         const presented = presentTask(task);
         if (include?.includes("output") === true && results !== undefined && task.terminalResultId !== undefined) {
@@ -84,6 +88,7 @@ export function createTaskControlTools(config: {
           ...(config.originTurnId === undefined ? {} : { originTurnId: config.originTurnId }),
           ...(config.continuations === undefined ? {} : { continuations: config.continuations }),
           ...(config.resumeQueue === undefined ? {} : { resumeQueue: config.resumeQueue }),
+          ...(results === undefined ? {} : { results }),
         });
       },
     }),
@@ -142,7 +147,7 @@ export function createTaskControlTools(config: {
             taskId,
             ...(wakeups === undefined ? {} : { wakeups }),
           });
-          await driveContinuationsForCancelledTask({
+          await driveContinuationsForTerminalTask({
             sessionId,
             taskId,
             ledger,
@@ -260,6 +265,7 @@ async function awaitTaskPredicate(
     readonly originTurnId?: string;
     readonly continuations?: HarnessContinuationLedger;
     readonly resumeQueue?: HarnessResumeQueue;
+    readonly results?: HarnessResultStore;
   } = {},
 ) {
   const tasks = await Promise.all(predicate.taskIds.map((taskId) => requireTask(ledger, sessionId, taskId)));
@@ -291,8 +297,23 @@ async function awaitTaskPredicate(
 
   return {
     status: "satisfied" as const,
-    tasks: terminalTasks.map(presentTask),
+    tasks: await presentTasks(terminalTasks, options.results),
   };
+}
+
+/** The tasks as the model sees them: a question for a person carries its answer once it has one. */
+export async function presentTasks(
+  tasks: readonly HarnessTaskRecord[],
+  results: HarnessResultStore | undefined,
+): Promise<Record<string, unknown>[]> {
+  return Promise.all(tasks.map((task) => presentAnyTask(task, results)));
+}
+
+function presentAnyTask(
+  task: HarnessTaskRecord,
+  results: HarnessResultStore | undefined,
+): Promise<Record<string, unknown>> | Record<string, unknown> {
+  return task.kind === "input" && results !== undefined ? presentInputTask({ results }, task) : presentTask(task);
 }
 
 async function parkTaskPredicate(options: {
@@ -474,7 +495,11 @@ async function suppressWakeupsForCancelledTask(options: {
   }
 }
 
-async function driveContinuationsForCancelledTask(options: {
+/**
+ * Moves every open `await_tasks` wait on this task forward now that it is terminal, and queues the
+ * parked turn's resume once its wait is satisfied.
+ */
+export async function driveContinuationsForTerminalTask(options: {
   readonly sessionId: string;
   readonly taskId: HarnessTaskId;
   readonly ledger: HarnessTaskLedger;
@@ -507,6 +532,34 @@ async function driveContinuationsForCancelledTask(options: {
         continuation,
       });
     }
+  }
+}
+
+/**
+ * Moves every open task wait of a continuation forward whose tasks are already terminal, and
+ * queues the parked turn's resume once all its waits are over. For a continuation recorded after
+ * its tasks may have finished.
+ */
+export async function driveContinuationWaits(options: {
+  readonly continuation: HarnessContinuationRecord;
+  readonly ledger: HarnessTaskLedger;
+  readonly continuations: HarnessContinuationLedger;
+  readonly resumeQueue?: HarnessResumeQueue;
+}): Promise<void> {
+  for (const wait of options.continuation.waits) {
+    const predicate = waitPredicateAsTasks(wait.predicate);
+    if (wait.state !== "open" || predicate === undefined) continue;
+    const continuation = await options.continuations.get(options.continuation.continuationId);
+    if (continuation === undefined) return;
+    await driveAlreadySatisfiedTaskWait({
+      sessionId: continuation.sessionId,
+      predicate,
+      waitId: wait.waitId,
+      ledger: options.ledger,
+      continuations: options.continuations,
+      ...(options.resumeQueue === undefined ? {} : { resumeQueue: options.resumeQueue }),
+      continuation,
+    });
   }
 }
 

@@ -1,6 +1,8 @@
 import type { ModelMessage, UIMessage } from "ai";
 import { convertToModelMessages } from "ai";
 import { buildMemorySystemContext } from "../memory/memory.js";
+import { MEMORY_SKILL_NAME } from "../memory/skill.js";
+import { LOAD_SKILL_TOOL_NAME } from "../skills/load-skill-tool.js";
 import { resolveSkillsWithWarnings } from "../skills/skill.js";
 import type {
   FileWriter,
@@ -50,18 +52,28 @@ export async function buildModelMessages<TExtraBody>(
     warnings.push(...resolved.warnings);
   }
   if (skills.length > 0) {
+    // Without bash the agent opens skills with load_skill (assembleTurnTools adds it).
+    const bash = options.config.runtime?.bash !== false;
     systemParts.push(
       `Available skills:\n${skills
-        .map((skill) => `- ${skill.name}: ${skill.description}. Read details at ${skill.harnessDir}/SKILL.md`)
+        .map((skill) =>
+          bash
+            ? `- ${skill.name}: ${skill.description}. Read details at ${skill.harnessDir}/SKILL.md`
+            : `- ${skill.name}: ${skill.description}. Open it with ${LOAD_SKILL_TOOL_NAME}.`,
+        )
         .join("\n")}`,
     );
   }
 
-  const memoryContext = options.files
-    ? await buildMemorySystemContext(options.config.memory, options.files)
-    : undefined;
-  if (memoryContext) {
-    systemParts.push(memoryContext);
+  if (options.files && options.config.memory.length > 0) {
+    const memory = await buildMemorySystemContext(options.config.memory, options.files, {
+      readOnlyDirs: options.session.getReadOnlyPersistentDirs(),
+      hasMemorySkill: skills.some((skill) => skill.name === MEMORY_SKILL_NAME),
+    });
+    warnings.push(...memory.warnings);
+    if (memory.text) {
+      systemParts.push(memory.text);
+    }
   }
 
   if (options.messages) {

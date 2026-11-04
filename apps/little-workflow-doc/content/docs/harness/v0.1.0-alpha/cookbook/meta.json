@@ -1,0 +1,10 @@
+{
+  "title": "Cookbook",
+  "pages": [
+    "nextjs-use-chat",
+    "document-research-agent",
+    "customer-research-agent",
+    "internal-data-agent",
+    "gbrain-memory"
+  ]
+}

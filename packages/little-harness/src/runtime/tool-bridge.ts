@@ -28,9 +28,6 @@ export type RuntimeToolBridge = {
   invokeTool(path: string, argsJson: string): Promise<string>;
 };
 
-/** Managed-agents-named alias for the sandbox-facing tool proxy. */
-export type HarnessToolProxy = RuntimeToolBridge;
-
 export type RuntimeToolBridgeOptions<TExtraBody = unknown> = {
   tools: ToolSet;
   toolContext: HarnessToolExecutionContext<TExtraBody>;
@@ -279,14 +276,7 @@ async function emitToolCallEvent<TExtraBody>(
   await options.emit?.({
     type: event.type,
     occurrenceId: event.toolCallId,
-    payload: {
-      ...eventData.payload,
-      ...(event.type === "harness.tool_call.succeeded" &&
-        Object.hasOwn(event, "result") &&
-        event.result === undefined
-        ? { resultUndefined: true }
-        : {}),
-    },
+    payload: eventData.payload,
     metadata: eventData.metadata,
   });
 }

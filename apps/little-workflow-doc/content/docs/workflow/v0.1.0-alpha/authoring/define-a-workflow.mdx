@@ -1,0 +1,185 @@
+---
+title: Define a Workflow
+description: Author a workflow with defineWorkflow — plain input/output schemas, a model or a fixed plan, and inline tools.
+---
+
+`defineWorkflow` is how you author a workflow. You describe the job — plain `input`/`output` schemas, a model (or several model slots), the tools the plan may call, and optionally a planner config or a fixed plan — and it normalizes into the shape the runtime runs. Start with one `model` and inline tools; the same function takes the full config (model slots, `PlannerConfig`, `toolSelection`, `workflowVersionReuseStrategy`, worker and memory settings) when you need it. See [Workflow Config](/docs/workflow/v0.1.0-alpha/authoring/advanced-createlittleworkflow) for every field.
+
+> **Related but distinct.** Little Workflow owns workflow *authoring* (`defineWorkflow`). To hand a defined workflow to a Little Harness agent as a typed tool, adapt it with `asHarnessWorkflow`; see [Compose With Little Harness](/docs/workflow/v0.1.0-alpha/authoring/compose-with-harness).
+
+## The minimal shape
+
+```ts
+import { anthropic } from "@ai-sdk/anthropic";
+import { tool } from "ai";
+import { z } from "zod";
+import { defineWorkflow, runWorkflow } from "@little-stack/workflow";
+
+const Applicant = z.object({ applicantId: z.string(), resume: z.string() });
+const Verdict = z.object({
+  applicantId: z.string(),
+  score: z.number().min(0).max(100),
+  decision: z.enum(["advance", "reject", "maybe"]),
+  reason: z.string(),
+});
+
+export const reviewApplicants = defineWorkflow({
+  id: "applicants.review",
+  description: "Review applicants against role criteria; score each independently.",
+  input: z.object({ role: z.string(), criteria: z.string(), applicants: z.array(Applicant) }),
+  output: z.array(Verdict),                  // z.array(...) => array output inferred
+  model: anthropic("claude-sonnet-4-6"),     // one model; models: [...] takes several
+  tools: {                                   // inline, keyed by name; no registry
+    fetchScorecard: tool({
+      description: "Load the role scoring rubric.",
+      inputSchema: z.object({ role: z.string() }),
+      execute: async ({ role }) => loadRubric(role),
+    }),
+  },
+});
+```
+
+## What each field does
+
+| Field | Required | Notes |
+|---|---|---|
+| `id` | yes | Stable authoring identity for the workflow. |
+| `description` | no | Guides the planner; also the tool description when the workflow is handed to Little Harness. |
+| `policy` | no | Rules every model step must follow. The runtime adds them, word for word, to the system prompt of every `ai.generate` step. See [A policy](#a-policy). |
+| `label` | no | Human-friendly display name. |
+| `input` | no | A schema for the run input (Zod, Standard Schema, or JSON Schema). Validated at run start. |
+| `suggestedInput` | no | A schema hint shown to the planner. Not used to validate input. |
+| `output` | no | A plain schema — `z.array(...)` infers array output, a plain object infers object output, a string schema infers text — or an explicit `output.*` mode. |
+| `model` | one of `model`, `models`, `plan` | One AI SDK model (or `model(...)` slot) for the workflow's steps. |
+| `models` | one of `model`, `models`, `plan` | Several `model(...)` slots the plan chooses between by slot id. Pass `model` or `models`, not both. |
+| `planner` | no | A bare model (lifted into a `PlannerConfig`) or a full `PlannerConfig` (system prompt, skills, custom harness, `supervise`). Defaults to the first model. |
+| `plan` | no | A fixed plan, `{ steps }` or a complete LWIR document. Replaces the planner; see [A fixed plan](#a-fixed-plan). |
+| `tools` | no | AI SDK tools keyed by name, a `ToolRegistry`, or the names of tools the run supplies. |
+| `toolSelection` | no | Which declared tools the plan may reference. Default `"planner_selected"`. |
+| `workflowVersionReuseStrategy` | no | Whether the planner may reuse a prior compiled version: `"planner_reviewed"` (default), `"planner_reviews_each_run"` or `"always_fresh"`. See [Run A Workflow → Options](/docs/workflow/v0.1.0-alpha/running/run-a-workflow#options). |
+| `worker` | no | A `WorkerConfig` for the worker harness. |
+| `memory` | no | A `MemoryConfig` for memory-store mounts. |
+| `bash` | no | Bash capabilities for the harness sessions. |
+
+A workflow needs an `id` and a way to get a plan: a `model` (or `models`) for the planner to draft one, or a fixed `plan`. Everything else is optional.
+
+`input` and `output` must stay inside the [LWIR schema subset](/docs/workflow/v0.1.0-alpha/reference/lwir-reference#schema-subset). The subset accepts `.describe()`, `.min()`/`.max()`, enums, and string- or enum-keyed `z.record(...)`. It rejects `.positive()`/`.gt()` (`exclusiveMinimum`), `.regex()` (`pattern`), `.email()` (`format`), and `.default()`. The workflow fails to compile before any model is called. Validate finer constraints inside a tool.
+
+## Running it
+
+`runWorkflow(workflow, input, options?)` defaults the world to `localWorld()` and wires in the workflow's inline tools, so a typical run needs no `world` or `tools` plumbing:
+
+```ts
+const result = await runWorkflow(reviewApplicants, {
+  role: "Staff Engineer",
+  criteria: "8+ yrs distributed systems; strong written communication.",
+  applicants: await loadApplicants(),
+});
+
+result.output;        // Verdict[] — typed from the output schema
+result.usage.costUsd; // number | null — real USD, or null when nothing could be priced
+result.runId;         // re-runnable / replayable
+```
+
+`result.usage` also carries `inputTokens`, `cachedInputTokens`, `outputTokens`, `reasoningTokens`, `pricedCalls`, and `unpricedCalls`. `costUsd` is `null` when the run made model calls but none of them matched a registry entry — that is *unpriced*, not free. A real `0` is a genuine zero-dollar total, normally because the run made no model calls. See [Quickstart → What The Run Cost](/docs/workflow/v0.1.0-alpha/getting-started/quickstart#what-the-run-cost).
+
+`workflow.run(input, options?)` is the same call, with the same options:
+
+```ts
+const result = await reviewApplicants.run({
+  role: "Staff Engineer",
+  criteria: "8+ yrs distributed systems; strong written communication.",
+  applicants: await loadApplicants(),
+});
+```
+
+## Giving the planner a stronger model
+
+The planner that designs the plan defaults to the workflow's `model`. To give it a stronger model than the workers, pass a bare model under `planner` — it is lifted into a `PlannerConfig`:
+
+```ts
+defineWorkflow({
+  id: "applicants.review",
+  model: anthropic("claude-sonnet-4-6"),       // workers
+  planner: anthropic("claude-opus-4-7"),       // planner only
+  // ...input, output, tools
+});
+```
+
+## Several models
+
+To let the plan pick a model per step, list model slots under `models`. The planner references each by its slot id; the planner itself defaults to the first slot unless `planner` names another model:
+
+```ts
+import { model } from "@little-stack/workflow";
+
+defineWorkflow({
+  id: "applicants.review",
+  models: [
+    model(anthropic("claude-haiku-4-5"), { id: "fast", description: "Short classification." }),
+    model(anthropic("claude-sonnet-4-6"), { id: "deep", description: "Long-form reasoning." }),
+  ],
+  planner: { model: anthropic("claude-opus-4-7"), system: "Use `fast` for triage, `deep` for scoring." },
+  // ...input, output, tools
+});
+```
+
+## A fixed plan
+
+When you already know the steps, write them as `plan` and skip the planner. A fixed-plan workflow needs no model unless one of its steps calls one. The `{ steps }` form is completed from the definition: the plan's name, input schema and output schema come from `id`, `input` and `output`, and its permissions from the tools and model slots the steps use. Pass a complete LWIR document instead to control every field.
+
+```ts
+const input = z.object({ value: z.string() });
+
+export const echo = defineWorkflow({
+  id: "starter_echo",
+  input,
+  tools: {
+    echo: tool({
+      description: "Echo the value back.",
+      inputSchema: input,
+      execute: async ({ value }) => ({ echoed: value }),
+    }),
+  },
+  plan: {
+    steps: [
+      {
+        id: "echo",
+        uses: "tool.call",
+        with: { tool: "echo", args: { value: "{{ input.value }}" } },
+        output: { mode: "json", schema: true },
+      },
+    ],
+  },
+});
+
+const result = await runWorkflow(echo, { value: "hello" }); // result.output: { echoed: "hello" }
+```
+
+The plan is validated like a drafted one, but it is never redrafted or replaced: an invalid plan (a misspelled model slot, an unregistered tool) fails the run with the validation findings. Only the steps' own `with.tool` and `with.model` count toward its permissions, so tool arguments are passed as data even when they look like steps. The plan's hash is part of the workflow definition hash, so changing a step changes the hash. See the [LWIR Reference](/docs/workflow/v0.1.0-alpha/reference/lwir-reference) for the step types.
+
+## A policy
+
+When the workflow applies rules, such as a lending policy, put them in `policy` rather than the description. The runtime adds the policy, word for word, to the system prompt of every `ai.generate` step, whoever wrote the plan. A planner cannot paraphrase it, drop a rule or add a cut-off, and a fixed plan gets it too.
+
+```ts
+const preapproval = defineWorkflow({
+  id: "loan_preapproval",
+  description: "Pre-approve a mortgage application and write the applicant a letter.",
+  policy: [
+    "Decline when the debt-to-income ratio is above 0.43 or the credit score is below 580.",
+    "Approve when the score is 620 or more, the ratio is 0.43 or less, and income is verified.",
+    "Anything this policy does not cover goes to a human: refer, never decline.",
+  ].join("\n"),
+  model: anthropic("claude-sonnet-5-5"),
+  input,
+  output,
+  tools,
+});
+```
+
+The planner sees the policy too, so it can plan the steps the policy needs, and it is told not to copy the policy into the steps. The policy is not stored in the plan: a run reads it from the definition. Changing it sends a saved plan back to the planner for review, like a changed description.
+
+## Composing workflows
+
+To compose distinct workflows, adapt each one with `asHarnessWorkflow` and hand them to a Little Harness agent. See [Compose With Little Harness](/docs/workflow/v0.1.0-alpha/authoring/compose-with-harness). `runOrchestration` (the orchestrator agent) is deprecated.

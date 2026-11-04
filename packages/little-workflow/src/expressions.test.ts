@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { resolveExpressionValue, type ExpressionContext } from "./expressions.js";
+import {
+  resolveExpressionText,
+  resolveExpressionValue,
+  type ExpressionContext,
+} from "./expressions.js";
 
 function makeContext(
   stepsOverride: ExpressionContext["steps"] = {},
@@ -128,5 +132,39 @@ describe("expression resolution — steps.X.output backward compatibility", () =
 
     // The runtime resolver uses the object shape directly; output is still accessible.
     expect(resolveExpressionValue("{{ steps.worker.output.v }}", ctx)).toBe(3);
+  });
+});
+
+describe("expression resolution — resolveExpressionText", () => {
+  const ctx = makeContext({ credit: { output: { score: 712, flags: ["late"] } } });
+
+  it("fills embedded expressions into the surrounding text", () => {
+    expect(resolveExpressionText("Ticket {{ input.ticketId }} scored {{ steps.credit.output.score }}.", ctx))
+      .toBe("Ticket t1 scored 712.");
+  });
+
+  it("stringifies a template-only value instead of keeping its type", () => {
+    expect(resolveExpressionText("{{ steps.credit.output }}", ctx)).toBe('{"score":712,"flags":["late"]}');
+    expect(resolveExpressionText("{{ steps.credit.output.score }}", ctx)).toBe("712");
+  });
+
+  it("passes plain text through and fails loudly on a path that does not exist", () => {
+    expect(resolveExpressionText("No templates here.", ctx)).toBe("No templates here.");
+    expect(() => resolveExpressionText("Hi {{ input.missing }}", ctx)).toThrow(/could not be resolved/u);
+  });
+});
+
+describe("expression resolution — a back-edge step that has not run yet", () => {
+  const ctx = makeContext({});
+
+  it("gives no lastOutput, an empty allVisits, and empty text", () => {
+    expect(resolveExpressionValue("{{ steps.review.lastOutput }}", ctx)).toBeUndefined();
+    expect(resolveExpressionValue("{{ steps.review.lastOutput.note }}", ctx)).toBeUndefined();
+    expect(resolveExpressionValue("{{ steps.review.allVisits }}", ctx)).toEqual([]);
+    expect(resolveExpressionText("Notes: [{{ steps.review.lastOutput.note }}]", ctx)).toBe("Notes: []");
+  });
+
+  it("still fails for output, which needs a completed step", () => {
+    expect(() => resolveExpressionValue("{{ steps.review.output }}", ctx)).toThrow(/incomplete step 'review'/u);
   });
 });

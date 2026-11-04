@@ -1,15 +1,16 @@
-import { mkdir, rm, writeFile } from "node:fs/promises";
 import * as path from "node:path";
 import { HarnessPathError } from "../errors.js";
-import { diffSnapshots, snapshotFolder, type FolderSnapshot } from "../files/diff.js";
-import { normalizeHarnessPrefix, resolveHarnessPath } from "../files/path-policy.js";
+import { diffSnapshots, type FolderSnapshot } from "../files/diff.js";
+import { normalizeHarnessPrefix, resolveHarnessPath, type HarnessRootDirs } from "../files/path-policy.js";
+import { diskStorage, type WorkspaceStorage } from "../files/storage.js";
 import { sha256Hex } from "../ids.js";
 import type { LocalHostPaths } from "../local-host/paths.js";
-import type { LocalHarnessSession } from "../local-host/session-store.js";
+import type { VirtualHostPaths } from "../virtual-host/paths.js";
 import { createTraceErrorEnvelope } from "../trace/error.js";
 import type {
   FileChangeSet,
   FileContent,
+  HarnessSession,
   PersistentDir,
   PersistentDirCommitOptions,
   PersistentDirCommitResult,
@@ -18,8 +19,13 @@ import type {
 } from "../types.js";
 
 export type PreparePersistentDirsOptions<TExtraBody = unknown> = {
-  hostPaths: LocalHostPaths;
-  session: LocalHarnessSession;
+  session: HarnessSession;
+  /** Where the session's managed roots are: its directories, or its filesystem's folders. */
+  roots: HarnessRootDirs;
+  /** Where checkouts are written. Default: the disk. */
+  storage?: WorkspaceStorage;
+  /** Handed to Persistent Dir callbacks as `sessionHostPaths`; localHost passes its paths. */
+  hostPaths?: LocalHostPaths | VirtualHostPaths;
   persistentDirs: PersistentDir<TExtraBody>[];
   extraBody?: TExtraBody | undefined;
 };
@@ -34,6 +40,8 @@ type LoadedDir<TExtraBody> = {
   checkoutRoot: string;
   before: FolderSnapshot;
   cursor?: unknown;
+  /** False when `canWrite` said no for this turn: the dir is mounted read-only and not stored. */
+  writable: boolean;
 };
 
 export async function preparePersistentDirs<TExtraBody>(
@@ -41,19 +49,28 @@ export async function preparePersistentDirs<TExtraBody>(
 ): Promise<PreparedPersistentDirs> {
   const loaded: LoadedDir<TExtraBody>[] = [];
   const session = options.session;
+  const storage = options.storage ?? diskStorage();
 
   return {
     async load(loadOptions = {}) {
       loaded.length = 0;
+      const writable = new Map<PersistentDir<TExtraBody>, boolean>();
+      for (const dir of options.persistentDirs) {
+        writable.set(
+          dir,
+          dir.commit !== "read-only" &&
+            (dir.canWrite === undefined || (await dir.canWrite({ extraBody: options.extraBody })) === true),
+        );
+      }
       session.setReadOnlyPersistentDirs(
         options.persistentDirs
-          .filter((dir) => dir.commit === "read-only")
+          .filter((dir) => !writable.get(dir))
           .map((dir) => normalizeHarnessPrefix(dir.harnessDir)),
       );
 
       for (const dir of options.persistentDirs) {
         const loadedAt = Date.now();
-        const resolved = resolveHarnessPath(session.paths, dir.harnessDir, "write", {
+        const resolved = resolveHarnessPath(options.roots, dir.harnessDir, "write", {
           bypassReadOnly: true,
         });
         if (resolved.root !== "persistent") {
@@ -62,24 +79,26 @@ export async function preparePersistentDirs<TExtraBody>(
           });
         }
 
-        const checkoutRoot = resolved.realPath;
-        await rm(checkoutRoot, { recursive: true, force: true });
-        await mkdir(checkoutRoot, { recursive: true });
+        const checkoutRoot = storage.locate(resolved);
+        await storage.removeTree(checkoutRoot);
+        await storage.makeDir(checkoutRoot);
 
         const { files, cursor } = await loadDir(dir, options);
-        await writeSnapshot(checkoutRoot, files);
-        const before = await snapshotFolder(checkoutRoot);
+        await writeSnapshot(storage, checkoutRoot, files);
+        const before = await storage.snapshot(checkoutRoot);
         loaded.push({
           dir,
           checkoutRoot,
           cursor,
           before,
+          writable: writable.get(dir) ?? false,
         });
         await loadOptions.emit?.({
           type: "harness.persistent_dir.loaded",
           metadata: {
             harnessDir: dir.harnessDir,
             commit: dir.commit ?? "after-turn",
+            ...(dir.commit !== "read-only" && !writable.get(dir) ? { readOnly: true } : {}),
             durationMs: Date.now() - loadedAt,
             fileCount: Object.keys(before).length,
             files: snapshotFileMetadata(dir.harnessDir, before),
@@ -97,7 +116,8 @@ export async function preparePersistentDirs<TExtraBody>(
       for (const item of loaded) {
         const commitMode = item.dir.commit ?? "after-turn";
         const shouldCommit =
-          mode === "manual" ? commitMode === "manual" : commitMode === "after-turn";
+          item.writable &&
+          (mode === "manual" ? commitMode === "manual" : commitMode === "after-turn");
         if (!shouldCommit) {
           commits.push({
             harnessDir: item.dir.harnessDir,
@@ -107,7 +127,7 @@ export async function preparePersistentDirs<TExtraBody>(
           continue;
         }
 
-        const after = await snapshotFolder(item.checkoutRoot);
+        const after = await storage.snapshot(item.checkoutRoot);
         const changes = diffSnapshots(item.before, after);
         const changeSummary = persistentDirChangeSummary(item.dir.harnessDir, changes, item.before);
         const commitStartedAt = Date.now();
@@ -220,11 +240,13 @@ async function loadDir<TExtraBody>(
   return { files: {} };
 }
 
-async function writeSnapshot(root: string, files: Record<string, FileContent>): Promise<void> {
+async function writeSnapshot(
+  storage: WorkspaceStorage,
+  root: string,
+  files: Record<string, FileContent>,
+): Promise<void> {
   for (const [file, content] of Object.entries(files)) {
-    const target = resolveStorageFilePath(root, file);
-    await mkdir(path.dirname(target), { recursive: true });
-    await writeFile(target, await toUint8Array(content));
+    await storage.writeFile(resolveStorageFilePath(storage.path, root, file), await toUint8Array(content));
   }
 }
 
@@ -291,7 +313,7 @@ function hasFilesResult(
   return "files" in result && typeof result.files === "object" && result.files !== null;
 }
 
-function resolveStorageFilePath(root: string, file: string): string {
+function resolveStorageFilePath(path: WorkspaceStorage["path"], root: string, file: string): string {
   if (file.startsWith("/") || file.includes("\0") || file.split(/[\\/]/).includes("..")) {
     throw new HarnessPathError("Persistent Dir file paths must be relative", { path: file });
   }

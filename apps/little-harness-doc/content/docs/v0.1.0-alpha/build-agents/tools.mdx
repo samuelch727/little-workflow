@@ -9,7 +9,6 @@ Little Harness keeps the tool API familiar. A normal AI SDK-style tool definitio
 
 ```ts
 const queryCustomers = tool({
-  name: "query_customers",
   description: "Query customer account data.",
   inputSchema: z.object({
     accountId: z.string().optional(),
@@ -17,7 +16,16 @@ const queryCustomers = tool({
   }),
   execute: async (input) => customerDb.query(input),
 });
+
+createHarness({ /* ... */ tools: { query_customers: queryCustomers } });
 ```
+
+AI SDK `tool()` has no `name` field. The model sees the tool under its key in
+`tools`, or, for a tool discovered from an agent folder, under its file name.
+
+Names such as `start_review` are ordinary tool names. They must not collide with
+an actual generated workflow launcher: a workflow named `candidate.review` reserves
+`start_candidate_review`. Harness rejects that collision before calling the model.
 
 ## Return Small Results Inline
 
@@ -38,13 +46,17 @@ For planned large outputs, a tool should write the full payload into the harness
 filesystem and return a compact preview to the model.
 
 ```ts
+import { harnessToolContext } from "@little-stack/harness";
+
 const queryCustomers = tool({
   description: "Query customer account data.",
   inputSchema,
-  execute: async (input, ctx) => {
+  execute: async (input, options) => {
     const rows = await customerDb.query(input);
+    // The AI SDK types do not declare the harness context; read it through the typed accessor.
+    const { files } = harnessToolContext(options);
 
-    const file = await ctx.files.writeJSON(
+    const file = await files.writeJSON(
       "/artifacts/tool/query-customers/result.json",
       rows,
     );
@@ -64,6 +76,10 @@ tools. The model gets a path and summary instead of every row.
 Use `/session/` for data that only needs to live in the current session. Use
 `/artifacts/` for outputs that the host app may want to inspect, export, or show
 to the user.
+
+When the harness has `humanInput`, the context also has `ask`, for a tool that
+needs a person's approval or answer before it acts. See
+[Asking A Person](/docs/v0.1.0-alpha/build-agents/asking-a-person#ask-from-your-own-tool).
 
 ## Call Tools From Runtime JavaScript
 
@@ -146,3 +162,7 @@ Good tools have:
 - explicit side effects
 
 When a tool writes outside the harness, name that side effect clearly. `save_report` is better than `finish`.
+When workflow steps call such a tool (your configured workflows, workflows the agent
+defines, or its ad-hoc plans), wrap it with `once` so a retried run does not write
+twice. See
+[Tools That Write](/docs/v0.1.0-alpha/build-agents/dynamic-workflows#tools-that-write).

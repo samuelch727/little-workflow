@@ -3,11 +3,12 @@
 Dogfoods the little-harness managed-agents ports end to end, across real process
 boundaries:
 
-- **Sandbox** — the harness runs agent bash through `subprocessSandbox()` (a child
-  process spawned with a stripped environment).
+- **Sandbox** — the harness runs agent bash through
+  `localHost({ sandbox: subprocessSandbox() })` (a child process spawned with a stripped
+  environment).
 - **Session log** — the durable event log lives behind `startSessionLogServer()` with a
-  file-backed store (`createFileSessionLog`), reached via `remoteSessionLog()` with
-  bearer auth.
+  file-backed store (`fileSessionLog`), reached via `remoteSessionLog()` with
+  bearer auth. All three come from `@little-stack/harness/remote-session`.
 - **Kill and resume** — the phase-1 harness process SIGKILLs itself after recording two
   turns. The session-log **server is then restarted** over the same file, and a fresh
   harness process (new pid, new data dir; only the run ids and the log URL are shared)
@@ -24,7 +25,7 @@ The demo asserts, via process exit code:
 
 ```bash
 pnpm install
-pnpm --filter little-harness build   # the subprocess sandbox worker runs from dist/
+pnpm --filter @little-stack/harness build   # the subprocess sandbox worker runs from dist/
 pnpm --filter remote-resume demo
 ```
 

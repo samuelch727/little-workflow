@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import registry from "./model-registry.json" with { type: "json" };
 
 export type ModelInfo = {
   readonly description: string;
@@ -20,6 +20,8 @@ export type ModelInfo = {
    * - **Tiered by prompt size.** `google/gemini-2.5-pro` is listed at its ≤200k-token
    *   tier ($1.25 / $10.00); prompts above 200k tokens bill at $2.50 / $15.00. A single
    *   rate pair cannot carry the breakpoint, so long-prompt Gemini spend is under-stated.
+   *   `anthropic/claude-haiku-5-5` is the same: listed at its ≤100k-token tier ($0.10 /
+   *   $0.50); a request whose prompt is over 100k tokens bills at $0.50 / $2.50.
    * - **Cache storage billed per hour.** Gemini's context cache adds a *storage* fee of
    *   $4.50 (Pro) / $1.00 (Flash) per 1M tokens **per hour** on top of the per-token
    *   cache-read rate. That is a function of wall-clock time, not of tokens, so no
@@ -75,7 +77,7 @@ export type ModelInfo = {
   readonly pricingVerifiedAt?: string;
 };
 
-const MODEL_REGISTRY = readModelRegistry();
+const MODEL_REGISTRY = registry as Readonly<Record<string, ModelInfo>>;
 
 /**
  * The bundled registry, as a plain record.
@@ -148,21 +150,4 @@ export function getModelInfoFor(
     }
   }
   return undefined;
-}
-
-function readModelRegistry(): Readonly<Record<string, ModelInfo>> {
-  for (const url of modelRegistryUrls()) {
-    if (!existsSync(url)) {
-      continue;
-    }
-    return JSON.parse(readFileSync(url, "utf8")) as Readonly<Record<string, ModelInfo>>;
-  }
-  throw new Error("Unable to locate model-registry.json.");
-}
-
-function modelRegistryUrls(): readonly URL[] {
-  return [
-    new URL("./model-registry.json", import.meta.url),
-    new URL("../src/model-registry.json", import.meta.url),
-  ];
 }

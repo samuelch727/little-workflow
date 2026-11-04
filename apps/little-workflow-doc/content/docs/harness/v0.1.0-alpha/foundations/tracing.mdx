@@ -1,0 +1,169 @@
+---
+title: Tracing
+description: What the host app can inspect after an agent run.
+---
+
+Tracing is one of the main reasons to have a harness instead of a loose pile of
+tool calls.
+
+Little Harness records what happened without dumping every detail back into the
+model context. The trace is a host-facing debug record, not agent memory and not
+a second transcript.
+
+## What The Trace Records
+
+A useful trace includes:
+
+- session start and end
+- mounted filesystem roots and their file metadata
+- model requests and responses
+- tool calls and results
+- artifact writes
+- shell commands, execution-tier switches, and environment teardown failures
+- file changes
+- Persistent Dir loads and commits
+- commit failures and retries
+- outcomes reported after the run (`outcome.reported`, see [Outcome Capture](/docs/harness/v0.1.0-alpha/build-agents/outcomes))
+
+Each Local Host trace event is newline-delimited JSON with a versioned envelope.
+
+```ts
+type HarnessTraceEvent = {
+  schemaVersion: "lh.trace.v2";
+  type: string;
+  eventId: string;
+  sequence: number;
+  sessionId: string;
+  turnId?: string;
+  stepId?: string;
+  parentEventId?: string;
+  timestamp: string;
+  metadata: Record<string, unknown>;
+};
+```
+
+The dotted event names are intentionally distinct from Little Workflow event
+names. When a developer has both tools open, Little Harness traces read like
+agent-runtime observability:
+
+```txt
+harness.model.called
+harness.tool_call.succeeded
+harness.file.updated
+harness.persistent_dir.commit.failed
+```
+
+## Host-Facing By Default
+
+The trace is primarily for the host app, developer console, audit views, and debugging. It is not automatically injected into the agent's normal context.
+
+That separation matters. A persistence commit failure is useful to the app, but usually not useful to a model that has already finished its response.
+
+## Content Policy
+
+The trace captures enough to debug a run without becoming a raw data dump.
+
+By default, Little Harness records:
+
+- byte counts, hashes, media types, paths, and lifecycle metadata
+- small previews for model text, tool inputs, tool outputs, and diffs
+- artifact references for large captured content
+- before/after file metadata for file changes
+- bounded unified diffs for text file changes
+
+Large captured content is written under `/artifacts/trace/...` and referenced by
+path. Large tool results that are sent back to the model are written under
+`/artifacts/tool-results/...` and also appear as ordinary file and artifact
+events.
+
+The trace does not capture:
+
+- API keys, cookies, auth headers, or provider credentials
+- raw mounted file contents
+- raw binary payloads such as PDFs, images, archives, audio, or video
+- hidden model reasoning that the provider does not expose
+- deleted file contents after deletion
+- anything matched by the redaction policy
+
+## Debugging File Changes
+
+File events answer what changed without forcing a developer to open the
+session folder first.
+
+```json
+{
+  "type": "harness.file.updated",
+  "metadata": {
+    "path": "/persistent/user/notes.md",
+    "root": "persistent",
+    "source": "agent",
+    "before": {
+      "bytes": 41,
+      "sha256": "3d2c4a1a6c1f2a2f0e8070f6354c0c7376aeb57c4a7499c06f917f780cf5f7c4"
+    },
+    "after": {
+      "bytes": 57,
+      "sha256": "cd40a2a40f0c138afdf01fd497de47e264b192b8cf0cfceff3da839f8917b0ef"
+    },
+    "diff": {
+      "available": true,
+      "format": "unified",
+      "preview": "@@ -1 +1\\n-old note\\n+new note\\n",
+      "truncated": false
+    }
+  }
+}
+```
+
+For large diffs, the trace stores a `contentRef` instead of a long inline
+preview.
+
+## Result Shape
+
+The stream result exposes high-level trace handles through a `finished` promise, so the HTTP response can stream while the host app still receives control-plane metadata.
+
+```ts
+const result = streamHarness({ harness, messages, session, extraBody });
+const finished = await result.finished;
+
+console.log(finished.trace.id);
+console.log(finished.trace.path);
+if (finished.status === "completed") console.log(finished.persistence.status);
+```
+
+The exact trace backend can change. The developer experience should not require
+a trace backend decision before a local harness works.
+
+## Sending traces to LittleDB
+
+> **Preview:** the `@little-stack/littledb` client is not published yet and needs a LittleDB
+> service that is not publicly available. See [Using LittleDB](/docs/littledb/harness).
+
+The local trace stays where it is. To also see turns in LittleDB, hand a LittleDB tracer to
+`createHarness({ onEvent })` or to a per-run `generateHarness`/`streamHarness` call:
+
+```ts
+// Preview — @little-stack/littledb is not published yet.
+const db = createLittleDB({ url: process.env.LITTLEDB_URL!, apiKey: process.env.LITTLEDB_API_KEY! });
+const tracer = db.harnessTracer({ harness: "support-desk" });
+
+createHarness({
+  // ...
+  onEvent: tracer.onEvent,
+  trace: { content: { previewBytes: 65_536 } },
+});
+```
+
+The tracer turns each turn's events into one trace: the turn, an `llm` span per model call with
+its token usage, and a `tool` span per tool call. It reads the events as they are emitted and sends
+them in the background, so harness execution and local trace persistence never depend on LittleDB
+being reachable.
+
+LittleDB sees what the events carry. Events carry the small previews described under
+[Content Policy](#content-policy), 512 UTF-16 code units by default. `trace.content.previewBytes`
+is the legacy option name for that code-unit bound; a boundary drops a dangling high surrogate.
+It is not a UTF-8 storage quota. Artifact/file ceilings and byte/hash metadata still use actual
+UTF-8 bytes. Raise the preview limit when LittleDB should show more prompt and output text;
+a preview alone does not establish that full content was captured.
+
+LittleDB also accepts OpenTelemetry (OTLP/HTTP) traces, for apps that already export them.

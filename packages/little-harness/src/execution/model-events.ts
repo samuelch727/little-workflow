@@ -79,7 +79,12 @@ export async function modelRespondedEventData(options: ModelRespondedMetadataOpt
     response.output = result.output;
   }
   if (Array.isArray(result.toolCalls)) {
-    response.toolCalls = result.toolCalls.filter(isJsonLike);
+    // AI SDK 7 attaches a non-enumerable symbol holding the pre-validation
+    // input to tool calls. Persist their JSON fields rather than that internal
+    // object; nested input still passes through the strict durable validator.
+    response.toolCalls = result.toolCalls.filter(isJsonLike).map((call) =>
+      isObject(call) ? Object.fromEntries(Object.entries(call)) : call
+    );
   }
   if (result.usage !== undefined && isJsonLike(result.usage)) {
     response.usage = result.usage;

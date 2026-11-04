@@ -1,19 +1,57 @@
 ---
 title: Glossary
-description: Short definitions for Little Harness concepts.
+description: Short definitions for Little Harness and its Little Compute integration.
 ---
+
+Little Harness keeps the durable conversation and file vocabulary even when a
+deployment uses Little Compute. Compute terms describe logical work and
+temporary execution capacity; they do not rename a Harness Session.
 
 ## A
 
-**Artifact** — A file or payload produced inside the harness, usually too large or too durable to keep inline in model context.
+**Agent Group** — The public Harness-facing handle for a Little Compute Task
+Scope: one immutable, atomically sealed set of child Tasks with a declared join
+and reduction policy.
+
+**Approval** — Authorization for one exact action digest. An Approval for one
+digest cannot authorize a modified action.
+
+**Artifact** — An immutable file or payload with verified identity and
+provenance, usually too large or too durable to keep inline in model context.
+Examples include patches, logs, test reports, screenshots, and Continuation
+Capsules.
+
+**Attempt** — One retryable execution of a Little Compute Task. An Attempt is
+durable independently of a sandbox and can use zero or more sequential Sandbox
+Leases.
+
+## C
+
+**Cell** — The Little Compute correctness, database, scheduling, and
+blast-radius boundary that owns an Operation for one writable ownership epoch.
+
+**Change Set** — An immutable code result relative to a Repository Snapshot.
+It records the producing Task and Attempt rather than mutating shared product
+state automatically.
+
+**Continuation Capsule** — A credential-free Artifact containing the exact
+Harness event, File Snapshot, workspace generation, Task Scope, and pinned
+configuration cursors needed to resume an Attempt on another trusted runner.
+It is a derived checkpoint, not independent mutation authority.
 
 ## E
 
 **Export** — A deliberate app-level write that moves a harness artifact or result into product state.
 
-**Execution API** — The public call surface for a harness. `streamHarness()` streams an AI SDK-compatible UI response; `generateHarness()` returns a completed result. Both should share the same session, input, tool, artifact, persistence, and trace semantics.
+**Execution API** — The public call surface for a harness. `streamHarness()` streams an AI SDK-compatible UI response; `generateHarness()` returns a completed result. Both should share the same Harness Session, input, tool, Artifact, persistence, and trace semantics.
 
 **Extra Body** — App-defined request context passed to execution calls, tools, Persistent Dir callbacks, events, and trace metadata.
+
+## F
+
+**File Snapshot** — An immutable, content-addressed root for the Session Files
+committed at one workspace generation. It is distinct from a provider
+filesystem checkpoint, rootfs snapshot, or memory snapshot.
 
 ## H
 
@@ -23,31 +61,95 @@ description: Short definitions for Little Harness concepts.
 
 **Harness Dir** — A directory path inside the Little Harness filesystem, such as `/persistent/user`. It is separate from the source directory, object-store prefix, or app storage record that backs it.
 
-**Harness Memory** — An opt-in Persistent Dir convenience layer that lets the model save compact durable lessons through `remember` and receive a bounded memory index in future turns.
+**Harness Memory** — Opt-in long-term memory: a Persistent Dir of plain files the model reads and edits with its file tools, listed in every turn's prompt, with a built-in `memory` skill on how to keep it.
 
 ## L
 
-**Local Host** — The zero-service development host for Little Harness. It stores session folders, artifacts, traces, local Persistent Dir sources, and locks under a local `dataDir`.
+**Lease Resource Grant** — A conserved Little Compute right for the CPU,
+memory, disk, browser, and related capacity required by one Sandbox Lease. The
+grant must exist before provisioning and remains accounted for until safe
+release; it is not the provider sandbox itself.
+
+**Local Host** — The zero-service development host for Little Harness. It stores Harness Session folders, Artifacts, traces, local Persistent Dir sources, and locks under a local `dataDir`.
 
 ## M
 
-**Message Staging** — The pre-turn hook that lets a developer turn uploaded chat-message files into session files and return a small path-only notice for the model.
+**Message Staging** — The pre-turn hook that lets a developer turn uploaded chat-message files into Session Files and return a small path-only notice for the model.
+
+## O
+
+**Operation** — One root user intent managed by Little Compute, such as one UI
+comment or requested code change. It owns the root Task graph, budgets,
+convergence, and final result within one home Cell ownership epoch.
 
 ## P
 
-**Persistent Dir** — An opt-in developer-backed directory exposed inside a session at a `harnessDir` so selected files can persist across sessions.
+**Persistent Dir** — An opt-in developer-backed directory exposed inside a Harness Session at a `harnessDir` so selected files can persist across Harness Sessions.
+
+**Project** — Little Compute's tenant-scoped configuration boundary for
+policies, repositories, Agent Definitions, Templates, and execution profiles.
 
 **Project Dir** — An explicit local filesystem source reference that must resolve inside the configured project root before Local Host exposes it.
 
+## R
+
+**Repository Materialization** — An ephemeral, private checkout or mount made
+from a Repository Snapshot and the current Attempt workspace generation. It is
+a disposable cache, never a second mutable file authority.
+
+**Repository Snapshot** — An immutable, normalized repository tree and lineage
+point used as the base for Tasks and Change Sets.
+
 ## S
 
-**Session** — The durable isolated boundary for one conversation or job. Owns workspace, artifacts, trace, and continuation handle.
+**Sandbox Lease** — Temporary, fenced authority to attach one provider sandbox
+generation to an Attempt at an expected workspace generation. An Attempt can
+hold zero Leases while reasoning or waiting and later acquire sequential
+Leases; it has at most one writable attachment at a time.
 
-**Session Files** — Files inside one session's isolated filesystem. They can be written by the app, message staging, tools, or the agent, and persist across turns in that session.
+**Scheduler Lane** — A fenced, high-throughput Little Compute admission
+partition that spends only the conserved rights delegated to its current
+epoch. It does not own Task truth or provider node placement.
+
+**Scheduling Domain** — A Little Compute capacity and fairness boundary whose
+allocator delegates conserved rights to Scheduler Lanes.
+
+**Session / Harness Session** — The durable isolated boundary for one
+conversation or job. It owns conversation replay, Session Files, Artifacts,
+trace, and continuation correlation. It is not a VM, container, checkout,
+Attempt, or Sandbox Lease.
+
+**Session Files** — Files inside one Harness Session's isolated filesystem.
+They can be written by the app, message staging, tools, or the agent, and
+persist across turns in that Harness Session.
+
+**Shared Execution Context** — An immutable Task-Scope base that pins the
+Repository Snapshot, Template, base File Snapshot, dependency or index inputs,
+and verification base shared by the Scope's members.
 
 **Skill** — Procedural knowledge exposed read-only for the agent, usually as a `SKILL.md` file plus supporting material.
 
 ## T
+
+**Task** — One logical, durable unit of work in a Little Compute Operation
+graph. A Task can have retry Attempts, but has at most one committed successful
+winner. Harness may expose a short Harness Session-scoped handle such as
+`task_1` while Compute stores the globally unique correlation.
+
+**Task Execution Context** — An immutable per-Task overlay on a Shared
+Execution Context. It pins the managed Agent Definition or attached
+coordinator identity, input Artifacts, allowed narrower authority, and result
+schema.
+
+**Task Publication** — A fenced immutable `progress`, `finding`,
+`change_intent`, `change_preview`, `work_claim`, `check`, `evidence`, or
+`needs_input` record from an Attempt. A Publication can inform a parent or UI,
+but is not a winning Task result by itself.
+
+**Task Scope** — An immutable set of Little Compute Tasks created atomically
+with member order, dependencies, budgets, join predicate, and bounded reduction
+policy. It is exposed to Harness callers as an Agent Group; later fan-out
+creates a new Scope instead of mutating membership.
 
 **Tool** — A host-provided capability exposed to the agent.
 
@@ -55,4 +157,13 @@ description: Short definitions for Little Harness concepts.
 
 ## W
 
-**Workspace** — Avoid for Little Harness docs when referring to the agent-visible filesystem. Prefer **Session Files** or `/session/`.
+**Workspace Generation** — A monotonic Attempt-local pointer to one immutable
+File Snapshot committed at a command or quiescence boundary. A Sandbox Lease
+must attach at the expected generation, and advancing the pointer is a fenced
+compare-and-set.
+
+**Workspace** — Avoid this unqualified word in Little Harness docs when
+referring to the agent-visible filesystem. Prefer **Session Files** or a path
+such as `/session/`. In Little Compute, use the precise term **workspace
+generation** only for the Attempt's canonical File Snapshot pointer and
+**Repository Materialization** for a disposable checkout or mount.

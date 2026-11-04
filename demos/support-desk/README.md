@@ -1,7 +1,8 @@
 # support-desk — when the failure is a wrong ACTION
 
-A τ²-bench-shaped customer-support agent for a fictional homewares store, wired into the
-same littleDB self-improvement loop as `demos/kb-chatbot`.
+A τ²-bench-shaped customer-support agent for a fictional homewares store, wired into
+LittleDB: each session resolves the version it runs on, each episode is a trace with its
+scores, and proposed versions are gated by experiments this demo runs itself.
 
 The kb demo measures whether an agent says the right thing. This one measures whether it
 **does** the right thing. Its failures are refunds outside the window, refunds for the full
@@ -12,10 +13,13 @@ transcript grader; all of them are visible in a database.
 ```
 node experiment/verify-truth.mjs        # ground the scenarios against the seed data
 node experiment/run.mjs --seed          # fresh episode area
-node experiment/run.mjs --traffic       # 20 optimizer scenarios on prompt v1 → graded, reacted
-node experiment/run.mjs --gate --k 3    # 15 gate scenarios: no reactions, no telemetry, pass^k
-node experiment/run.mjs --status        # harness metrics + live channel pointer
-pnpm test                               # the whole thing, hermetically, in ~5 seconds
+node experiment/run.mjs --traffic       # 20 optimizer scenarios on prompt v1 → traced, graded, scored
+node experiment/run.mjs --gate --k 3    # 15 gate scenarios: no scores, no traces, pass^k
+node experiment/run.mjs --dataset       # both sets as a LittleDB dataset: gate = holdout, optimizer = dev
+node experiment/run.mjs --worker        # run LittleDB's experiments (proposal gates) here
+node experiment/run.mjs --propose <f>   # propose a prompt file as the next version
+node experiment/run.mjs --status        # versions, proposals and datasets in LittleDB
+pnpm test                               # the whole thing, hermetically, in ~10 seconds
 ```
 
 ---
@@ -121,28 +125,30 @@ two times in three is not a support desk that works.
 | `optimizer-truth.json` | 14 | 3 | 3 | **20** |
 | `gate-truth.json` | 12 | 2 | 1 | **15** |
 
-Tier A is a single turn with an outcome reported. Tier B adds scripted pushback and still
-reports. **Tier C adds pushback and reports nothing at all** — invisible to the success
-metric, its failure existing only in what the customer typed. That is the tier that asks
-whether dreaming can read a conversation.
+Tier A is a single turn, scored. Tier B adds scripted pushback and is still scored.
+**Tier C adds pushback and is scored nothing at all** — invisible to the success metric, its
+failure existing only in what the customer typed. That is the tier that asks whether a
+reviewer can read a conversation.
 
 Kinds, across both sets: fair refunds, delivery-window traps, out-of-window, undelivered,
 final sale, opened/partial, double refunds, over-limit escalations, charge disputes,
 verification failures, exchanges in and out of window, address changes.
 
 **Pushback fires only when the customer's ask has *not* been granted.** Arguing with an agent
-that just did what you asked is theatre, and it would poison both the metric and littleDB's
+that just did what you asked is theatre, and it would poison both the metric and LittleDB's
 pushback detector with frustration nobody felt. Under v1 the delivery-window traps are
 refused, so their pushback fires; the scenarios v1 wrongly *grants* stay one turn long.
 
-Every follow-up turn is checked against a verbatim copy of littleDB's LIT-51 detector
+Every follow-up turn is checked against a verbatim copy of LittleDB's LIT-51 detector
 (`pushback-heuristic-v1`, 13 patterns) — a tier-C failure that matched no pattern would be a
-failure littleDB could never hear about.
+failure LittleDB could never hear about.
 
 The two sets share **no id, no order and no turn text**, checked by both the grounding script
 and the test suite. That is the sealed dev/gate split of the research synthesis §7, and the
-gate enforces it mechanically: `--gate` wires no reporter and reports no outcome, so a gate
-episode never becomes run history a later dream can be tuned on.
+gate enforces it mechanically: `--gate` creates no tracer and sends no score, so a gate
+episode never becomes history a later proposal can be tuned on. `--dataset` carries the same
+split into LittleDB: the gate set is the `holdout` split a proposal is gated on, and the
+optimizer set is the `dev` split LittleDB's reviewer may read.
 
 ## 5. Nothing here is trusted
 
@@ -172,27 +178,52 @@ agents/support/
   agent.ts            createHarness, bash OFF, one tool call at a time
   policy.md           the truth, returned verbatim by read_policy
   policy.mjs          the numbers and the derivations, in one place
-  instructions.md     the honest prompt (used when littleDB is not in the loop)
-  env.ts              .env.local loader chain, model slots, the globalThis model seam
+  instructions.md     the honest prompt (used when LittleDB is not in the loop)
+  env.ts              .env.local loader chain, model slots (DeepSeek, Anthropic), the globalThis model seam
   model-retry.ts      retries the unparseable-200 the AI SDK will not
   episode.ts          the per-episode store and the sessionId → episode binding
   tool-context.ts     the one path every tool call takes
-  littledb.ts         managed config, the SUPPORT_PROMPT_FILE bootstrap hook, outcome sink
+  littledb.ts         resolve per session, the episode tracer, the SUPPORT_PROMPT_FILE bootstrap hook
   run-episode.ts      one scripted conversation, one session, one database
   tools/              7 tools that enforce nothing
 experiment/
   prompt-v1.md        the plausible, wrong summary
   optimizer-truth.json / gate-truth.json
   grade.mjs           the two scores, pass^k, Wilson intervals
-  run.mjs             --seed / --traffic / --gate / --status
+  run.mjs             --seed / --traffic / --gate / --dataset / --worker / --propose / --status
   verify-truth.mjs    the grounding script
-  pushback-patterns.mjs  littleDB's LIT-51 detector, copied as a fixture
+  pushback-patterns.mjs  LittleDB's LIT-51 detector, copied as a fixture
 seed-data/db.json     the tracked seed, copied per episode
-tests/                hermetic: stub control plane, stand-in agents, no network
+tests/                hermetic: stub LittleDB, stand-in agents, no network
 ```
 
 ## 7. Running it live
 
-Needs a littleDB stack (control plane on `:3000`, engine on `:7878`) and a `DEEPSEEK_API_KEY`
-in a `.env.local` at the demo root or the repo root. The harness slug is `support-desk-x`,
-never a demo's own — a broken experiment cannot damage anything else.
+Needs a LittleDB server (`littledb dev` serves one on `:7340` and prints a key for local apps)
+and a model key in the environment or in a `.env.local` at the demo root or the repo root:
+
+| `SUPPORT_MODEL_SLOT` | provider | key |
+| --- | --- | --- |
+| `deepseek-v4-flash` (default), `deepseek-v4-pro` | DeepSeek | `DEEPSEEK_API_KEY` |
+| `claude-haiku-5-5`, `claude-sonnet-5-5` | Anthropic | `SUPPORT_ANTHROPIC_API_KEY` |
+
+A version's content is `{ system, model }`: the slot is the bootstrap's model, and a proposal
+can change either. Use a harness slug of the run's own (`LITTLEDB_HARNESS`, default
+`support-desk`), since LittleDB keeps the first bootstrap it sees as version 1.
+
+```sh
+export LITTLEDB_URL=http://127.0.0.1:7340 LITTLEDB_API_KEY=ldb_dev_local_key LITTLEDB_HARNESS=support-desk-x
+export SUPPORT_MODEL_SLOT=claude-haiku-5-5   # with SUPPORT_ANTHROPIC_API_KEY set
+
+node experiment/run.mjs --dataset                                   # gate set → holdout, optimizer set → dev
+node experiment/run.mjs --traffic                                   # v1 traffic: one trace per episode, scored
+node experiment/run.mjs --propose agents/support/instructions.md    # a candidate; LittleDB starts its gate
+node experiment/run.mjs --worker --once                             # run the gate's runs here, then exit
+node experiment/run.mjs --status
+```
+
+`--traffic` scores tiers A and B with `task_success` and `policy_compliance` (1 or 0, source
+`code`) on each episode's trace (`sd_<sessionId>`); tier C is traced and never scored.
+`--worker` claims experiment runs for the harness, runs the version it was handed on the
+item's scenario with the real tools, sends the episode into the run's trace and completes
+the run with the same two scores. Without `--once` it keeps polling until Ctrl-C.

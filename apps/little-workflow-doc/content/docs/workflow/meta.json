@@ -1,0 +1,11 @@
+{
+  "title": "Little Workflow",
+  "description": "Durable workflows · npm 0.2.0-alpha.1",
+  "icon": "Workflow",
+  "pages": [
+    "index",
+    "comparisons",
+    "v0.1.0-alpha"
+  ],
+  "root": true
+}

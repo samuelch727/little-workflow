@@ -11,14 +11,14 @@ export const TIER0_MATRIX_SCHEMA_VERSION = 1;
  * Bump when the *content* below changes (a new needs-real-exec entry, a re-pinned
  * snapshot after a just-bash upgrade). Date-ordinal so it sorts.
  */
-export const TIER0_MATRIX_VERSION = "2026-08-14.1";
+export const TIER0_MATRIX_VERSION = "2026-11-05.1";
 
 /**
  * The emulator the pinned halves of this matrix were observed against. Informational
  * only — just-bash does not export its `package.json`, so this cannot be read back at
  * runtime. The drift tests, not this string, are what actually catches an upgrade.
  */
-export const TIER0_EMULATOR = "just-bash@3.0.1";
+export const TIER0_EMULATOR = "just-bash@3.0.3";
 
 /**
  * Which runtime toggle has to be on for just-bash to register a command.

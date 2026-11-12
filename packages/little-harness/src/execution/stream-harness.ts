@@ -77,6 +77,7 @@ import { toolCallEventData } from "./tool-events.js";
 import { uncachedInstructions, withPromptCaching } from "./prompt-caching.js";
 import { withTurnMessages } from "./turn-messages.js";
 import { withTurnOptions } from "./turn-options.js";
+import { bindSnapshotEvents, guardSnapshotInvocation, snapshotConfig, snapshotState } from "./snapshot-turn.js";
 import { inboxPrepareStep, type HarnessInbox } from "./inbox.js";
 import { logicalTurnBudget, modelInvocationGuard } from "./logical-turn-budget.js";
 import { createTurnLimiter, HarnessTurnLimitError, turnLimitCause } from "./turn-limits.js";
@@ -142,6 +143,7 @@ type ToolReplayState = {
   replay: ToolReplay;
   callId?: string;
   occurrenceId: string;
+  invocationId?: string | undefined;
 };
 
 type StartedStream<TOutput> = {
@@ -310,6 +312,7 @@ async function runStreamHarnessTurn<TOutput, TInput, TExtraBody>(
         records.throwIfFailed();
         options.abortSignal?.throwIfAborted();
         await options.beforeInvocation?.();
+        await guardSnapshotInvocation(options);
         records.throwIfFailed();
         options.abortSignal?.throwIfAborted();
       };
@@ -339,6 +342,7 @@ async function runStreamHarnessTurn<TOutput, TInput, TExtraBody>(
         payload: { sessionId: session.id, turnId },
         ...(startedMetadata === undefined ? {} : { metadata: startedMetadata }),
       });
+      await bindSnapshotEvents(options, emitTurnEvent);
       await prepared.loadPersistentDirs({ emit: emitTurnEvent });
 
       const resolvedTools = options.connectorTools === undefined
@@ -415,7 +419,9 @@ async function runStreamHarnessTurn<TOutput, TInput, TExtraBody>(
         hostDataFs: prepared.dataFs,
       });
       resolvedMcp = assembled.mcp;
-      const { resolvedSkills, turnTools } = assembled;
+      const snapshot = snapshotState(options);
+      const resolvedSkills = snapshot ? snapshot.registry.skills(snapshot.snapshot) : assembled.resolvedSkills;
+      const turnTools = snapshot?.tools ?? assembled.turnTools;
       warnings.push(...assembled.warnings);
       await prepared.stageSkills(resolvedSkills);
 
@@ -432,7 +438,7 @@ async function runStreamHarnessTurn<TOutput, TInput, TExtraBody>(
         files: agentFiles,
         stagingNotices: staging.notices,
         stripStagedFileParts: staging.stripStagedFileParts,
-        resolvedSkills,
+        resolvedSkills: snapshot ? [] : resolvedSkills,
         ...messageInputOptions(options),
       });
       warnings.push(...built.warnings);
@@ -491,6 +497,7 @@ async function runStreamHarnessTurn<TOutput, TInput, TExtraBody>(
         toolContext,
         modelToolPositions,
         records,
+        toolReplayStates,
       );
 
       const prepareStep = runtimeAwarePrepareStep(
@@ -498,13 +505,14 @@ async function runStreamHarnessTurn<TOutput, TInput, TExtraBody>(
         built.system,
         runtime,
         options.activeTools,
+        snapshot !== undefined,
       );
       // Messages that arrive while the turn runs are read before the next step.
       const inbox = inboxPrepareStep(guardedModelPrepareStep(prepareStep, records), options.inbox);
       await inbox.restore({ stepNumber: 0, at: built.messages.length });
-      const invocationGuard = budget ?? modelInvocationGuard({ beforeInvocation, requireConcrete: options.beforeInvocation !== undefined, ...(options.abortSignal ? { signal: options.abortSignal } : {}) });
+      const invocationGuard = budget ?? modelInvocationGuard({ beforeInvocation, requireConcrete: options.beforeInvocation !== undefined || snapshot !== undefined, ...(options.abortSignal ? { signal: options.abortSignal } : {}) });
       const guardedPrepareStep = invocationGuard.wrapPrepareStep(inbox.prepareStep);
-      const system = prepareStep === undefined
+      const system = !snapshot && prepareStep === undefined
         ? runtimeSystem(built.system, runtime, options.activeTools)
         : built.system;
       const outputSpec = options.output ?? (built.output as Output.Output<TOutput> | undefined);
@@ -699,11 +707,12 @@ async function runStreamHarnessTurn<TOutput, TInput, TExtraBody>(
           }));
           const replay = toolReplayForEvent(priorEvents as readonly DurableHarnessEvent[], event, claimedReplays);
           const callId = replay.kind === "inflight" ? replay.callId : event.toolCall.toolCallId;
-          const occurrenceId =
-            replay.kind === "none"
-              ? toolOccurrenceId(event)
-              : toolOccurrenceIdFor(priorEvents as readonly DurableHarnessEvent[], callId) ?? toolOccurrenceId(event);
-          toolReplayStates.set(event.toolCall.toolCallId, { replay, callId, occurrenceId });
+          const originalOccurrence = toolOccurrenceIdFor(priorEvents as readonly DurableHarnessEvent[], callId);
+          const occurrenceId = replay.kind === "none" ? toolOccurrenceId(event) : originalOccurrence ?? toolOccurrenceId(event);
+          // Keep event occurrence behavior unchanged. A legacy unfinished replay's replacement
+          // occurrence is not safe to expose as the original write's deduplication identity.
+          const invocationId = replay.kind === "none" ? occurrenceId : originalOccurrence;
+          toolReplayStates.set(event.toolCall.toolCallId, { replay, callId, occurrenceId, invocationId });
           if (replay.kind !== "none") {
             return;
           }
@@ -1256,7 +1265,7 @@ function resolveTurnConfig<TInput, TExtraBody, TOutput>(
   if (runtime !== undefined) {
     out.runtime = runtime;
   }
-  return out;
+  return snapshotConfig(out, options);
 }
 
 function resolveRuntimeOptions(
@@ -1313,9 +1322,10 @@ function runtimeAwarePrepareStep(
   baseSystem: string,
   runtime: Pick<HarnessSandbox, "systemHints">,
   activeTools: readonly string[] | undefined,
+  snapshot = false,
 ): Parameters<typeof streamText>[0]["prepareStep"] {
-  if (prepareStep === undefined) {
-    return undefined;
+  if (snapshot || prepareStep === undefined) {
+    return prepareStep;
   }
 
   return (async (event: Parameters<NonNullable<Parameters<typeof streamText>[0]["prepareStep"]>>[0]) => {

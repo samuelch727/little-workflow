@@ -92,6 +92,16 @@ const harness = createHarness({
 escalates never pays for it. Build one with the shared machinery described in
 [Writing a custom execution environment](/docs/v0.1.0-alpha/runtime/execution-environments#writing-a-custom-execution-environment).
 
+**Ships in `0.2.0-alpha.3`:** if a tier wraps the tool returned by `createShellRuntime`, preserve all
+execute-option keys, including symbols. Passing the options through unchanged or using
+`{ ...executeOptions, abortSignal }` / `Object.assign` preserves the private, one-use
+delegation token, so the adapter receives the same `context.executionId` as the outer
+trace. Rebuilding options from only named string fields or serializing them drops that
+context and makes the inner shell create a fresh ID. Consume the token in only the
+intended delegated call; retaining or copying it cannot reuse an already-consumed ID.
+Public `executionId` fields do not set attempt identity. See
+[Runtime events](/docs/v0.1.0-alpha/reference/events#runtime-events).
+
 How a turn moves:
 
 - **Two signals escalate.** A `classifyCommand` decision of `"escalate"` switches
@@ -150,3 +160,10 @@ environment that writes outside a `bash` command can do the same with
 - [Execution Environments](/docs/v0.1.0-alpha/runtime/execution-environments) — modes, the subprocess sandbox, and custom factories.
 - [Isolation And Security](/docs/v0.1.0-alpha/runtime/isolation-and-security) — the Tier-0 security contract.
 - [Events](/docs/v0.1.0-alpha/reference/events) — the full trace vocabulary.
+
+**Ships in `0.2.0-alpha.3`:** command-caused escalation and unavailability carry `toolCallId`,
+`executionId` and matching `occurrenceId`, just like denial. One shared successful
+provisioning emits a transition for the invocation that wins the switch; each
+unavailable result keeps its own invocation identity. The executing adapter receives
+the same execution ID as the outer trace. See
+[Runtime events](/docs/v0.1.0-alpha/reference/events#runtime-events) for attempt/resume semantics.

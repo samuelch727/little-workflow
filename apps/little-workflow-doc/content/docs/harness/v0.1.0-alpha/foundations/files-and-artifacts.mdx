@@ -147,12 +147,6 @@ host-only writes follow the
 [host-staging rules](/docs/harness/v0.1.0-alpha/foundations/persistent-dirs#host-staged-writes)
 (an `after-turn` dir's host-only write is discarded by the next turn's reload).
 
-> **UNRELEASED:** `createHarnessFileMutationEvents()` and the
-> `@little-stack/harness/remote-session` entry point exist only in the current source.
-> Published `0.2.0-alpha.0` has neither, and no npm version includes them yet.
-> This notice covers only that function and entry point. See
-> [Alpha Migrations](/docs/harness/v0.1.0-alpha/reference/alpha-migrations#small-subpaths-events-and-remote-session).
-
 Trusted remote execution adapters should call
 `createHarnessFileMutationEvents()` from `@little-stack/harness/remote-session` after
 the file outcome is durable. The same serializer now backs the local evented

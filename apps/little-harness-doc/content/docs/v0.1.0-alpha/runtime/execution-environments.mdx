@@ -9,13 +9,6 @@ Anthropic describes in
 [Scaling Managed Agents](https://www.anthropic.com/engineering/managed-agents).
 Each concern is a port with a default local adapter:
 
-> **UNRELEASED names.** This page uses the current source's names. Published
-> `0.2.0-alpha.0` calls the `localHost()` option `executionEnvironment`, the port
-> `HarnessExecutionEnvironmentFactory`, and the builders
-> `tieredExecutionEnvironment()` and `createJustBashRuntime`, and exports the
-> session-log helpers from the root entry. See
-> [Alpha Migrations](/docs/v0.1.0-alpha/reference/alpha-migrations#one-name-per-concept).
-
 | Concern | Port | Default adapter | Alternate adapters |
 | --- | --- | --- | --- |
 | Sandbox | `HarnessSandboxFactory` consuming a `HarnessWorkspaceSpec` | `"auto"`: `subprocessSandbox()`, or in-process just-bash for turns that run no code and have no network | `"in-process"`, `"subprocess"`, `subprocessSandbox({ ... })`, `tieredSandbox({ ... })`, `justBashSandbox()`, custom factories |
@@ -319,3 +312,7 @@ are per-process (data and locks live in the store instance); use the
 file-backed default or a shared store when multiple processes coordinate. If
 you only need a different sandbox or session log, you do not need to touch
 this port.
+
+The just-bash workspace also provides the `0.2.0-alpha.3`
+[synthetic `/dev/null` endpoint](/docs/v0.1.0-alpha/runtime/just-bash#synthetic-null-endpoint).
+It applies to local, virtual, subprocess and Tier-0 environments; it is not a host device mount.

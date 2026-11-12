@@ -1,7 +1,7 @@
 import { createInterface } from "node:readline";
 import { spawn } from "node:child_process";
 import { readFile, writeFile } from "node:fs/promises";
-import { basename, join } from "node:path";
+import { basename, join, resolve } from "node:path";
 import type { ToolSet } from "ai";
 import type { CliIo } from "../cli-core.js";
 import {
@@ -467,7 +467,7 @@ export async function resolveConnectorReplTools(
   };
 }
 
-export async function testCommand(args: readonly string[], _dataDir: string, io: CliIo): Promise<number> {
+export async function testCommand(args: readonly string[], dataDir: string, io: CliIo): Promise<number> {
   let parsed: ReturnType<typeof parseKnownOptions>;
   try {
     parsed = parseKnownOptions(args, new Set(["connector"]));
@@ -487,7 +487,7 @@ export async function testCommand(args: readonly string[], _dataDir: string, io:
     await err(io, `Unknown agent '${name}'. Available: ${available}\n`);
     return 1;
   }
-  const harness = await loadHarness(agent.dir);
+  const harness = await loadHarness(agent.dir, { dataDir: resolve(cwdOf(io), dataDir) });
   const replOpts: Parameters<typeof runRepl>[3] = {};
   const connectorId = parsed.options.connector;
   if (connectorId !== undefined) {

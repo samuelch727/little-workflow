@@ -25,6 +25,13 @@ const harness = createHarness({
 `virtualHost()` runs anywhere `localHost()` runs too, so you can test a workerd app
 in Node.
 
+## Use the recommended agent folders
+
+**Ships in `0.2.0-alpha.3`:** the build-time `@little-stack/harness/compiler` API. Compile `agents/<name>/` in Node, then import the generated
+registry from your worker and call `loadHarness(name, { host })` for each chat.
+See [Agent Folders](/docs/v0.1.0-alpha/build-agents/agent-folders#build-agent-folders-for-workerd)
+and `demos/workerd-folders` for a standalone offline example and real workerd tests.
+
 ## What Little Harness does, and what your app does
 
 Little Harness runs one agent turn for one session, over the filesystem you give
@@ -94,6 +101,68 @@ A restart preserves an acknowledged parked turn and completed files and history.
 It does not recover a turn that was active or resuming when the process died,
 nor a reply that completed but was not saved to history. Claimed records have no
 recovery protocol, and this example makes no exactly-once execution guarantee.
+
+## Stream a reply
+
+> **Ships in `0.2.0-alpha.3`:** the `demos/workerd-chats` streaming route uses
+> `streamHarness()` and `virtualHost()` with durable finalization.
+
+The demo returns JSON by default. For an AI SDK UI message stream, send
+`Accept: text/event-stream` or add `?stream=1`:
+
+```bash
+curl -N localhost:8080/chats/a/messages -H 'content-type: application/json' \
+  -H 'accept: text/event-stream' \
+  -d '{"text":"echo hello > notes.txt && cat notes.txt"}'
+```
+
+Tool inputs, tool outputs and text arrive as the turn runs. The app drains
+`streamHarness().toUIMessageStream()` and waits for `finished`, records the
+user's message and a completed assistant reply, then saves files. Only after
+that succeeds does it send `finish` and close with `[DONE]`. If finalization
+fails, it sends one generic `error` chunk and no `finish`. LittleDB export
+remains best-effort in the background.
+
+For a React client using `@ai-sdk/react` and `ai`, pass a
+`DefaultChatTransport` to `useChat`. The demo owns history, so send only the
+last message's text:
+
+```tsx
+import { useChat } from "@ai-sdk/react";
+import { DefaultChatTransport } from "ai";
+
+export function useWorkerdChat(chatId: string) {
+  return useChat({
+    transport: new DefaultChatTransport({
+      api: `/chats/${encodeURIComponent(chatId)}/messages?stream=1`,
+      prepareSendMessagesRequest: ({ messages }) => ({
+        body: {
+          text: messages.at(-1)?.parts
+            .filter((part) => part.type === "text")
+            .map((part) => part.text).join("") ?? "",
+        },
+      }),
+    }),
+  });
+}
+```
+
+Call the hook's `sendMessage({ text: "echo hello" })` and render its `messages`
+in your app. Closing the client stops delivery, but the server keeps running
+and saving the turn before releasing the chat's queue slot. This demo has no
+server stop endpoint. A streamed question can park: it saves the user message
+and pending request before `finish`, which carries
+`messageMetadata: { status: "parked", requests }`. In `useChat`, the assistant
+message's `metadata.requests[n].requestId` is the input request ID to send to
+`/answers`:
+
+```bash
+curl -X POST localhost:8080/chats/a/answers -H 'content-type: application/json' \
+  -d '{"requestId":"input_...","answer":{"text":"The blue notebook"}}'
+```
+
+The existing endpoint resumes the parked turn. A completed turn's `finish`
+passes through unchanged.
 
 ## Traces without internet
 
@@ -240,3 +309,10 @@ workerd serve workerd.capnp --experimental
 ```
 
 The example also has a Dockerfile that runs this config.
+
+## Synthetic null endpoint (`0.2.0-alpha.3`)
+
+The exact `/dev/null` sink/EOF behavior is shared by all just-bash-backed hosts,
+including local, virtual and subprocess environments. See
+[Synthetic null endpoint](/docs/v0.1.0-alpha/runtime/just-bash#synthetic-null-endpoint)
+for file-type, directory, copy/move and descriptor-order semantics.

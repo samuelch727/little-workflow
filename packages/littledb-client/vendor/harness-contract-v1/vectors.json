@@ -1,0 +1,162 @@
+{
+  "text": [
+    {
+      "name": "utf8-0",
+      "input": "",
+      "hash": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "name": "utf8-1",
+      "input": "return",
+      "hash": "sha256:7187f0675eb3827939741acf7342ba78836ecec21a31ecf3f34a55309d3bee8a"
+    },
+    {
+      "name": "utf8-2",
+      "input": "退貨",
+      "hash": "sha256:b643f4ed1bd1bdb57dc44b5dfb5b2de23d31eb698dcf6bec0f22f0b8a777f5dd"
+    },
+    {
+      "name": "utf8-3",
+      "input": "🙂",
+      "hash": "sha256:d06f1525f791397809f9bc98682b5c13318eca4c3123433467fd4dffda44fd14"
+    },
+    {
+      "name": "utf8-4",
+      "input": "é",
+      "hash": "sha256:bf12767b0f2a56b2190075bae8169f656e3ce8d6357d4aff184bc6c7ea48f9f6"
+    }
+  ],
+  "json": [
+    {
+      "name": "canonical-0",
+      "input": {
+        "b": 2,
+        "a": 1
+      },
+      "hash": "sha256:43258cff783fe7036d8a43033f830adfc60ec037382473548ac742b888292777"
+    },
+    {
+      "name": "canonical-1",
+      "input": {
+        "nested": {
+          "z": "退貨",
+          "a": [
+            1,
+            true,
+            null
+          ]
+        }
+      },
+      "hash": "sha256:4aed7981ac5e1472dc0d8e8b88fc0ec860754ccf0a17e4a188fc022b59218eb6"
+    }
+  ],
+  "files": [
+    {
+      "name": "chinese-skill",
+      "input": {
+        "skills/orders/SKILL.md": "---\nname: orders\ndescription: 退貨指引\n---\nUse the delivery date.🙂\n"
+      },
+      "totalBytes": 74,
+      "manifest": [
+        {
+          "path": "skills/orders/SKILL.md",
+          "bytes": 74,
+          "hash": "sha256:4e2937f4a34a0da8eecf8e1348b5a9c61668682817a46fa2d6e541cc7f0a4b7e"
+        }
+      ],
+      "bundleHash": "sha256:cc21ab98cba071115f34bc8b639f8bc871630850da3686e366d2a5b147378a5c"
+    },
+    {
+      "name": "traversal",
+      "input": {
+        "skills/orders/../bad.md": "text"
+      },
+      "error": "path"
+    },
+    {
+      "name": "unreachable",
+      "input": {
+        "references/orphan.md": "text"
+      },
+      "error": "unreachable"
+    },
+    {
+      "name": "nonliteral-frontmatter",
+      "input": {
+        "skills/orders/SKILL.md": "---\nname: orders\ndescription: |\n  text\n---\nbody"
+      },
+      "error": "frontmatter"
+    }
+  ],
+  "budget": [
+    {
+      "name": "bytes-and-framing",
+      "parts": {
+        "system": {
+          "text": "退貨🙂",
+          "category": "system"
+        }
+      },
+      "expected": {
+        "profile": "utf8-static-v1",
+        "totalUnits": 266,
+        "pass": true
+      }
+    },
+    {
+      "name": "missing-counter-fallback",
+      "parts": {
+        "system": {
+          "text": "退貨",
+          "category": "system"
+        }
+      },
+      "refinement": {
+        "profile": "exact-v1",
+        "units": {}
+      },
+      "expected": {
+        "profile": "utf8-static-v1",
+        "totalUnits": 262
+      }
+    },
+    {
+      "name": "complete-counter",
+      "parts": {
+        "system": {
+          "text": "退貨",
+          "category": "system"
+        }
+      },
+      "refinement": {
+        "profile": "exact-v1",
+        "units": {
+          "system": 2
+        }
+      },
+      "expected": {
+        "profile": "exact-v1",
+        "totalUnits": 258
+      }
+    },
+    {
+      "name": "window-tenth-cap",
+      "parts": {
+        "system": {
+          "text": "text",
+          "category": "system"
+        }
+      },
+      "limits": {
+        "inputWindow": 100
+      },
+      "expected": {
+        "cap": 10,
+        "pass": false,
+        "violations": [
+          "static"
+        ]
+      }
+    }
+  ]
+}

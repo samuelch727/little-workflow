@@ -140,7 +140,7 @@ little events <runId> --data-dir .little-harness/sessions/<session>/workflows
 little report <runId> --table --data-dir .little-harness/sessions/<session>/workflows
 ```
 
-Each run's token usage and cost stay in its own run record. Passing `world` in the adapter options stores runs there instead. Before `0.2.0-alpha.0`, runs were stored under `<cwd>/<sessionId>/workflows`, and runs recorded there are not found on resume.
+Each run's token usage and cost stay in its own run record. Passing `world` in the adapter options stores runs there instead. Runs recorded under the older `<cwd>/<sessionId>/workflows` layout are not found on resume.
 
 ## Folder Workflows: `loadWorkflow`
 

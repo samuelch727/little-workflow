@@ -2,7 +2,7 @@
 
 This directory ships with the `@little-stack/workflow` npm package so agents and tools can inspect the SDK docs from `node_modules/@little-stack/workflow/docs`.
 
-These files mirror the docs site's `v0.1.0-alpha` section. The path name is kept for stable links; the content describes the current alpha release (`0.2.0-alpha.1`: AI SDK 7, Node.js 22+). Start with:
+These files mirror the docs site's `v0.1.0-alpha` section. The path name is kept for stable links; the content describes the current alpha release (`0.2.0-alpha.3`: AI SDK 7, Node.js 22+). Start with:
 
 - `getting-started/` for the overview and quickstart (install, then authoring and running a workflow with `defineWorkflow`).
 - `authoring/` for authoring patterns: `define-a-workflow.mdx` (`defineWorkflow`, including a fixed `plan`), `advanced-createlittleworkflow.mdx` (every `defineWorkflow` field), `compose-with-harness.mdx` (`asHarnessWorkflow` / `loadWorkflow`, the supported way to compose workflows), tools and MCP, AI SDK-native model usage, memory, skills, and the deprecated orchestrator.

@@ -613,3 +613,21 @@ describe("validateTraceEvent", () => {
     ).toThrow(/activeMs/);
   });
 });
+
+it.each(["harness.runtime.command.started", "harness.runtime.command.succeeded", "harness.runtime.command.failed", "harness.runtime.command.denied"])("keeps old %s traces readable and validates additive exact IDs", type => {
+  const metadata = { command: "echo synthetic", ...(type.endsWith("denied") ? { reasons: [] } : type.endsWith("started") ? {} : {
+    exitCode: 0, durationMs: 1, stdout: { captured: false }, stderr: { captured: false },
+  }) };
+  expect(() => validateTraceEvent({ ...baseEvent, type, metadata })).not.toThrow();
+  expect(() => validateTraceEvent({ ...baseEvent, type, occurrenceId: "exec-id", metadata: { ...metadata, executionId: "exec-id", toolCallId: "call-id" } })).not.toThrow();
+  expect(() => validateTraceEvent({ ...baseEvent, type, metadata: { ...metadata, executionId: 123 } })).toThrow();
+  expect(() => validateTraceEvent({ ...baseEvent, type, metadata: { ...metadata, toolCallId: "" } })).toThrow();
+});
+
+it.each(["harness.runtime.tier.escalated", "harness.runtime.tier.unavailable"])("accepts historical %s and validates invocation links when present", type => {
+  const metadata = { from: "tier-0", to: "next-tier", trigger: "classification", command: "cargo build", ...(type.endsWith("unavailable") ? { detail: "unavailable" } : {}) };
+  expect(() => validateTraceEvent({ ...baseEvent, type, metadata })).not.toThrow();
+  expect(() => validateTraceEvent({ ...baseEvent, type, occurrenceId: "attempt", metadata: { ...metadata, executionId: "attempt", toolCallId: "call" } })).not.toThrow();
+  expect(() => validateTraceEvent({ ...baseEvent, type, metadata: { ...metadata, executionId: "" } })).toThrow();
+  expect(() => validateTraceEvent({ ...baseEvent, type, metadata: { ...metadata, toolCallId: 12 } })).toThrow();
+});

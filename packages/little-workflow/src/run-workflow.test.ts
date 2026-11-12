@@ -7172,16 +7172,16 @@ describe("P1.5 — planner declares model in permissions; runtime receives model
     });
     expect(result.status).toBe("completed");
 
-    // deepseek/deepseek-v4-flash is listed at input $0.14 / output $0.28 per 1M tokens.
-    //   10,000 input  x $0.14 / 1M = $0.00140
-    //    2,000 output x $0.28 / 1M = $0.00056
-    //                        total = $0.00196
-    expect(result.usage.costUsd).toBeCloseTo(0.00196, 12);
+    // deepseek/deepseek-v4-flash is listed at input $0.30 / output $1.20 per 1M tokens.
+    //   10,000 input  x $0.30 / 1M = $0.0030
+    //    2,000 output x $1.20 / 1M = $0.0024
+    //                        total = $0.0054
+    expect(result.usage.costUsd).toBeCloseTo(0.0054, 12);
     expect(result.usage.pricedCalls).toBeGreaterThan(0);
     expect(result.usage.unpricedCalls).toBe(0);
 
     const state = materializeRunStateFromEvents("run_real_provider_id_pricing", result.events);
-    expect(state.steps.summarize?.usage.costUsd).toBeCloseTo(0.00196, 12);
+    expect(state.steps.summarize?.usage.costUsd).toBeCloseTo(0.0054, 12);
     expect(runReport(state).hasUnpricedCalls).toBe(false);
   });
 
@@ -7219,7 +7219,7 @@ describe("P1.5 — planner declares model in permissions; runtime receives model
       runId: "run_getter_provider_pricing",
     });
 
-    expect(result.usage.costUsd).toBeCloseTo(0.00196, 12);
+    expect(result.usage.costUsd).toBeCloseTo(0.0054, 12);
     expect(result.usage.unpricedCalls).toBe(0);
   });
 

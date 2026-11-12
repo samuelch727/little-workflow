@@ -244,6 +244,10 @@ describe("subprocessSandbox", () => {
           normalized = `occurrence-${occurrences.size + 1}`;
           occurrences.set(event.occurrenceId, normalized);
         }
+        if (event.type.startsWith("harness.runtime.command.")) {
+          expect(event.metadata.executionId).toBe(event.occurrenceId);
+          return { ...event, occurrenceId: normalized, metadata: { ...event.metadata, executionId: normalized } };
+        }
         return { ...event, occurrenceId: normalized };
       });
       return JSON.parse(

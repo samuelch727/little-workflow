@@ -86,7 +86,7 @@ little-harness init --here --provider anthropic --model claude-sonnet-4-6
 starter `support` agent. Pass `--force` to overwrite an existing workspace.
 
 The generated `package.json` pins versions instead of using `latest`: `@little-stack/harness` at the CLI's own
-version (`^0.2.0-alpha.0` for this release), `ai` at `^7.0.0`, the selected provider package at an AI SDK
+version (`^0.2.0-alpha.3` for this release), `ai` at `^7.0.0`, the selected provider package at an AI SDK
 7-compatible range, and a TypeScript 6 / `tsx` toolchain. The same table is exported as
 `scaffoldDependencyVersions()` from `@little-stack/harness/scaffold`.
 
@@ -106,13 +106,12 @@ See [Agent Folders](/docs/harness/v0.1.0-alpha/build-agents/agent-folders) for t
 
 Add another agent to an existing workspace at `agents/<name>` — an `agent.ts` (a `createHarness`
 template), an example `tools/echo.ts`, and `instructions.md`. Pass `--provider <provider>` and
-`--model <model>` to choose the provider and model written into the new `agent.ts` (defaults to the
-`anthropic` provider); pass `--force` to overwrite an existing folder.
+`--model <model>` to choose the provider and model written into the new `agent.ts`; pass
+`--force` to overwrite an existing folder.
 
-> **UNRELEASED:** in the current source, the default provider is `openai` (`gpt-5.2`) for
-> `little-harness init` and `little-harness new`, matching `little setup` and `little init`.
-> No npm version includes this yet. `init` and `new` also reject unknown options, print usage for
-> `--help`, and `init --workflow` points to `little setup --workflow`, which scaffolds a Workflow.
+`little-harness init` and `little-harness new` default to `openai` (`gpt-5.2`),
+matching `little setup` and `little init`. Both reject unknown options and print
+usage for `--help`; `init --workflow` points to `little setup --workflow`.
 
 ```bash
 little-harness new support

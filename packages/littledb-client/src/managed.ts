@@ -1,6 +1,8 @@
+import type { HarnessExecutionSnapshot, HarnessSnapshotRegistry, SnapshotContext } from "@little-stack/harness";
+import { digest as executionDigest } from "./harness-contract-v1/harness.js";
 import { randomUUID } from "node:crypto";
 import { ResolvedModelSchema, type Caller, type ResolvedModel } from "./contract.js";
-import { evalRunOf } from "./eval-context.js";
+import { currentEvalContext, evalRunOf, pinFor } from "./eval-context.js";
 import type { LittleDBErrorHandler } from "./exporter.js";
 import type { HarnessEventLike, HarnessTracer, HarnessTracerOptions } from "./harness/tracer.js";
 import { readWorkflowMemory, type ManagedMemoryOption, type WorkflowMemory } from "./memory.js";
@@ -33,6 +35,10 @@ export type ManagedTurnMetadata = {
     readonly versionId: string | null;
     readonly number: number | null;
     readonly mode: Resolution["mode"];
+    readonly executionHash?: HarnessExecutionSnapshot["executionHash"];
+    readonly registryHash?: HarnessExecutionSnapshot["registryHash"];
+    readonly envelopeHash?: HarnessExecutionSnapshot["envelopeHash"];
+    readonly pins?: HarnessExecutionSnapshot["pins"];
   };
 };
 
@@ -40,9 +46,23 @@ export type ManagedTurnMetadata = {
 export type ModelSlots<M> = Readonly<Record<string, M>> | ((slot: string) => M | undefined);
 
 /** What the default `apply` sets: the system prompt, and the model when `models` names the slot. */
-export type DefaultOverrides<M> = { system?: string; model?: M; temperature?: number };
+export type DefaultOverrides<M> = {
+  system?: string;
+  model?: M;
+  temperature?: number;
+  executionSnapshot?: HarnessExecutionSnapshot;
+};
 
 export type ManagedHarnessOptions<C extends Content, M, O extends object, TExtraBody> = {
+  /** Opt into format-1 execution using actual installed code, policy and a concrete code model. */
+  readonly execution?: {
+    readonly registry: HarnessSnapshotRegistry;
+    readonly model: SnapshotContext["model"];
+    /** Isolated, version-independent state identities. Evaluations supply fresh state per run. */
+    readonly state: (turn: ManagedTurnLike<TExtraBody>) =>
+      | Pick<SnapshotContext, "toolState" | "memorySnapshot">
+      | Promise<Pick<SnapshotContext, "toolState" | "memorySnapshot">>;
+  };
   /** The harness's slug in LittleDB. */
   readonly slug: string;
   /** Release channel. Default `production`. */
@@ -233,7 +253,10 @@ export function createManagedHarness<C extends Content, M, O extends object, TEx
     deps.onError(new Error(message), { operation: "managedHarness" });
   };
   const apply = (options.apply ?? defaultApply(options.models, options.slug, warn)) as (content: C, turn: ManagedTurnLike<TExtraBody>) => O;
-  type Session = ManagedSession<C, O> & { readonly modelDecision: ResolvedModel | null };
+  type Session = ManagedSession<C, O> & {
+    readonly modelDecision: ResolvedModel | null;
+    readonly snapshot?: HarnessExecutionSnapshot;
+  };
   const sessions = new Map<string, Session>();
   const runTracers = new Map<string, HarnessTracer>();
   const tracer =
@@ -261,6 +284,71 @@ export function createManagedHarness<C extends Content, M, O extends object, TEx
       sessions.delete(oldest);
     }
   };
+
+  async function execution(
+    session: Session,
+    turn: ManagedTurnLike<TExtraBody>,
+    pinned?: HarnessExecutionSnapshot,
+  ): Promise<Session> {
+    if (session.content.harnessFormat !== 1) {
+      if (options.execution)
+        throw new TypeError("Execution snapshots require admitted harnessFormat:1 content.");
+      return session;
+    }
+    const installed = options.execution;
+    if (!installed)
+      throw new TypeError("harnessFormat:1 requires an owner-installed execution registry.");
+    const evalContext = currentEvalContext();
+    if (evalContext) {
+      const expected = pinFor("harness", options.slug);
+      if (
+        !expected ||
+        session.resolution.versionId !== expected.versionId ||
+        executionDigest(session.content) !== executionDigest(expected.content) ||
+        session.resolution.fallback ||
+        session.resolution.mode === "none"
+      )
+        throw new TypeError(
+          "An evaluation must execute its exact pinned version; bootstrap and fallback are unavailable.",
+        );
+    }
+    const model =
+      (session.overrides as { model?: SnapshotContext["model"] }).model ?? installed.model;
+    const state = await installed.state(turn);
+    let snapshot: HarnessExecutionSnapshot;
+    if (pinned) {
+      snapshot = (await installed.registry.verify(pinned, model)).snapshot;
+      if (executionDigest(snapshot.content) !== executionDigest(session.content))
+        throw new TypeError("The parked content and execution snapshot disagree.");
+      if (
+        snapshot.pins.toolState !== state.toolState ||
+        snapshot.pins.memorySnapshot !== state.memorySnapshot
+      )
+        throw new TypeError("The parked execution state is unavailable or changed.");
+    } else {
+      const served = evalContext
+        ? installed.registry.validate(session.content)
+        : installed.registry.serve(session.content);
+      snapshot = await installed.registry.snapshot(
+        served.content,
+        {
+          ...state,
+          model,
+          modelDecision: session.modelDecision === null ? null : { ...session.modelDecision },
+        },
+        "warnings" in served ? (served.warnings as HarnessExecutionSnapshot["warnings"]) : [],
+      );
+    }
+    const overrides = { ...session.overrides, model, executionSnapshot: snapshot };
+    // The neutral runtime renders the owner rules and catalog from the same budgeted content.
+    delete (overrides as { system?: unknown }).system;
+    return {
+      ...session,
+      content: snapshot.content as unknown as C,
+      overrides: overrides as O,
+      snapshot,
+    };
+  }
 
   async function prepare(turn: ManagedTurnLike<TExtraBody>): Promise<Session> {
     const pinned = pinOf<C>(options.slug, turn.resumed?.pin);
@@ -290,7 +378,8 @@ export function createManagedHarness<C extends Content, M, O extends object, TEx
         }
         decision = withModel(applied, resolution);
       }
-      const session = { resolution, content: pinned.content, ...decision };
+      if (options.execution && pinned.snapshot === undefined) throw new TypeError("A format-1 continuation requires its exact execution snapshot.");
+      const session = await execution({ resolution, content: pinned.content, ...decision }, turn, pinned.snapshot);
       keep(turn.sessionId, session);
       return session;
     }
@@ -306,11 +395,12 @@ export function createManagedHarness<C extends Content, M, O extends object, TEx
       ...(caller === undefined ? {} : { caller }),
     });
     const content = resolution.content ?? options.bootstrap;
+    if (content.harnessFormat === 1 && !options.execution) throw new TypeError("harnessFormat:1 requires an owner-installed execution registry.");
     let session: Session;
     try {
       session = { resolution, content, ...withModel(apply(content, turn), resolution) };
     } catch (error) {
-      if (content === options.bootstrap) throw error;
+      if (content === options.bootstrap || options.execution || currentEvalContext()) throw error;
       // A version the app cannot run never runs: the bootstrap does, and the trace says so.
       const message = `Version ${resolution.number ?? "?"} of harness:${options.slug} cannot run (${error instanceof Error ? error.message : String(error)}); running your bootstrap.`;
       deps.onError(new Error(message), { operation: "managedHarness" });
@@ -320,6 +410,7 @@ export function createManagedHarness<C extends Content, M, O extends object, TEx
         ...withModel(apply(options.bootstrap, turn), resolution),
       };
     }
+    session = await execution(session, turn);
     keep(turn.sessionId, session);
     return session;
   }
@@ -349,9 +440,32 @@ export function createManagedHarness<C extends Content, M, O extends object, TEx
       const traced = runTracer() ?? tracer;
       const { resolution } = session;
       const decided = {
-        metadata: { littledb: { subject: `harness:${options.slug}`, versionId: resolution.versionId, number: resolution.number, mode: resolution.mode } },
-        pin: { littledb: { content: session.content, version: versionOf(resolution), model: session.modelDecision === null ? null : { ...session.modelDecision } } },
+        metadata: {
+          littledb: {
+            subject: `harness:${options.slug}`,
+            versionId: resolution.versionId,
+            number: resolution.number,
+            mode: resolution.mode,
+            ...(session.snapshot
+              ? {
+                  executionHash: session.snapshot.executionHash,
+                  registryHash: session.snapshot.registryHash,
+                  envelopeHash: session.snapshot.envelopeHash,
+                  pins: session.snapshot.pins,
+                }
+              : {}),
+          },
+        },
+        pin: {
+          littledb: {
+            content: session.content,
+            version: versionOf(resolution),
+            model: session.modelDecision === null ? null : { ...session.modelDecision },
+            ...(session.snapshot ? { snapshot: session.snapshot } : {}),
+          },
+        },
       };
+
       return traced === undefined ? { ...session.overrides, ...decided } : { ...session.overrides, ...decided, onEvent: traced.onEvent };
     },
     async session(sessionId) {
@@ -440,13 +554,34 @@ function versionOf(resolution: Resolution<unknown>): ManagedWorkflowVersion & Pi
  * The content and version a parked turn of this harness pinned (`pin.littledb`), or undefined when
  * the turn has no pin of ours. A pin of ours without content is refused.
  */
-function pinOf<C>(slug: string, pin: unknown): { readonly content: C; readonly version?: unknown; readonly model?: ResolvedModel | null } | undefined {
+function pinOf<C>(
+  slug: string,
+  pin: unknown,
+):
+  | {
+      readonly content: C;
+      readonly version?: unknown;
+      readonly model?: ResolvedModel | null;
+      readonly snapshot?: HarnessExecutionSnapshot;
+    }
+  | undefined {
   if (!isRecord(pin) || !Object.hasOwn(pin, "littledb")) return undefined;
   const ours = pin.littledb;
   if (!isRecord(ours) || !isRecord(ours.content)) {
-    throw new TypeError(`managedHarness "${slug}": the version this parked turn was pinned to is not one turnOptions returned.`);
+    throw new TypeError(
+      `managedHarness "${slug}": the version this parked turn was pinned to is not one turnOptions returned.`,
+    );
   }
-  return { content: ours.content as C, version: ours.version, ...(Object.hasOwn(ours, "model") ? { model: ours.model === null ? null : pinnedModel(ours.model, "harness", slug) } : {}) };
+  return {
+    content: ours.content as C,
+    version: ours.version,
+    ...(Object.hasOwn(ours, "snapshot")
+      ? { snapshot: ours.snapshot as HarnessExecutionSnapshot }
+      : {}),
+    ...(Object.hasOwn(ours, "model")
+      ? { model: ours.model === null ? null : pinnedModel(ours.model, "harness", slug) }
+      : {}),
+  };
 }
 
 function pinnedModel(value: unknown, kind: "workflow" | "harness", slug: string): ResolvedModel {

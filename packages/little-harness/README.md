@@ -121,6 +121,9 @@ subpath by which helpers you need:
 - `@little-stack/harness/remote-session` — session-log implementations and the remote session-log
   client and server (`fileSessionLog`, `inMemorySessionLog`, `remoteSessionLog`,
   `startSessionLogServer`).
+- `@little-stack/harness/remote-tools` — `remoteTool` contracts, `remoteTools` clients,
+  `remoteToolHandler`, `serveRemoteTools` and `RemoteToolError`. Execute code and database
+  credentials stay in your service. `listenRemoteTools` is in the Node-only `/server` entry.
 - `@little-stack/harness/agents` — **experimental**: the Agent Group launcher port, its protocol types
   and errors, and the task-ledger projections. App code only passes `createHarness({ agents })`; import
   from here when you implement a launcher or a ledger.
@@ -248,3 +251,14 @@ Durable workflow harness events use dotted names:
 - `harness.execute_step.succeeded`
 
 For orchestrator sub-runs, `run_workflow` and `start_workflow` reserve `payload.args.subRunId` in `harness.tool_call.started` before the child run starts, and return the same ID as `payload.result.runId` on success. (Those tools belong to Little Workflow's **deprecated** orchestrator surface. To compose workflows into an agent, use `asHarnessWorkflow` + `createHarness({ workflows })` instead — each workflow becomes its own tool.)
+
+## Agent folders on self-hosted workerd
+
+The build-time `@little-stack/harness/compiler` API turns the recommended
+`agents/<name>/` workspace into static imports with bundled instructions and skill
+assets. The generated registry accepts a per-chat host; Node `loadHarness` and
+the compiled runtime share merge and validation rules. Use a host factory for
+chat-local mutable tools. These APIs ship in `0.2.0-alpha.3`.
+
+See [the standalone offline demo](../../demos/workerd-folders/README.md) for the
+compiler contract, limitations, setup and real self-hosted workerd tests.

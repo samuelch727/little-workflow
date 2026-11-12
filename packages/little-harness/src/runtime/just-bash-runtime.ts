@@ -64,7 +64,7 @@ export async function buildWorkspaceFs(
       })
     : undefined;
 
-  const fs = new MountableFs({ base: new UnmanagedRootFs() });
+  const fs = new WorkspaceFs({ base: new UnmanagedRootFs() });
   for (const [mountPath, mount] of workspaceMounts) {
     if (mountPath === "/.agents") {
       continue;
@@ -928,31 +928,68 @@ class PolicyFs implements IFileSystem {
   }
 }
 
+const SYNTHETIC_DIRS: ReadonlySet<string> = new Set(["/", "/dev"]);
+const SYNTHETIC_PATHS: ReadonlySet<string> = new Set([...SYNTHETIC_DIRS, "/dev/null"]);
+
+// A synthetic sink/EOF endpoint, not a host device mount or a general writable /dev.
+function isNullDevice(pathname: string): boolean {
+  return path.posix.normalize(pathname) === "/dev/null";
+}
+
+/** Guard cross-mount structural operations before MountableFs can copy/remove a source. */
+class WorkspaceFs extends MountableFs {
+  private syntheticPath(pathname: string): string | undefined {
+    // Match MountableFs routing: root-relative paths, dot segments and trailing slashes.
+    const normalized = this.resolvePath("/", pathname);
+    return SYNTHETIC_PATHS.has(normalized) && !this.getMounts().some(({ mountPoint }) =>
+      normalized === mountPoint || normalized.startsWith(`${mountPoint}/`)) ? normalized : undefined;
+  }
+  private assertStructuralOperation(operation: "move" | "copy", src: string, dest: string): void {
+    const synthetic = this.syntheticPath(src) ?? this.syntheticPath(dest);
+    if (synthetic !== undefined) {
+      const kind = synthetic === "/dev/null" ? "endpoint" : "directory";
+      throw accessDenied(`Cannot ${operation} the synthetic ${synthetic} ${kind}`);
+    }
+  }
+  override async mv(src: string, dest: string): Promise<void> {
+    this.assertStructuralOperation("move", src, dest);
+    return super.mv(src, dest);
+  }
+  override async cp(src: string, dest: string, options?: CpOptions): Promise<void> {
+    this.assertStructuralOperation("copy", src, dest);
+    return super.cp(src, dest, options);
+  }
+}
+
 class UnmanagedRootFs implements IFileSystem {
   async readFile(pathname: string): Promise<string> {
+    if (isNullDevice(pathname)) return "";
     throw notFound(pathname);
   }
 
   async readFileBuffer(pathname: string): Promise<Uint8Array> {
+    if (isNullDevice(pathname)) return new Uint8Array();
     throw notFound(pathname);
   }
 
   async writeFile(pathname: string): Promise<void> {
+    if (isNullDevice(pathname)) return;
     throw accessDenied(`Unmanaged harness path is read-only: ${pathname}`);
   }
 
   async appendFile(pathname: string): Promise<void> {
+    if (isNullDevice(pathname)) return;
     throw accessDenied(`Unmanaged harness path is read-only: ${pathname}`);
   }
 
   async exists(pathname: string): Promise<boolean> {
-    return path.posix.normalize(pathname) === "/";
+    return SYNTHETIC_PATHS.has(path.posix.normalize(pathname));
   }
 
   async stat(pathname: string): Promise<FsStat> {
-    if (path.posix.normalize(pathname) === "/") {
-      return directoryStat();
-    }
+    const normalized = path.posix.normalize(pathname);
+    if (SYNTHETIC_DIRS.has(normalized)) return directoryStat();
+    if (normalized === "/dev/null") return { ...directoryStat(), isDirectory: false, isFile: false, mode: 0o666 };
     throw notFound(pathname);
   }
 
@@ -960,17 +997,23 @@ class UnmanagedRootFs implements IFileSystem {
     return this.stat(pathname);
   }
 
-  async mkdir(pathname: string): Promise<void> {
-    if (path.posix.normalize(pathname) === "/") {
-      return;
+  async mkdir(pathname: string, options?: MkdirOptions): Promise<void> {
+    const normalized = path.posix.normalize(pathname);
+    if (normalized === "/") return;
+    if (normalized === "/dev") {
+      if (options?.recursive) return;
+      const error = new Error(`EEXIST: file already exists, mkdir '${pathname}'`) as NodeJS.ErrnoException;
+      error.code = "EEXIST";
+      throw error;
     }
     throw accessDenied(`Cannot create unmanaged harness path: ${pathname}`);
   }
 
   async readdir(pathname: string): Promise<string[]> {
-    if (path.posix.normalize(pathname) === "/") {
-      return [];
-    }
+    const normalized = path.posix.normalize(pathname);
+    if (normalized === "/") return ["dev"];
+    if (normalized === "/dev") return ["null"];
+    if (normalized === "/dev/null") throw notDirectory(pathname);
     throw notFound(pathname);
   }
 
@@ -991,7 +1034,7 @@ class UnmanagedRootFs implements IFileSystem {
   }
 
   getAllPaths(): string[] {
-    return ["/"];
+    return [...SYNTHETIC_PATHS];
   }
 
   async chmod(pathname: string): Promise<void> {
@@ -1011,9 +1054,8 @@ class UnmanagedRootFs implements IFileSystem {
   }
 
   async realpath(pathname: string): Promise<string> {
-    if (path.posix.normalize(pathname) === "/") {
-      return "/";
-    }
+    const normalized = path.posix.normalize(pathname);
+    if (SYNTHETIC_PATHS.has(normalized)) return normalized;
     throw notFound(pathname);
   }
 

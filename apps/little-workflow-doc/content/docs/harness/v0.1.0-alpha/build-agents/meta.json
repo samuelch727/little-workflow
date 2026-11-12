@@ -3,6 +3,7 @@
   "pages": [
     "basic-agent",
     "tools",
+    "remote-tools",
     "skills",
     "memory",
     "message-files",

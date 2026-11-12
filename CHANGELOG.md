@@ -114,6 +114,52 @@ listed under Unreleased.
     proxy and hard subtree budgets are not built. Node must satisfy
     `^22.23.2 || ^24.18.1`.
 
+## [0.2.0-alpha.3] - 2026-11-12
+
+### Little Harness
+
+- **Added:** Node-only `@little-stack/harness/compiler` exports `compileHarnessFolder`
+  and `compileHarnessWorkspace`; `/compiled` runs their static agent registries on
+  standalone workerd. Instructions and bounded binary skill assets bundle offline;
+  host-factory agent exports create chat-local tools. Includes `demos/workerd-folders`.
+- **Added:** `/remote-tools` validating contracts, portable HTTP/service-binding
+  clients and authenticated Fetch handlers; `listenRemoteTools` in `/server`.
+  Principal-scoped dedupe metadata and call-local `invocationId` support application-owned
+  idempotency stores; retained unfinished replays preserve their occurrence.
+- **Added:** admitted per-turn execution snapshots and owner-installed registries,
+  isolated effective tools/skills/hooks, pinned provenance and a managed-client seam.
+  LittleDB itself remains private.
+- **Changed:** ordinary remote-tool wire serialization honors Date/toJSON and omits
+  undefined object fields without weakening strict identity hashing. All remote-tool
+  endpoints refuse redirects portably without forwarding credentials or retrying.
+- **Changed:** `demos/workerd-chats` streams AI SDK replies through durable finalization,
+  exposes parked input requests in stream metadata, and includes a loopback SQLite
+  remote-orders example.
+- **Fixed:** synthetic `/dev/null` supports shell redirection without persisting device
+  files. Structural guards protect synthetic directories; command `executionId` correlates
+  start, completion, denial and escalation without losing private attempt identity.
+- **Fixed:** default Node folder factories share host session queues; explicit hosts stay
+  isolated. Persistence failures remain visible; compiled skill validation rejects malformed
+  or mixed inputs. just-bash minimum is 3.0.3 for upstream descriptor routing.
+
+### Little Workflow and shared documentation
+
+- **Breaking:** the bundled model catalog no longer includes four unverified models;
+  see the migration note below.
+- **Changed:** model-price records were re-verified after their 90-day check window;
+  DeepSeek and Mistral rates were corrected and current verification dates recorded.
+- **Changed:** unified Little Stack docs use little-stack.dev canonical routes, retaining
+  historical URLs and marking which Compute and LittleDB features are unpublished.
+- **Fixed:** setup verification preserves server diagnostics on architecture qualification
+  failures; docs clarify scaffold defaults and existing Next setup flags.
+
+**Migration:** the bundled model catalog drops `openai/o4-mini`, `perplexity/sonar-pro`,
+`groq/llama-3.3-70b-versatile` and `amazon/nova-pro`, whose prices could not be
+re-verified. Those models remain usable through AI SDK, but lose bundled description and price
+metadata. Choose a priced catalog model when relying on SDK cost estimates, or
+account for unpriced calls. Runtime API additions otherwise preserve alpha.2 usage.
+Little Compute remains under Unreleased above.
+
 ## [0.2.0-alpha.2] - 2026-11-03
 
 The first release under the `@little-stack` npm scope: `@little-stack/harness`

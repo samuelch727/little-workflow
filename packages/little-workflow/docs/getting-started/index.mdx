@@ -5,7 +5,7 @@ description: What Little Workflow is, how it moves from developer intent to dura
 
 Little Workflow is a TypeScript library for AI-generated work that must be bounded, durable, inspectable, and replayable. You describe a goal, inputs, schemas, a model, tools, skills, and safety rules; an AI agent running in a structured **Harness** designs the workflow graph and executes the steps — all observable via a unified event log, all durable via per-step memoization. A failed `code.run` step can be repaired by the Fixer, but the default worker harness does not run `code.run` steps; see the [Quickstart](/docs/v0.1.0-alpha/getting-started/quickstart).
 
-The alpha is the minimum implementation that proves the thesis: a developer-supplied control plane compiles to validated LWIR and executes durably enough for a local development loop. These docs track the current alpha release, `0.2.0-alpha.1`. The `v0.1.0-alpha` URL path is kept so existing links keep working. The package requires Node.js 22+ and AI SDK 7 (`ai` is a peer dependency).
+The alpha is the minimum implementation that proves the thesis: a developer-supplied control plane compiles to validated LWIR and executes durably enough for a local development loop. These docs track the current alpha release, `0.2.0-alpha.3`. The `v0.1.0-alpha` URL path is kept so existing links keep working. The package requires Node.js 22+ and AI SDK 7 (`ai` is a peer dependency).
 
 ## The pipeline
 

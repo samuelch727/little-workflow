@@ -4,8 +4,8 @@ description: Create a Node or Next.js project with a Little Harness agent, or ad
 ---
 
 `little setup` is the guided way to start a project. It ships with Little
-Workflow, published on npm as `little-workflow@0.2.0-alpha.1` (2026-10-06) and
-as `@little-stack/workflow` from the next release. It always includes a Little
+Workflow, in this release as `@little-stack/workflow` `0.2.0-alpha.3`
+(3 November 2026) on the `alpha` and `latest` tags. It always includes a Little
 Harness agent. A sample durable Little Workflow is optional.
 
 This page is the canonical setup guide. The full command and flag reference is
@@ -32,20 +32,16 @@ Three commands create projects. Pick by what you want to end up with.
 
 | Command | Package | Creates |
 | --- | --- | --- |
-| `little setup` | `little-workflow` (`@little-stack/workflow` from the next release) | A new Node or Next.js project with a Harness agent, or additive changes to an existing TypeScript App Router project. `--workflow` adds a working durable Workflow echo example. |
-| `little init` | `little-workflow` (`@little-stack/workflow` from the next release) | A workflow-first TypeScript project with a starter workflow folder; `--with-harness` adds a Harness agent folder. It never installs packages. See [Init And Add](/docs/workflow/v0.1.0-alpha/reference/cli#init-and-add). |
-| `little-harness init` | `little-harness` (`@little-stack/harness` from the next release) | A standalone agent workspace with a starter `support` agent you chat with from the CLI. See [Harness Getting Started](/docs/harness/v0.1.0-alpha/getting-started). |
+| `little setup` | `@little-stack/workflow` | A new Node or Next.js project with a Harness agent, or additive changes to an existing TypeScript App Router project. `--workflow` adds a working durable Workflow echo example. |
+| `little init` | `@little-stack/workflow` | A workflow-first TypeScript project with a starter workflow folder; `--with-harness` adds a Harness agent folder. It never installs packages. See [Init And Add](/docs/workflow/v0.1.0-alpha/reference/cli#init-and-add). |
+| `little-harness init` | `@little-stack/harness` | A standalone agent workspace with a starter `support` agent you chat with from the CLI. See [Harness Getting Started](/docs/harness/v0.1.0-alpha/getting-started). |
 
 ## New project
 
 ```bash
 # Interactive Next.js or standalone Node agent wizard
-npx little-workflow@0.2.0-alpha.1 setup
+npx @little-stack/workflow@alpha setup
 ```
-
-Until the first `@little-stack` release is on npm, these commands run the published
-`little-workflow@0.2.0-alpha.1`. After it, run `npx @little-stack/workflow@alpha setup`
-with the same flags.
 
 The command synopsis is
 `little setup [directory | --here] [--template node|next|existing-next] [--workflow]`. Run
@@ -58,10 +54,10 @@ Preview first, then apply:
 
 ```bash
 # Preview additive changes in an existing TypeScript App Router project
-npx little-workflow@0.2.0-alpha.1 setup --here --template existing-next --workflow --plan
+npx @little-stack/workflow@alpha setup --here --template existing-next --workflow --plan
 
 # Apply, explicitly allow the SQLite native build, and run keyless verification
-npx little-workflow@0.2.0-alpha.1 setup --here --template existing-next --workflow --yes --install --allow-native-build --verify
+npx @little-stack/workflow@alpha setup --here --template existing-next --workflow --yes --install --allow-native-build --verify
 ```
 
 Leave out `--workflow` to add only the Harness agent. `--plan` previews the
@@ -69,13 +65,12 @@ changes without writing. `--install` installs dependencies,
 `--allow-native-build` explicitly allows the SQLite native build, and `--verify`
 runs a keyless verification.
 
-> **UNRELEASED** (current source, no npm version yet): `--here` always means the
-> current directory and no longer selects the existing-app mode, so pass
-> `--template existing-next` as above to add Little to an existing Next.js app
-> (the published release accepts it too). A new-project
-> template (`node`, the default, or `next`) needs an empty target. The default
-> provider is `openai` in `little setup`, `little init` and `little-harness init`,
-> and `little init` names its workflow with `--workflow-name <name>`.
+`--here` always means the
+current directory and no longer selects the existing-app mode, so pass
+`--template existing-next` as above to add Little to an existing Next.js app. A new-project
+template (`node`, the default, or `next`) needs an empty target. The default
+provider is `openai` in `little setup`, `little init` and `little-harness init`,
+and `little init` names its workflow with `--workflow-name <name>`.
 
 ## What setup does
 
@@ -103,20 +98,16 @@ Stop the installer first, then run rollback for the same project:
 
 ```bash
 # Recover CLI-owned files after an interrupted transaction
-npx little-workflow@0.2.0-alpha.1 setup --here --rollback --yes
+npx @little-stack/workflow@alpha setup --here --rollback --yes
 ```
 
 Rollback restores unchanged CLI-written content and preserves concurrent edits.
-In published `0.2.0-alpha.1`, `--rollback` without a directory or `--here`
-recovers the current directory. When no edited files were preserved, it prints
-one generic success line, including when it found no setup journal; retained
-edits keep the journal available for manual recovery.
 
-> **UNRELEASED** (current source, no npm version yet): `--rollback` needs a
-> project directory or `--here`, the interrupted-setup error prints the exact
-> recovery command, and recovery reports one of four outcomes. The library API
-> is `recoverSetup()`, which can throw for an invalid journal or a still-running
-> installer. See [Setup Recovery](/docs/workflow/v0.1.0-alpha/reference/setup-recovery).
+`--rollback` needs a
+project directory or `--here`, the interrupted-setup error prints the exact
+recovery command, and recovery reports one of four outcomes. The library API
+is `recoverSetup()`, which can throw for an invalid journal or a still-running
+installer. See [Setup Recovery](/docs/workflow/v0.1.0-alpha/reference/setup-recovery).
 
 ## Next steps
 

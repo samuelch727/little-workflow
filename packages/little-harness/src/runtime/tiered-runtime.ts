@@ -24,6 +24,7 @@ import { justBashSandbox } from "./just-bash-runtime.js";
 import {
   createShellRuntime,
   emitTrackedMountFileChanges,
+  forwardShellAttempt,
   snapshotTrackedMounts,
   type ShellCommandInput,
   type ShellCommandResult,
@@ -133,7 +134,7 @@ export function tieredSandbox<TExtraBody = unknown>(
       ...(options.emitToolEvents === undefined ? {} : { emitToolEvents: options.emitToolEvents }),
       ...(options.traceOptions === undefined ? {} : { traceOptions: options.traceOptions }),
       files: options.files,
-      execute: (input, context) => tiering.execute(input, context.toolCallId),
+      execute: (input, context) => tiering.execute(input, context.toolCallId, context.executionId),
     });
 
     return {
@@ -250,7 +251,7 @@ function untrackedWorkspace(workspace: HarnessWorkspaceSpec): HarnessWorkspaceSp
 /** One tier, reduced to the only thing the switch needs from it: a command executor. */
 type TierExecutor = {
   readonly runtime: HarnessSandbox;
-  execute(input: ShellCommandInput, toolCallId: string): Promise<ShellCommandResult>;
+  execute(input: ShellCommandInput, toolCallId: string, executionId?: string): Promise<ShellCommandResult>;
   /**
    * The model's commands this tier ran, and the time it spent on them and on the switch's
    * own probe and carry-over, measured here so a tier with no usage() is still accounted for.
@@ -274,8 +275,8 @@ function tierExecutor(runtime: HarnessSandbox): TierExecutor {
   return {
     runtime,
     meter: { commands: 0, activeMs: 0 },
-    async execute(input, toolCallId) {
-      return shellCommandResult(await call(input, { toolCallId, messages: [] }));
+    async execute(input, toolCallId, executionId) {
+      return shellCommandResult(await forwardShellAttempt(executionId, toolCallId, options => call(input, options)));
     },
   };
 }
@@ -311,6 +312,8 @@ type EscalationTrigger = "classification" | "emulation-gap";
 
 type EscalationCause = {
   readonly trigger: EscalationTrigger;
+  readonly toolCallId: string;
+  readonly executionId: string;
   readonly command: string;
   readonly classification?: CommandClassification | undefined;
   readonly gap?: Tier0EmulationGap | undefined;
@@ -345,7 +348,7 @@ type CreateTierSwitchOptions<TExtraBody> = {
  * built at most once, and one that failed is not retried command after command.
  */
 function createTierSwitch<TExtraBody>(options: CreateTierSwitchOptions<TExtraBody>): {
-  execute(input: ShellCommandInput, toolCallId: string): Promise<ShellCommandResult>;
+  execute(input: ShellCommandInput, toolCallId: string, executionId: string): Promise<ShellCommandResult>;
   /** Whether a higher tier was actually built, and so could write at dispose. */
   escalated(): boolean;
   /** The active tier's usage: the higher tier's once the turn escalated, else Tier-0's. */
@@ -361,8 +364,8 @@ function createTierSwitch<TExtraBody>(options: CreateTierSwitchOptions<TExtraBod
   let denied = 0;
   let escalations = 0;
 
-  const emit = async (type: HarnessTierEventType, metadata: JsonObject): Promise<void> => {
-    await options.emit?.({ type, metadata });
+  const emit = async (type: HarnessTierEventType, metadata: JsonObject, occurrenceId?: string): Promise<void> => {
+    await options.emit?.({ type, metadata, ...(occurrenceId === undefined ? {} : { occurrenceId }) });
   };
 
   const classify = (command: string): CommandClassification | undefined => {
@@ -419,7 +422,7 @@ function createTierSwitch<TExtraBody>(options: CreateTierSwitchOptions<TExtraBod
       }
     }
     if (next.status === "unavailable") {
-      await emit("harness.runtime.tier.unavailable", { ...causeMetadata(cause), detail: next.detail });
+      await emit("harness.runtime.tier.unavailable", { ...causeMetadata(cause), detail: next.detail }, cause.executionId);
       return { ok: false, detail: next.detail };
     }
     if (active === "tier-0") {
@@ -427,7 +430,7 @@ function createTierSwitch<TExtraBody>(options: CreateTierSwitchOptions<TExtraBod
       // switch that already happened rather than causing another.
       active = "next-tier";
       escalations += 1;
-      await emit("harness.runtime.tier.escalated", causeMetadata(cause));
+      await emit("harness.runtime.tier.escalated", causeMetadata(cause), cause.executionId);
     }
     return { ok: true, detail: "" };
   };
@@ -435,11 +438,12 @@ function createTierSwitch<TExtraBody>(options: CreateTierSwitchOptions<TExtraBod
   const runOnActiveTier = async (
     input: ShellCommandInput,
     toolCallId: string,
+    executionId: string,
   ): Promise<ShellCommandResult> => {
     if (active === "tier-0") {
       tier0Executed = true;
       options.tier0.meter.commands += 1;
-      return runOnTier(options.tier0, input, toolCallId);
+      return runOnTier(options.tier0, input, toolCallId, executionId);
     }
     const tier = next.status === "ready" ? next.tier : undefined;
     if (tier === undefined) {
@@ -447,18 +451,20 @@ function createTierSwitch<TExtraBody>(options: CreateTierSwitchOptions<TExtraBod
       return refusal("the higher tier is no longer available");
     }
     tier.meter.commands += 1;
-    return runOnTier(tier, input, toolCallId);
+    return runOnTier(tier, input, toolCallId, executionId);
   };
 
   return {
-    async execute(input, toolCallId) {
+    async execute(input, toolCallId, executionId) {
       const classification = classify(input.command);
       if (classification?.decision === "deny") {
         denied += 1;
         await emit("harness.runtime.command.denied", {
           command: input.command,
+          toolCallId,
+          executionId,
           reasons: classification.reasons,
-        });
+        }, executionId);
         return refusal(`blocked by policy (${describeReasons(classification.reasons)})`);
       }
 
@@ -466,6 +472,7 @@ function createTierSwitch<TExtraBody>(options: CreateTierSwitchOptions<TExtraBod
         const escalated = await escalate({
           trigger: "classification",
           command: input.command,
+          toolCallId, executionId,
           classification,
         });
         if (!escalated.ok) {
@@ -479,7 +486,7 @@ function createTierSwitch<TExtraBody>(options: CreateTierSwitchOptions<TExtraBod
       }
 
       const ranOnTier0 = active === "tier-0";
-      const result = await runOnActiveTier(input, toolCallId);
+      const result = await runOnActiveTier(input, toolCallId, executionId);
       if (!ranOnTier0) {
         return result;
       }
@@ -488,14 +495,14 @@ function createTierSwitch<TExtraBody>(options: CreateTierSwitchOptions<TExtraBod
       if (gap === undefined) {
         return result;
       }
-      const escalated = await escalate({ trigger: "emulation-gap", command: input.command, gap });
+      const escalated = await escalate({ trigger: "emulation-gap", command: input.command, gap, toolCallId, executionId });
       if (!escalated.ok) {
         // The command already ran; its real result beats a synthesized error.
         return result;
       }
       // Exactly one retry per command, structurally: the retry's own stderr is returned
       // unexamined, so a script that prints gap lines forever still escalates only once.
-      return runOnActiveTier(input, toolCallId);
+      return runOnActiveTier(input, toolCallId, executionId);
     },
     escalated: () => next.status === "ready",
     usage: () => tierUsage(next.status === "ready" ? next.tier : options.tier0),
@@ -525,11 +532,12 @@ async function runOnTier(
   tier: TierExecutor,
   input: ShellCommandInput,
   toolCallId: string,
+  executionId?: string,
 ): Promise<ShellCommandResult> {
   // The state probe and carry-over are not commands, but they are time the tier spent.
   const startedAt = Date.now();
   try {
-    return await tier.execute(input, toolCallId);
+    return await tier.execute(input, toolCallId, executionId);
   } catch (error) {
     // The shell port's contract is a result, never a throw — an adapter that breaks it
     // must not take the turn down with it.
@@ -557,6 +565,8 @@ function causeMetadata(cause: EscalationCause): JsonObject {
     to: "next-tier",
     trigger: cause.trigger,
     command: cause.command,
+    toolCallId: cause.toolCallId,
+    executionId: cause.executionId,
     ...(cause.classification === undefined
       ? {}
       : { decision: cause.classification.decision, reasons: cause.classification.reasons }),

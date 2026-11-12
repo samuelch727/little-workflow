@@ -1,8 +1,9 @@
+import { InMemoryFs } from "just-bash";
 import { createHook } from "node:async_hooks";
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { tool } from "ai";
 import * as path from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { localHost, localSessionWorkspace } from "../local-host/index.js";
 import { resolveLocalHostPaths } from "../local-host/paths.js";
@@ -603,5 +604,139 @@ describe("justBashSandbox()", () => {
       expect(bashDisabled.systemHints().join("\n")).not.toContain("tools.add");
       expect(bashDisabled.systemHints().join("\n")).not.toContain("js-exec");
     });
+  });
+});
+
+it("refuses null structural copies before any chmod fallback and preserves the source", async () => {
+  await withTempDir(async dir => {
+    const session = await new LocalSessionStore(resolveLocalHostPaths({ dataDir: dir }, dir)).getOrCreate({ id: "null-boundary" });
+    await session.files.writeText("/session/source", "keep");
+    const fs = await buildWorkspaceFs(localSessionWorkspace(session), []);
+    const chmod = vi.spyOn(fs, "chmod").mockResolvedValue(undefined);
+    await expect(fs.mv("/session/source", "/dev/null")).rejects.toThrow(/Cannot move the synthetic/);
+    await expect(fs.cp("/session/source", "/dev/null")).rejects.toThrow(/Cannot copy the synthetic/);
+    expect(chmod).not.toHaveBeenCalled(); expect((await session.files.read("/session/source")).text()).toBe("keep");
+    expect(await fs.readFile("/dev/null")).toBe(""); expect((await fs.stat("/dev/null")).isFile).toBe(false);
+  });
+});
+it("preserves historical direct-shell runtime-tool replay scope across fresh sandboxes", async () => {
+  await withTempDir(async dir => {
+    const host = localHost({ dataDir: dir, sandbox: "in-process" }); const session = await host.sessions.getOrCreate({ id: "direct-replay" });
+    const prepared = await host.prepareTurn({ session, turnId: "same-turn", persistentDirs: [] });
+    const execute = vi.fn(async () => ({ sum: 999 }));
+    const find = vi.fn(query => query.scope?.parentToolCallId === "runtime_bash" && query.callIndex === 1
+      ? { kind: "completed" as const, result: { sum: 7 } } : { kind: "none" as const });
+    for (const toolCallId of [undefined, ""]) {
+      const runtime = await prepared.createSandbox({
+        tools: { add: tool({ inputSchema: z.object({ a: z.number(), b: z.number() }), execute }) }, runtimeToolReplay: { find },
+      });
+      try {
+        const shell = runtime.shellTool() as any;
+        const result = await shell.execute({ command: "js-exec -c 'console.log((await tools.add({a:3,b:4})).sum)'" }, toolCallId === undefined ? {} : { toolCallId });
+        expect(result).toMatchObject({ stdout: "7\n", exitCode: 0 });
+      } finally { await runtime.dispose?.(); }
+    }
+    expect(execute).not.toHaveBeenCalled(); expect(find).toHaveBeenCalledTimes(2);
+  });
+});
+
+it.each([
+  "/dev/null/", "/dev/null///", "/dev//null/", "/dev/./null/",
+  "/dev/../dev/null/", "/dev/null/.", "///dev///null///", "dev/null/", "./dev/null/", "../../dev/null/",
+])("refuses structural null aliases before cross-mount mutation: %s", async alias => {
+  await withTempDir(async dir => {
+    const session = await new LocalSessionStore(resolveLocalHostPaths({ dataDir: dir }, dir)).getOrCreate({ id: "null-alias" });
+    await session.files.writeText("/session/source", "keep");
+    const fs = await buildWorkspaceFs(localSessionWorkspace(session), []);
+    const chmod = vi.spyOn(fs, "chmod").mockResolvedValue(undefined);
+    const write = vi.spyOn(fs, "writeFile"), remove = vi.spyOn(fs, "rm");
+    expect(fs.resolvePath("/", alias)).toBe("/dev/null");
+    await expect(fs.mv("/session/source", alias)).rejects.toThrow(/Cannot move the synthetic/);
+    await expect(fs.cp("/session/source", alias)).rejects.toThrow(/Cannot copy the synthetic/);
+    await expect(fs.mv(alias, "/session/destination")).rejects.toThrow(/Cannot move the synthetic/);
+    await expect(fs.cp(alias, "/session/destination")).rejects.toThrow(/Cannot copy the synthetic/);
+    expect(chmod).not.toHaveBeenCalled(); expect(write).not.toHaveBeenCalled(); expect(remove).not.toHaveBeenCalled();
+    expect((await session.files.read("/session/source")).text()).toBe("keep");
+    expect(await fs.exists("/session/destination")).toBe(false); expect(await fs.readFile("/dev/null")).toBe("");
+  });
+});
+
+it("keeps neighboring paths protected and explicit /dev mounts under their own policy", async () => {
+  await withTempDir(async dir => {
+    const session = await new LocalSessionStore(resolveLocalHostPaths({ dataDir: dir }, dir)).getOrCreate({ id: "null-alias-policy" });
+    await session.files.writeText("/session/source", "keep");
+    const fs = await buildWorkspaceFs(localSessionWorkspace(session), []);
+    await expect(fs.cp("/session/source", "/dev/nullish/")).rejects.toThrow(/Unmanaged harness path/);
+    expect((await session.files.read("/session/source")).text()).toBe("keep");
+    const mounted = new InMemoryFs(); fs.mount("/dev", mounted);
+    await fs.cp("/session/source", "/dev/./null/");
+    expect(await mounted.readFile("/null")).toBe("keep");
+    await fs.mv("/session/source", "/dev/null///");
+    expect(await fs.exists("/session/source")).toBe(false); expect(await mounted.readFile("/null")).toBe("keep");
+  });
+});
+it("does not treat a shell-relative managed dev/null file as the synthetic endpoint", async () => {
+  await withTempDir(async dir => {
+    const session = await new LocalSessionStore(resolveLocalHostPaths({ dataDir: dir }, dir)).getOrCreate({ id: "relative-null-alias" });
+    const runtime = await justBashSandbox()({ workspace: localSessionWorkspace(session), files: session.files });
+    try {
+      const result = await (runtime.shellTool() as any).execute({ command: "mkdir -p dev; printf keep >dev/null; mv dev/null kept; cp kept copied; cat copied" }, {});
+      expect(result).toMatchObject({ stdout: "keep", stderr: "", exitCode: 0 });
+    } finally { await runtime.dispose?.(); }
+  });
+});
+
+it.each(["/dev", "/dev/", "/dev///", "///dev//", "/dev/.", "/dev/null/..", "dev/", "./dev/", "../../dev/", "/"])(
+  "refuses synthetic directory structural aliases before any mutation: %s", async alias => {
+    await withTempDir(async dir => {
+      const session = await new LocalSessionStore(resolveLocalHostPaths({ dataDir: dir }, dir)).getOrCreate({ id: "synthetic-directory" });
+      await session.files.writeText("/session/source", "keep");
+      const fs = await buildWorkspaceFs(localSessionWorkspace(session), []);
+      const chmod = vi.spyOn(fs, "chmod").mockResolvedValue(undefined);
+      const write = vi.spyOn(fs, "writeFile"), remove = vi.spyOn(fs, "rm"), make = vi.spyOn(fs, "mkdir");
+      await expect(fs.mv(alias, "/session/destination")).rejects.toThrow(/Cannot move the synthetic/);
+      await expect(fs.cp(alias, "/session/destination", { recursive: true })).rejects.toThrow(/Cannot copy the synthetic/);
+      await expect(fs.mv("/session/source", alias)).rejects.toThrow(/Cannot move the synthetic/);
+      await expect(fs.cp("/session/source", alias)).rejects.toThrow(/Cannot copy the synthetic/);
+      expect(chmod).not.toHaveBeenCalled(); expect(write).not.toHaveBeenCalled();
+      expect(remove).not.toHaveBeenCalled(); expect(make).not.toHaveBeenCalled();
+      expect(await fs.exists("/session/destination")).toBe(false);
+      expect((await session.files.read("/session/source")).text()).toBe("keep");
+      expect(await fs.readdir("/dev")).toEqual(["null"]);
+    });
+  },
+);
+
+it("refuses null-source copies without creating or truncating managed files", async () => {
+  await withTempDir(async dir => {
+    const session = await new LocalSessionStore(resolveLocalHostPaths({ dataDir: dir }, dir)).getOrCreate({ id: "null-copy-contract" });
+    await session.files.writeText("/session/existing", "keep");
+    const runtime = await justBashSandbox()({ workspace: localSessionWorkspace(session), files: session.files });
+    try {
+      const shell = runtime.shellTool() as any;
+      for (const destination of ["existing", "absent"]) {
+        const result = await shell.execute({ command: `cp /dev/null /session/${destination}` }, {});
+        expect(result.exitCode).not.toBe(0); expect(result.stderr).toMatch(/Cannot copy the synthetic/);
+      }
+      expect((await session.files.read("/session/existing")).text()).toBe("keep");
+      await expect(session.files.read("/session/absent")).rejects.toThrow();
+      expect(await shell.execute({ command: ": > /session/existing; : > /session/absent" }, {})).toMatchObject({ exitCode: 0 });
+      expect((await session.files.read("/session/existing")).text()).toBe("");
+      expect((await session.files.read("/session/absent")).text()).toBe("");
+    } finally { await runtime.dispose?.(); }
+  });
+});
+
+it("delegates explicit /dev directory mounts to their own structural policy", async () => {
+  await withTempDir(async dir => {
+    const session = await new LocalSessionStore(resolveLocalHostPaths({ dataDir: dir }, dir)).getOrCreate({ id: "mounted-dev-directory" });
+    const fs = await buildWorkspaceFs(localSessionWorkspace(session), []);
+    const mounted = new InMemoryFs({ "/null": "application-owned" }); fs.mount("/dev", mounted);
+    await fs.cp("/dev/", "/session/copied", { recursive: true });
+    expect(await fs.readFile("/session/copied/null")).toBe("application-owned");
+    // MountableFs itself refuses moving an explicit mount point before copying it.
+    await expect(fs.mv("/dev/.", "/session/moved")).rejects.toThrow(/EBUSY: mount point/);
+    expect(await fs.exists("/session/moved")).toBe(false);
+    expect(await mounted.readFile("/null")).toBe("application-owned");
   });
 });

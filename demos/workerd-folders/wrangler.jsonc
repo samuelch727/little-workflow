@@ -1,0 +1,7 @@
+{
+  "name": "workerd-folders",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-10-01",
+  "durable_objects": { "bindings": [{ "name": "CHAT", "class_name": "Chat" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Chat"] }]
+}

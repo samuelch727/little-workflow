@@ -1,20 +1,19 @@
 ---
 title: Alpha Migrations
-description: Unreleased source changes since npm 0.2.0-alpha.0, and the migrations they need.
+description: Migrate from little-harness 0.2.0-alpha.0 to @little-stack/harness 0.2.0-alpha.2.
 ---
 
-> **UNRELEASED review preview.** Every change on this page is in the current
-> source only. Published `0.2.0-alpha.0` (on npm as `little-harness`) has none of
-> them. The source manifests carry `0.2.0-alpha.2` for the next release, which is
-> not on npm yet. Code written for `0.2.0-alpha.0` keeps working with
-> `0.2.0-alpha.0`; these migrations apply when you move to the unreleased SDK.
+This page covers migration from `little-harness` `0.2.0-alpha.0` to
+`@little-stack/harness` `0.2.0-alpha.2`, published on 3 November 2026 on the
+`alpha` and `latest` tags. Replace dependency names and imports along with the
+API changes below. Code that stays on the old package keeps its old API.
 
 ## One name per concept
 
-The current source gives each concept one name and each symbol one entry point.
+`0.2.0-alpha.2` gives each concept one name and each symbol one entry point.
 The old names were aliases or near-copies, and none of them stays as a
 deprecated alias, so code written for `0.2.0-alpha.0` that uses them stops
-compiling against the unreleased SDK. The sandbox, session-log, type-alias and
+compiling against `0.2.0-alpha.2`. The sandbox, session-log, type-alias and
 entry-point changes are renames or moves with unchanged runtime behavior. The
 last three subsections cover the Agent Group launcher shape, the shared error
 base class and a new `loadHarness` option.
@@ -22,9 +21,9 @@ base class and a new `loadHarness` option.
 ### Sandbox names
 
 "Execution environment" and "runtime" both meant the sandbox the agent's
-`bash` tool runs in. The current source calls it a sandbox everywhere.
+`bash` tool runs in. `0.2.0-alpha.2` calls it a sandbox everywhere.
 
-| Published `0.2.0-alpha.0` | UNRELEASED source |
+| Published `0.2.0-alpha.0` | `0.2.0-alpha.2` |
 | --- | --- |
 | `localHost({ executionEnvironment })` | `localHost({ sandbox })` |
 | `HarnessExecutionEnvironmentMode` | `HarnessSandboxMode` (from `@little-stack/harness/sandbox`) |
@@ -55,7 +54,7 @@ const host = localHost({
 });
 ```
 
-After (UNRELEASED):
+After (`0.2.0-alpha.2`):
 
 ```ts
 import {
@@ -76,7 +75,7 @@ The string modes `"auto"`, `"in-process"` and `"subprocess"` and
 
 ### Session logs
 
-| Published `0.2.0-alpha.0` | UNRELEASED source |
+| Published `0.2.0-alpha.0` | `0.2.0-alpha.2` |
 | --- | --- |
 | `createFileSessionLog({ path })` | `fileSessionLog({ path })` |
 | `createInMemorySessionLog()` | `inMemorySessionLog()` |
@@ -94,7 +93,7 @@ const harness = createHarness({
 });
 ```
 
-After (UNRELEASED):
+After (`0.2.0-alpha.2`):
 
 ```ts
 import { createHarness } from "@little-stack/harness";
@@ -109,7 +108,7 @@ const harness = createHarness({
 
 ### Removed type aliases
 
-| Published `0.2.0-alpha.0` | UNRELEASED source |
+| Published `0.2.0-alpha.0` | `0.2.0-alpha.2` |
 | --- | --- |
 | `GenerateHarnessResult<T>` | `HarnessTurnResult<T>` (see [Typed parked results](#typed-parked-results)) |
 | `StreamHarnessFinished` | `StreamHarnessTurnFinished` |
@@ -122,9 +121,10 @@ const harness = createHarness({
 
 Each symbol now has one entry point:
 
-| Symbols | Published `0.2.0-alpha.0` | UNRELEASED source |
+| Symbols | Published `0.2.0-alpha.0` | `0.2.0-alpha.2` |
 | --- | --- | --- |
-| `streamHarness`, `generateHarness`, `stageChatMessages` | root, and `little-harness/execution` | root only; the `./execution` subpath is removed |
+| `streamHarness`, `generateHarness` | root, and `little-harness/execution` | root only; the `./execution` subpath is removed |
+| `stageChatMessages` | root, and `little-harness/execution` | `@little-stack/harness/internals` only |
 | `loadHarness`, `loadWorkspace` | root, and `little-harness/workspace` | root only; the `./workspace` subpath is removed |
 | `discoverTools`, `discoverSkills`, `discoverWorkflows` | root, and `little-harness/workspace` | `@little-stack/harness/internals` only (see [A smaller root](#a-smaller-root)) |
 | Durable event contract: `HarnessSessionLog`, `DurableHarnessEventInput`, `PersistedDurableHarnessEvent`, `TraceHarnessEventInput`, `HarnessTraceSink`, `HarnessPriorEventQuery`, `emitHarnessOccurrence` | root | `@little-stack/harness/events` only |
@@ -141,7 +141,7 @@ import { loadHarness } from "little-harness/workspace";
 import { remoteSessionLog, type HarnessSessionLog } from "little-harness";
 ```
 
-After (UNRELEASED):
+After (`0.2.0-alpha.2`):
 
 ```ts
 import { loadHarness, streamHarness } from "@little-stack/harness";
@@ -162,14 +162,14 @@ execute: async (input, options) => {
 
 ### A smaller root
 
-The published root entry exported over 150 values. The unreleased root keeps the 33
+The `0.2.0-alpha.0` root entry exported over 150 values. The `0.2.0-alpha.2` root keeps the exports
 an app needs to build and run an agent: the run and load functions,
-`localHost` and the dir helpers, the three ready-made sandboxes, `skill`,
+`localHost`, `virtualHost` and the dir helpers, the three ready-made sandboxes, `skill`,
 `memory`, `inputType`, the tool context, outcomes and the error classes, plus
 the new `once`, `resumeParked`, `answerInputRequest`, `listInputRequests` and
 `defineSchedule`. Everything else moved, with no behavior change:
 
-| Symbols | Published `0.2.0-alpha.0` | UNRELEASED source |
+| Symbols | Published `0.2.0-alpha.0` | `0.2.0-alpha.2` |
 | --- | --- | --- |
 | Sandbox building blocks: `createShellRuntime`, `createEnvironmentToolBridge`, `createRuntimeToolBridge`, `localSessionWorkspace`, `resolveSandbox`, `selectSandboxMode`, the just-bash helpers, `snapshotTrackedMounts`, `emitTrackedMountFileChanges`, `classifyCommand`, `detectEmulationGap`, `tier0CapabilityMatrix`, the `TIER0_*` constants, `resolveTraceOptions` | root | `@little-stack/harness/sandbox` only |
 | Host building blocks: `createInMemoryOrchestrationServices`, `createDurableOrchestrationServices`, `createFileDurableStore`, `createInMemoryDurableStore`, `DurableJsonStore`, `HarnessOrchestrationServices`, `PreparedTurn`, `LocalSessionStore`, `LocalSessionQueue`, `LocalHarnessSession`, `LocalTrace`, `resolveLocalHostPaths`, `sessionKeyToPathKey`, `createLocalFileWriter`, `readLocalTrace`, `listLocalSessions`, `listLocalFiles`, `listLocalArtifacts`, `latestDiffForPath`, `doctorSession` | root | `@little-stack/harness/host` only |
@@ -182,7 +182,7 @@ Before (`0.2.0-alpha.0`):
 import { createShellRuntime, createInMemoryOrchestrationServices, localHost } from "little-harness";
 ```
 
-After (UNRELEASED):
+After (`0.2.0-alpha.2`):
 
 ```ts
 import { localHost } from "@little-stack/harness";
@@ -196,8 +196,8 @@ Compute share Harness code, and its names can change in any release.
 
 ### Agent Group launchers
 
-Agent Groups are not in any published version. If you wrote a launcher or a
-task ledger against earlier unreleased source:
+Agent Groups ship in `0.2.0-alpha.2`. If you wrote a launcher or a
+task ledger against an earlier source preview:
 
 - The launcher port, its request and result types, the `HarnessAgentGroup*Error`
   classes and the 22 task-ledger projection types moved from the root to the
@@ -214,7 +214,7 @@ task ledger against earlier unreleased source:
   exported. Configure `createHarness({ checkpoints: { writer } })`; the
   `checkpoint` tool is injected automatically.
 
-Before (earlier unreleased source):
+Before (earlier source preview):
 
 ```ts
 import { type HarnessAgentGroupLauncher } from "@little-stack/harness";
@@ -227,7 +227,7 @@ const launcher: HarnessAgentGroupLauncher = {
 };
 ```
 
-After (UNRELEASED):
+After (`0.2.0-alpha.2`):
 
 ```ts
 import type { HarnessAgentGroupLauncher } from "@little-stack/harness/agents";
@@ -246,8 +246,8 @@ const launcher: HarnessAgentGroupLauncher = {
 
 Every error Little Harness throws on purpose extends `LittleHarnessError`, so one
 `instanceof LittleHarnessError` check catches them all, and each has one stable
-`code`. None of the classes below is in a published version; in earlier
-unreleased source they extended plain `Error` and their `code` field, when they
+`code`. The classes below ship in `0.2.0-alpha.2`; in earlier
+source previews they extended plain `Error` and their `code` field, when they
 had one, took different shapes:
 
 | Class | Entry point | `code` |
@@ -274,7 +274,7 @@ takes its sessions from that host. Published `0.2.0-alpha.0` has only
 `loadHarness(agentDir)`.
 
 ```ts
-// UNRELEASED: replaces spreading the loaded harness to swap its host.
+// `0.2.0-alpha.2`: replaces spreading the loaded harness to swap its host.
 const harness = await loadHarness("agents/support", {
   host: localHost({ dataDir: ".little-harness-test" }),
 });
@@ -287,15 +287,15 @@ A turn can park when a tool returns a parked result, so a turn ends either
 `HarnessTurnResult` and `StreamHarnessTurnFinished` already include the parked
 state, but the named result types do not:
 
-| Declared type | Published `0.2.0-alpha.0` | UNRELEASED source |
+| Declared type | Published `0.2.0-alpha.0` | `0.2.0-alpha.2` |
 | --- | --- | --- |
 | Returned by `generateHarness()` | `GenerateHarnessResult<T>`, an alias of `HarnessCompletedResult<T>` | `HarnessTurnResult<T>` |
 | Resolved by `streamHarness().finished` | `StreamHarnessFinished`, an alias of `StreamHarnessCompletedResult` | `StreamHarnessTurnFinished` |
 
-The unreleased source declares the unions and removes the casts that presented
+`0.2.0-alpha.2` declares the unions and removes the casts that presented
 a parked result as completed. It also removes the `GenerateHarnessResult` and
 `StreamHarnessFinished` aliases (see [One name per concept](#removed-type-aliases)). This is a compile-time
-correction, not new parking behavior: the published runtime can already return
+correction, not new parking behavior: the `0.2.0-alpha.0` runtime can already return
 a parked result whose type claims it completed.
 
 A parked result has `status: "parked"`, `continuationId`, `pending`,
@@ -304,7 +304,7 @@ A parked result has `status: "parked"`, `continuationId`, `pending`,
 
 **Migration.** Check `status === "completed"` before reading `text`, `output`,
 `persistence` or `commitManual`. Without the check, that code stops compiling
-against the unreleased SDK. The check compiles against `0.2.0-alpha.0` too, so
+against `0.2.0-alpha.2`. The check compiles against `0.2.0-alpha.0` too, so
 you can add it now.
 
 Before (compiles against `0.2.0-alpha.0` only):
@@ -314,7 +314,7 @@ const result = await generateHarness({ harness, messages });
 console.log(result.output);
 ```
 
-After (compiles against `0.2.0-alpha.0` and the unreleased SDK):
+After (compiles against `0.2.0-alpha.0` and `0.2.0-alpha.2`):
 
 ```ts
 const result = await generateHarness({ harness, messages });
@@ -323,10 +323,10 @@ if (result.status === "completed") {
 }
 ```
 
-With the unreleased SDK only, you can also handle the parked branch explicitly:
+With `0.2.0-alpha.2` only, you can also handle the parked branch explicitly:
 
 ```ts
-// UNRELEASED SDK only.
+// 0.2.0-alpha.2.
 if (result.status === "parked") {
   // resumeParked({ harness }) continues it once result.pending settles.
   return;
@@ -344,16 +344,16 @@ The same applies to `const finished = await result.finished` from
 | Version | Reserved for configured and discovered tools |
 | --- | --- |
 | Published `0.2.0-alpha.0` | `bash`, `__proto__`, `constructor`, `prototype` |
-| UNRELEASED source | The names above, plus `checkpoint`, `start_agent_group`, `spawn_agent`, `watch_agent_group`, `join_agent_group` and `cancel_agent_group` |
+| `0.2.0-alpha.2` | The names above, plus `checkpoint`, `start_agent_group`, `spawn_agent`, `watch_agent_group`, `join_agent_group` and `cancel_agent_group` |
 
-In the unreleased source, the extra names are reserved even when `checkpoints`
+In `0.2.0-alpha.2`, the extra names are reserved even when `checkpoints`
 or `agents` is not configured, because the runtime injects tools under them when
 those features are on.
 
 **Migration.** Rename any tool called `checkpoint` or after an Agent Group tool,
 in `createHarness({ tools })` and in an agent folder's `tools/` directory. Such a
-name passes the published name validation in `0.2.0-alpha.0`, but the
-unreleased SDK rejects it.
+name passes the published name validation in `0.2.0-alpha.0`, but
+`0.2.0-alpha.2` rejects it.
 
 ## Small subpaths: events and remote-session
 
@@ -372,7 +372,7 @@ import {
 } from "little-harness";
 ```
 
-The unreleased source adds two dedicated entry points, which are the only home
+`0.2.0-alpha.2` adds two dedicated entry points, which are the only home
 of these symbols:
 
 - `@little-stack/harness/events`: the durable event types and the new validators
@@ -388,11 +388,11 @@ version that can load ES modules through `require()`, and only for a module
 graph without top-level await. The export conditions alone do not guarantee
 that.
 
-**Migration.** Required. The unreleased source no longer re-exports these
+**Migration.** Required. `0.2.0-alpha.2` no longer re-exports these
 symbols from the root entry, and renames the two store helpers:
 
 ```ts
-// UNRELEASED
+// `0.2.0-alpha.2`
 import { emitHarnessOccurrence } from "@little-stack/harness/events";
 import {
   fileSessionLog,
@@ -406,7 +406,7 @@ See [Entry points](#entry-points) for the full list.
 
 ## Mandatory append identity
 
-The unreleased source makes `appendIdempotencyKey` mandatory on every
+`0.2.0-alpha.2` makes `appendIdempotencyKey` mandatory on every
 `DurableHarnessEventInput`. In `0.2.0-alpha.0` the input is only `type`,
 `runId`, an optional `occurrenceId` and `payload`. This is an intentional
 source-breaking change: a durable agent cannot safely retry an ambiguous append
@@ -418,7 +418,7 @@ Before (`0.2.0-alpha.0`):
 await sessionLog.append({ type, runId, occurrenceId, payload });
 ```
 
-After (UNRELEASED; `createHarnessAppendIdempotencyKey` comes from
+After (`0.2.0-alpha.2`; `createHarnessAppendIdempotencyKey` comes from
 `@little-stack/harness/events`):
 
 ```ts
@@ -442,7 +442,7 @@ events, each with its own append key.
 
 ## Store and wire migration
 
-In the unreleased source, persisted records include `appendIdempotencyKey` and
+In `0.2.0-alpha.2`, persisted records include `appendIdempotencyKey` and
 `canonicalRequestDigest` (in `0.2.0-alpha.0` they add only `eventId`, `sequence`
 and `recordedAt`). Stores must enforce one row per `(runId, key)`, return
 the original row for an identical digest, and reject another digest. The remote

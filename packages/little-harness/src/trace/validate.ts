@@ -205,11 +205,15 @@ const toolFailedMetadataSchema = toolBaseMetadataSchema
 const runtimeStartedMetadataSchema = z
   .object({
     command: z.string().min(1),
+    toolCallId: z.string().min(1).optional(),
+    executionId: z.string().min(1).optional(),
   })
   .passthrough();
 const runtimeFinishedMetadataSchema = z
   .object({
     command: z.string().min(1),
+    toolCallId: z.string().min(1).optional(),
+    executionId: z.string().min(1).optional(),
     exitCode: z.number().int(),
     durationMs: z.number().nonnegative(),
     stdout: traceContentRefSchema,
@@ -232,6 +236,8 @@ const classificationReasonSchema = z
 const runtimeCommandDeniedMetadataSchema = z
   .object({
     command: z.string().min(1),
+    toolCallId: z.string().min(1).optional(),
+    executionId: z.string().min(1).optional(),
     reasons: z.array(classificationReasonSchema),
   })
   .passthrough();
@@ -241,6 +247,8 @@ const runtimeTierMetadataSchema = z
     to: z.string().min(1),
     trigger: z.enum(["classification", "emulation-gap"]),
     command: z.string().min(1),
+    toolCallId: z.string().min(1).optional(),
+    executionId: z.string().min(1).optional(),
     decision: z.enum(["run", "escalate", "deny"]).optional(),
     reasons: z.array(classificationReasonSchema).optional(),
     gap: z
@@ -438,6 +446,12 @@ export function validateTraceEvent(event: unknown): HarnessEvent<HarnessTraceEve
 
 function metadataSchemaFor(type: HarnessTraceEventType): z.ZodTypeAny {
   switch (type) {
+    case "harness.snapshot.catalog_presented":
+    case "harness.snapshot.file_opened":
+    case "harness.snapshot.tool_effect":
+    case "harness.snapshot.hook":
+    case "harness.snapshot.warning":
+      return z.object({ executionHash: z.string().regex(/^sha256:[a-f0-9]{64}$/) }).passthrough();
     case "harness.session.started":
     case "harness.session.completed":
     case "harness.session.failed":

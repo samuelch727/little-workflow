@@ -409,11 +409,11 @@ describe("Layer B — runWorkflow with maxOuterCycles", () => {
     }
 
     expect(caught?.causeCode).toBe("outer_loop_exhausted");
-    // deepseek/deepseek-v4-flash is listed at input $0.14 / output $0.28 per 1M tokens.
-    //   10,000 input  x $0.14 / 1M = $0.00140
-    //    2,000 output x $0.28 / 1M = $0.00056
-    //                        total = $0.00196
-    expect(caught?.result?.usage.costUsd).toBeCloseTo(0.00196, 12);
+    // deepseek/deepseek-v4-flash is listed at input $0.30 / output $1.20 per 1M tokens.
+    //   10,000 input  x $0.30 / 1M = $0.0030
+    //    2,000 output x $1.20 / 1M = $0.0024
+    //                        total = $0.0054
+    expect(caught?.result?.usage.costUsd).toBeCloseTo(0.0054, 12);
     expect(caught?.result?.usage.pricedCalls).toBe(1);
     expect(caught?.result?.usage.inputTokens).toBe(10_000);
     // Known limitation, unchanged by this fix: the reported usage is the *final cycle's*
@@ -1195,9 +1195,9 @@ describe("outer-loop replay (Layer B §3.6)", () => {
     }
 
     expect(caught?.causeCode).toBe("outer_loop_exhausted");
-    // deepseek/deepseek-v4-flash is listed at input $0.14 / output $0.28 per 1M tokens:
-    // 10,000 x $0.14/1M + 2,000 x $0.28/1M = $0.00196. The old code reported $0.
-    expect(caught?.result?.usage.costUsd).toBeCloseTo(0.00196, 12);
+    // deepseek/deepseek-v4-flash is listed at input $0.30 / output $1.20 per 1M tokens:
+    // 10,000 x $0.30/1M + 2,000 x $1.20/1M = $0.0054. The old code reported $0.
+    expect(caught?.result?.usage.costUsd).toBeCloseTo(0.0054, 12);
     expect(caught?.result?.usage.pricedCalls).toBe(1);
     expect(caught?.result?.usage.inputTokens).toBe(10_000);
   });

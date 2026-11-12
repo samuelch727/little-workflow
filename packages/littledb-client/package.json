@@ -57,11 +57,11 @@
     "node": ">=22"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "build": "node scripts/prepare-harness-contract.mjs && tsc -p tsconfig.build.json && node scripts/prepare-harness-contract.mjs --copy-dist",
     "prepack": "pnpm run build",
-    "typecheck": "tsc --noEmit",
-    "test": "vitest run",
-    "lint": "tsc --noEmit"
+    "typecheck": "node scripts/prepare-harness-contract.mjs && tsc --noEmit",
+    "test": "node scripts/prepare-harness-contract.mjs && vitest run",
+    "lint": "node scripts/prepare-harness-contract.mjs && tsc --noEmit"
   },
   "dependencies": {
     "zod": "^4.4.3"

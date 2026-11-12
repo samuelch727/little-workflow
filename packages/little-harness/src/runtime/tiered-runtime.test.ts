@@ -30,7 +30,7 @@ import {
 
 const packageRoot = path.resolve(fileURLToPath(new URL(".", import.meta.url)), "../..");
 
-type TierCall = { command: string; toolCallId: string };
+type TierCall = { command: string; toolCallId: string; executionId?: string };
 
 type FakeTier = {
   readonly factory: HarnessSandboxFactory;
@@ -58,6 +58,7 @@ function justBashTier(): FakeTier {
         ({
           ...shell,
           execute: async (input: any, executeOptions: any) => {
+            expect(executeOptions).not.toHaveProperty("executionId");
             calls.push({ command: input.command, toolCallId: executeOptions?.toolCallId ?? "" });
             return inner(input, executeOptions);
           },
@@ -86,7 +87,7 @@ function scriptedTier(respond: (command: string) => ShellCommandResult): FakeTie
       workspace: options.workspace,
       files: options.files,
       execute: async (input, context) => {
-        calls.push({ command: input.command, toolCallId: context.toolCallId });
+        calls.push({ command: input.command, toolCallId: context.toolCallId, executionId: context.executionId });
         return bookkeeping.has(context.toolCallId) ? OK : respond(input.command);
       },
       dispose: async () => {
@@ -172,6 +173,11 @@ describe("tieredSandbox", () => {
 
       expect(result).toMatchObject({ stdout: "built\n", exitCode: 0 });
       expect(next.modelCommands()).toEqual(["sh /session/build.sh"]);
+      const started = events.find(event => event.type === "harness.runtime.command.started")!;
+      const transition = events.find(event => event.type === "harness.runtime.tier.escalated")!;
+      expect(transition.metadata!.executionId).toBe(started.metadata!.executionId);
+      expect(transition.occurrenceId).toBe(started.occurrenceId);
+      expect(next.calls.find(call => call.command === "sh /session/build.sh")?.executionId).toBe(started.metadata!.executionId);
       expect(events.filter((event) => event.type === "harness.runtime.tier.escalated")).toMatchObject([
         {
           metadata: {
@@ -379,6 +385,15 @@ describe("tieredSandbox", () => {
       expect(deniedAfterEscalation.exitCode).toBe(TIER_REFUSED_EXIT_CODE);
       expect(next.modelCommands()).toEqual(["cargo build"]);
       expect(events.filter((event) => event.type === "harness.runtime.command.denied")).toHaveLength(2);
+      const starts = events.filter(event => event.type === "harness.runtime.command.started" && event.metadata?.command === "docker ps");
+      for (const denied of events.filter(event => event.type === "harness.runtime.command.denied")) {
+        const started = starts.find(event => event.metadata?.executionId === denied.metadata?.executionId);
+        expect(started).toBeDefined();
+        expect(denied.occurrenceId).toBe(started?.occurrenceId);
+        const ended = events.find(event => event.type === "harness.runtime.command.failed" && event.metadata?.executionId === denied.metadata?.executionId);
+        expect(ended?.metadata?.toolCallId).toBe(denied.metadata?.toolCallId);
+        expect(ended?.occurrenceId).toBe(denied.occurrenceId);
+      }
       await runtime.dispose?.();
     });
   });
@@ -862,5 +877,111 @@ describe("tieredSandbox() usage accounting", () => {
       expect(runtime.tiering?.()?.commands).toEqual({ tier0: 1, nextTier: 1, denied: 0 });
       await runtime.dispose?.();
     });
+  });
+});
+
+it.each(["ready", "unavailable"])("ties concurrent identical-command transitions and adapter IDs to their execution: %s", async outcome => {
+  await withTempDir(async dir => {
+    const session = await sessionFor(dir);
+    const events: HarnessEventInput[] = [];
+    const next = scriptedTier(() => OK);
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const runtime = await tieredSandbox({
+      tier0: scriptedTier(() => OK).factory,
+      nextTier: async options => { await gate; if (outcome === "unavailable") throw new Error("synthetic unavailable"); return next.factory(options); },
+    })({ workspace: localSessionWorkspace(session), files: session.files, emit: async event => { events.push(event); } });
+    const shell = runtime.shellTool() as any;
+    const reusedOptions = { toolCallId: "same-provider-call", executionId: "caller-reused-attempt", messages: [] };
+    const calls = [shell.execute({ command: "cargo build" }, reusedOptions), shell.execute({ command: "cargo build" }, reusedOptions)];
+    try {
+      await expect.poll(() => events.filter(event => event.type === "harness.runtime.command.started").length).toBe(2);
+      release(); await Promise.all(calls);
+      const starts = events.filter(event => event.type === "harness.runtime.command.started");
+      expect(new Set(starts.map(event => event.occurrenceId)).size).toBe(2);
+      expect(starts.every(event => event.occurrenceId !== reusedOptions.executionId)).toBe(true);
+      const transitions = events.filter(event => event.type === `harness.runtime.tier.${outcome === "ready" ? "escalated" : "unavailable"}`);
+      expect(transitions).toHaveLength(outcome === "ready" ? 1 : 2);
+      for (const transition of transitions) {
+        const start = starts.find(event => event.metadata?.executionId === transition.metadata?.executionId);
+        expect(start).toBeDefined(); expect(transition.occurrenceId).toBe(start!.occurrenceId);
+        expect(transition.metadata!.toolCallId).toBe(start!.metadata!.toolCallId);
+      }
+      if (outcome === "ready") {
+        const executed = next.calls.filter(call => call.command === "cargo build");
+        expect(executed).toHaveLength(2);
+        expect(new Set(executed.map(call => call.executionId))).toEqual(new Set(starts.map(event => event.metadata!.executionId)));
+      }
+    } finally { release(); await Promise.allSettled(calls); await runtime.dispose?.(); }
+  });
+});
+
+it("preserves the outer trace execution ID in the tier-0 adapter context", async () => {
+  await withTempDir(async dir => {
+    const session = await sessionFor(dir); const events: HarnessEventInput[] = [];
+    const tier0 = scriptedTier(() => OK);
+    const runtime = await tieredSandbox({ tier0: tier0.factory })({ workspace: localSessionWorkspace(session), files: session.files, emit: async event => { events.push(event); } });
+    try {
+      await run(runtime, "echo synthetic");
+      const started = events.find(event => event.type === "harness.runtime.command.started")!;
+      expect(tier0.calls.find(call => call.command === "echo synthetic")?.executionId).toBe(started.metadata!.executionId);
+    } finally { await runtime.dispose?.(); }
+  });
+});
+
+it.each(["spread", "assign"])("preserves private attempt IDs through a next-tier options wrapper: %s", async copy => {
+  await withTempDir(async dir => {
+    const session = await sessionFor(dir);
+    const events: HarnessEventInput[] = [];
+    const next = scriptedTier(() => OK);
+    const abortSignal = new AbortController().signal;
+    let innerShell: any;
+    let retainedOptions: object | undefined;
+    const runtime = await tieredSandbox({
+      tier0: scriptedTier(() => OK).factory,
+      nextTier: async options => {
+        const tier = await next.factory(options);
+        innerShell = tier.shellTool();
+        return {
+          ...tier,
+          shellTool: () => ({
+            ...innerShell,
+            execute: (input: any, executeOptions: object) => {
+              expect(executeOptions).not.toHaveProperty("executionId");
+              const wrapped = copy === "spread"
+                ? { ...executeOptions, abortSignal }
+                : Object.assign({}, executeOptions, { abortSignal });
+              if (input.command.startsWith("cargo ")) retainedOptions = wrapped;
+              return innerShell.execute(input, wrapped);
+            },
+          }),
+        };
+      },
+    })({ workspace: localSessionWorkspace(session), files: session.files, emit: async event => { events.push(event); } });
+    try {
+      const shell = runtime.shellTool() as any;
+      const publicOptions = { toolCallId: "same-provider-call", executionId: "caller-reused-attempt" };
+      for (const command of ["cargo build", "cargo test"]) {
+        expect(await shell.execute({ command }, publicOptions)).toEqual(OK);
+      }
+      const starts = events.filter(event => event.type === "harness.runtime.command.started");
+      expect(starts).toHaveLength(2);
+      expect(new Set(starts.map(event => event.occurrenceId)).size).toBe(2);
+      for (const start of starts) {
+        const adapter = next.calls.find(call => call.command === start.metadata!.command)!;
+        expect(adapter.executionId).toBe(start.metadata!.executionId);
+        expect(adapter.executionId).toBe(start.occurrenceId);
+        expect(adapter.executionId).not.toBe(publicOptions.executionId);
+        expect(adapter.toolCallId).toBe("same-provider-call");
+        expect(events.find(event => event.type === "harness.runtime.command.succeeded" && event.occurrenceId === start.occurrenceId)).toBeDefined();
+      }
+      expect(events.find(event => event.type === "harness.runtime.tier.escalated")!.occurrenceId).toBe(starts[0]!.occurrenceId);
+      // Copying or retaining a consumed delegate token cannot replay its attempt identity.
+      expect(retainedOptions).toBeDefined();
+      await innerShell.execute({ command: "echo reused-options" }, { ...retainedOptions, executionId: starts[1]!.occurrenceId });
+      const replay = next.calls.find(call => call.command === "echo reused-options")!;
+      expect(starts.some(start => start.occurrenceId === replay.executionId)).toBe(false);
+      expect(replay.executionId).not.toBe(publicOptions.executionId);
+    } finally { await runtime.dispose?.(); }
   });
 });

@@ -1,6 +1,6 @@
 {
   "name": "@little-stack/workflow",
-  "version": "0.2.0-alpha.2",
+  "version": "0.2.0-alpha.3",
   "description": "Local-first TypeScript workflow orchestration with validated LWIR, durable Local World execution, replay, and an alpha CLI.",
   "license": "Apache-2.0",
   "repository": {
@@ -79,7 +79,7 @@
     "ajv": "^8.20.0",
     "better-sqlite3": "^12.10.0",
     "es-module-lexer": "^1.7.0",
-    "just-bash": "^3.0.1",
+    "just-bash": "^3.0.3",
     "jiti": "^2.7.0",
     "@little-stack/harness": "workspace:^",
     "zod": "^4.4.3",

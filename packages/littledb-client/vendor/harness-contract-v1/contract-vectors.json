@@ -1,0 +1,1264 @@
+{
+  "format": 1,
+  "owners": {
+    "base": {
+      "registry": {
+        "format": 1,
+        "tools": {
+          "read_order": {
+            "implementationHash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "orderId": {
+                  "type": "string",
+                  "description": "Order ID"
+                }
+              },
+              "required": [
+                "orderId"
+              ],
+              "additionalProperties": false
+            },
+            "description": "Read an order",
+            "parameterDescriptionPaths": [
+              "/properties/orderId"
+            ],
+            "effect": "read"
+          },
+          "refund": {
+            "implementationHash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "inputSchema": {
+              "type": "object",
+              "properties": {}
+            },
+            "description": "Refund an order",
+            "parameterDescriptionPaths": [],
+            "effect": "write"
+          }
+        },
+        "hooks": {
+          "turnLimits": {
+            "bounded": {
+              "implementationHash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+              "parameters": {
+                "maxSteps": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 20
+                },
+                "enabled": {
+                  "type": "boolean"
+                },
+                "mode": {
+                  "type": "string",
+                  "enum": [
+                    "short",
+                    "long"
+                  ]
+                }
+              },
+              "defaults": {
+                "maxSteps": 10,
+                "enabled": true,
+                "mode": "short"
+              },
+              "order": 0,
+              "staticHints": "Keep the owner rules."
+            }
+          }
+        }
+      },
+      "envelope": {
+        "format": 1,
+        "registryHash": "sha256:c893e6c13b54279d282fda54fdc975d4476ab602da1272eb517396d48ad540b1",
+        "allowedTools": [
+          "read_order",
+          "refund"
+        ],
+        "requiredTools": [
+          "read_order"
+        ],
+        "defaultTools": [
+          "read_order"
+        ],
+        "allowedHooks": {
+          "turnLimits": [
+            "bounded"
+          ]
+        },
+        "requiredHooks": [
+          "turnLimits"
+        ],
+        "defaultHooks": {
+          "turnLimits": {
+            "profile": "bounded"
+          }
+        },
+        "ownerRules": "Refunds require explicit owner authorization."
+      }
+    },
+    "redeployed": {
+      "registry": {
+        "format": 1,
+        "tools": {
+          "read_order": {
+            "implementationHash": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "orderId": {
+                  "type": "string",
+                  "description": "Order ID"
+                }
+              },
+              "required": [
+                "orderId"
+              ],
+              "additionalProperties": false
+            },
+            "description": "Read an order",
+            "parameterDescriptionPaths": [
+              "/properties/orderId"
+            ],
+            "effect": "read"
+          },
+          "refund": {
+            "implementationHash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "inputSchema": {
+              "type": "object",
+              "properties": {}
+            },
+            "description": "Refund an order",
+            "parameterDescriptionPaths": [],
+            "effect": "write"
+          }
+        },
+        "hooks": {
+          "turnLimits": {
+            "bounded": {
+              "implementationHash": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+              "parameters": {
+                "maxSteps": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 20
+                },
+                "enabled": {
+                  "type": "boolean"
+                },
+                "mode": {
+                  "type": "string",
+                  "enum": [
+                    "short",
+                    "long"
+                  ]
+                }
+              },
+              "defaults": {
+                "maxSteps": 10,
+                "enabled": true,
+                "mode": "short"
+              },
+              "order": 0,
+              "staticHints": "Keep the owner rules."
+            }
+          }
+        }
+      },
+      "envelope": {
+        "format": 1,
+        "registryHash": "sha256:dc14e636eefb75dd363db6cbdecaeb4a641f893e5f193624c5445b1ba63eccf8",
+        "allowedTools": [
+          "read_order",
+          "refund"
+        ],
+        "requiredTools": [
+          "read_order"
+        ],
+        "defaultTools": [
+          "read_order"
+        ],
+        "allowedHooks": {
+          "turnLimits": [
+            "bounded"
+          ]
+        },
+        "requiredHooks": [
+          "turnLimits"
+        ],
+        "defaultHooks": {
+          "turnLimits": {
+            "profile": "bounded"
+          }
+        },
+        "ownerRules": "Refunds require explicit owner authorization."
+      }
+    },
+    "pointer_removed": {
+      "registry": {
+        "format": 1,
+        "tools": {
+          "read_order": {
+            "implementationHash": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            "inputSchema": {
+              "type": "object",
+              "properties": {},
+              "required": [],
+              "additionalProperties": false
+            },
+            "description": "Read an order",
+            "parameterDescriptionPaths": [],
+            "effect": "read"
+          },
+          "refund": {
+            "implementationHash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "inputSchema": {
+              "type": "object",
+              "properties": {}
+            },
+            "description": "Refund an order",
+            "parameterDescriptionPaths": [],
+            "effect": "write"
+          }
+        },
+        "hooks": {
+          "turnLimits": {
+            "bounded": {
+              "implementationHash": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+              "parameters": {
+                "maxSteps": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 20
+                },
+                "enabled": {
+                  "type": "boolean"
+                },
+                "mode": {
+                  "type": "string",
+                  "enum": [
+                    "short",
+                    "long"
+                  ]
+                }
+              },
+              "defaults": {
+                "maxSteps": 10,
+                "enabled": true,
+                "mode": "short"
+              },
+              "order": 0,
+              "staticHints": "Keep the owner rules."
+            }
+          }
+        }
+      },
+      "envelope": {
+        "format": 1,
+        "registryHash": "sha256:a9bfe550d4836adb7d5720839a1832cfe308d5edd5117438123254ea90da7592",
+        "allowedTools": [
+          "read_order",
+          "refund"
+        ],
+        "requiredTools": [
+          "read_order"
+        ],
+        "defaultTools": [
+          "read_order"
+        ],
+        "allowedHooks": {
+          "turnLimits": [
+            "bounded"
+          ]
+        },
+        "requiredHooks": [
+          "turnLimits"
+        ],
+        "defaultHooks": {
+          "turnLimits": {
+            "profile": "bounded"
+          }
+        },
+        "ownerRules": "Refunds require explicit owner authorization."
+      }
+    },
+    "tighter": {
+      "registry": {
+        "format": 1,
+        "tools": {
+          "read_order": {
+            "implementationHash": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "orderId": {
+                  "type": "string",
+                  "description": "Order ID"
+                }
+              },
+              "required": [
+                "orderId"
+              ],
+              "additionalProperties": false
+            },
+            "description": "Read an order",
+            "parameterDescriptionPaths": [
+              "/properties/orderId"
+            ],
+            "effect": "read"
+          },
+          "refund": {
+            "implementationHash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "inputSchema": {
+              "type": "object",
+              "properties": {}
+            },
+            "description": "Refund an order",
+            "parameterDescriptionPaths": [],
+            "effect": "write"
+          }
+        },
+        "hooks": {
+          "turnLimits": {
+            "bounded": {
+              "implementationHash": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+              "parameters": {
+                "maxSteps": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 2
+                },
+                "enabled": {
+                  "type": "boolean"
+                },
+                "mode": {
+                  "type": "string",
+                  "enum": [
+                    "short",
+                    "long"
+                  ]
+                }
+              },
+              "defaults": {
+                "maxSteps": 2,
+                "enabled": true,
+                "mode": "short"
+              },
+              "order": 0,
+              "staticHints": "Keep the owner rules."
+            }
+          }
+        }
+      },
+      "envelope": {
+        "format": 1,
+        "registryHash": "sha256:95193ad10840b579149bb7a938a340fc129e6b5f3ad65980285a696697c0f7ae",
+        "allowedTools": [
+          "read_order",
+          "refund"
+        ],
+        "requiredTools": [
+          "read_order"
+        ],
+        "defaultTools": [
+          "read_order"
+        ],
+        "allowedHooks": {
+          "turnLimits": [
+            "bounded"
+          ]
+        },
+        "requiredHooks": [
+          "turnLimits"
+        ],
+        "defaultHooks": {
+          "turnLimits": {
+            "profile": "bounded"
+          }
+        },
+        "ownerRules": "Refunds require explicit owner authorization."
+      }
+    }
+  },
+  "cases": [
+    {
+      "name": "admit-stamps",
+      "operation": "admit",
+      "owner": "base",
+      "args": [
+        {
+          "harnessFormat": 1,
+          "files": {},
+          "system": "Handle returns carefully.",
+          "tools": {
+            "read_order": {
+              "description": "Read the identified order.",
+              "parameterDescriptions": {
+                "/properties/orderId": "User supplied ID"
+              }
+            },
+            "refund": {
+              "enabled": true
+            }
+          },
+          "hooks": {
+            "turnLimits": {
+              "profile": "bounded",
+              "parameters": {
+                "maxSteps": 3
+              }
+            }
+          }
+        }
+      ],
+      "expected": {
+        "/content/tools/read_order/implementationHash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "/content/tools/read_order/schemaHash": "sha256:66dd64424e7d24eafcab19f923898170b569cb8849c282c1eadadd01f7da41a0",
+        "/content/hooks/turnLimits/parameters/maxSteps": 3,
+        "/contentHash": "sha256:22125d302052e37a80dc94e39774ab18d34a67b53c49f8552c10e1039ab027e5",
+        "/budget/unit": "bytes",
+        "/budget/cap": 32000
+      }
+    },
+    {
+      "name": "defaults",
+      "operation": "admit",
+      "owner": "base",
+      "args": [
+        {
+          "harnessFormat": 1,
+          "files": {}
+        }
+      ],
+      "expected": {
+        "/content/tools/read_order/enabled": true,
+        "/content/tools/refund/enabled": false,
+        "/content/hooks/turnLimits/parameters/maxSteps": 10
+      }
+    },
+    {
+      "name": "valid-stored",
+      "operation": "validate",
+      "owner": "base",
+      "args": [
+        {
+          "harnessFormat": 1,
+          "files": {},
+          "tools": {
+            "read_order": {
+              "enabled": true,
+              "description": "Read the identified order.",
+              "parameterDescriptions": {
+                "/properties/orderId": "User supplied ID"
+              },
+              "implementationHash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "schemaHash": "sha256:66dd64424e7d24eafcab19f923898170b569cb8849c282c1eadadd01f7da41a0"
+            },
+            "refund": {
+              "enabled": true,
+              "description": "Refund an order",
+              "parameterDescriptions": {},
+              "implementationHash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "schemaHash": "sha256:caa1215d2278f303733e5fcb008a09853e2bc0e4d5545416a1f40eb4e3ba29fe"
+            }
+          },
+          "hooks": {
+            "turnLimits": {
+              "profile": "bounded",
+              "parameters": {
+                "enabled": true,
+                "maxSteps": 3,
+                "mode": "short"
+              },
+              "implementationHash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+              "parameterSchemaHash": "sha256:1034d8caff5fe53cd202318d7e4a694d2c59acb3bcf5f35dbc61538313f6cdb5"
+            }
+          },
+          "system": "Handle returns carefully."
+        }
+      ],
+      "expected": {
+        "/contentHash": "sha256:22125d302052e37a80dc94e39774ab18d34a67b53c49f8552c10e1039ab027e5"
+      }
+    },
+    {
+      "name": "reviewer-hash",
+      "operation": "admit",
+      "owner": "base",
+      "args": [
+        {
+          "harnessFormat": 1,
+          "files": {},
+          "system": "Handle returns carefully.",
+          "tools": {
+            "read_order": {
+              "implementationHash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }
+          },
+          "hooks": {
+            "turnLimits": {
+              "profile": "bounded",
+              "parameters": {
+                "maxSteps": 3
+              }
+            }
+          }
+        }
+      ],
+      "error": "field"
+    },
+    {
+      "name": "uninstalled",
+      "operation": "admit",
+      "owner": "base",
+      "args": [
+        {
+          "harnessFormat": 1,
+          "files": {},
+          "system": "Handle returns carefully.",
+          "tools": {
+            "missing": {}
+          },
+          "hooks": {
+            "turnLimits": {
+              "profile": "bounded",
+              "parameters": {
+                "maxSteps": 3
+              }
+            }
+          }
+        }
+      ],
+      "error": "capability"
+    },
+    {
+      "name": "mandatory-off",
+      "operation": "admit",
+      "owner": "base",
+      "args": [
+        {
+          "harnessFormat": 1,
+          "files": {},
+          "system": "Handle returns carefully.",
+          "tools": {
+            "read_order": {
+              "enabled": false
+            }
+          },
+          "hooks": {
+            "turnLimits": {
+              "profile": "bounded",
+              "parameters": {
+                "maxSteps": 3
+              }
+            }
+          }
+        }
+      ],
+      "error": "required"
+    },
+    {
+      "name": "over-ceiling",
+      "operation": "admit",
+      "owner": "base",
+      "args": [
+        {
+          "harnessFormat": 1,
+          "files": {},
+          "system": "Handle returns carefully.",
+          "tools": {
+            "read_order": {
+              "description": "Read the identified order.",
+              "parameterDescriptions": {
+                "/properties/orderId": "User supplied ID"
+              }
+            },
+            "refund": {
+              "enabled": true
+            }
+          },
+          "hooks": {
+            "turnLimits": {
+              "profile": "bounded",
+              "parameters": {
+                "maxSteps": 21
+              }
+            }
+          }
+        }
+      ],
+      "error": "parameter"
+    },
+    {
+      "name": "executable",
+      "operation": "admit",
+      "owner": "base",
+      "args": [
+        {
+          "harnessFormat": 1,
+          "files": {},
+          "system": "Handle returns carefully.",
+          "tools": {
+            "read_order": {
+              "execute": "return true"
+            }
+          },
+          "hooks": {
+            "turnLimits": {
+              "profile": "bounded",
+              "parameters": {
+                "maxSteps": 3
+              }
+            }
+          }
+        }
+      ],
+      "error": "field"
+    },
+    {
+      "name": "stale-evaluation",
+      "operation": "validate",
+      "owner": "redeployed",
+      "args": [
+        {
+          "harnessFormat": 1,
+          "files": {},
+          "tools": {
+            "read_order": {
+              "enabled": true,
+              "description": "Read the identified order.",
+              "parameterDescriptions": {
+                "/properties/orderId": "User supplied ID"
+              },
+              "implementationHash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "schemaHash": "sha256:66dd64424e7d24eafcab19f923898170b569cb8849c282c1eadadd01f7da41a0"
+            },
+            "refund": {
+              "enabled": true,
+              "description": "Refund an order",
+              "parameterDescriptions": {},
+              "implementationHash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "schemaHash": "sha256:caa1215d2278f303733e5fcb008a09853e2bc0e4d5545416a1f40eb4e3ba29fe"
+            }
+          },
+          "hooks": {
+            "turnLimits": {
+              "profile": "bounded",
+              "parameters": {
+                "enabled": true,
+                "maxSteps": 3,
+                "mode": "short"
+              },
+              "implementationHash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+              "parameterSchemaHash": "sha256:1034d8caff5fe53cd202318d7e4a694d2c59acb3bcf5f35dbc61538313f6cdb5"
+            }
+          },
+          "system": "Handle returns carefully."
+        }
+      ],
+      "error": "stale"
+    },
+    {
+      "name": "serving-fallback",
+      "operation": "serve",
+      "owner": "redeployed",
+      "args": [
+        {
+          "harnessFormat": 1,
+          "files": {},
+          "tools": {
+            "read_order": {
+              "enabled": true,
+              "description": "Read the identified order.",
+              "parameterDescriptions": {
+                "/properties/orderId": "User supplied ID"
+              },
+              "implementationHash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "schemaHash": "sha256:66dd64424e7d24eafcab19f923898170b569cb8849c282c1eadadd01f7da41a0"
+            },
+            "refund": {
+              "enabled": true,
+              "description": "Refund an order",
+              "parameterDescriptions": {},
+              "implementationHash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "schemaHash": "sha256:caa1215d2278f303733e5fcb008a09853e2bc0e4d5545416a1f40eb4e3ba29fe"
+            }
+          },
+          "hooks": {
+            "turnLimits": {
+              "profile": "bounded",
+              "parameters": {
+                "enabled": true,
+                "maxSteps": 3,
+                "mode": "short"
+              },
+              "implementationHash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+              "parameterSchemaHash": "sha256:1034d8caff5fe53cd202318d7e4a694d2c59acb3bcf5f35dbc61538313f6cdb5"
+            }
+          },
+          "system": "Handle returns carefully."
+        }
+      ],
+      "expected": {
+        "/content/tools/read_order/description": "Read an order",
+        "/content/tools/read_order/parameterDescriptions": {},
+        "/content/tools/read_order/enabled": true,
+        "/content/hooks/turnLimits/parameters/maxSteps": 10,
+        "/warnings": [
+          {
+            "event": "harness_selector_warning",
+            "path": "/tools/read_order",
+            "reason": "stale_tool_installed_default"
+          },
+          {
+            "event": "harness_selector_warning",
+            "path": "/hooks/turnLimits",
+            "reason": "stale_hook_installed_default"
+          }
+        ]
+      }
+    },
+    {
+      "name": "changed-in-code-proposal",
+      "operation": "rebase",
+      "owner": "redeployed",
+      "args": [
+        {
+          "harnessFormat": 1,
+          "files": {},
+          "tools": {
+            "read_order": {
+              "enabled": true,
+              "description": "Read the identified order.",
+              "parameterDescriptions": {
+                "/properties/orderId": "User supplied ID"
+              },
+              "implementationHash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "schemaHash": "sha256:66dd64424e7d24eafcab19f923898170b569cb8849c282c1eadadd01f7da41a0"
+            },
+            "refund": {
+              "enabled": true,
+              "description": "Refund an order",
+              "parameterDescriptions": {},
+              "implementationHash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "schemaHash": "sha256:caa1215d2278f303733e5fcb008a09853e2bc0e4d5545416a1f40eb4e3ba29fe"
+            }
+          },
+          "hooks": {
+            "turnLimits": {
+              "profile": "bounded",
+              "parameters": {
+                "enabled": true,
+                "maxSteps": 3,
+                "mode": "short"
+              },
+              "implementationHash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+              "parameterSchemaHash": "sha256:1034d8caff5fe53cd202318d7e4a694d2c59acb3bcf5f35dbc61538313f6cdb5"
+            }
+          },
+          "system": "Handle returns carefully."
+        }
+      ],
+      "expected": {
+        "/kind": "changed_in_code",
+        "/requiresEvaluation": true,
+        "/invalidatesEvidence": true,
+        "/content/tools/read_order/description": "Read the identified order.",
+        "/content/hooks/turnLimits/parameters/maxSteps": 3,
+        "/content/hooks/turnLimits/implementationHash": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+      }
+    },
+    {
+      "name": "removed-pointer",
+      "operation": "rebase",
+      "owner": "pointer_removed",
+      "args": [
+        {
+          "harnessFormat": 1,
+          "files": {},
+          "tools": {
+            "read_order": {
+              "enabled": true,
+              "description": "Read the identified order.",
+              "parameterDescriptions": {
+                "/properties/orderId": "User supplied ID"
+              },
+              "implementationHash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "schemaHash": "sha256:66dd64424e7d24eafcab19f923898170b569cb8849c282c1eadadd01f7da41a0"
+            },
+            "refund": {
+              "enabled": true,
+              "description": "Refund an order",
+              "parameterDescriptions": {},
+              "implementationHash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "schemaHash": "sha256:caa1215d2278f303733e5fcb008a09853e2bc0e4d5545416a1f40eb4e3ba29fe"
+            }
+          },
+          "hooks": {
+            "turnLimits": {
+              "profile": "bounded",
+              "parameters": {
+                "enabled": true,
+                "maxSteps": 3,
+                "mode": "short"
+              },
+              "implementationHash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+              "parameterSchemaHash": "sha256:1034d8caff5fe53cd202318d7e4a694d2c59acb3bcf5f35dbc61538313f6cdb5"
+            }
+          },
+          "system": "Handle returns carefully."
+        }
+      ],
+      "expected": {
+        "/content/tools/read_order/parameterDescriptions": {},
+        "/warnings/0/reason": "overlay_pointer_unavailable",
+        "/warnings/0/path": "/tools/read_order/parameterDescriptions/~1properties~1orderId",
+        "/invalidatesEvidence": true
+      }
+    },
+    {
+      "name": "tightened-owner-default",
+      "operation": "serve",
+      "owner": "tighter",
+      "args": [
+        {
+          "harnessFormat": 1,
+          "files": {},
+          "tools": {
+            "read_order": {
+              "enabled": true,
+              "description": "Read the identified order.",
+              "parameterDescriptions": {
+                "/properties/orderId": "User supplied ID"
+              },
+              "implementationHash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "schemaHash": "sha256:66dd64424e7d24eafcab19f923898170b569cb8849c282c1eadadd01f7da41a0"
+            },
+            "refund": {
+              "enabled": true,
+              "description": "Refund an order",
+              "parameterDescriptions": {},
+              "implementationHash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "schemaHash": "sha256:caa1215d2278f303733e5fcb008a09853e2bc0e4d5545416a1f40eb4e3ba29fe"
+            }
+          },
+          "hooks": {
+            "turnLimits": {
+              "profile": "bounded",
+              "parameters": {
+                "enabled": true,
+                "maxSteps": 3,
+                "mode": "short"
+              },
+              "implementationHash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+              "parameterSchemaHash": "sha256:1034d8caff5fe53cd202318d7e4a694d2c59acb3bcf5f35dbc61538313f6cdb5"
+            }
+          },
+          "system": "Handle returns carefully."
+        }
+      ],
+      "expected": {
+        "/content/hooks/turnLimits/parameters/maxSteps": 2
+      }
+    },
+    {
+      "name": "execution-native-digest",
+      "operation": "identity",
+      "owner": "base",
+      "args": [
+        {
+          "harnessFormat": 1,
+          "files": {},
+          "tools": {
+            "read_order": {
+              "enabled": true,
+              "description": "Read the identified order.",
+              "parameterDescriptions": {
+                "/properties/orderId": "User supplied ID"
+              },
+              "implementationHash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "schemaHash": "sha256:66dd64424e7d24eafcab19f923898170b569cb8849c282c1eadadd01f7da41a0"
+            },
+            "refund": {
+              "enabled": true,
+              "description": "Refund an order",
+              "parameterDescriptions": {},
+              "implementationHash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "schemaHash": "sha256:caa1215d2278f303733e5fcb008a09853e2bc0e4d5545416a1f40eb4e3ba29fe"
+            }
+          },
+          "hooks": {
+            "turnLimits": {
+              "profile": "bounded",
+              "parameters": {
+                "enabled": true,
+                "maxSteps": 3,
+                "mode": "short"
+              },
+              "implementationHash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+              "parameterSchemaHash": "sha256:1034d8caff5fe53cd202318d7e4a694d2c59acb3bcf5f35dbc61538313f6cdb5"
+            }
+          },
+          "system": "Handle returns carefully."
+        },
+        {
+          "runtime": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+          "renderer": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+          "accounting": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+          "model": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+          "toolState": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+          "memorySnapshot": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+        }
+      ],
+      "expected": {
+        "/executionHash": "sha256:f770a2594f454ebc10b90efddabe4099cceddeb4bfeba949f94f57547f7d9210"
+      }
+    },
+    {
+      "name": "independent-merge",
+      "operation": "merge",
+      "owner": "base",
+      "args": [
+        {
+          "harnessFormat": 1,
+          "files": {},
+          "tools": {
+            "read_order": {
+              "enabled": true,
+              "description": "Read the identified order.",
+              "parameterDescriptions": {
+                "/properties/orderId": "User supplied ID"
+              },
+              "implementationHash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "schemaHash": "sha256:66dd64424e7d24eafcab19f923898170b569cb8849c282c1eadadd01f7da41a0"
+            },
+            "refund": {
+              "enabled": true,
+              "description": "Refund an order",
+              "parameterDescriptions": {},
+              "implementationHash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "schemaHash": "sha256:caa1215d2278f303733e5fcb008a09853e2bc0e4d5545416a1f40eb4e3ba29fe"
+            }
+          },
+          "hooks": {
+            "turnLimits": {
+              "profile": "bounded",
+              "parameters": {
+                "enabled": true,
+                "maxSteps": 3,
+                "mode": "short"
+              },
+              "implementationHash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+              "parameterSchemaHash": "sha256:1034d8caff5fe53cd202318d7e4a694d2c59acb3bcf5f35dbc61538313f6cdb5"
+            }
+          },
+          "system": "Handle returns carefully."
+        },
+        {
+          "harnessFormat": 1,
+          "files": {},
+          "tools": {
+            "read_order": {
+              "enabled": true,
+              "description": "New",
+              "parameterDescriptions": {
+                "/properties/orderId": "User supplied ID"
+              },
+              "implementationHash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "schemaHash": "sha256:66dd64424e7d24eafcab19f923898170b569cb8849c282c1eadadd01f7da41a0"
+            },
+            "refund": {
+              "enabled": true,
+              "description": "Refund an order",
+              "parameterDescriptions": {},
+              "implementationHash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "schemaHash": "sha256:caa1215d2278f303733e5fcb008a09853e2bc0e4d5545416a1f40eb4e3ba29fe"
+            }
+          },
+          "hooks": {
+            "turnLimits": {
+              "profile": "bounded",
+              "parameters": {
+                "enabled": true,
+                "maxSteps": 3,
+                "mode": "short"
+              },
+              "implementationHash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+              "parameterSchemaHash": "sha256:1034d8caff5fe53cd202318d7e4a694d2c59acb3bcf5f35dbc61538313f6cdb5"
+            }
+          },
+          "system": "Handle returns carefully."
+        },
+        {
+          "harnessFormat": 1,
+          "files": {},
+          "tools": {
+            "read_order": {
+              "enabled": true,
+              "description": "Read the identified order.",
+              "parameterDescriptions": {
+                "/properties/orderId": "User supplied ID"
+              },
+              "implementationHash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "schemaHash": "sha256:66dd64424e7d24eafcab19f923898170b569cb8849c282c1eadadd01f7da41a0"
+            },
+            "refund": {
+              "enabled": false,
+              "description": "Refund an order",
+              "parameterDescriptions": {},
+              "implementationHash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "schemaHash": "sha256:caa1215d2278f303733e5fcb008a09853e2bc0e4d5545416a1f40eb4e3ba29fe"
+            }
+          },
+          "hooks": {
+            "turnLimits": {
+              "profile": "bounded",
+              "parameters": {
+                "enabled": true,
+                "maxSteps": 3,
+                "mode": "short"
+              },
+              "implementationHash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+              "parameterSchemaHash": "sha256:1034d8caff5fe53cd202318d7e4a694d2c59acb3bcf5f35dbc61538313f6cdb5"
+            }
+          },
+          "system": "Handle returns carefully."
+        }
+      ],
+      "expected": {
+        "/content/tools/read_order/description": "New",
+        "/content/tools/refund/enabled": false,
+        "/requiresEvaluation": true
+      }
+    },
+    {
+      "name": "atomic-hook-conflict",
+      "operation": "merge",
+      "owner": "base",
+      "args": [
+        {
+          "harnessFormat": 1,
+          "files": {},
+          "tools": {
+            "read_order": {
+              "enabled": true,
+              "description": "Read the identified order.",
+              "parameterDescriptions": {
+                "/properties/orderId": "User supplied ID"
+              },
+              "implementationHash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "schemaHash": "sha256:66dd64424e7d24eafcab19f923898170b569cb8849c282c1eadadd01f7da41a0"
+            },
+            "refund": {
+              "enabled": true,
+              "description": "Refund an order",
+              "parameterDescriptions": {},
+              "implementationHash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "schemaHash": "sha256:caa1215d2278f303733e5fcb008a09853e2bc0e4d5545416a1f40eb4e3ba29fe"
+            }
+          },
+          "hooks": {
+            "turnLimits": {
+              "profile": "bounded",
+              "parameters": {
+                "enabled": true,
+                "maxSteps": 3,
+                "mode": "short"
+              },
+              "implementationHash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+              "parameterSchemaHash": "sha256:1034d8caff5fe53cd202318d7e4a694d2c59acb3bcf5f35dbc61538313f6cdb5"
+            }
+          },
+          "system": "Handle returns carefully."
+        },
+        {
+          "harnessFormat": 1,
+          "files": {},
+          "tools": {
+            "read_order": {
+              "enabled": true,
+              "description": "Read the identified order.",
+              "parameterDescriptions": {
+                "/properties/orderId": "User supplied ID"
+              },
+              "implementationHash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "schemaHash": "sha256:66dd64424e7d24eafcab19f923898170b569cb8849c282c1eadadd01f7da41a0"
+            },
+            "refund": {
+              "enabled": true,
+              "description": "Refund an order",
+              "parameterDescriptions": {},
+              "implementationHash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "schemaHash": "sha256:caa1215d2278f303733e5fcb008a09853e2bc0e4d5545416a1f40eb4e3ba29fe"
+            }
+          },
+          "hooks": {
+            "turnLimits": {
+              "profile": "bounded",
+              "parameters": {
+                "enabled": true,
+                "maxSteps": 1,
+                "mode": "short"
+              },
+              "implementationHash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+              "parameterSchemaHash": "sha256:1034d8caff5fe53cd202318d7e4a694d2c59acb3bcf5f35dbc61538313f6cdb5"
+            }
+          },
+          "system": "Handle returns carefully."
+        },
+        {
+          "harnessFormat": 1,
+          "files": {},
+          "tools": {
+            "read_order": {
+              "enabled": true,
+              "description": "Read the identified order.",
+              "parameterDescriptions": {
+                "/properties/orderId": "User supplied ID"
+              },
+              "implementationHash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "schemaHash": "sha256:66dd64424e7d24eafcab19f923898170b569cb8849c282c1eadadd01f7da41a0"
+            },
+            "refund": {
+              "enabled": true,
+              "description": "Refund an order",
+              "parameterDescriptions": {},
+              "implementationHash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "schemaHash": "sha256:caa1215d2278f303733e5fcb008a09853e2bc0e4d5545416a1f40eb4e3ba29fe"
+            }
+          },
+          "hooks": {
+            "turnLimits": {
+              "profile": "bounded",
+              "parameters": {
+                "enabled": true,
+                "maxSteps": 3,
+                "mode": "long"
+              },
+              "implementationHash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+              "parameterSchemaHash": "sha256:1034d8caff5fe53cd202318d7e4a694d2c59acb3bcf5f35dbc61538313f6cdb5"
+            }
+          },
+          "system": "Handle returns carefully."
+        }
+      ],
+      "expected": {
+        "/content": null,
+        "/conflicts/0/path": "/hooks/turnLimits"
+      }
+    },
+    {
+      "name": "english-bytes",
+      "operation": "budget",
+      "owner": "base",
+      "args": [
+        {
+          "system": {
+            "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "category": "system"
+          }
+        }
+      ],
+      "expected": {
+        "/unit": "bytes",
+        "/cap": 32000,
+        "/totalUnits": 16256,
+        "/pass": true
+      }
+    },
+    {
+      "name": "chinese-bytes",
+      "operation": "budget",
+      "owner": "base",
+      "args": [
+        {
+          "system": {
+            "text": "退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退退",
+            "category": "system"
+          }
+        }
+      ],
+      "expected": {
+        "/unit": "bytes",
+        "/cap": 32000,
+        "/totalUnits": 6256,
+        "/pass": true
+      }
+    },
+    {
+      "name": "exact-tokens",
+      "operation": "budget",
+      "owner": "base",
+      "args": [
+        {
+          "system": {
+            "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "category": "system"
+          }
+        },
+        {},
+        {
+          "profile": "exact-v1",
+          "units": {
+            "system": 4000
+          }
+        }
+      ],
+      "expected": {
+        "/unit": "tokens",
+        "/cap": 8000,
+        "/totalUnits": 4256,
+        "/pass": true
+      }
+    },
+    {
+      "name": "exact-over-cap",
+      "operation": "budget",
+      "owner": "base",
+      "args": [
+        {
+          "system": {
+            "text": "x",
+            "category": "system"
+          }
+        },
+        {},
+        {
+          "profile": "exact-v1",
+          "units": {
+            "system": 9000
+          }
+        }
+      ],
+      "expected": {
+        "/unit": "tokens",
+        "/cap": 8000,
+        "/pass": false
+      }
+    },
+    {
+      "name": "invalid-counter",
+      "operation": "budget",
+      "owner": "base",
+      "args": [
+        {
+          "system": {
+            "text": "退",
+            "category": "system"
+          }
+        },
+        {},
+        {
+          "profile": "exact-v1",
+          "units": {}
+        }
+      ],
+      "expected": {
+        "/unit": "bytes",
+        "/cap": 32000,
+        "/totalUnits": 259
+      }
+    }
+  ]
+}

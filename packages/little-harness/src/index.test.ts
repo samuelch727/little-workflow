@@ -22,6 +22,7 @@ describe("public exports", () => {
       "answerInputRequest",
       "createHarness",
       "createHarnessOutcomeReporter",
+      "createHarnessSnapshotRegistry",
       "customDir",
       "defineSchedule",
       "foldOutcomeReports",

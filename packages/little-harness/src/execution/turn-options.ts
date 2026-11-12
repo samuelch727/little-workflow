@@ -7,6 +7,7 @@ import type {
   HarnessTurnMetadata,
   HarnessTurnOptions,
 } from "../types.js";
+import { prepareSnapshotTurn } from "./snapshot-turn.js";
 
 /** The turn options a `generateHarness` or `streamHarness` call reads: the per-run overrides and `onEvent`. */
 type TurnCallOptions = HarnessAgentOptions & {
@@ -17,6 +18,7 @@ type TurnCallOptions = HarnessAgentOptions & {
 };
 
 const OVERRIDE_KEYS = [
+  "executionSnapshot",
   "model",
   "system",
   "temperature",
@@ -45,6 +47,14 @@ export type TurnDecision = {
  * none of its own.
  */
 export async function withTurnOptions<T extends TurnCallOptions>(
+  options: T,
+  session: HarnessSession,
+  resumed?: HarnessTurnContext["resumed"],
+): Promise<T & TurnDecision> {
+  return prepareSnapshotTurn(await resolveTurnOptions(options, session, resumed), resumed);
+}
+
+async function resolveTurnOptions<T extends TurnCallOptions>(
   options: T,
   session: HarnessSession,
   resumed?: HarnessTurnContext["resumed"],

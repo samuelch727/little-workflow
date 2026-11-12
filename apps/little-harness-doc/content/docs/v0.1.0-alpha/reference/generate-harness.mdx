@@ -29,26 +29,17 @@ const result = await generateHarness({
   session: ticket.id,
 });
 
-// Compiles against published 0.2.0-alpha.0 and against the unreleased source.
 if (result.status === "completed") {
   console.log(result.output.priority);
 }
 ```
 
-A turn can park when a tool returns a parked result. The published
-`0.2.0-alpha.0` types do not say so: there, `generateHarness()` returns
-`GenerateHarnessResult`, which names the completed result only, even though the
-runtime can still return a parked one. Guard on `status === "completed"` before
-reading completed-only fields.
-
-> **UNRELEASED:** in the current source, `generateHarness()` returns
-> `HarnessTurnResult`, the `status`-discriminated union, so the parked branch
-> type-checks. The `GenerateHarnessResult` alias is removed. No npm version
-> includes this yet. See
-> [Typed parked results](/docs/v0.1.0-alpha/reference/alpha-migrations#typed-parked-results).
+A turn can park when a tool returns a parked result. `generateHarness()`
+returns `HarnessTurnResult`, the `status`-discriminated union of completed and
+parked results. Guard on `status === "completed"` before reading completed-only
+fields.
 
 ```ts
-// UNRELEASED: needs the unreleased source SDK.
 if (result.status === "parked") {
   // The agent is waiting in await_tasks, for example for a person's answer.
   // resumeParked() continues the turn once the wait is over.
@@ -289,10 +280,6 @@ const result = await generateHarness({
 Per-call session-log override (the durable event log this run appends to and
 replays from). When omitted, the log configured on `createHarness()` is used.
 
-> **UNRELEASED:** the current source removes the `durability` alias. Published
-> `0.2.0-alpha.0` accepts `durability` as an alias of `sessionLog` (`sessionLog`
-> wins when both are set). See [Alpha Migrations](/docs/v0.1.0-alpha/reference/alpha-migrations#one-name-per-concept).
-
 See
 [Execution Environments](/docs/v0.1.0-alpha/runtime/execution-environments)
 for the remote session-log adapter.
@@ -300,8 +287,6 @@ for the remote session-log adapter.
 ### `trigger`
 
 `HarnessTrigger`: `{ kind: string; source?: string; from?: string; label?: string }`
-
-> **UNRELEASED:** `trigger` is in the current source only. No npm version includes it yet.
 
 How this turn started, for trace readers such as LittleDB: a `kind` (`message`,
 `schedule`, `api`, `cli`, or a word of your own), where it came from (`source`),
@@ -417,16 +402,7 @@ A turn ends in one of two states:
   the wait is over; see
   [Asking A Person](/docs/v0.1.0-alpha/build-agents/asking-a-person#answer-and-continue).
 
-How the type says so depends on the version:
-
-| Version | Declared return type |
-| --- | --- |
-| Published `0.2.0-alpha.0` | `GenerateHarnessResult<TOutput>`, an alias of `HarnessCompletedResult<TOutput>` only. The runtime can still return a parked result; the type does not include it. |
-| UNRELEASED source (no npm version yet) | `HarnessTurnResult<TOutput>`, the union of the completed and parked results. `GenerateHarnessResult` no longer exists. |
-
-`HarnessTurnResult` already declares both states in `0.2.0-alpha.0`; only the
-declared return type changes. A `status === "completed"` guard compiles with both. See
-[Typed parked results](/docs/v0.1.0-alpha/reference/alpha-migrations#typed-parked-results).
+`HarnessTurnResult<TOutput>` is the union of the completed and parked results.
 
 The fields below describe a completed result.
 

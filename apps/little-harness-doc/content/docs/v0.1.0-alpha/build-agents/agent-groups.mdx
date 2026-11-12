@@ -11,10 +11,6 @@ This separation keeps the model-facing surface stable while the execution layer 
 The five generated names remain reserved for user tools, but they appear in the resolved manifest and model
 toolset only when `agents` is configured.
 
-> **UNRELEASED:** Agent Groups exist only in the current source. Published `0.2.0-alpha.0` (on npm as
-> `little-harness`) has no `agents` option and no `/agents` entry point, so the examples on this page do
-> not compile against it. No npm version includes Agent Groups yet.
-
 > **Experimental entry point.** The launcher port, its request and result types, the
 > `HarnessAgentGroup*Error` classes, the protocol-version constants and the task-ledger projection types
 > come from `@little-stack/harness/agents`, which may change between alpha releases. App code that only

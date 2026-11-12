@@ -22,10 +22,10 @@ export default async function Page(props: PageProps<'/docs/[[...slug]]'>) {
   const markdownUrl = getPageMarkdownUrl(page).url;
 
   return (
-    <DocsPage toc={page.data.toc} full={page.data.full}>
+    <DocsPage toc={page.data.toc} full={page.data.full} tabIndex={-1}>
       <DocsTitle>{page.data.title}</DocsTitle>
       <DocsDescription className="mb-0">{page.data.description}</DocsDescription>
-      <div className="flex flex-row gap-2 items-center border-b pb-6">
+      <div className="docs-page-actions">
         <MarkdownCopyButton markdownUrl={markdownUrl} />
         {/*
           No per-page GitHub link: this preview combines pages whose sources are not
@@ -59,7 +59,9 @@ export async function generateMetadata(props: PageProps<'/docs/[[...slug]]'>): P
   return {
     title: page.data.title,
     description: page.data.description,
+    alternates: { canonical: page.url },
     openGraph: {
+      url: page.url,
       images: getPageImage(page).url,
     },
   };

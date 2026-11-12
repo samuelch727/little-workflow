@@ -4,3 +4,4 @@
  * has no flags for. Node only.
  */
 export { startAgentServer, type AgentServer, type AgentServerOptions } from "./agent-server.js";
+export { listenRemoteTools, type ListenRemoteToolsOptions } from "./remote-tools.js";

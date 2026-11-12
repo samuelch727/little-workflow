@@ -109,7 +109,7 @@ type MountedConnector = {
  */
 export async function startAgentServer(options: AgentServerOptions): Promise<AgentServer> {
   const log = options.log ?? ((line: string) => console.log(line));
-  const harness = await (options.loadHarness ?? ((dir) => defaultLoadHarness(dir)))(options.agentDir);
+  const harness = await (options.loadHarness ?? ((dir) => defaultLoadHarness(dir, { dataDir: options.dataDir })))(options.agentDir);
   const background = new Set<Promise<unknown>>();
   const track = (task: Promise<unknown>) => {
     const settled = task.catch((error) => log(`[server] background work failed: ${message(error)}`))

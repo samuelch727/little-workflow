@@ -1,0 +1,25 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": [
+      "es2023"
+    ],
+    "types": [
+      "@cloudflare/workers-types"
+    ],
+    "skipLibCheck": true,
+    "strict": true,
+    "exactOptionalPropertyTypes": true,
+    "noUncheckedIndexedAccess": true,
+    "noEmit": true,
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "allowImportingTsExtensions": true,
+    "noUnusedLocals": true
+  },
+  "include": [
+    "src/**/*.ts"
+  ]
+}

@@ -153,7 +153,7 @@ export async function schedulesCommand(args: readonly string[], dataDir: string,
   const running = first === "run" && third !== undefined;
   const agent = await findAgent(running ? second : first, io, "schedules <name> | schedules run <name> <schedule-id>");
   if (agent === undefined) return 1;
-  const harness = await loadHarness(agent.dir);
+  const harness = await loadHarness(agent.dir, { dataDir: resolve(cwdOf(io), dataDir) });
   const runner = createScheduleRunner({
     harness,
     schedules: await discoverSchedules(agent.dir),

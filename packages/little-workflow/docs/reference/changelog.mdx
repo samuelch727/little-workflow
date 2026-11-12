@@ -3,14 +3,38 @@ title: Changelog
 description: What changed in the current alpha release of Little Workflow, with a pointer to the full repository changelog.
 ---
 
-This page summarizes the changes that matter to Little Workflow users. The full, authoritative history for both `little-workflow` and `little-harness`, which share one version line, is the repository [CHANGELOG.md](https://github.com/samuelch727/little-workflow/blob/main/CHANGELOG.md). These docs keep the `v0.1.0-alpha` URL path for stable links, but they describe the current release.
+This page summarizes the changes that matter to Little Workflow users. The full, authoritative history for `@little-stack/workflow` and `@little-stack/harness`, which share one version line from `0.2.0-alpha.2`, is the repository [CHANGELOG.md](https://github.com/samuelch727/little-workflow/blob/main/CHANGELOG.md). These docs keep the `v0.1.0-alpha` URL path for stable links, but they describe the current release.
 
 Little Workflow is in its **alpha phase**: the LWIR wire format, public APIs, and persistence formats can change between alpha releases.
 
-## Unreleased
+## 0.2.0-alpha.3 — 12 November 2026
 
-These changes are in the current source only. No npm version includes them.
+- **Added:** Harness agent-folder compiler and standalone workerd demo, remote tools,
+  per-turn execution snapshots and command execution correlation.
+- **Fixed:** synthetic `/dev/null` shell redirection and setup-server diagnostics.
+- **Changed:** verified model prices, including corrected DeepSeek and Mistral rates.
+- **Breaking:** the bundled catalog removes `openai/o4-mini`, `perplexity/sonar-pro`,
+  `groq/llama-3.3-70b-versatile` and `amazon/nova-pro` because prices could not be
+  re-verified. These models remain usable but have no bundled price metadata; choose a priced
+  catalog model for SDK cost estimates, or account for unpriced calls.
 
+## 0.2.0-alpha.2 — 3 November 2026
+
+The first release under the `@little-stack` npm scope: `@little-stack/workflow`
+and `@little-stack/harness`, both `0.2.0-alpha.2`, on the `alpha` and `latest`
+tags. Replace dependency names and imports, including subpaths; the `little`
+and `little-harness` command names stay the same.
+
+- **Workflows without disk.** `virtualWorld({ fs, dataDir })` stores runs in a
+  supplied filesystem. `dynamicWorkflows()` on `virtualHost()` runs one-shot
+  plans and defined workflows over the host's `dataFs`, with app workflows
+  and `once()` records using the virtual session's data directory too.
+  Persistence follows the app's filesystem save policy.
+
+- **Setup recovery reports its outcome.** `@little-stack/workflow/scaffold` adds `recoverSetup()`, which returns `nothing-to-recover`, `rolled-back`, `completed-cleanup` or `manual-recovery-required` plus the preserved paths. `rollbackSetup()` is no longer exported; read `retained` from `recoverSetup()`. `little setup --rollback` needs a project directory or `--here`, prints a distinct message per outcome, and exits with an error when manual recovery is required. See [Setup Recovery](/docs/v0.1.0-alpha/reference/setup-recovery).
+- **One way to define and run a workflow.** `runWorkflow(workflow, input, options?)` is the only run form; `world` is optional and defaults to `localWorld()`, and `workflow.run(input, options?)` takes the same options. The options-object form is removed: the deprecated orchestrator moves to `runOrchestration({ workflows, orchestrator, input })`. `defineWorkflow` now takes the full config (`models`, a `PlannerConfig`, `toolSelection`, `workflowVersionReuseStrategy`, a `ToolRegistry` or tool names under `tools`, `suggestedInput`) and a fixed `plan` that runs without a planner model; `createLittleWorkflow` moves to `@little-stack/workflow/internals`. See [Define a Workflow](/docs/v0.1.0-alpha/authoring/define-a-workflow) and [Run A Workflow](/docs/v0.1.0-alpha/running/run-a-workflow).
+- **Explicit entry points.** The root exports only the define, run, replay and Harness-composition API, plus `isRunFailedError`. LWIR validation moves to `@little-stack/workflow/lwir`, eval sets to `@little-stack/workflow/eval`, and runtime, world-storage, harness and pricing plumbing (`listEvents`, `materializeRunState`, `workflowHarness`, `runReport`, …) to `@little-stack/workflow/internals`, which has no semver guarantees. Use `world.listEvents(runId)` for events. Test helpers are no longer exported. See [SDK API](/docs/v0.1.0-alpha/reference/api-reference).
+- **One scaffolder vocabulary.** In `little setup`, `--here` only means the current directory; add Little to an existing Next.js app with `--template existing-next`. `little setup`, `little init` and `little-harness init` default to the `openai` provider. `little init` and `little add harness` name a workflow with `--workflow-name`, and `init` rejects `--yes`/`--no-install`. The `--workflow` starter is a fixed-plan `starter_echo` workflow. See [CLI](/docs/v0.1.0-alpha/reference/cli).
 - **`ai.generate` prompts resolve expressions, and the step gets no tools.** `{{ ... }}` expressions in `with.prompt` and `with.system` are resolved at run time with the same roots as `input`; before, they reached the model as literal braces. `with.system` now reaches the model after the worker's system prompt; before, it was dropped. The default worker harness no longer offers an `ai.generate` step the workflow's tools or bash in any output mode. Text-output steps used to be offered them, but a tool call only ended the step with empty output. Call tools from a `tool.call` step. See [LWIR](/docs/v0.1.0-alpha/reference/lwir-reference).
 - **Saved plans are kept without a planner call when nothing changed.** With the default `workflowVersionReuseStrategy: "planner_reviewed"`, a run whose definition, tools, model slots, output contract and input shape all match the newest successful WorkflowVersion keeps it without calling the planner; only the input values differ. Once the planner has reviewed a change and kept the plan, later runs keep it the same way. Anything the planner would read differently still sends the candidate to the planner for review. The planner prompt also asks the model to copy a policy in the workflow description word for word and add no rules of its own. See [Run A Workflow](/docs/v0.1.0-alpha/running/run-a-workflow#options).
 - **`result.plan` says which plan ran.** Every completed `runWorkflow` result has `plan: { kind, plannerCalled, workflowVersionId, previousWorkflowVersionId?, rationale? }`, where `kind` is `"drafted"`, `"kept"`, `"adapted"` or `"fixed"`. `readWorkflowVersion(world, id)` reads the steps a run executed, and `little run` prints `plan`. `runOrchestration` results have no `plan`. See [Which Plan Ran](/docs/v0.1.0-alpha/running/run-a-workflow#which-plan-ran).
@@ -18,6 +42,7 @@ These changes are in the current source only. No npm version includes them.
 - **`defineWorkflow({ policy })`.** Rules every model step must follow. The runtime adds the policy, word for word, to the system prompt of every `ai.generate` step, whoever wrote the plan; the planner sees it and a change sends a saved plan back for review. See [A policy](/docs/v0.1.0-alpha/authoring/define-a-workflow#a-policy).
 - **Graded runs.** `gradeRun(world, runId, { verdict, reason?, gradedBy? })` records whether a run did its job, and `listRunGrades` reads the grades back. A `"fail"` grade sends the plan that run executed back to the planner with the reason on the next run. See [Grading Runs](/docs/v0.1.0-alpha/running/run-a-workflow#grading-runs).
 - **Missing `needs` in a drafted plan are added.** When a planner's draft reads an earlier step's output without listing it in `needs`, the compiler adds the entry instead of sending the draft back for a repair call. A reference to a missing step, from a `parallel` body to an outer step, or one that would close a cycle is still a validation error, and a fixed plan must still list its own `needs`. See [Needs A Planner Left Out](/docs/v0.1.0-alpha/reference/lwir-reference#needs-a-planner-left-out).
+- **Little Harness changes** that Workflow users may meet, such as typed parked turn results, broader reserved tool names and the mandatory durable append identity, are listed with their migrations on the Little Harness [Alpha Migrations](/docs/harness/v0.1.0-alpha/reference/alpha-migrations) page. See [Releases](/docs/releases) for the status of every product.
 
 ## 0.2.0-alpha.1
 

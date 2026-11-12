@@ -369,6 +369,12 @@ export type HarnessToolExecutionContext<TExtraBody = unknown> = {
    */
   idempotencyKey?: string | undefined;
   /**
+   * This model call's occurrence, set only on its own execute options after the durable start.
+   * An unfinished replay without its original occurrence has no safe invocation identity.
+   * Workflow steps and runtime/bash calls do not inherit it.
+   */
+  invocationId?: string | undefined;
+  /**
    * Asks a person a question and returns at once, when the harness has `humanInput`. Asking the
    * same question again in the session returns the first one, with its answer once there is one.
    */
@@ -404,6 +410,8 @@ export type HarnessTrigger = {
 };
 
 export type HarnessAgentOptions = {
+  /** Immutable, admitted per-turn content. Requires an owner-installed executionRegistry. */
+  executionSnapshot?: import("./execution-snapshot.js").HarnessExecutionSnapshot;
   model?: LanguageModel;
   system?: string | ModelMessage | ModelMessage[];
   runtime?: HarnessRuntimeOptions;
@@ -534,6 +542,8 @@ export type ResolvedHarnessMemoryConfig = {
 };
 
 export type CreateHarnessOptions<TTools extends ToolSet = ToolSet, TExtraBody = unknown> = {
+  /** Installed tools, canonical validators, fixed hook code and owner capability envelope. */
+  executionRegistry?: import("./execution-snapshot.js").HarnessSnapshotRegistry;
   host: HarnessHost<TExtraBody>;
   /**
    * The model every turn runs unless `turnOptions` or the call names another. Optional: where

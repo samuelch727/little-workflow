@@ -1,4 +1,6 @@
-import { access, readdir, readFile } from "node:fs/promises";
+import { readSkillTree } from "../workspace/folder-layout.js";
+import { parseFrontmatter } from "./frontmatter.js";
+import { access, readFile } from "node:fs/promises";
 import * as path from "node:path";
 import { HarnessInputError } from "../errors.js";
 import type {
@@ -158,53 +160,10 @@ async function resolveDirectorySkill(input: LocalSkillInput): Promise<ResolvedSk
     name,
     description,
     harnessDir: input.harnessDir ?? `.agents/skills/${name}`,
-    files: await readTree(root),
+    files: await readSkillTree(root),
   };
 }
 
-function parseFrontmatter(markdown: string): { name?: string; description?: string } {
-  if (!markdown.startsWith("---\n")) {
-    return {};
-  }
-
-  const end = markdown.indexOf("\n---", 4);
-  if (end === -1) {
-    return {};
-  }
-
-  const out: { name?: string; description?: string } = {};
-  const block = markdown.slice(4, end).split("\n");
-  for (const line of block) {
-    const match = /^([a-zA-Z0-9_-]+):\s*(.*)$/.exec(line);
-    if (!match) {
-      continue;
-    }
-
-    const value = match[2]!.replace(/^["']|["']$/g, "");
-    if (match[1] === "name") {
-      out.name = value;
-    }
-    if (match[1] === "description") {
-      out.description = value;
-    }
-  }
-
-  return out;
-}
-
-async function readTree(root: string, relative = ""): Promise<Record<string, Uint8Array>> {
-  const files: Record<string, Uint8Array> = {};
-  const entries = await readdir(path.join(root, relative), { withFileTypes: true });
-  for (const entry of entries) {
-    const next = relative ? path.join(relative, entry.name) : entry.name;
-    if (entry.isDirectory()) {
-      Object.assign(files, await readTree(root, next));
-    } else if (entry.isFile()) {
-      files[next.split(path.sep).join("/")] = await readFile(path.join(root, next));
-    }
-  }
-  return files;
-}
 
 function encodeFiles(files: Record<string, string | Uint8Array>): Record<string, Uint8Array> {
   const out: Record<string, Uint8Array> = {};

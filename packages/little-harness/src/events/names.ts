@@ -1,4 +1,9 @@
 export const HARNESS_EVENT_TYPES = [
+  "harness.snapshot.catalog_presented",
+  "harness.snapshot.file_opened",
+  "harness.snapshot.tool_effect",
+  "harness.snapshot.hook",
+  "harness.snapshot.warning",
   "harness.session.started",
   "harness.session.completed",
   "harness.session.failed",

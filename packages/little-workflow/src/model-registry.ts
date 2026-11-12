@@ -26,8 +26,9 @@ export type ModelInfo = {
    *   $4.50 (Pro) / $1.00 (Flash) per 1M tokens **per hour** on top of the per-token
    *   cache-read rate. That is a function of wall-clock time, not of tokens, so no
    *   per-token registry can represent it. `cachedInput` here is the read rate only.
-   * - **Per-request fees.** `perplexity/sonar-pro` charges $5–$12 per 1,000 requests for
-   *   search context in addition to tokens. Only the token rates are recorded.
+   * - **Time-of-day rates.** `deepseek/*` is listed at DeepSeek's peak rate. Off-peak
+   *   hours (everything outside 01:00–04:00 and 06:00–10:00 UTC on weekdays) bill at
+   *   half that, so DeepSeek spend is over-stated, never under-stated.
    *
    * One provider-side token-accounting mismatch is also worth knowing about, because it
    * would corrupt costs rather than merely under-state them: **AWS Bedrock reports cache

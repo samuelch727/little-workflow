@@ -60,6 +60,13 @@ async function redirects() {
       permanent: true,
     },
     {
+      // An empty wildcard gains a trailing slash in Vercel's routing layer.
+      // Keep the old comparison index to one hop, as it is with next start.
+      source: '/docs/comparisons',
+      destination: '/docs/workflow/comparisons',
+      permanent: true,
+    },
+    {
       source: '/docs/comparisons/:path*',
       destination: '/docs/workflow/comparisons/:path*',
       permanent: true,

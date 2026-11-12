@@ -299,10 +299,6 @@ streamHarness({
 Per-call session-log override (the durable event log this run appends to and
 replays from). When omitted, the log configured on `createHarness()` is used.
 
-> **UNRELEASED:** the current source removes the `durability` alias. Published
-> `0.2.0-alpha.0` accepts `durability` as an alias of `sessionLog` (`sessionLog`
-> wins when both are set). See [Alpha Migrations](/docs/harness/v0.1.0-alpha/reference/alpha-migrations#one-name-per-concept).
-
 See
 [Execution Environments](/docs/harness/v0.1.0-alpha/runtime/execution-environments#the-session-log-as-a-service)
 for the remote session-log adapter.
@@ -501,8 +497,8 @@ return result.toUIMessageStreamResponse();
 
 ### `finished`
 
-Promise that resolves to `StreamHarnessTurnFinished` (in published `0.2.0-alpha.0`,
-`StreamHarnessFinished`; see the table below).
+Promise that resolves to `StreamHarnessTurnFinished`, the union of completed
+and parked results.
 
 Resolves after the model, tools, file writes, artifact creation, and persistence
 commit work has finished.
@@ -527,12 +523,7 @@ When a tool parks the turn until pending work settles, `finished` resolves to
 `warnings`, and without `persistence` or `commitManual`. `resumeParked()` continues
 a turn that parked in `await_tasks`, as a `generateHarness()` turn; see
 [Asking A Person](/docs/harness/v0.1.0-alpha/build-agents/asking-a-person#answer-and-continue).
-The guard above compiles with every version. What the type says differs:
-
-| Version | Declared type of `finished` |
-| --- | --- |
-| Published `0.2.0-alpha.0` | `StreamHarnessFinished`, an alias of `StreamHarnessCompletedResult` only. The runtime can still resolve to a parked result; the type does not include it. |
-| UNRELEASED source (no npm version yet) | `StreamHarnessTurnFinished`, the union of the completed and parked results. `StreamHarnessFinished` no longer exists. |
+`StreamHarnessTurnFinished` includes both states.
 
 See [Typed parked results](/docs/harness/v0.1.0-alpha/reference/alpha-migrations#typed-parked-results).
 A completed turn has `status: "completed"` and these fields:

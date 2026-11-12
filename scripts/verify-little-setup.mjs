@@ -1,6 +1,8 @@
+import { withNextServer } from "./verify-next-server.mjs";
+import { writeFileSync } from "node:fs";
 // Clean consumer qualification, with no workspace dependency resolution or provider keys.
 import assert from "node:assert/strict";
-import { spawn, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -8,7 +10,7 @@ import { fileURLToPath } from "node:url";
 const repo = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const args = process.argv.slice(2);
 const value = name => args.includes(name) ? args[args.indexOf(name) + 1] : undefined;
-const tarball = resolve(value("--tarball") || join(tmpdir(), "little-setup-packs/little-stack-workflow-0.2.0-alpha.2.tgz"));
+const tarball = resolve(value("--tarball") || join(tmpdir(), "little-setup-packs/little-stack-workflow-0.2.0-alpha.3.tgz"));
 const managers = args.includes("--existing-only") ? [] : args.includes("--managers") ? value("--managers").split(",") : ["npm", "pnpm"];
 const templates = args.includes("--templates") ? value("--templates").split(",") : ["node", "next"];
 // An unpublished Harness candidate: generated fixtures and the CLI consumer resolve it from this tarball.
@@ -20,11 +22,13 @@ function overrideHarness(pkg, manager) {
   // npm only accepts an override of a direct dependency as a reference to that dependency's spec.
   else pkg.overrides = { ...pkg.overrides, "@little-stack/harness": "$@little-stack/harness" };
 }
-const root = await mkdtemp(join(tmpdir(), "little-install-matrix-"));
+const evidenceBase = process.env.LITTLE_SETUP_EVIDENCE_DIR || tmpdir();
+await mkdir(evidenceBase, { recursive: true });
+const root = await mkdtemp(join(evidenceBase, "little-install-matrix-"));
 console.log(`Qualification fixtures and logs: ${root}`);
 function run(command, argv, cwd, name) {
   const result = spawnSync(command, argv, { cwd, encoding: "utf8", env: { ...process.env, LITTLE_DEMO: "1", NEXT_TELEMETRY_DISABLED: "1" }, maxBuffer: 10 * 1024 * 1024 });
-  if (name) writeFile(join(root, `${name}.log`), `${result.stdout ?? ""}${result.stderr ?? ""}`);
+  if (name) writeFileSync(join(root, `${name}.log`), `${result.stdout ?? ""}${result.stderr ?? ""}`);
   if (result.status !== 0) throw new Error(`${command} ${argv.join(" ")} failed (${result.status}):\n${result.stdout}\n${result.stderr}`);
   return result.stdout;
 }
@@ -72,16 +76,8 @@ for (const manager of managers) {
       run(process.execPath, [join(dir, "node_modules/next/dist/bin/next"), "build"], dir, `${name}-build`);
       assert.deepEqual(JSON.parse(run(process.execPath, [cli, ...flags, "--plan"], root)).files, []);
       const port = 43000 + evidence.length;
-      const server = spawn(process.execPath, [join(dir, "node_modules/next/dist/bin/next"), "start", "--port", String(port)], { cwd: dir, stdio: "ignore", env: { ...process.env, LITTLE_DEMO: "1", NEXT_TELEMETRY_DISABLED: "1" } });
-      const serverExited = new Promise(accept => server.once("exit", accept));
-      try {
-        const url = `http://localhost:${port}`;
-        let ready = false;
-        for (let i = 0; i < 100; i++) {
-          try { if ((await fetch(`${url}/little`)).ok) { ready = true; break; } } catch {}
-          await new Promise(accept => setTimeout(accept, 100));
-        }
-        assert(ready, "Next server started");
+      const url = `http://localhost:${port}`;
+      await withNextServer({ command: process.execPath, args: [join(dir, "node_modules/next/dist/bin/next"), "start", "--port", String(port)], cwd: dir, url, logPath: join(root, `${name}-server.log`), env: { ...process.env, LITTLE_DEMO: "1", NEXT_TELEMETRY_DISABLED: "1" } }, async () => {
         const request = { messages: [{ id: "test", role: "user", parts: [{ type: "text", text: "hello" }] }], userId: "not-auth", id: "not-a-server-session" };
         const response = await fetch(`${url}/api/little/chat`, { method: "POST", headers: { "content-type": "application/json", origin: url }, body: JSON.stringify(request) });
         assert.equal(response.status, 200);
@@ -90,7 +86,7 @@ for (const manager of managers) {
         if (workflow) assert.match(stream, /starter_echo/);
         assert.equal((await fetch(`${url}/api/little/chat`, { method: "POST", body: "{broken" })).status, 400);
         assert.equal((await fetch(`${url}/api/little/chat`, { method: "POST", headers: { origin: "https://untrusted.example" }, body: JSON.stringify(request) })).status, 403);
-      } finally { server.kill("SIGTERM"); await serverExited; }
+      });
     }
     evidence.push({ manager, template, workflow, install: "passed", typecheck: "passed", keyless: "passed", build: template === "next" ? "passed" : "n/a", rerun: "no-op" });
     console.log(`Passed ${name}`);
@@ -127,21 +123,13 @@ for (const src of templates.includes("next") ? [false, true] : []) {
   run(process.execPath, [join(dir, "node_modules/next/dist/bin/next"), "build"], dir, `${name}-build`);
   assert.deepEqual(JSON.parse(run(process.execPath, [...flags, "--plan"], dir)).files, []);
   const port = src ? 43902 : 43901;
-  const server = spawn(process.execPath, [join(dir, "node_modules/next/dist/bin/next"), "start", "--port", String(port)], { cwd: dir, stdio: "ignore", env: { ...process.env, LITTLE_DEMO: "1" } });
-  const serverExited = new Promise(accept => server.once("exit", accept));
-  try {
-    const url = `http://localhost:${port}`;
-    let ready = false;
-    for (let i = 0; i < 100; i++) {
-      try { if ((await fetch(`${url}/little`)).ok) { ready = true; break; } } catch {}
-      await new Promise(accept => setTimeout(accept, 100));
-    }
-    assert(ready);
+  const url = `http://localhost:${port}`;
+  await withNextServer({ command: process.execPath, args: [join(dir, "node_modules/next/dist/bin/next"), "start", "--port", String(port)], cwd: dir, url, logPath: join(root, `${name}-server.log`), env: { ...process.env, LITTLE_DEMO: "1", NEXT_TELEMETRY_DISABLED: "1" } }, async () => {
     const response = await fetch(`${url}/api/little/chat`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ messages: [{ id: "test", role: "user", parts: [{ type: "text", text: "hello" }] }] }) });
     assert.equal(response.status, 200);
     const stream = await response.text();
     assert.match(stream, /Hello from Little/); assert.match(stream, /starter_echo/);
-  } finally { server.kill("SIGTERM"); await serverExited; }
+  });
 
   evidence.push({ template: name, manager: "npm", workflow: true, install: "passed", typecheck: "passed", keyless: "passed", build: "passed", customScripts: "preserved", existingChat: "preserved", rerun: "no-op" });
   console.log(`Passed ${name}`);

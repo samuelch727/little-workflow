@@ -396,3 +396,44 @@ void worker.start();
 
 LittleDB shows a warning on an experiment whose runs no worker is asking for.
 See [Experiments](/docs/littledb/experiments).
+
+## Format-1 execution snapshots (private draft)
+
+An opted-in managed harness can map admitted `harnessFormat:1` versions onto the
+neutral SDK snapshot. Install the same owner registry on `createHarness` and
+`execution.registry`, a concrete fallback code model in `execution.model`, and
+`execution.state(turn)` returning the tool-state and memory-snapshot SHA-256
+identities. The returned `turnOptions` carries an immutable execution snapshot,
+with execution/registry/envelope/runtime/renderer/accounting/model/state pins in
+metadata and the saved logical-turn pin. State callbacks must return isolated
+state per evaluation run; snapshots do not isolate arbitrary external tools.
+
+```ts
+const support = db.managedHarness({
+  slug: "support", bootstrap: admittedContent,
+  execution: {
+    registry, model,
+    state: (turn) => isolatedStateIdentities(turn),
+  },
+});
+const harness = createHarness({
+  host, tools, executionRegistry: registry, runtime: { bash: false },
+  turnOptions: support.turnOptions,
+});
+```
+
+Model slots and existing model/payer decisions retain their usual precedence.
+A resumed turn uses its saved content, model decision and exact snapshot without
+resolving today's live version; changed/missing installation or state fails.
+New serving turns can apply the contract's stale-selector default fallback with
+warnings. Evaluation turns require the exact claimed version and content and
+strict validation: a bootstrap, missing pin, invalid selector or fallback cannot
+produce candidate evidence. Format-1 content without this explicit adapter fails
+before execution. Existing legacy/custom adapters remain usable without opting in.
+
+This source-only slice qualifies inline files, registered tools/hooks and
+`bash:false`, including code-only durable person questions. It refuses shell,
+MCP, workflow/agent/checkpoint tools, external skills, mutable memory and typed
+input. It does not enable backend admission or merge/promotion/evaluation-evidence
+policy; those remain the control-plane follow-up. See the snapshot section in the
+[Harness reference](/docs/harness/v0.1.0-alpha/reference/create-harness).

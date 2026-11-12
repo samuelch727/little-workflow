@@ -132,15 +132,12 @@ Some tool names are reserved because Little Harness injects or protects them.
 `createHarness` rejects a configured tool with a reserved name, and
 `loadHarness` rejects a discovered `tools/<name>.ts` with one.
 
-| Version | Reserved for configured and discovered tools |
-| --- | --- |
-| Published `0.2.0-alpha.0` | `bash`, `__proto__`, `constructor`, `prototype` |
-| UNRELEASED source (no npm version yet) | The names above, plus `checkpoint` and the five Agent Group tools: `start_agent_group`, `spawn_agent`, `watch_agent_group`, `join_agent_group`, `cancel_agent_group` |
+`bash`, `__proto__`, `constructor`, `prototype`, `checkpoint` and the five
+Agent Group tools (`start_agent_group`, `spawn_agent`, `watch_agent_group`,
+`join_agent_group`, `cancel_agent_group`) are reserved.
 
-In the unreleased source, these extra names stay reserved even when
-`checkpoints` or `agents` is not configured. An existing tool named
-`checkpoint` or after an Agent Group tool passes the published name validation in
-`0.2.0-alpha.0`, but must be renamed for the unreleased SDK. See
+These names stay reserved even when `checkpoints` or `agents` is not
+configured. Rename configured or discovered tools that use them. See
 [Broader reserved tool names](/docs/harness/v0.1.0-alpha/reference/alpha-migrations#broader-reserved-tool-names).
 
 ### `mcp`
@@ -510,10 +507,6 @@ otherwise. See
 [Execution Environments](/docs/harness/v0.1.0-alpha/runtime/execution-environments).
 ### `agents`
 
-> **UNRELEASED:** the `agents` option exists only in the current source. Published
-> `0.2.0-alpha.0` has no runtime `agents` option, and no npm version includes it
-> yet. Agent folder scaffolding is a separate, published feature.
-
 `HarnessAgentGroupsOptions`
 
 Optional neutral launcher port for ordered fan-out into isolated agents. It injects
@@ -570,10 +563,6 @@ See [Agent Groups](/docs/harness/v0.1.0-alpha/build-agents/agent-groups) for the
 `first_verified` binding, revision fencing, and failure semantics.
 
 ### `checkpoints`
-
-> **UNRELEASED:** the `checkpoints` option exists only in the current source.
-> Published `0.2.0-alpha.0` has no `checkpoints` property on
-> `CreateHarnessOptions`, and no npm version includes it yet.
 
 `HarnessCheckpointsOptions`
 
@@ -812,14 +801,6 @@ sessionLog: remoteSessionLog({ baseUrl: process.env.SESSION_LOG_URL!, authToken 
 
 See
 [Execution Environments](/docs/harness/v0.1.0-alpha/runtime/execution-environments#the-session-log-as-a-service).
-
-> **UNRELEASED:** in the current source the session-log helpers come only from
-> `@little-stack/harness/remote-session`, the file and in-memory logs are
-> `fileSessionLog()` and `inMemorySessionLog()`, and the `durability` alias is
-> gone. Published `0.2.0-alpha.0` exports `createFileSessionLog()`,
-> `createInMemorySessionLog()` and `remoteSessionLog()` from the root entry and
-> accepts `durability` as an alias of `sessionLog`. See
-> [Alpha Migrations](/docs/harness/v0.1.0-alpha/reference/alpha-migrations#one-name-per-concept).
 
 ## Returns
 

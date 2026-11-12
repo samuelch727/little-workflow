@@ -102,3 +102,25 @@ which classifies each script before it runs; see [Execution Tiers](/docs/v0.1.0-
 Containers, microVMs, or hosted execution pools plug in as that `nextTier` (or as the whole
 `sandbox`) through the same `HarnessSandboxFactory` port — the
 developer-facing harness config does not change.
+
+## Synthetic null endpoint
+
+**Ships in `0.2.0-alpha.3`:** all just-bash-backed workspaces expose a synthetic `/dev` directory
+and exact `/dev/null` endpoint. This includes in-process `localHost`, `virtualHost`,
+`subprocessSandbox` and Tier-0 under `tieredSandbox`. Root listings now include `dev`.
+
+Reads return EOF; writes/appends (including shell redirects and `tee`) discard bytes
+without a backing file or file-change artifact. The endpoint is not a regular file:
+`test -f /dev/null` is false. This narrow interface is not a host device mount or full
+POSIX character-device implementation. In particular, `cp` and `mv` involving the
+synthetic `/`, `/dev` or `/dev/null` paths are explicitly refused before cross-mount
+copying/removal; no destination is created and source files remain intact. This also
+refuses `cp /dev/null file` rather than treating the endpoint as a regular empty file.
+To create or truncate a managed file, use a redirect such as `: > /session/file`.
+`chmod`, replacement, links and other `/dev` writes remain denied.
+An application-owned explicit filesystem mount at `/dev` uses that mount's own policy.
+
+Plain `mkdir /dev` fails with `EEXIST`; `mkdir -p /dev` succeeds without changing it.
+The SDK requires just-bash 3.0.3 or later for correct descriptor order, including
+`>/dev/null 2>&1`; both orders and later redirect overrides are covered in Node and
+native workerd tests. See the [upstream fix](https://github.com/vercel-labs/just-bash/pull/286).

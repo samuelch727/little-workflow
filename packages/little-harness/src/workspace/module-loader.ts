@@ -21,6 +21,9 @@ export async function importDefault<T = unknown>(modulePath: string): Promise<T>
   const abs = resolve(modulePath); // jiti treats a relative path as a bare specifier; resolve to absolute first
   const mod = (await jiti.import(abs)) as { default?: T };
   if (mod.default === undefined) {
+    // jiti can return a cached CommonJS module.exports object after a generated ESM
+    // module imported it. In CommonJS that object itself is the default export.
+    if (/\.(cjs|cts)$/u.test(abs)) return mod as T;
     throw new HarnessInputError("Agent module must have a default export.", { path: abs });
   }
   return mod.default;

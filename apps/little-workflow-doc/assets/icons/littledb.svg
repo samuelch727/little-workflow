@@ -1,0 +1,59 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" role="img" aria-label="LittleDB animated eyes avatar">
+  <style>
+    .database-gaze { animation: database-look 12s ease-in-out infinite; }
+    .database-eye {
+      transform-box: fill-box;
+      transform-origin: center;
+      animation: database-expression 12s ease-in-out infinite;
+    }
+    @keyframes database-look {
+      0.0000% { transform: translate(0px, 0px); }
+      16.6667% { transform: translate(0px, 0px); }
+      19.1667% { transform: translate(-1.2px, 0.4px); }
+      29.1667% { transform: translate(-1.2px, 0.4px); }
+      31.6667% { transform: translate(0px, 0px); }
+      40.0000% { transform: translate(0px, 0px); }
+      42.5000% { transform: translate(1.2px, 0.3px); }
+      55.0000% { transform: translate(1.2px, 0.3px); }
+      58.3333% { transform: translate(0px, 0px); }
+      84.1667% { transform: translate(0px, 0px); }
+      86.6667% { transform: translate(0px, -0.6px); }
+      92.5000% { transform: translate(0px, -0.6px); }
+      95.8333% { transform: translate(0px, 0px); }
+      100.0000% { transform: translate(0px, 0px); }
+    }
+    @keyframes database-expression {
+      0.0000% { transform: scale(1, 1); }
+      8.7500% { transform: scale(1, 1); }
+      9.6833% { transform: scale(1.12, 0.16); }
+      10.1500% { transform: scale(1.12, 0.16); }
+      11.0833% { transform: scale(1, 1); }
+      35.4167% { transform: scale(1, 1); }
+      36.3500% { transform: scale(1.12, 0.16); }
+      36.8167% { transform: scale(1.12, 0.16); }
+      37.7500% { transform: scale(1, 1); }
+      59.1667% { transform: scale(1, 1); }
+      62.5000% { transform: scale(1.03, 0.75); }
+      66.6667% { transform: scale(1.05, 0.5); }
+      69.1667% { transform: scale(1.12, 0.16); }
+      71.6667% { transform: scale(1.12, 0.16); }
+      74.5833% { transform: scale(1, 1); }
+      95.0000% { transform: scale(1, 1); }
+      95.9333% { transform: scale(1.12, 0.16); }
+      96.4000% { transform: scale(1.12, 0.16); }
+      97.3333% { transform: scale(1, 1); }
+      100.0000% { transform: scale(1, 1); }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .database-gaze, .database-eye { animation: none; }
+    }
+  </style>
+  <path fill="#795CAB" d="M12.5 5.5h15a7.5 7.5 0 0 1 7.5 7.5v14a7.5 7.5 0 0 1-7.5 7.5h-15A7.5 7.5 0 0 1 5 27V13a7.5 7.5 0 0 1 7.5-7.5Z" />
+  <path fill="#C0A3E2" d="M20.5 13.5h15a7.5 7.5 0 0 1 7.5 7.5v14a7.5 7.5 0 0 1-7.5 7.5h-15A7.5 7.5 0 0 1 13 35V21a7.5 7.5 0 0 1 7.5-7.5Z" />
+  <g transform="translate(28 28.1)" fill="#4B326B">
+    <g class="database-gaze">
+      <ellipse class="database-eye database-left" cx="-4.05" cy="0" rx="1.55" ry="2.2"/>
+      <ellipse class="database-eye database-right" cx="4.05" cy="0" rx="1.55" ry="2.2"/>
+    </g>
+  </g>
+</svg>

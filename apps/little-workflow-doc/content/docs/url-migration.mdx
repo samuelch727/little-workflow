@@ -1,10 +1,10 @@
 ---
 title: URL migration
-description: Where pages from the separate Little Workflow, Little Harness and Little Compute docs sites live on this combined site.
+description: Where pages from the separate Little Workflow, Little Harness and Little Compute docs sites live on little-stack.dev.
 ---
 
 The Workflow, Harness and Compute docs used to be separate sites. Their pages now
-live under product roots on this site. The complete page-by-page map is
+live under product roots on **little-stack.dev**. The complete page-by-page map is
 published as JSON at <a href="/docs-migration.json">/docs-migration.json</a>.
 
 ## Rules
@@ -15,7 +15,7 @@ published as JSON at <a href="/docs-migration.json">/docs-migration.json</a>.
 | Workflow: `/docs/comparisons` | `/docs/workflow/comparisons` | Yes |
 | Workflow: `/docs/v0.1.0-alpha` (had no page) | `/docs/workflow/v0.1.0-alpha/getting-started` | Yes |
 | Workflow: `/docs` | `/docs/workflow` | No: `/docs` is now the family index |
-| Harness (`https://little-harness.dev`): `/docs/<page>` | `/docs/harness/<page>` | No: link migration only |
+| Harness (`https://little-harness.vercel.app`): `/docs/<page>` | `/docs/harness/<page>` | No: link migration only |
 | Compute: `/docs/<page>` | `/docs/compute/<page>` | Yes, for each old Compute page name |
 
 The same rules apply to each page's Markdown copy (`/llms.mdx/docs/...`) and
@@ -41,6 +41,8 @@ These old Compute pages redirect from `/docs/<page>` to `/docs/compute/<page>`:
 
 ## Why the Harness site is not redirected
 
-This preview runs on the existing Little Workflow host. It cannot add redirects
-to the separate Little Harness domain, which stays as it is. Use the map to
-update links by hand.
+The unified site also serves the existing Little Workflow host, so its old
+paths retain permanent redirects. The separate Little Harness domain keeps
+working with its existing routes. Those paths overlap with old Workflow paths;
+redirecting that domain needs a separate host-aware migration. Use this map to
+update Harness links to their canonical destination on little-stack.dev.

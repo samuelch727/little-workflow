@@ -30,6 +30,40 @@ export type ShellCommandInput = { command: string; cwd?: string; timeoutMs?: num
 
 export type ShellCommandResult = { stdout: string; stderr: string; exitCode: number };
 
+// Only tier delegation may forward an attempt identity. Public execute options cannot set it.
+const forwardedAttemptToken = Symbol("harness.shell-attempt");
+const forwardedExecutionIds = new WeakMap<object, string>();
+
+/** Internal tier call channel; deliberately absent from package entry points. */
+export async function forwardShellAttempt<T>(
+  executionId: string | undefined,
+  toolCallId: string,
+  execute: (options: { toolCallId: string; messages: never[] }) => Promise<T>,
+): Promise<T> {
+  // Object spread/Object.assign preserve this opaque token; the ID stays in the private map.
+  const token = {};
+  const options = { toolCallId, messages: [], [forwardedAttemptToken]: token };
+  if (executionId !== undefined) forwardedExecutionIds.set(token, executionId);
+  try {
+    return await execute(options);
+  } finally {
+    forwardedExecutionIds.delete(token);
+  }
+}
+
+function takeExecutionId(options: unknown): string {
+  if (isObject(options)) {
+    const token = (options as { [forwardedAttemptToken]?: unknown })[forwardedAttemptToken];
+    if (isObject(token)) {
+      const forwarded = forwardedExecutionIds.get(token);
+      // A token can forward an identity only once, even across copies of its options.
+      forwardedExecutionIds.delete(token);
+      if (forwarded !== undefined) return forwarded;
+    }
+  }
+  return createEventId();
+}
+
 export type CreateShellRuntimeOptions = {
   workspace: HarnessWorkspaceSpec;
   /**
@@ -39,7 +73,7 @@ export type CreateShellRuntimeOptions = {
    * non-zero exitCode and the message in stderr — never thrown — so the model sees the
    * same tool-result shape from every adapter.
    */
-  execute(input: ShellCommandInput, context: { toolCallId: string }): Promise<ShellCommandResult>;
+  execute(input: ShellCommandInput, context: { toolCallId: string; executionId: string }): Promise<ShellCommandResult>;
   toolBridge?: RuntimeToolBridge | undefined;
   runtime?: HarnessRuntimeOptions | undefined;
   /** More lines for the system prompt about this environment, after the workspace's own. */
@@ -70,6 +104,9 @@ export type CreateShellRuntimeOptions = {
  * executor. All observable behavior — harness.runtime.command.* events, tool-call events,
  * workspace file-change events — lives here once, so in-process, subprocess, and remote
  * execution environments emit identical traces.
+ * Tier tool wrappers must preserve all execute-option keys (including symbols), either
+ * by passing options through or shallow-copying them with spread/Object.assign. Rebuilding
+ * only named fields or serializing options drops the private one-use correlation token.
  */
 export function createShellRuntime(options: CreateShellRuntimeOptions): HarnessSandbox {
   const { workspace, toolBridge } = options;
@@ -113,14 +150,16 @@ export function createShellRuntime(options: CreateShellRuntimeOptions): HarnessS
             input.timeoutMs = timeoutMs;
           }
           const startedAt = Date.now();
+          const executionId = takeExecutionId(executeOptions);
           const toolCallId =
-            isObject(executeOptions) && typeof executeOptions.toolCallId === "string"
+            isObject(executeOptions) && typeof executeOptions.toolCallId === "string" && executeOptions.toolCallId.length > 0
               ? executeOptions.toolCallId
-              : "runtime_bash";
+              : "runtime_bash"; // Keep the historical direct-call tool-bridge replay scope stable.
           const before = options.emit ? await snapshotTrackedMounts(workspace) : undefined;
           await options.emit?.({
             type: "harness.runtime.command.started",
-            metadata: input,
+            occurrenceId: executionId,
+            metadata: { ...input, toolCallId, executionId },
           });
           if (options.emitToolEvents !== false) {
             await options.emit?.({
@@ -138,7 +177,7 @@ export function createShellRuntime(options: CreateShellRuntimeOptions): HarnessS
               },
             });
           }
-          const result = await options.execute(input, { toolCallId });
+          const result = await options.execute(input, { toolCallId, executionId });
           const output: ShellCommandResult = {
             stdout: result.stdout,
             stderr: result.stderr,
@@ -158,8 +197,11 @@ export function createShellRuntime(options: CreateShellRuntimeOptions): HarnessS
           }
           await options.emit?.({
             type: result.exitCode === 0 ? "harness.runtime.command.succeeded" : "harness.runtime.command.failed",
+            occurrenceId: executionId,
             metadata: {
               command,
+              toolCallId,
+              executionId,
               ...(cwd === undefined ? {} : { cwd }),
               ...(timeoutMs === undefined ? {} : { timeoutMs }),
               exitCode: result.exitCode,

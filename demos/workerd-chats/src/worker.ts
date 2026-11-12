@@ -1,16 +1,18 @@
 import { DurableObject } from "cloudflare:workers";
 import {
   answerInputRequest, createHarness, generateHarness, HarnessInputError, listInputRequests,
-  resumeParked, virtualHost, type HarnessEvent, type HarnessTurnResult, type HumanInputAnswer,
+  resumeParked, streamHarness, virtualHost, type HarnessEvent, type HarnessTurnResult, type HumanInputAnswer,
 } from "@little-stack/harness";
 import { createLittleDB, type HarnessTracer } from "@little-stack/littledb";
+import { remoteTools } from "@little-stack/harness/remote-tools";
 import {
   dynamicWorkflows, virtualWorld, type DynamicWorkflowWorldContext, type EventEnvelope, type World,
 } from "@little-stack/workflow";
-import { jsonSchema, tool, type UIMessage } from "ai";
+import { createUIMessageStreamResponse, jsonSchema, tool, type UIMessage, type UIMessageChunk } from "ai";
 import { ChatFiles } from "./chat-files.js";
 import { ChatStore } from "./chat-store.js";
 import { chatModel } from "./model.js";
+import { ordersLookup } from "./remote-contracts.js";
 
 type Env = {
   CHAT: DurableObjectNamespace<Chat>;
@@ -20,9 +22,15 @@ type Env = {
   MODEL_API_KEY?: string;
   LITTLEDB_URL?: string;
   LITTLEDB_API_KEY?: string;
+  DATA_API: Fetcher;
+  DATA_API_TOKEN?: string;
   /** Smaller retention can be used to exercise pruning locally. Default: 5000. */
   TRACE_LIMIT?: string;
+  /** Test fixtures only; deliberately absent from the shipped workerd.capnp. */
+  TEST_FAULTS?: string;
 };
+
+type TestFaults = { failAfterDrainFor?: string; saveDelayMs?: number };
 
 type MessageRow = { seq: number; role: string; text: string };
 type LocalTraceEvent =
@@ -51,6 +59,11 @@ export class Chat extends DurableObject<Env> {
     humanInput: true,
     dynamicWorkflows: dynamicWorkflows({ world: (context) => this.workflowWorld(context) }),
     tools: {
+      ...(this.env.DATA_API_TOKEN ? remoteTools([ordersLookup], {
+        endpoint: this.env.DATA_API,
+        scope: this.ctx.id.toString(),
+        headers: { authorization: `Bearer ${this.env.DATA_API_TOKEN}` },
+      }) : {}),
       word_count: tool({
         description: "Count whitespace-separated words in text.",
         inputSchema: jsonSchema<{ text: string }>({
@@ -122,6 +135,9 @@ export class Chat extends DurableObject<Env> {
     if (action === "messages") {
       if (typeof body.text !== "string") return Response.json({ error: "text must be a string" }, { status: 400 });
       const text = body.text;
+      if (request.headers.get("accept")?.split(",").some((type) => type.split(";")[0]?.trim() === "text/event-stream") || url.searchParams.get("stream") === "1") {
+        return this.streamReply(text);
+      }
       run = () => this.reply(text);
     } else {
       if (typeof body.requestId !== "string" || !isObject(body.answer)) return Response.json({ error: "Expected requestId and answer" }, { status: 400 });
@@ -144,15 +160,19 @@ export class Chat extends DurableObject<Env> {
     return this.ctx.storage.sql.exec<MessageRow>("SELECT seq, role, text FROM messages ORDER BY seq").toArray();
   }
 
-  private async reply(text: string) {
+  private messages(text: string): UIMessage[] {
     const messages: UIMessage[] = this.history().map((row) => ({
       id: `m${row.seq}`, role: row.role === "user" ? "user" : "assistant", parts: [{ type: "text", text: row.text }],
     }));
     messages.push({ id: crypto.randomUUID(), role: "user", parts: [{ type: "text", text }] });
+    return messages;
+  }
+
+  private async reply(text: string) {
     const events: HarnessEvent[] = [];
     try {
       const result = await generateHarness({
-        harness: this.harness, session: "chat", messages,
+        harness: this.harness, session: "chat", messages: this.messages(text),
         onEvent: (event) => this.recordEvent(event, events),
       });
       this.ctx.storage.sql.exec("INSERT INTO messages (role, text) VALUES ('user', ?)", text);
@@ -164,6 +184,98 @@ export class Chat extends DurableObject<Env> {
       await this.files.save();
       this.flushTraces();
     }
+  }
+
+  private streamReply(text: string): Response {
+    let connected = true;
+    let controller: ReadableStreamDefaultController<UIMessageChunk>;
+    const stream = new ReadableStream<UIMessageChunk>({
+      start(value) { controller = value; },
+      // Leaving the page stops delivery, not the server-owned turn or its save.
+      cancel() { connected = false; },
+    });
+    // Deliberately buffer chat-sized turns for slow readers so delivery cannot
+    // stall execution or persistence; this is not a bounded transport queue.
+    const forward = (chunk: UIMessageChunk) => {
+      if (!connected) return;
+      try { controller.enqueue(chunk); } catch { connected = false; }
+    };
+    // This one completion owns the queue slot and the Durable Object lifetime,
+    // including after a canceled response. Consumer backpressure never drives it.
+    const completion = this.turns.then(async () => {
+      try {
+        forward(await this.runStreamedReply(text, forward));
+      } catch {
+        forward({ type: "error", errorText: "The turn failed." });
+      } finally {
+        if (connected) {
+          try { controller.close(); } catch { connected = false; }
+        }
+      }
+    });
+    this.turns = completion.catch(() => undefined);
+    this.ctx.waitUntil(this.turns);
+    return createUIMessageStreamResponse({ stream });
+  }
+
+  private async runStreamedReply(text: string, forward: (chunk: UIMessageChunk) => void): Promise<UIMessageChunk> {
+    const faults: TestFaults = this.env.TEST_FAULTS ? JSON.parse(this.env.TEST_FAULTS) as TestFaults : {};
+    const events: HarnessEvent[] = [];
+    let finish: Extract<UIMessageChunk, { type: "finish" }> | undefined;
+    let parked = false;
+    let streamFailed = false;
+    try {
+      const turn = streamHarness({
+        harness: this.harness, session: "chat", messages: this.messages(text),
+        onEvent: (event) => this.recordEvent(event, events),
+        uiMessageStream: { onError: () => "The turn failed." },
+      });
+      const reader = (turn.toUIMessageStream() as ReadableStream<UIMessageChunk>).getReader();
+      const drain = async () => {
+        try {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            if (value.type === "finish") finish = value;
+            else if (value.type === "error") streamFailed = true;
+            else forward(value);
+          }
+        } finally {
+          reader.releaseLock();
+        }
+      };
+      // A read failure must still await the harness's failure bookkeeping before
+      // releasing the chat. Neither branch is allowed to short-circuit the other.
+      const [drained, finished] = await Promise.allSettled([drain(), turn.finished]);
+      if (drained.status === "rejected") throw drained.reason;
+      if (finished.status === "rejected") throw finished.reason;
+      if (streamFailed || finish === undefined) throw new Error("The UI stream did not finish successfully");
+      if (faults.failAfterDrainFor === text) throw new Error("Injected after-drain failure");
+      parked = finished.value.status === "parked";
+      const reply = finished.value.status === "completed" ? await turn.text : undefined;
+      this.ctx.storage.sql.exec("INSERT INTO messages (role, text) VALUES ('user', ?)", text);
+      if (reply !== undefined) this.ctx.storage.sql.exec("INSERT INTO messages (role, text) VALUES ('assistant', ?)", reply);
+    } finally {
+      try {
+        if (faults.saveDelayMs) await new Promise((resolve) => setTimeout(resolve, faults.saveDelayMs));
+        await this.files.save();
+      } finally {
+        this.flushTraces();
+      }
+    }
+    // The upstream finish preceded harness finalization; only now is it safe to
+    // expose success. The SDK response helper appends [DONE] when we close.
+    if (parked) {
+      return {
+        ...finish,
+        messageMetadata: {
+          ...(isObject(finish.messageMetadata) ? finish.messageMetadata : {}),
+          status: "parked",
+          requests: await listInputRequests({ harness: this.harness, sessionId: "chat" }),
+        },
+      };
+    }
+    return finish;
   }
 
   private async answer(requestId: string, answer: HumanInputAnswer) {
@@ -193,7 +305,16 @@ export class Chat extends DurableObject<Env> {
       status: result.status,
       reply: result.status === "completed" ? result.text : "[parked]",
       ...(result.status === "parked" ? { requests: await listInputRequests({ harness: this.harness, sessionId: "chat" }) } : {}),
-      events: events.map(({ type, sequence }) => ({ type, sequence })),
+      events: events.map(({ type, sequence, sessionId, turnId, metadata }) => ({
+        type, sequence,
+        // Explicit ID-only projection. Never forward command text, output or raw metadata.
+        ...((type.startsWith("harness.runtime.command.") || type.startsWith("harness.runtime.tier.")) ? {
+          sessionId,
+          ...(turnId === undefined ? {} : { turnId }),
+          ...(typeof metadata?.executionId === "string" ? { executionId: metadata.executionId } : {}),
+          ...(typeof metadata?.toolCallId === "string" ? { toolCallId: metadata.toolCallId } : {}),
+        } : {}),
+      })),
     };
   }
 

@@ -107,7 +107,7 @@ describe("virtualHost", () => {
     // Bash sees the four workspace roots and nothing else of the filesystem.
     const listing = await run(host, "chat", ["ls -a /"]);
     expect(listing.stdout.split(/\s+/u).filter((name) => !["", ".", ".."].includes(name)).sort())
-      .toEqual([".agents", "artifacts", "persistent", "session"]);
+      .toEqual([".agents", "artifacts", "dev", "persistent", "session"]);
     expect((await run(host, "chat", [`ls ${VIRTUAL_HOST_STATE_DIR}`])).exitCode).not.toBe(0);
   });
 
@@ -267,7 +267,7 @@ describe("virtualHost", () => {
     const recalled = await run(virtualHost({ fs }), "chat", ["cat /persistent/memory/release.md"], { memory });
     expect(recalled).toMatchObject({ exitCode: 0, stdout: "The release colour is violet.\n" });
     const roots = await run(virtualHost({ fs }), "chat", ["ls -A /"], { memory });
-    expect(roots.stdout.trim().split(/\s+/u).sort()).toEqual([".agents", "artifacts", "persistent", "session"]);
+    expect(roots.stdout.trim().split(/\s+/u).sort()).toEqual([".agents", "artifacts", "dev", "persistent", "session"]);
     expect((await run(virtualHost({ fs }), "chat", ["cat /.little-harness/data/memory/release.md"], { memory })).exitCode).not.toBe(0);
   });
 
@@ -458,4 +458,46 @@ describe("virtualHost", () => {
     const prepared = await host.prepareTurn({ session, turnId: "turn_1", persistentDirs: [] });
     await expect(prepared.createSandbox({})).rejects.toBeInstanceOf(HarnessInputError);
   });
+});
+
+it.each([
+  "printf hidden > /dev/null; cat /dev/null; printf OK",
+  "printf hidden >> '/dev/null'; cat < /dev/null; printf OK",
+  "cat /missing 2>/dev/null; printf OK",
+  "{ printf hidden; cat /missing; } >/dev/null 2>&1; printf OK",
+  "printf hidden > /dev/../dev/null; printf OK",
+])("virtualHost uses a synthetic null sink/EOF endpoint: %s", async command => {
+  const fs = new InMemoryFs(); const host = virtualHost({ fs }); const events: HarnessEvent[] = [];
+  expect(await run(host, "null", [command], { events })).toMatchObject({ exitCode: 0, stdout: "OK", stderr: "" });
+  expect(fs.getAllPaths().some(path => path.startsWith("/dev/"))).toBe(false);
+  expect(events.filter(event => event.type.startsWith("harness.file."))).toEqual([]);
+});
+
+it.each([
+  "printf no > /dev/nullish", "printf no > /dev/other", "mkdir /dev/new",
+  "rm /dev/null", "ln -s /session/target /dev/null", "ln /dev/null /session/alias",
+  "printf keep >/session/source; mv /session/source /dev/null",
+])("virtualHost keeps other device writes and structural changes forbidden: %s", async command => {
+  const host = virtualHost({ fs: new InMemoryFs() });
+  expect((await run(host, "null-deny", [command])).exitCode).not.toBe(0);
+  expect(await run(host, "null-check", ["cat /dev/null"])).toMatchObject({ exitCode: 0, stdout: "", stderr: "" });
+});
+
+it.each([
+  ["{ printf OUT; printf ERR >&2; } >/session/all 2>&1; cat /session/all", "OUTERR"],
+  ["{ printf OUT; printf ERR >&2; } 2>&1 >/session/out; printf '|'; cat /session/out", "ERR|OUT"],
+  ["{ printf OUT; printf ERR >&2; } >/session/all 2>&1 2>/session/err; cat /session/all; printf '|'; cat /session/err", "OUT|ERR"],
+  ["printf OUT >/session/first >/session/last; cat /session/first; printf '|'; cat /session/last", "|OUT"],
+  ["{ printf OUT; printf ERR >&2; } >/dev/null 2>&1; printf OK", "OK"],
+  ["{ printf OUT; printf ERR >&2; } 2>&1 >/dev/null; printf OK", "ERROK"],
+])("preserves descriptor destination/order semantics: %s", async (command, stdout) => {
+  const host = virtualHost({ fs: new InMemoryFs() });
+  expect(await run(host, "fd-order", [command])).toMatchObject({ stdout, stderr: "", exitCode: 0 });
+});
+
+it("treats null as a special endpoint and preserves existing-directory mkdir semantics", async () => {
+  const host = virtualHost({ fs: new InMemoryFs() });
+  expect(await run(host, "null-kind", ["test ! -f /dev/null && test -c /dev/null && test -e /dev/null && printf OK"])).toMatchObject({ exitCode: 0, stdout: "OK" });
+  expect((await run(host, "null-mkdir", ["mkdir /dev"])).exitCode).not.toBe(0);
+  expect(await run(host, "null-mkdir", ["mkdir -p /dev; printf OK"])).toMatchObject({ exitCode: 0, stdout: "OK" });
 });

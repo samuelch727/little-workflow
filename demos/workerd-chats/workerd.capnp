@@ -6,6 +6,7 @@ const config :Workerd.Config = (
   services = [
     (name = "chats", worker = .chats),
     (name = "chat-storage", disk = (path = "data", writable = true)),
+    (name = "data-api", external = (address = "127.0.0.1:8788", http = ())),
     # Models/ingest may run on this machine. For a different LAN host, allow only its
     # chosen IP/subnet here; workerd's implicit internet service blocks private IPs.
     (name = "internet", network = (
@@ -23,6 +24,8 @@ const chats :Workerd.Worker = (
   durableObjectStorage = (localDisk = "chat-storage"),
   bindings = [
     (name = "CHAT", durableObjectNamespace = "Chat"),
+    (name = "DATA_API", service = "data-api"),
+    (name = "DATA_API_TOKEN", fromEnvironment = "DATA_API_TOKEN"),
     # Unset, the chats run a scripted model that needs no key.
     (name = "DEEPSEEK_API_KEY", fromEnvironment = "DEEPSEEK_API_KEY"),
     (name = "MODEL_BASE_URL", fromEnvironment = "MODEL_BASE_URL"),

@@ -87,9 +87,6 @@ localHost({ sandbox: "in-process" }); // trusted read-only tools only
 localHost({ sandbox: subprocessSandbox({ initTimeoutMs: 10_000 }) });
 ```
 
-> **UNRELEASED:** published `0.2.0-alpha.0` names this option `executionEnvironment`. See
-> [Alpha Migrations](/docs/harness/v0.1.0-alpha/reference/alpha-migrations#one-name-per-concept).
-
 See [Execution Environments](/docs/harness/v0.1.0-alpha/runtime/execution-environments).
 
 ## Persistent Dirs
@@ -179,3 +176,7 @@ Local Host is designed for development:
 
 For stronger isolation or managed scaling, the same SDK shape should later swap
 to a self-hosted or managed host.
+
+The just-bash workspace also provides the `0.2.0-alpha.3`
+[synthetic `/dev/null` endpoint](/docs/harness/v0.1.0-alpha/runtime/just-bash#synthetic-null-endpoint).
+It applies to local, virtual, subprocess and Tier-0 environments; it is not a host device mount.

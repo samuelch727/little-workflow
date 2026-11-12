@@ -46,6 +46,99 @@ command and replies with what bash printed. Set `DEEPSEEK_API_KEY` before
 `pnpm serve` for a real model (`deepseek-v4-flash`). `pnpm dev` runs the same app
 under `wrangler dev` instead.
 
+## Tools on your Node data service
+
+The optional remote tool keeps its SQLite connection, query code and credentials
+in `data-service.mjs`, outside the workerd bundle. It uses the shared validating
+`src/remote-contracts.ts`. Start the loopback service in another terminal (Node
+22.13 or later):
+
+```bash
+export DATA_API_TOKEN=local-development-only
+node --experimental-strip-types data-service.mjs # 127.0.0.1:8788
+```
+
+Use the same `DATA_API_TOKEN` in the terminal running `pnpm serve`, then:
+
+```bash
+curl localhost:8080/chats/orders/messages -H 'content-type: application/json' \
+  -d '{"text":"orders:open"}'
+```
+
+`workerd.capnp` binds `DATA_API` to `127.0.0.1:8788` and reads the token from the
+environment. To change ports, set `DATA_API_PORT` on Node and edit that external
+address. A missing token leaves the remote tool unregistered. Wrong tokens and
+an unavailable service produce ordinary tool errors, allowing another turn.
+The demo's fixed `demo` principal can read only its own seeded orders; the row
+owned by `other` is excluded by a parameterized query.
+
+This is a credentialed **loopback development example**. The service token proves
+the demo host called; it is not proof of an end user's identity. For a deployable
+service use TLS and verify per-user proof from a dedicated header (issuer,
+audience and expiry), then authorize each resource against that principal.
+`context` is only a host assertion. See the
+[remote-tools guide](../../apps/little-harness-doc/content/docs/v0.1.0-alpha/build-agents/remote-tools.mdx).
+The demo router itself has no user authentication; user/chat namespacing remains
+a separate follow-up. Its trace table is not automatically a replay session log.
+Use business keys for retried writes; a timeout is an uncertain outcome.
+
+## Stream a reply
+
+JSON remains the default. Request an AI SDK UI message stream with
+`Accept: text/event-stream`, or add `?stream=1`:
+
+```bash
+curl -N localhost:8080/chats/a/messages -H 'content-type: application/json' \
+  -H 'accept: text/event-stream' \
+  -d '{"text":"echo hello > notes.txt && cat notes.txt"}'
+```
+
+The stream includes tool inputs, tool outputs and text as they happen. Its
+`finish` chunk is held until the harness finishes, message history is recorded,
+and `ChatFiles.save()` succeeds. The response then ends with `[DONE]`. A failed
+turn sends one generic `error` chunk and no `finish`; treat partial text as
+unacknowledged until `finish`. Trace export remains best-effort in the background.
+
+In a React client that already uses `@ai-sdk/react` and `ai`, connect `useChat`
+through `DefaultChatTransport`. Send only the last message's text: this server
+owns the chat's history.
+
+```tsx
+import { useChat } from "@ai-sdk/react";
+import { DefaultChatTransport } from "ai";
+
+export function useWorkerdChat(chatId: string) {
+  return useChat({
+    transport: new DefaultChatTransport({
+      api: `/chats/${encodeURIComponent(chatId)}/messages?stream=1`,
+      prepareSendMessagesRequest: ({ messages }) => ({
+        body: {
+          text: messages.at(-1)?.parts
+            .filter((part) => part.type === "text")
+            .map((part) => part.text).join("") ?? "",
+        },
+      }),
+    }),
+  });
+}
+```
+
+Use the hook's `sendMessage({ text: "echo hello" })` and render its `messages`
+in your app. Stopping the client or leaving the page stops delivery only: the
+server keeps running the turn, saving files and history, and holding that chat's
+queue slot. There is no server stop endpoint. A streamed `ask:` turn also sends
+`finish` after saving its parked state and user message, with
+`messageMetadata: { status: "parked", requests }`. In `useChat`, read the input
+request ID from the assistant message's `metadata.requests[n].requestId`, then
+send it to the existing `/answers` endpoint:
+
+```bash
+curl -X POST localhost:8080/chats/a/answers -H 'content-type: application/json' \
+  -d '{"requestId":"input_...","answer":{"text":"The blue notebook"}}'
+```
+
+That endpoint resumes the parked turn. A completed turn's `finish` is unchanged.
+
 ## Plans and reusable workflows
 
 With the scripted model, `plan:<text>` runs a one-shot plan: `word_count` counts
@@ -143,7 +236,12 @@ restart and answers, saved history, SIGKILL before file save, trace cursor
 pruning, zero LittleDB calls for off/partial settings, export outage, and a fake
 compatible model. Workflow tests run a tool-and-model plan and verify that a
 completed definition stays offered after restart, retaining its workflow version
-with an unchanged-plan decision and no planner call. It strips
+with an unchanged-plan decision and no planner call. Streaming tests check UI
+chunk order and framing, saved state before `finish`, a failed finalization,
+queue ordering through a delayed save, client disconnect and restart, parked
+questions, query-string opt-in, and streamed workflows. Fault injection exists
+only in the generated test config; the shipped `workerd.capnp` has no
+`TEST_FAULTS` binding. The suite strips
 provider/model/LittleDB settings and gives workerd
 only loopback network access. It needs no key.
 
@@ -156,3 +254,8 @@ workerd loads just-bash's browser build, which has no `python3`, `node`
 (`js-exec`), `sqlite3`, `tar`, `yq` or `xan`. The harness tells the agent so in its
 system prompt. `jq`, `grep`, `sed`, `awk` and the rest of just-bash's commands
 work. For the full list of limits, see the "Run on workerd" docs page.
+
+The keyless scripted model accepts `parallel-bash:<command>` to issue two identical
+bash tool calls in one model step. This exercises exact command IDs and overlapping
+execution inside one chat/turn; response events expose only allowlisted IDs and scope,
+not command text, output or raw metadata.

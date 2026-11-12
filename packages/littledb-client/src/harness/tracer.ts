@@ -2,6 +2,7 @@ import type { ComputeUsage, Environment, SpanInput, TraceInput, Trigger } from "
 import type { Exporter, LittleDBErrorHandler } from "../exporter.js";
 import type { MemoryLinks } from "../memory.js";
 import type { Resolution } from "../resolve.js";
+import { json as snapshotJson } from "../harness-contract-v1/harness.js";
 import {
   boundedId,
   clipText,
@@ -222,6 +223,7 @@ function memoryPathsIn(text: string, dirs: readonly string[]): { path: string; g
 }
 
 type Turn = {
+  snapshot?: Record<string, unknown>;
   readonly sessionId: string;
   /** In every child span's id: turns can share a trace (`traceId`), and the same tool call id or memory may come up in each. */
   readonly turnId: string;
@@ -367,7 +369,9 @@ export function createHarnessTracer(
     ...(options.experimentId === undefined ? {} : { experimentId: options.experimentId }),
     ...(options.datasetItemId === undefined ? {} : { datasetItemId: options.datasetItemId }),
     startTime: turn.startTime,
-    ...(options.metadata === undefined ? {} : { metadata: { ...options.metadata } }),
+    ...(options.metadata === undefined && turn.snapshot === undefined ? {} : {
+      metadata: { ...options.metadata, ...(turn.snapshot ? { harnessSnapshot: turn.snapshot } : {}) },
+    }),
     ...(options.tags === undefined ? {} : { tags: [...options.tags] }),
     ...(trigger === undefined ? {} : { trigger }),
     ...(turn.compute === undefined ? {} : { compute: turn.compute }),
@@ -518,6 +522,37 @@ export function createHarnessTracer(
   function handle(event: HarnessEventLike): void {
     const metadata = isRecord(event.metadata) ? event.metadata : {};
     switch (event.type) {
+      case "harness.snapshot.catalog_presented":
+      case "harness.snapshot.file_opened":
+      case "harness.snapshot.tool_effect":
+      case "harness.snapshot.hook":
+      case "harness.snapshot.warning": {
+        const turn = turnOf(event);
+        const executionHash = stringValue(metadata.executionHash);
+        if (!executionHash || !/^sha256:[a-f0-9]{64}$/.test(executionHash))
+          throw new TypeError("Snapshot evidence requires an execution hash.");
+        if (turn.snapshot?.executionHash && turn.snapshot.executionHash !== executionHash)
+          throw new TypeError("A turn cannot contain evidence from two execution snapshots.");
+        // These events are provenance, independent of captureContent. Never forward an
+        // adapter's accidental body, raw input/output, or arbitrary metadata fields.
+        const fields = ["executionHash", "registryHash", "envelopeHash", "contentHash", "pins",
+          "tools", "files", "complete", "skill", "path", "hash", "bytes", "entry", "tool",
+          "toolCallId", "implementationHash", "schemaHash", "effect", "outcome", "stage",
+          "inputHash", "outputHash", "slot", "profile", "parameterHash", "event", "reason"];
+        const safe = snapshotJson(Object.fromEntries(fields.filter(key =>
+          Object.hasOwn(metadata, key)).map(key => [key, metadata[key]]))) as Record<string, unknown>;
+        const summary = ["executionHash", "registryHash", "envelopeHash", "contentHash", "pins"];
+        turn.snapshot = { ...turn.snapshot, ...Object.fromEntries(summary.filter(key =>
+          Object.hasOwn(safe, key)).map(key => [key, safe[key]])) };
+        const id = event.eventId ?? sha256Hex(JSON.stringify([event.type, event.timestamp, safe]));
+        send([traceRow(turn, turn.trigger)], [{
+          traceId: turn.traceId, id: boundedId("snapshot", turn.turnId, id), parentId: turn.spanId,
+          name: event.type, type: "event", startTime: event.timestamp, endTime: event.timestamp,
+          status: safe.outcome === "denied" || safe.outcome === "uncertain" ? "error" : "ok",
+          attributes: { harnessSnapshot: { eventType: event.type, ...safe } },
+        }]);
+        return;
+      }
       case "harness.session.started": {
         beginTurn(event, event.turnId ?? "turn", sessionTrigger(metadata));
         return;

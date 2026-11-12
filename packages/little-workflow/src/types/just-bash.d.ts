@@ -42,7 +42,7 @@ declare module "just-bash" {
     }): Promise<BashExecResult>;
   }
 
-  // just-bash 3.0.1 omits security/transform files referenced by its top-level
+  // just-bash 3.0.3 omits security/transform files referenced by its top-level
   // declarations. Retain the existing Bash facade, but use its actual filesystem
   // declarations so World.files has exactly the interface Little Harness uses.
   export type IFileSystem = import("../../node_modules/just-bash/dist/fs/interface.js").IFileSystem;

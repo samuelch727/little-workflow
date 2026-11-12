@@ -1,0 +1,323 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:littledb:harness:1:admitted",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "harnessFormat",
+    "files",
+    "tools",
+    "hooks"
+  ],
+  "not": {
+    "required": [
+      "system",
+      "instructions"
+    ]
+  },
+  "properties": {
+    "harnessFormat": {
+      "const": 1
+    },
+    "files": {
+      "type": "object",
+      "maxProperties": 128,
+      "propertyNames": {
+        "maxLength": 512,
+        "pattern": "^(skills/[a-z0-9]+(-[a-z0-9]+)*/|references/)[A-Za-z0-9._/-]+\\.md$"
+      },
+      "additionalProperties": {
+        "type": "string",
+        "maxLength": 65536
+      }
+    },
+    "system": {
+      "type": "string",
+      "maxLength": 1048576
+    },
+    "instructions": {
+      "type": "string",
+      "maxLength": 1048576
+    },
+    "model": {
+      "type": "string",
+      "maxLength": 128
+    },
+    "temperature": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 2
+    },
+    "tools": {
+      "type": "object",
+      "maxProperties": 64,
+      "propertyNames": {
+        "type": "string",
+        "maxLength": 128,
+        "pattern": "^[A-Za-z_][A-Za-z0-9_.-]*$",
+        "not": {
+          "enum": [
+            "__proto__",
+            "prototype",
+            "constructor"
+          ]
+        }
+      },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "implementationHash",
+          "schemaHash"
+        ],
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 4096
+          },
+          "parameterDescriptions": {
+            "type": "object",
+            "maxProperties": 128,
+            "additionalProperties": {
+              "type": "string",
+              "maxLength": 4096
+            }
+          },
+          "implementationHash": {
+            "type": "string",
+            "pattern": "^sha256:[a-f0-9]{64}$"
+          },
+          "schemaHash": {
+            "type": "string",
+            "pattern": "^sha256:[a-f0-9]{64}$"
+          }
+        }
+      }
+    },
+    "hooks": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "prepareStep": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "profile",
+            "implementationHash",
+            "parameterSchemaHash"
+          ],
+          "properties": {
+            "profile": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^[A-Za-z_][A-Za-z0-9_.-]*$",
+              "not": {
+                "enum": [
+                  "__proto__",
+                  "prototype",
+                  "constructor"
+                ]
+              }
+            },
+            "parameters": {
+              "type": "object",
+              "maxProperties": 32,
+              "propertyNames": {
+                "type": "string",
+                "maxLength": 128,
+                "pattern": "^[A-Za-z_][A-Za-z0-9_.-]*$",
+                "not": {
+                  "enum": [
+                    "__proto__",
+                    "prototype",
+                    "constructor"
+                  ]
+                }
+              },
+              "additionalProperties": {
+                "type": [
+                  "string",
+                  "number",
+                  "boolean"
+                ]
+              }
+            },
+            "implementationHash": {
+              "type": "string",
+              "pattern": "^sha256:[a-f0-9]{64}$"
+            },
+            "parameterSchemaHash": {
+              "type": "string",
+              "pattern": "^sha256:[a-f0-9]{64}$"
+            }
+          }
+        },
+        "stopWhen": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "profile",
+            "implementationHash",
+            "parameterSchemaHash"
+          ],
+          "properties": {
+            "profile": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^[A-Za-z_][A-Za-z0-9_.-]*$",
+              "not": {
+                "enum": [
+                  "__proto__",
+                  "prototype",
+                  "constructor"
+                ]
+              }
+            },
+            "parameters": {
+              "type": "object",
+              "maxProperties": 32,
+              "propertyNames": {
+                "type": "string",
+                "maxLength": 128,
+                "pattern": "^[A-Za-z_][A-Za-z0-9_.-]*$",
+                "not": {
+                  "enum": [
+                    "__proto__",
+                    "prototype",
+                    "constructor"
+                  ]
+                }
+              },
+              "additionalProperties": {
+                "type": [
+                  "string",
+                  "number",
+                  "boolean"
+                ]
+              }
+            },
+            "implementationHash": {
+              "type": "string",
+              "pattern": "^sha256:[a-f0-9]{64}$"
+            },
+            "parameterSchemaHash": {
+              "type": "string",
+              "pattern": "^sha256:[a-f0-9]{64}$"
+            }
+          }
+        },
+        "turnLimits": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "profile",
+            "implementationHash",
+            "parameterSchemaHash"
+          ],
+          "properties": {
+            "profile": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^[A-Za-z_][A-Za-z0-9_.-]*$",
+              "not": {
+                "enum": [
+                  "__proto__",
+                  "prototype",
+                  "constructor"
+                ]
+              }
+            },
+            "parameters": {
+              "type": "object",
+              "maxProperties": 32,
+              "propertyNames": {
+                "type": "string",
+                "maxLength": 128,
+                "pattern": "^[A-Za-z_][A-Za-z0-9_.-]*$",
+                "not": {
+                  "enum": [
+                    "__proto__",
+                    "prototype",
+                    "constructor"
+                  ]
+                }
+              },
+              "additionalProperties": {
+                "type": [
+                  "string",
+                  "number",
+                  "boolean"
+                ]
+              }
+            },
+            "implementationHash": {
+              "type": "string",
+              "pattern": "^sha256:[a-f0-9]{64}$"
+            },
+            "parameterSchemaHash": {
+              "type": "string",
+              "pattern": "^sha256:[a-f0-9]{64}$"
+            }
+          }
+        },
+        "compaction": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "profile",
+            "implementationHash",
+            "parameterSchemaHash"
+          ],
+          "properties": {
+            "profile": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^[A-Za-z_][A-Za-z0-9_.-]*$",
+              "not": {
+                "enum": [
+                  "__proto__",
+                  "prototype",
+                  "constructor"
+                ]
+              }
+            },
+            "parameters": {
+              "type": "object",
+              "maxProperties": 32,
+              "propertyNames": {
+                "type": "string",
+                "maxLength": 128,
+                "pattern": "^[A-Za-z_][A-Za-z0-9_.-]*$",
+                "not": {
+                  "enum": [
+                    "__proto__",
+                    "prototype",
+                    "constructor"
+                  ]
+                }
+              },
+              "additionalProperties": {
+                "type": [
+                  "string",
+                  "number",
+                  "boolean"
+                ]
+              }
+            },
+            "implementationHash": {
+              "type": "string",
+              "pattern": "^sha256:[a-f0-9]{64}$"
+            },
+            "parameterSchemaHash": {
+              "type": "string",
+              "pattern": "^sha256:[a-f0-9]{64}$"
+            }
+          }
+        }
+      }
+    }
+  }
+}

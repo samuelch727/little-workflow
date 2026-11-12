@@ -154,10 +154,6 @@ The invariant is fixed: one session never runs two turns at the same time.
 
 The sandbox the agent's `bash` tool runs in. Defaults to `"auto"`.
 
-> **UNRELEASED:** published `0.2.0-alpha.0` names this option `executionEnvironment`
-> (and the types `HarnessExecutionEnvironmentMode` and
-> `HarnessExecutionEnvironmentFactory`). See [Alpha Migrations](/docs/v0.1.0-alpha/reference/alpha-migrations#one-name-per-concept).
-
 - `"auto"` — in-process just-bash only when the turn's `runtime.python` and
   `runtime.javascript` are both `false` and network is off; `subprocessSandbox()`
   otherwise. Because Python and JavaScript are on unless disabled, most turns get

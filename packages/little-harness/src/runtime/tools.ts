@@ -23,6 +23,9 @@ export function wrapToolsWithHarnessContext<TTools extends ToolSet, TExtraBody>(
     /** Resolves once the call's durable start record is acknowledged; otherwise throws. */
     acknowledgeToolStart(toolCallId: string | undefined, toolName: string): Promise<void>;
   },
+  modelToolInvocations?: {
+    get(toolCallId: string): { invocationId?: string | undefined } | undefined;
+  },
 ): TTools {
   const wrapped: Record<string, unknown> = {};
 
@@ -43,6 +46,11 @@ export function wrapToolsWithHarnessContext<TTools extends ToolSet, TExtraBody>(
               await modelToolStarts?.acknowledgeToolStart(toolCallId, name);
               await ctx.beforeInvocation?.();
               ctx.abortSignal?.throwIfAborted();
+              // Read only after the start gate chose this call's occurrence. Keep it off ctx:
+              // workflows inherit ctx, while their steps have their own idempotencyKey.
+              executeOptions.invocationId = toolCallId === undefined
+                ? undefined
+                : modelToolInvocations?.get(toolCallId)?.invocationId;
               const modelToolPosition = toolCallId === undefined
                 ? undefined
                 : modelToolPositions?.get(toolCallId);

@@ -14,7 +14,7 @@
     "@ai-sdk/deepseek": "^3.0.58",
     "@little-stack/harness": "workspace:*",
     "ai": "^7.0.126",
-    "just-bash": "3.0.1",
+    "just-bash": "3.0.3",
     "@little-stack/littledb": "workspace:*",
     "@ai-sdk/openai-compatible": "3.0.61",
     "@little-stack/workflow": "workspace:*"

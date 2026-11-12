@@ -1,0 +1,185 @@
+---
+title: Remote Tools
+description: Keep tool implementations, database pools and credentials on your own server.
+---
+
+A remote tool exposes a shared name, description and validating schema to the
+harness. Its `execute` runs in your service. One POST carries each call, with no
+discovery handshake. Ordinary tool events and large-result spooling still apply.
+
+> **Ships in `0.2.0-alpha.3`:** `@little-stack/harness/remote-tools`,
+> `listenRemoteTools` from `/server`, and call-local `invocationId` in tool context.
+
+## The shared contract
+
+```ts
+// contracts.ts — safe to import in the harness and the service
+import { z } from "zod";
+import { remoteTool } from "@little-stack/harness/remote-tools";
+
+export const lookupOrder = remoteTool({
+  name: "lookup_order",
+  description: "Look up one of your orders.",
+  inputSchema: z.object({ orderId: z.string() }),
+  outputSchema: z.object({ id: z.string(), total: z.number() }),
+});
+```
+
+Contracts are frozen; duplicate and reserved names are refused. Every schema
+must carry a validator: Zod/Standard Schema or `jsonSchema(schema, { validate })`.
+Plain `jsonSchema(schema)` is refused at construction because it validates
+nothing. Async validators work. The server validates input before execution.
+Output and the client's context/envelope use JSON.stringify-style wire conversion:
+Dates become ISO strings, `toJSON` is honored, and undefined object fields are
+omitted (undefined array entries become null). The server converts output before
+validating an optional output schema, so describe the wire shape there, such as
+a string for a timestamp. BigInt, non-finite numbers, class instances without a
+JSON-producing `toJSON`, cycles and outputs with no JSON value are refused.
+Unexpected server serialization failures stay generic to the model; `onError`
+receives the reason. Input identity hashing stays strict: validated inputs must
+be plain JSON values, without Date/toJSON conversion or undefined fields.
+
+## An authenticated service
+
+```ts
+// app/api/tools/route.ts — a Next.js route on your server only
+import { remoteToolHandler, serveRemoteTools, RemoteToolError }
+  from "@little-stack/harness/remote-tools";
+import { lookupOrder } from "../../../contracts";
+import { verifyUserToken, orders } from "../../../server-services";
+
+export const POST = serveRemoteTools({
+  authenticate: request => {
+    // This app function checks signature, issuer, audience and expiry. It
+    // returns { id: userId } or undefined, never an unverified decoded JWT.
+    return verifyUserToken(request.headers.get("x-user-token"));
+  },
+  tools: [remoteToolHandler(lookupOrder, async ({ orderId }, { principal, signal }) => {
+    const order = await orders.findOwnedBy(principal.id, orderId, { signal });
+    if (!order) throw new RemoteToolError("Order not found.", "not_found");
+    return { id: order.id, total: order.total };
+  })],
+  onError: (error, call) => {
+    // Use your redacting logger. call excludes headers, input and context;
+    // error is the original server exception, which may contain private data.
+    console.error("Remote tool failed", { tool: call?.tool });
+  },
+});
+```
+
+`authenticate` is required and fails closed if it throws. `principal` is verified
+by your service. `context` contains assertions from the harness host. Authorize
+every resource against the principal. A shared host credential proves the host
+called; it does not identify the human asking. Per-user proof belongs in a
+dedicated header such as `x-user-token`, never in context.
+
+Use a verifier library for signed tokens. If a deployed handler compares a static
+shared secret, use a constant-time comparison (for example Node's
+`crypto.timingSafeEqual` with fixed-length bytes), not the loopback demo's equality
+check.
+
+Only deliberate `RemoteToolError` messages reach the model (1–500 characters,
+optional lowercase code). Unexpected exceptions become `"The tool failed."`.
+Throwing diagnostics cannot change the answer. Non-200 bodies, HTML, malformed
+responses and oversized responses are never echoed by the client.
+
+## The harness client
+
+```ts
+import { remoteTools } from "@little-stack/harness/remote-tools";
+import { lookupOrder } from "./contracts";
+
+const tools = remoteTools([lookupOrder], {
+  endpoint: "https://data.example.com/api/tools",
+  scope: chatObjectId, // stable per harness/chat; session IDs can repeat
+  headers: call => ({ "x-user-token": currentUserToken }),
+  context: { locale: "en" }, // assertions only
+});
+// createHarness({ host, model, tools })
+```
+
+Headers and context can be async per-call functions. Their argument includes
+tool/scope/session/call IDs and `call.harness` inside a turn. `extraBody` and
+credentials are never forwarded automatically. URL endpoints require HTTPS
+except loopback HTTP and refuse URL credentials. On every runtime, URL and
+`{ fetch }` endpoints use `redirect: "manual"`. Every 3xx and `opaqueredirect`
+response is refused generically before reading `Location` or its body. The
+client never follows or retries a redirect, so credentials and request bodies
+are not forwarded to its destination. This single path works on workerd,
+which does not support constructing a Request with `redirect: "error"`.
+Defaults: `timeoutMs: 60_000`, `maxRequestBytes: 1 MiB`, `maxResponseBytes: 4 MiB`.
+The service also accepts `maxRequestBytes`. Actual bytes are bounded, including
+chunked bodies without Content-Length.
+
+For workerd or Cloudflare service bindings, use the binding directly:
+
+```ts
+remoteTools([lookupOrder], {
+  endpoint: env.DATA_API, // { fetch(request) }; keep its target trusted
+  scope: durableObjectId,
+  headers: { "x-user-token": currentUserToken },
+});
+```
+
+The portable entry reaches no Node runtime module. Only your service imports
+drivers, pools and execute code. `demos/workerd-chats` demonstrates Node SQLite
+behind a workerd service binding.
+
+## Write safety, retries and cancellation
+
+`execute(input, { principal, context, call, signal })` receives tool/call/scope/
+session IDs, optional `invocationId` and `idempotencyKey`, plus:
+
+- `call.dedupeKey`: SHA-256 of the canonical tuple
+  `["lh.remote-tool.dedupe.v1", kind, principal.id, scope, sessionId, tool, id]`.
+  Kind is `"invocation"` for a model occurrence or `"workflow-step"` for the
+  step's own key. It is undefined when neither identity is present.
+- `call.inputDigest`: a canonical SHA-256 of validated input.
+
+The library stores nothing and performs no automatic retry. Store/claim the
+dedupe key atomically with the side effect, and reject the same key with a
+different digest. A bare provider `toolCallId` is never a dedupe key.
+
+`harnessToolContext(options).invocationId` is call-local, chosen after the start
+gate in both generate and stream. Concurrent calls have distinct IDs. Nested
+workflow steps receive their own `idempotencyKey` and no parent invocation ID.
+An unfinished replay retains its ID only with the original started event's
+`occurrenceId` in the same logical run's `priorEvents`. A recognized replay
+missing it exposes undefined. Without a session log, crash recovery looks fresh
+and gets a new ID. A new-turn retry is a new invocation too. Use application
+business keys for write retries in new turns, outside a turn, through bash or
+after an original occurrence was lost.
+
+Host retention:
+
+- `localHost` and `virtualHost` retain session/files/orchestration state but do
+  not supply an event session log automatically. Configure `sessionLog` and
+  resume with the same run ID. The demo's trace table is not `priorEvents`.
+- The Node agent server uses a configured session log. Otherwise managed
+  continuations have file logs per resumed run, removed when done;
+  caller-dispatched runs also get file logs. Fresh turns do not share identities.
+
+A timeout means **the call may or may not have run**. Check the outcome before
+retrying writes. Turn aborts stay terminal. Server cancellation is cooperative:
+pass `signal` to operations that support it. A Node client disconnect after
+upload aborts execution; a fully uploaded request with a slow handler does not.
+Failures or timeouts while preparing headers/context/envelopes report that no
+call was sent; after entering fetch, failures remain conservatively uncertain.
+
+## Loopback-only development
+
+```ts
+import { listenRemoteTools } from "@little-stack/harness/server";
+import { remoteToolHandler } from "@little-stack/harness/remote-tools";
+
+const service = await listenRemoteTools({
+  port: 8788, // 127.0.0.1 by default
+  authenticate: () => ({ id: "local" }), // trusted local development only
+  tools: [remoteToolHandler(lookupOrder, input => localOrders.get(input.orderId))],
+});
+// await service.close()
+```
+
+This unauthenticated loopback example is separate from the authenticated route
+above. `listenRemoteTools` is Node only; `serveRemoteTools` is a Fetch handler for
+other hosts. MCP remains the path for third-party MCP servers.

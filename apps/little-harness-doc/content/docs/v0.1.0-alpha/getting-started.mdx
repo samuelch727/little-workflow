@@ -54,26 +54,22 @@ and model call match the provider and model you selected in the wizard:
 
 ```ts
 import { createHarness, localHost } from "@little-stack/harness";
-import { anthropic } from "@ai-sdk/anthropic";
+import { openai } from "@ai-sdk/openai";
 
 export default createHarness({
-  model: anthropic("claude-opus-4-6"),
+  model: openai("gpt-5.2"),
   system: "You are a helpful agent.",
   host: localHost(),
 });
 ```
 
-The scaffold defaults to the `anthropic` provider; if you selected a different
+The scaffold defaults to the `openai` provider (`gpt-5.2`); if you selected a different
 provider in the wizard, the import and model call match your choice instead. Then
 set the selected provider's required environment variables — for the default:
 
 ```bash
-export ANTHROPIC_API_KEY=sk-ant-...
+export OPENAI_API_KEY=sk-...
 ```
-
-> **UNRELEASED:** in the current source, the default provider is `openai` (`gpt-5.2`) for
-> `little-harness init` and `little-harness new`, matching `little setup` and `little init`.
-> No npm version includes this yet.
 
 Provider packages and model ids come from AI SDK providers. For providers such as OpenAI-compatible
 APIs or Open Responses, the generated `agent.ts` also includes the required URL environment variable.

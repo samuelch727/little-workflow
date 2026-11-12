@@ -1,6 +1,6 @@
 {
   "name": "@little-stack/harness",
-  "version": "0.2.0-alpha.2",
+  "version": "0.2.0-alpha.3",
   "description": "Local-first agent runtime primitives for AI SDK sessions, tools, files, traces, persistence, and Little Workflow harness integration.",
   "license": "Apache-2.0",
   "repository": {
@@ -81,6 +81,10 @@
       "types": "./dist/remote-session/index.d.ts",
       "default": "./dist/remote-session/index.js"
     },
+    "./remote-tools": {
+      "types": "./dist/remote-tools/index.d.ts",
+      "default": "./dist/remote-tools/index.js"
+    },
     "./server": {
       "types": "./dist/server/index.d.ts",
       "default": "./dist/server/index.js"
@@ -89,14 +93,22 @@
       "types": "./dist/scaffold.d.ts",
       "default": "./dist/scaffold.js"
     },
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./compiler": {
+      "types": "./dist/compiler.d.ts",
+      "default": "./dist/compiler.js"
+    },
+    "./compiled": {
+      "types": "./dist/compiled.d.ts",
+      "default": "./dist/compiled.js"
+    }
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "build": "node ../littledb-client/scripts/prepare-harness-contract.mjs --harness && tsc -p tsconfig.build.json && node ../littledb-client/scripts/prepare-harness-contract.mjs --harness --copy-dist",
     "prepack": "pnpm run build",
-    "typecheck": "tsc --noEmit",
-    "lint": "tsc --noEmit",
-    "test": "vitest run",
+    "typecheck": "node ../littledb-client/scripts/prepare-harness-contract.mjs --harness && tsc --noEmit",
+    "lint": "node ../littledb-client/scripts/prepare-harness-contract.mjs --harness && tsc --noEmit",
+    "test": "node ../littledb-client/scripts/prepare-harness-contract.mjs --harness && vitest run",
     "test:watch": "vitest"
   },
   "dependencies": {
@@ -104,7 +116,7 @@
     "@inquirer/prompts": "^8.5.2",
     "@types/json-schema": "7.0.15",
     "jiti": "^2.7.0",
-    "just-bash": "^3.0.1",
+    "just-bash": "^3.0.3",
     "zod": "^4.4.3"
   },
   "peerDependencies": {

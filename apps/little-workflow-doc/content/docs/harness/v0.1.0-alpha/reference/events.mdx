@@ -10,28 +10,7 @@ to evolve during alpha.
 The trace vocabulary on this page is separate from the durable session-log
 contract described under [HarnessEvent Envelope](#harnessevent-envelope).
 
-> **UNRELEASED:** the durable validators `normalizePersistedDurableHarnessEvent`
-> and `canonicalHarnessEventRequestDigest`, and the dedicated
-> `@little-stack/harness/events` and `@little-stack/harness/remote-session` entry
-> points, exist only in the current source. No npm version includes them yet.
-> In the current source these two entries are the only home of the durable
-> event contract (`HarnessSessionLog`, `DurableHarnessEventInput`,
-> `createHarnessAppendIdempotencyKey`, `emitHarnessOccurrence`, …) and of the
-> session-log helpers; the root entry no longer re-exports them.
->
-> Published `0.2.0-alpha.0` has neither the validators nor an `./events` or
-> `./remote-session` package export. It exports the older durable and remote
-> helpers from the root `@little-stack/harness` entry: `emitHarnessOccurrence`,
-> `remoteSessionLog`, `startSessionLogServer`, `createFileSessionLog` and
-> `createInMemorySessionLog` (renamed `fileSessionLog` and `inMemorySessionLog`
-> in the current source). See
-> [Small subpaths](/docs/harness/v0.1.0-alpha/reference/alpha-migrations#small-subpaths-events-and-remote-session).
-
 ```ts
-// Published 0.2.0-alpha.0 (the `little-harness` package): older helpers from the root entry.
-import { createFileSessionLog, remoteSessionLog } from "little-harness";
-
-// UNRELEASED: the session logs and the durable event contract have their own entries.
 import { fileSessionLog, remoteSessionLog } from "@little-stack/harness/remote-session";
 import {
   canonicalHarnessEventRequestDigest,
@@ -99,20 +78,14 @@ Example trace event:
 ```
 
 `HarnessEvent` is not the same object as a durable replay event. Durable replay
-stores payloads. The shape differs by version:
+stores payloads.
 
-| Version | `DurableHarnessEventInput` | Persisted event adds |
-| --- | --- | --- |
-| Published `0.2.0-alpha.0` | `type`, `runId`, optional `occurrenceId`, `payload` (a JSON object) | `eventId`, `sequence`, `recordedAt` |
-| UNRELEASED source (no npm version yet) | The type below: a required `appendIdempotencyKey`, optional correlation ids, and either `payload` or `payloadArtifactId` | `eventId`, `sequence`, `recordedAt`, `canonicalRequestDigest` |
-
-The type below and the three paragraphs after it describe the UNRELEASED
-durable contract, including the Little Compute adapter, which is also
-unpublished. None of it is in `0.2.0-alpha.0`; see
+The durable event contract below is published in `@little-stack/harness`
+`0.2.0-alpha.2`. The Little Compute adapter is UNRELEASED because
+`@little-stack/compute` is not published. See
 [Alpha Migrations](/docs/harness/v0.1.0-alpha/reference/alpha-migrations).
 
 ```ts
-// UNRELEASED durable event input.
 type DurableHarnessEventInput<TEventType extends string = HarnessEventType> = {
   type: TEventType;
   runId: string;
@@ -256,6 +229,36 @@ Runtime events are for the execution substrate, such as the built-in bash tool.
 stdout and stderr previews, and file changes discovered by the runtime. Every
 sandbox emits them identically.
 
+**Ships in `0.2.0-alpha.3`:** command start/success/failure, tiered denial, and escalation/unavailability
+include an opaque `metadata.executionId` and the resolved `metadata.toolCallId`.
+A top-level shell invocation uses `executionId` as its `occurrenceId`; join its events
+by session/turn/executionId, never command text or completion order. Trusted tier
+wrappers forward the same execution ID through a private delegation channel to the
+adapter, including a retry on a higher tier within that invocation. Shallow tool-option
+copies preserve its one-use token; custom wrappers must preserve all own keys, including
+symbols (see [Execution tiers](/docs/harness/v0.1.0-alpha/runtime/execution-tiers)). Public shell execute
+options cannot choose or reuse an execution ID. Historical traces may omit the metadata IDs.
+
+A crash/resume that actually re-executes a command creates a new attempt execution ID
+and occurrence. The recorded provider tool-call ID remains the logical link between
+attempts, within session/turn scope. Append identity for a new attempt is intentionally
+distinct; retrying transport delivery of an already-created event retains that event's
+identity. Execution IDs are not durable effect-idempotency keys or a promise of
+exactly-once command execution.
+
+Built-in runtime command lifecycle events carry trace metadata only. The durable session
+log records payload-bearing model and tool events separately.
+
+Direct calls without a nonempty provider ID retain the historical `runtime_bash`
+tool-call fallback so nested runtime-tool replay scope and call indexes stay compatible.
+Their execution IDs still distinguish overlapping attempts. An embedded caller that
+needs distinct logical calls across resume should supply its own stable tool-call IDs.
+
+This adds identifiers only. Existing trace-content capture policies still apply; it does
+not export stdout/stderr or raw event metadata to a new destination. Command strings may
+contain arbitrary arguments; this API does not promise arbitrary argument redaction.
+Consumers should allowlist the correlation fields they need instead of forwarding metadata.
+
 `harness.runtime.tier.escalated`, `harness.runtime.tier.unavailable`, and
 `harness.runtime.command.denied` appear only under `tieredSandbox`.
 They record why a turn switched execution tier, why a needed tier could not be
@@ -345,10 +348,6 @@ type TraceFileDiff =
 Deleted file events should record metadata and path, not deleted file contents.
 When a deleted `FileRef` includes byte/hash fields, they must match the `before`
 version; created and updated references must match `after`.
-
-> **UNRELEASED:** `createHarnessFileMutationEvents()` exists only in the current
-> source. Published `0.2.0-alpha.0` has no such symbol, and no npm version
-> includes it yet.
 
 Trusted local and remote adapters share `createHarnessFileMutationEvents()`.
 Its caller must allocate one stable `occurrenceId` at the file-mutation

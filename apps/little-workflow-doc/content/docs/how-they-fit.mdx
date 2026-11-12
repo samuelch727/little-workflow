@@ -23,8 +23,8 @@ The Little stack is three things that fit together.
 | Piece | Owns | Status |
 | --- | --- | --- |
 | [LittleDB](/docs/littledb) | Traces, scores and user feedback; versions of agents and workflows; the review loop that proposes, tests and ships changes | Private source |
-| [Little Harness](/docs/harness) | Agent sessions, tools, skills, files and artifacts, traces, Persistent Dirs, the folder tier of a workspace | npm `0.2.0-alpha.0` |
-| [Little Workflow](/docs/workflow) | Workflows an agent designs: validated, versioned, durable runs with replay | npm `0.2.0-alpha.1` |
+| [Little Harness](/docs/harness) | Agent sessions, tools, skills, files and artifacts, traces, Persistent Dirs, the folder tier of a workspace | npm `@little-stack/harness` `0.2.0-alpha.3` |
+| [Little Workflow](/docs/workflow) | Workflows an agent designs: validated, versioned, durable runs with replay | npm `@little-stack/workflow` `0.2.0-alpha.3` |
 | Workspaces, managed | Each user's workspace held by LittleDB: the Harness folder tier for most turns, a container that wakes on demand and sleeps after ten idle minutes | Part of LittleDB's hosted service; private |
 | Workspaces, self-hosted ([Little Compute](/docs/compute)) | The same workspace on rootless Podman, with durable Tasks, fork and merge-back | Unpublished source; control plane frozen |
 

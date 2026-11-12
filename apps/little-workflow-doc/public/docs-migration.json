@@ -1,10 +1,10 @@
 {
   "schemaVersion": 1,
-  "asOf": "2026-10-09",
-  "description": "Where pages from the separate Little Workflow, Little Harness and Little Compute docs sites live on the combined Little documentation site. Paths are site-relative.",
+  "asOf": "2026-11-05",
+  "description": "Where pages from the separate Little Workflow, Little Harness and Little Compute docs sites live on Little Stack at https://little-stack.dev. Paths are site-relative.",
   "notes": [
     "Workflow entries were served by this host; the redirects in next.config.mjs send them to their new path.",
-    "Harness entries came from the separate Little Harness site (https://little-harness.dev). This host cannot redirect that domain, so these entries are a link-migration map only.",
+    "Harness entries came from the separate Little Harness site (https://little-harness.vercel.app). This host cannot redirect that domain, so these entries are a link-migration map only.",
     "Compute entries came from the separate Little Compute docs app. Their page names do not collide with pages on this site, so this host also redirects /docs/<page> for each of them.",
     "/docs on this host is now the family index and is intentionally not redirected.",
     "The two LittleDB integration pages moved to the LittleDB root; the old product paths remain as short pointer pages."
@@ -13,6 +13,7 @@
     { "source": "/docs/v0.1.0-alpha/running/using-littledb", "destination": "/docs/littledb/workflow" },
     { "source": "/docs/v0.1.0-alpha", "destination": "/docs/workflow/v0.1.0-alpha/getting-started" },
     { "source": "/docs/v0.1.0-alpha/:path*", "destination": "/docs/workflow/v0.1.0-alpha/:path*" },
+    { "source": "/docs/comparisons", "destination": "/docs/workflow/comparisons" },
     { "source": "/docs/comparisons/:path*", "destination": "/docs/workflow/comparisons/:path*" },
     { "source": "/docs/:page(architecture|artifacts|cli|concepts|http-api|planned-enforcement|providers|recovery|runtime-io|self-hosting|topology-credential-worker)", "destination": "/docs/compute/:page" },
     { "source": "/llms.mdx/docs/... and /og/docs/...", "destination": "The same rules, applied to the Markdown and Open Graph image routes" }
@@ -71,7 +72,7 @@
     ]
   },
   "harness": {
-    "oldSite": "Little Harness docs (https://little-harness.dev)",
+    "oldSite": "Little Harness docs (https://little-harness.vercel.app)",
     "redirectedOnThisHost": false,
     "note": "Link migration only. Prefix an old Harness path with /docs/harness on this site, except the two noted entries.",
     "entries": [

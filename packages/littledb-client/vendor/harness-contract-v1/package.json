@@ -1,0 +1,10 @@
+{
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./harness.d.ts",
+      "default": "./harness.js"
+    }
+  }
+}

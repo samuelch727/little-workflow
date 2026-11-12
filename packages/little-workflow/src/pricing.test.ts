@@ -100,17 +100,17 @@ describe("token semantics", () => {
     const pricing = getModelInfoFor("mistral", "mistral-large-latest")?.pricing;
     expect(pricing?.cachedInput).toBeUndefined();
 
-    // mistral/mistral-large-latest is listed at input $2.00 / output $6.00 per 1M tokens
+    // mistral/mistral-large-latest is listed at input $0.50 / output $1.50 per 1M tokens
     // with no published cache-read rate, so all 1,000 input tokens bill at the full input
     // rate.
-    //   1,000 input x $2.00 / 1M = $0.002
+    //   1,000 input x $0.50 / 1M = $0.0005
     const call = priceModelCall(
       { provider: "mistral", modelId: "mistral-large-latest" },
       { inputTokens: 1_000, cachedInputTokens: 1_000, outputTokens: 0 },
     );
 
     expect(call.cachedInputRateFellBack).toBe(true);
-    expect(call.costUsd).toBeCloseTo(0.002, 12);
+    expect(call.costUsd).toBeCloseTo(0.0005, 12);
   });
 });
 
@@ -147,17 +147,17 @@ describe("AI SDK sub-model provider ids", () => {
   );
 
   it("prices deepseek.chat, this project's primary provider", () => {
-    // deepseek/deepseek-v4-flash is listed at input (cache miss) $0.14 / output $0.28 per
+    // deepseek/deepseek-v4-flash is listed at input (cache miss) $0.30 / output $1.20 per
     // 1M tokens.
-    //   1,000,000 input  x $0.14 / 1M = $0.14
-    //   1,000,000 output x $0.28 / 1M = $0.28
-    //                           total = $0.42
+    //   1,000,000 input  x $0.30 / 1M = $0.30
+    //   1,000,000 output x $1.20 / 1M = $1.20
+    //                           total = $1.50
     const call = priceModelCall(
       { provider: "deepseek.chat", modelId: "deepseek-v4-flash" },
       { inputTokens: 1_000_000, outputTokens: 1_000_000 },
     );
 
-    expect(call.costUsd).toBeCloseTo(0.42, 10);
+    expect(call.costUsd).toBeCloseTo(1.5, 10);
   });
 
   it("keeps a genuinely unknown model unpriced even when its provider carries a suffix", () => {

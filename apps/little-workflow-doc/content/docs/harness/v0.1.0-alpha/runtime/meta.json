@@ -3,6 +3,7 @@
   "pages": [
     "index",
     "local-host",
+    "virtual-host",
     "just-bash",
     "execution-environments",
     "execution-tiers",

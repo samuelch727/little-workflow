@@ -6,7 +6,7 @@ Local-first TypeScript workflows that an AI planner designs for itself. You desc
 
 > **Alpha.** Breaking changes to the LWIR wire format, public APIs, and persistence formats are expected between alpha releases.
 
-In the Little stack, Workflow and Harness are the SDK and LittleDB is the product. A workflow's planner, worker and fixer roles run in a harness, so a run lives in the same workspace as the agent that started it (managed by LittleDB's hosted service, private for now, or self-hosted with Little Compute (not included in this public source snapshot)), and LittleDB (private for now; client in [`packages/littledb-client`](../littledb-client)) records each run as a trace and improves the workflow's step prompts and models the same way it improves an agent. Workflow runs fully without either.
+In the Little stack, Workflow and Harness are the SDK and LittleDB is the product. A workflow's planner, worker and fixer roles run in a harness, so a run lives in the same workspace as the agent that started it (managed by LittleDB's hosted service, private for now, or self-hosted with Little Compute; not included in this public source snapshot), and LittleDB (private for now; client in [`packages/littledb-client`](../littledb-client)) records each run as a trace and improves the workflow's step prompts and models the same way it improves an agent. Workflow runs fully without either.
 
 ## Install
 

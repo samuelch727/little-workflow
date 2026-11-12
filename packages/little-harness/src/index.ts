@@ -269,3 +269,5 @@ export {
   type LoadHarnessOptions,
   type WorkspaceAgent,
 } from "./workspace/load-harness.js";
+export { createHarnessSnapshotRegistry } from "./execution-snapshot.js";
+export type { HarnessExecutionSnapshot, HarnessSnapshotRegistry, SnapshotContent, SnapshotContext, SnapshotDigest, SnapshotEvent, SnapshotHookDefinition, SnapshotToolDefinition } from "./execution-snapshot.js";

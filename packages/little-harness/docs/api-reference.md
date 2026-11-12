@@ -50,6 +50,36 @@ service: `fileSessionLog`, `inMemorySessionLog`, `remoteSessionLog`, `startSessi
 (`REMOTE_SESSION_LOG_PROTOCOL_VERSION`, `RemoteSessionProtocolError`). The root entry point does not
 re-export these either.
 
+Use `@little-stack/harness/remote-tools` for tools whose code runs in your service:
+`remoteTool({ name, description, inputSchema, outputSchema? })` creates a frozen contract;
+`remoteTools(contracts, { endpoint, scope, headers?, context?, timeoutMs?, maxRequestBytes?, maxResponseBytes? })`
+returns a ToolSet. `remoteToolHandler(contract, execute)` binds server code;
+`serveRemoteTools({ tools, authenticate, onError?, maxRequestBytes? })` returns a Fetch handler.
+`listenRemoteTools({ port, host?, ... })` from `/server` returns `{ server, url, port, close }`.
+Every schema must validate; plain `jsonSchema()` is refused. Auth fails closed and returns a
+verified `{ id, ... }` principal. `execute(input, { principal, context, call, signal })` authorizes
+against principal, never context. Only bounded `RemoteToolError(message, code?)` crosses the
+model boundary. Defaults are 60s timeout, 1 MiB requests and 4 MiB responses. URLs require HTTPS
+except loopback. Every runtime and URL/fetch-binding endpoint uses `redirect: "manual"`.
+All 3xx and `opaqueredirect` responses are refused generically without reading Location/body,
+following or retrying; credentials and bodies are never forwarded to the destination.
+Wire output/context/envelope serialization honors Date/toJSON and omits undefined object
+properties, while refusing BigInt, non-finite numbers and classes without JSON-producing
+toJSON. Output conversion precedes optional wire-schema validation. Canonical input/identity
+digests remain strict and do not perform those conversions. Unexpected output errors remain
+generic with the original reason delivered to server onError. Preparation failures distinguish
+unsent requests from uncertain failures after fetch; no public client diagnostic hook is added.
+
+`harnessToolContext(options).invocationId` is optionally set on the model call's own execute
+options after its start gate; workflow steps use their own `idempotencyKey`. The server derives
+`call.dedupeKey` from version/kind/principal/scope/session/tool/identity, and `call.inputDigest`
+from validated input. The app stores these atomically with effects and rejects digest mismatch.
+Same-run replays need the retained original started event: a recognized replay missing its
+occurrence has no invocation ID. No log means no crash recovery of identity. New-turn retries,
+bash and standalone writes need business keys. Timeouts mean uncertain outcomes.
+See the [remote-tools guide](../../../apps/little-harness-doc/content/docs/v0.1.0-alpha/build-agents/remote-tools.mdx)
+for authenticated headers, host retention details and examples.
+
 Use `@little-stack/harness/agents` (**experimental**, may change between alpha releases) when you
 implement an Agent Group launcher or a task ledger that projects Agent Groups: the
 `HarnessAgentGroupLauncher` port, its request/result types, the `HarnessAgentGroup*Error` classes, the
@@ -162,7 +192,7 @@ export async function POST(req: Request) {
 }
 ```
 
-`createHarness` requires a `host` and `model`. For local development, use `localHost({ dataDir })`; it stores sessions under `.little-harness/` by default. Where there is no disk, such as workerd with a Durable Object per chat, use `virtualHost({ fs })`: it keeps each session's workspace (`/session`, `/artifacts`, `/persistent`, `/.agents`) and its status in the just-bash filesystem you pass, and your app saves that filesystem between turns. `dataFs` chooses where `localDir()` and memory keep their backing folders: an `IFileSystem` or async `(sessionId) => IFileSystem` factory, defaulting to the session's `fs`, under `/.little-harness/data/` outside bash's view. Sharing `dataFs` shares folders without making writes transactional across sessions; cross-Durable-Object sharing is the app's job. Virtual sources must be relative POSIX paths without `..`; `projectDir()` still needs `localHost()`. Configuring `dynamicWorkflows` on `virtualHost()` throws `HarnessInputError` up front because workflow execution still needs disk. On workerd, just-bash loads its browser build, so `python3`, `node` (`js-exec`), `sqlite3`, `tar`, `yq` and `xan` are not available. See the "Run on workerd" docs page and `demos/workerd-chats`.
+`createHarness` requires a `host` and `model`. For local development, use `localHost({ dataDir })`; it stores sessions under `.little-harness/` by default. Where there is no disk, such as workerd with a Durable Object per chat, use `virtualHost({ fs })`: it keeps each session's workspace (`/session`, `/artifacts`, `/persistent`, `/.agents`) and its status in the just-bash filesystem you pass, and your app saves that filesystem between turns. `dataFs` chooses where `localDir()` and memory keep their backing folders: an `IFileSystem` or async `(sessionId) => IFileSystem` factory, defaulting to the session's `fs`, under `/.little-harness/data/` outside bash's view. Sharing `dataFs` shares folders without making writes transactional across sessions; cross-Durable-Object sharing is the app's job. Virtual sources must be relative POSIX paths without `..`; `projectDir()` still needs `localHost()`. Enable `dynamicWorkflows()` from `@little-stack/workflow` on `virtualHost()` to run one-shot plans and defined workflows without disk: the default World is `virtualWorld` over the host's `dataFs`, with run files and kept plans under `dataRoot` (default `/.little-harness/data/`). Persistence follows the app's filesystem save policy; Worlds sharing storage must receive the same filesystem object so their in-process locks coordinate. On workerd, just-bash loads its browser build, so `python3`, `node` (`js-exec`), `sqlite3`, `tar`, `yq` and `xan` are not available. See the "Run on workerd" docs page and `demos/workerd-chats`.
 
 ## `createHarness(...)`
 

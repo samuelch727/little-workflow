@@ -1,0 +1,318 @@
+---
+title: Run on workerd
+description: Serve many chats from one self-hosted workerd process, each chat with its own files and bash.
+---
+
+`virtualHost()` keeps each session's workspace in a just-bash filesystem you hand
+it, instead of in folders on disk. That lets a harness run where there is no disk
+to give it: [workerd](https://github.com/cloudflare/workerd), the open-source
+runtime behind Cloudflare Workers, which you can run on your own machines. Give
+each chat a Durable Object, give each object a filesystem, and one workerd process
+serves many chats at once, each with its own files and its own `bash`.
+
+```ts
+import { createHarness, generateHarness, virtualHost } from "@little-stack/harness";
+import { InMemoryFs } from "just-bash";
+
+const harness = createHarness({
+  host: virtualHost({ fs: new InMemoryFs() }),
+  model,
+  system: "You work in this chat's files with bash.",
+  onEvent: tracer.onEvent, // where trace events go is yours to choose
+});
+```
+
+`virtualHost()` runs anywhere `localHost()` runs too, so you can test a workerd app
+in Node.
+
+## Use the recommended agent folders
+
+**Ships in `0.2.0-alpha.3`:** the build-time `@little-stack/harness/compiler` API. Compile `agents/<name>/` in Node, then import the generated
+registry from your worker and call `loadHarness(name, { host })` for each chat.
+See [Agent Folders](/docs/harness/v0.1.0-alpha/build-agents/agent-folders#build-agent-folders-for-workerd)
+and `demos/workerd-folders` for a standalone offline example and real workerd tests.
+
+## What Little Harness does, and what your app does
+
+Little Harness runs one agent turn for one session, over the filesystem you give
+it. Everything that decides which chat runs where, and what happens to its files
+between turns, stays in your app.
+
+| Little Harness | Your app |
+|---|---|
+| The agent turn: model loop, tools, skills, memory, workflows, `ask_person`, trace events. | Routing a request to its chat, such as a Durable Object per chat id. |
+| The `bash` tool over the session's filesystem, with Python and JavaScript off where they cannot run. | Each chat's filesystem: where it is stored, when it is saved, how big it may grow. |
+| The host: session status, files and artifacts, skills staged into `/.agents`, Persistent Dirs in `/persistent`, `harness.file.*` events, trace numbering, one turn at a time per session. | The chat's message history. |
+| Loading on workerd with a normal bundle (`wrangler deploy --dry-run`, or any bundler that picks the `workerd` or `browser` condition). | How many workerd processes run, and which chats each one serves. |
+| The seam to run a command on a real machine: any [sandbox](/docs/harness/v0.1.0-alpha/runtime/execution-environments) that copies the files there. | Secrets, outbound network rules, and where trace events go. |
+
+## Per-chat files with a Durable Object
+
+The `workerd-chats` example in the repository's `demos/` folder is the whole app. Its router sends each chat to its own Durable Object, and the
+object keeps the chat's files as one SQLite row per file:
+
+```ts
+export default {
+  async fetch(request, env) {
+    const [, route, chatId] = new URL(request.url).pathname.split("/");
+    if (route !== "chats" || !chatId) return new Response("Not found", { status: 404 });
+    return env.CHAT.get(env.CHAT.idFromName(chatId)).fetch(request);
+  },
+} satisfies ExportedHandler<Env>;
+
+export class Chat extends DurableObject<Env> {
+  private readonly files = new ChatFiles(this.ctx.storage); // rows in this object's SQLite
+  private readonly harness = createHarness({
+    host: virtualHost({ fs: this.files.open(), store: new ChatStore(this.ctx.storage.sql) }),
+    model: chatModel(this.env),
+    humanInput: true,
+  });
+
+  async fetch(request: Request) {
+    const { text } = await request.json<{ text: string }>();
+    try {
+      // The example also keeps the chat's messages in SQLite and passes them as `messages`.
+      const result = await generateHarness({ harness: this.harness, session: "chat", prompt: text });
+      return Response.json({ reply: result.status === "completed" ? result.text : result.status });
+    } finally {
+      await this.files.save(); // write back only the files this turn changed
+    }
+  }
+}
+```
+
+Create the harness once per object, not once per request: the host's turn order
+and its in-memory stores live as long as the harness does.
+
+## Keep state across restarts
+
+The example's `ChatStore` implements `DurableJsonStore` over the chat's SQLite
+`docs` table. Its locks cover one store instance in one Durable Object. The host
+uses it for human input, parked turns, tasks and workflow queues; files and
+message history have their own SQLite tables.
+
+When `POST /chats/<id>/messages` parks, it returns `status: "parked"` and the
+open requests. Send `{ requestId, answer }` to `POST /chats/<id>/answers` to answer
+one and resume its turn. Answers and messages use the same per-chat queue, and
+the answer, result and filesystem save finish before HTTP success. The keyless
+model demonstrates this with `ask: What should I call you?`.
+
+A restart preserves an acknowledged parked turn and completed files and history.
+It does not recover a turn that was active or resuming when the process died,
+nor a reply that completed but was not saved to history. Claimed records have no
+recovery protocol, and this example makes no exactly-once execution guarantee.
+
+## Stream a reply
+
+> **Ships in `0.2.0-alpha.3`:** the `demos/workerd-chats` streaming route uses
+> `streamHarness()` and `virtualHost()` with durable finalization.
+
+The demo returns JSON by default. For an AI SDK UI message stream, send
+`Accept: text/event-stream` or add `?stream=1`:
+
+```bash
+curl -N localhost:8080/chats/a/messages -H 'content-type: application/json' \
+  -H 'accept: text/event-stream' \
+  -d '{"text":"echo hello > notes.txt && cat notes.txt"}'
+```
+
+Tool inputs, tool outputs and text arrive as the turn runs. The app drains
+`streamHarness().toUIMessageStream()` and waits for `finished`, records the
+user's message and a completed assistant reply, then saves files. Only after
+that succeeds does it send `finish` and close with `[DONE]`. If finalization
+fails, it sends one generic `error` chunk and no `finish`. LittleDB export
+remains best-effort in the background.
+
+For a React client using `@ai-sdk/react` and `ai`, pass a
+`DefaultChatTransport` to `useChat`. The demo owns history, so send only the
+last message's text:
+
+```tsx
+import { useChat } from "@ai-sdk/react";
+import { DefaultChatTransport } from "ai";
+
+export function useWorkerdChat(chatId: string) {
+  return useChat({
+    transport: new DefaultChatTransport({
+      api: `/chats/${encodeURIComponent(chatId)}/messages?stream=1`,
+      prepareSendMessagesRequest: ({ messages }) => ({
+        body: {
+          text: messages.at(-1)?.parts
+            .filter((part) => part.type === "text")
+            .map((part) => part.text).join("") ?? "",
+        },
+      }),
+    }),
+  });
+}
+```
+
+Call the hook's `sendMessage({ text: "echo hello" })` and render its `messages`
+in your app. Closing the client stops delivery, but the server keeps running
+and saving the turn before releasing the chat's queue slot. This demo has no
+server stop endpoint. A streamed question can park: it saves the user message
+and pending request before `finish`, which carries
+`messageMetadata: { status: "parked", requests }`. In `useChat`, the assistant
+message's `metadata.requests[n].requestId` is the input request ID to send to
+`/answers`:
+
+```bash
+curl -X POST localhost:8080/chats/a/answers -H 'content-type: application/json' \
+  -d '{"requestId":"input_...","answer":{"text":"The blue notebook"}}'
+```
+
+The existing endpoint resumes the parked turn. A completed turn's `finish`
+passes through unchanged.
+
+## Traces without internet
+
+Every event is kept in the chat's SQLite `trace_events` table. Read
+`GET /chats/<id>/trace?after=<id>` to page forward through retained events.
+The SQLite `AUTOINCREMENT` id is the cursor. Each row identifies its `source` as
+`harness` or `workflow`; the original `sequence` stays in its own source/run
+namespace. Workflow envelopes keep their original run id, event id and timestamp.
+The example keeps the newest 5,000 events. Pruning removes old
+rows without reusing their ids.
+
+The filesystem's `/.little-harness/sessions/<key>/trace.json` counter writes
+through to SQLite before the event is handed out. Other files save at the end
+of a turn. A process crash therefore cannot reuse an emitted sequence or cursor.
+
+LittleDB export is optional. Set **both** `LITTLEDB_URL` and `LITTLEDB_API_KEY`
+to also export spans through `@little-stack/littledb`. With either value missing,
+the example constructs no client and makes zero LittleDB calls. Export failures
+are logged once per chat and do not fail the turn; pending spans flush with
+`ctx.waitUntil` after each turn. Local traces are always kept.
+
+## Agent workflows without disk
+
+Enable `dynamicWorkflows()` from `@little-stack/workflow` in the harness config.
+Its default World is `virtualWorld` over the host's `dataFs`, with POSIX paths:
+
+| Data | Location |
+|---|---|
+| One-shot plan run | `<dataRoot>/sessions/<pathKey>/dynamic-workflows/<runId>` |
+| App-configured workflow run | `<dataRoot>/sessions/<pathKey>/workflows/<runId>` |
+| `once()` tool records | `<dataRoot>/sessions/<pathKey>/once/` |
+| Defined workflow runs and kept plans | `<dataRoot>/agent-workflows` |
+
+The default `dataRoot` is `/.little-harness/data/`; `pathKey` is the host's
+existing session key. A shared `dataFs` shares
+defined-workflow storage across sessions; isolate users with separate backing
+filesystems. One process must own each filesystem, and Worlds sharing storage
+must receive the same filesystem object so their in-process locks coordinate.
+
+The keyless example accepts `plan: some words`, `define: count_words` and then
+`use: count_words: some more words`. Its `word_count` tool is pure. Local traces
+include the plan's tool and model steps. A definition and kept plan saved by
+completed turns remain available after restarting workerd; the planner is not
+called again for a reusable plan.
+
+Workflow files inherit the app's save policy. This example saves them at turn
+completion, so an interrupted workflow turn may be lost. The workflow trace
+observer does not add write-through runtime recovery or an exactly-once promise.
+An unsaved `once()` record can also be lost in a mid-turn restart, allowing the
+tool call to run again. The record is only as durable as the supplied filesystem.
+Filesystem/remote workflow skill folders are unsupported on `virtualWorld`.
+
+## A model without internet
+
+Set `MODEL_BASE_URL` to an OpenAI-compatible vLLM, Ollama or llama.cpp endpoint
+and set `MODEL_NAME` to its model id. `MODEL_API_KEY` is optional. This selection
+takes precedence over DeepSeek. Without it, `DEEPSEEK_API_KEY` selects DeepSeek;
+with neither configured, the example uses its keyless scripted model.
+
+The example allows public destinations and loopback for a model on the same
+machine. To reach another LAN host, explicitly allow that model host's address
+in the workerd network service. The acceptance tests replace this with a
+loopback-only service and never call a real model provider.
+
+## What the host keeps in the filesystem
+
+```txt
+/session              the agent's working folder (bash starts here)
+/artifacts            outputs
+/persistent           Persistent Dir checkouts
+/.agents              staged skills, read-only to the agent
+/.little-harness/     session status and trace numbering, which bash never sees
+```
+
+Save the filesystem and you have saved the session: a later process that opens the
+same files carries on with the same status and trace numbers. The host stores no
+trace events; read them with `onEvent` and send them where you keep traces.
+
+## Options
+
+| Option | Default | What it does |
+|---|---|---|
+| `fs` | a new `InMemoryFs` per session | The just-bash filesystem a session works in. One filesystem is one workspace, so every session on the host shares it; pass `(sessionId) => fs` to give each session its own. |
+| `dataFs` | the session's `fs` | Where `localDir()`, memory and dynamic workflow run files live, under `/.little-harness/data/`. Takes a filesystem or an async `(sessionId) => fs` factory. Share a filesystem to share folders and defined-workflow plans between sessions on this host; this does not make writes transactional across sessions. |
+| `store` | in memory | A `DurableJsonStore` for human input, parked turns, tasks and workflow queues. Point it at durable storage to keep them across restarts. |
+| `orchestration` | built from `store` | Orchestration services built some other way. |
+| `sandbox` | `justBashSandbox()` | The sandbox bash runs in. It gets the filesystem in `workspace.filesystem`; one that needs real folders, such as `subprocessSandbox()`, refuses it. |
+| `sameSession`, `maxConcurrentSessions` | `"queue"`, unlimited | The same turn-order options as [`localHost()`](/docs/harness/v0.1.0-alpha/runtime/local-host#session-concurrency). |
+
+## Limits
+
+- **Some commands are missing on workerd.** workerd loads just-bash's browser
+  build, which has no `python3`, `node` (`js-exec`), `sqlite3`, `tar`, `yq` or
+  `xan`. The harness turns Python and JavaScript off there and tells the agent in
+  its system prompt. In Node, `virtualHost()` gets the full just-bash.
+- **No command classifier on workerd.** The browser build has no parser, so
+  `tieredSandbox()` cannot clear a command for Tier 0 and sends every command to
+  its next tier.
+- **One thread per process.** A workerd process runs one request at a time between
+  `await`s, and Durable Objects of one class share its memory. Chats waiting on the
+  model overlap well; chats running long bash scripts do not. Run more processes
+  and shard chats by id for more.
+- **Not a security boundary.** Each chat sees only its own files through `bash`,
+  but chats in one process share a V8 isolate. Keep untrusted code on a real
+  sandbox.
+- **Files are read every turn.** File-change events compare `/session`,
+  `/artifacts` and `/persistent` before and after each command, which reads every
+  file in them. Keep a chat's working files modest, or keep bulky data outside
+  those folders.
+- **Disk-only features.** `projectDir()` still needs `localHost()`.
+  `localDir()`, memory and dynamic workflows use `dataFs` without disk.
+- **Shared folders need coordination.** A shared `dataFs` makes folders visible
+  across sessions, but does not serialize their writes. Sharing a folder between
+  chats in different Durable Objects is your app's job.
+
+## Self-hosting workerd
+
+Bundle with `wrangler deploy --dry-run --outdir dist` and serve the bundle with a
+`workerd.capnp` like the example's. Each Durable Object's SQLite database lands in
+the `chat-storage` folder:
+
+```txt
+using Workerd = import "/workerd/workerd.capnp";
+
+const config :Workerd.Config = (
+  services = [
+    (name = "chats", worker = .chats),
+    (name = "chat-storage", disk = (path = "data", writable = true)),
+  ],
+  sockets = [ (name = "http", address = "*:8080", http = (), service = "chats") ],
+);
+
+const chats :Workerd.Worker = (
+  modules = [ (name = "worker.js", esModule = embed "dist/worker.js") ],
+  compatibilityDate = "2026-10-01",
+  durableObjectNamespaces = [ (className = "Chat", uniqueKey = "workerd-chats-Chat", enableSql = true) ],
+  durableObjectStorage = (localDisk = "chat-storage"),
+  bindings = [ (name = "CHAT", durableObjectNamespace = "Chat") ],
+);
+```
+
+```bash
+workerd serve workerd.capnp --experimental
+```
+
+The example also has a Dockerfile that runs this config.
+
+## Synthetic null endpoint (`0.2.0-alpha.3`)
+
+The exact `/dev/null` sink/EOF behavior is shared by all just-bash-backed hosts,
+including local, virtual and subprocess environments. See
+[Synthetic null endpoint](/docs/harness/v0.1.0-alpha/runtime/just-bash#synthetic-null-endpoint)
+for file-type, directory, copy/move and descriptor-order semantics.

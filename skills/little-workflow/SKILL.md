@@ -9,7 +9,7 @@ description: "Use when working with the little-workflow package, Little Workflow
 
 Use this skill to build, debug, or explain Little Workflow apps. Treat local docs and source as authoritative; the package is still moving and model memory is likely stale.
 
-Published release: `little-workflow@0.2.0-alpha.1`. The source is `0.2.0-alpha.2`, the first release under `@little-stack/workflow`, which is not on npm yet. It requires Node.js 22+ and **AI SDK 7**, and `ai` is a peer dependency (`^7.0.0`). Install with `pnpm add @little-stack/workflow@alpha ai@^7 zod @ai-sdk/<provider>` once it is published; until then the published package is `little-workflow@alpha`. pnpm 10 apps must allow the `better-sqlite3` build (`"pnpm": { "onlyBuiltDependencies": ["better-sqlite3"] }`); `little init` writes this setting.
+This release: `@little-stack/workflow@0.2.0-alpha.3`. Harness and Workflow share the `@little-stack` scope and version line. It requires Node.js 22+ and **AI SDK 7**, and `ai` is a peer dependency (`^7.0.0`). Install with `pnpm add @little-stack/workflow@alpha ai@^7 zod @ai-sdk/<provider>`. pnpm 10 apps must allow the `better-sqlite3` build (`"pnpm": { "onlyBuiltDependencies": ["better-sqlite3"] }`); `little init` writes this setting.
 
 ## Required Checks
 
@@ -139,3 +139,13 @@ The same call takes the full config: several `model(...)` slots under `models`, 
 - Do not use `org/repo`, `github:org/repo`, or `gitlab:org/repo` shorthand skill sources.
 
 - Harness configured, discovered and MCP `start_*` tools are allowed unless their exact name collides with a generated workflow launcher. Workflow handles still cannot begin with `start_`.
+
+## Managed Harness snapshots (private source draft)
+
+`managedHarness({execution:{registry,model,state}})` maps admitted format-1 content
+onto the neutral Harness snapshot, using the same registry as `createHarness`.
+This first slice refuses workflow/dynamic/agent tools in snapshot mode; ordinary
+Workflow and legacy managed Harness calls keep their existing behavior. Evaluations
+need the exact claimed content/version and isolated tool/memory state per run; no
+bootstrap/fallback may be scored as the candidate. Read the LittleDB Harness guide's
+format-1 section before opting in. No implementation from candidate data is executed.

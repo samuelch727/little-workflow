@@ -9,12 +9,12 @@ const examples = [
     id: 'agent', title: 'agent.ts', icon: FileCode2, language: 'TypeScript',
     code: `import { createHarness, localHost }\n  from "@little-stack/harness";\nimport { openai } from "@ai-sdk/openai";\n\nexport const agent = createHarness({\n  host: localHost({ dataDir: ".little" }),\n  model: openai("gpt-5"),\n  system: "You help people get things done.",\n});`,
     href: '/docs/harness/v0.1.0-alpha/quickstart', link: 'Build your first agent',
-    note: 'Your model. Your tools. Your workspace.',
+    note: 'Bring your own model',
   },
   {
     id: 'setup', title: 'Terminal', icon: Terminal, language: 'Shell',
     code: `# Create a Node or Next.js project\nnpx @little-stack/workflow@0.2.0-alpha.3 setup\n\n# Already have a Next.js app? Preview changes:\nnpx @little-stack/workflow@0.2.0-alpha.3 setup \\\n  --here --template existing-next --plan\n\n# Add --workflow to include a durable workflow.`,
-    href: '/docs/get-started/setup', link: 'Follow the setup guide', note: 'Node.js 22+ · AI SDK 7',
+    href: '/docs/get-started/setup', link: 'Follow the setup guide', note: 'Needs Node.js 22+ and AI SDK 7',
   },
 ] as const;
 
@@ -72,10 +72,12 @@ export function QuickstartCode() {
         <pre aria-label={`${item.language} example`}><code>{item.code.split('\n').map((line, lineIndex) => <span className="code-line" key={lineIndex}><span className="code-line-number" aria-hidden="true">{lineIndex + 1}</span><span><HighlightedLine line={line} />{'\n'}</span></span>)}</code></pre>
       </div>)}
       <div className="code-window-footer">
-        <Link href={example.href}>{example.link}<span aria-hidden="true">↗</span></Link>
+        <Link href={example.href}>{example.link}</Link>
+        <span className="code-note">{example.note}</span>
         <button className="code-copy" type="button" onClick={copyCode} aria-label={copyStatus === 'copied' ? 'Code copied' : 'Copy example code'}>{copyStatus === 'copied' ? <Check size={15} aria-hidden="true" /> : <Copy size={15} aria-hidden="true" />}<span>{copyStatus === 'copied' ? 'Copied' : 'Copy'}</span></button>
+        <span className="sr-only" role="status">{copyStatus === 'copied' ? 'Example copied to clipboard.' : copyStatus === 'error' ? 'Could not copy. Select the code and copy it manually.' : ''}</span>
+        {copyStatus === 'error' && <span className="code-copy-error">Select the code to copy it.</span>}
       </div>
-      <div className="code-caption"><span className="code-caption-dot" /><span>{example.note}</span><span className="sr-only" role="status">{copyStatus === 'copied' ? 'Example copied to clipboard.' : copyStatus === 'error' ? 'Could not copy. Select the code and copy it manually.' : ''}</span>{copyStatus === 'error' && <span className="code-copy-error">Select the code to copy it.</span>}</div>
     </div>
   );
 }

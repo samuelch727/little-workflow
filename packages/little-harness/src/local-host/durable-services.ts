@@ -4802,27 +4802,6 @@ function createAsyncTaskQueueLedger(store: DurableJsonStore, rootDir: string): H
         return { claimed: true, record: updated };
       });
     },
-    async acquireToolSlot(input) {
-      return store.withLock(["async-tool-slots", input.sessionId], async () => {
-        return store.withLock(["async-queue", input.sessionId, input.queueId], async () => {
-          const record = await this.get(input);
-          if (record === undefined || record.status !== "queued" || record.taskId !== input.taskId) {
-            return optionalRecord({ acquired: false }, record);
-          }
-          const nonTerminal = await this.listNonTerminal({ sessionId: input.sessionId });
-          const active = nonTerminal.filter((candidate) =>
-            candidate.attemptLeaseExpiresAt !== undefined && leaseIsActive(candidate.attemptLeaseExpiresAt)
-          );
-          if (active.length >= input.maxConcurrentToolCalls) {
-            return { acquired: false, record };
-          }
-          const updated = compact({ ...record, attemptLeaseExpiresAt: input.leaseExpiresAt }) as HarnessAsyncTaskQueueRecord;
-          await this.update(updated);
-          return { acquired: true, record: updated };
-        });
-      });
-    },
-    async releaseToolSlot() {},
     async markTerminal(input, terminal) {
       return store.withLock(["async-queue", input.sessionId, input.queueId], async () => {
         const record = await this.get(input);

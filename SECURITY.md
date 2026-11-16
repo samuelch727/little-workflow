@@ -3,7 +3,7 @@
 ## Supported versions
 
 Little Workflow is in an early alpha phase. Security fixes are applied to the latest
-`0.1.0-alpha.x` release only. There is no long-term-support guarantee during alpha.
+`0.2.0-alpha.x` release only. There is no long-term-support guarantee during alpha.
 
 ## Reporting a vulnerability
 

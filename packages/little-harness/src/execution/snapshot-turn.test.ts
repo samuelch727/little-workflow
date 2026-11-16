@@ -251,3 +251,13 @@ describe("snapshot execution boundary", () => {
       expect(f.seen).toEqual([]);
     }));
 });
+
+
+it.each(["taskTools", "workflowTools"] as const)("rejects unqualified %s in snapshot v1", async option => {
+  await withTempDir(async dir => {
+    const f = await fixture(dir);
+    const harness = createHarness({ host: f.harness.config.host, model: f.model, tools: f.harness.config.tools, executionRegistry: f.registry, runtime: { bash: false }, turnLimits: { maxSteps: 4 }, [option]: true });
+    await expect(generateHarness({ harness, session: "group-snapshot", prompt: "Hi", executionSnapshot: await f.snapshot("A") })).rejects.toThrow(/taskTools|workflowTools/);
+    expect(f.seen).toEqual([]);
+  });
+});

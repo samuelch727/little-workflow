@@ -31,7 +31,7 @@ describe("FsFileWriter filesystem errors", () => {
     expect(failure).toMatchObject({ code: "ENOSPC", message: "ENOSPC: original write detail" });
   });
 
-  it.each(["readdir", "stat"] as const)("normalizes a %s failure reached during recursive listing", async operation => {
+  it.each(["readdir", "lstat"] as const)("normalizes a %s failure reached during recursive listing", async operation => {
     const fs = new InMemoryFs();
     const files = createFsFileWriter(fs);
     await files.writeText("/session/notes/nested/one.md", "one");
@@ -43,8 +43,8 @@ describe("FsFileWriter filesystem errors", () => {
         return readdir(path);
       });
     } else {
-      const stat = fs.stat.bind(fs);
-      vi.spyOn(fs, "stat").mockImplementation(async path => {
+      const stat = fs.lstat.bind(fs);
+      vi.spyOn(fs, "lstat").mockImplementation(async path => {
         if (path === "/session/notes/nested/one.md") throw failure;
         return stat(path);
       });

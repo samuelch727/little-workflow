@@ -305,7 +305,7 @@ These events are emitted by the runtime scheduler for each LWIR step, wrapping t
 | `StepCompleted` | Durable boundary; inline output + `outputRef` |
 | `StepFailed` | Attempt failed; with `error` + `retriable` |
 
-Plus parallel events: `ParallelGroupStarted`, `ParallelBranchScheduled`, `ParallelBranchCompleted/Failed`, `ParallelGroupCompleted/Failed`. See [Parallel](/docs/v0.1.0-alpha/internals/parallel).
+Plus parallel events: `ParallelGroupStarted`, `ParallelBranchScheduled`, `ParallelBranchCompleted/Failed`, `ParallelGroupCompleted/Failed`. See [Parallel](https://little-stack.dev/docs/workflow/v0.1.0-alpha/internals/parallel).
 
 ### Run-Level Events (unchanged)
 
@@ -415,7 +415,7 @@ Step outputs smaller than 256,000 bytes (canonical JSON) are stored inline in `S
 - **Idempotency.** `runWorkflow()` with the same `runId` returns the persisted result or replays the failure. Two-level memoization means the same result at both the LWIR step level and the harness model-call/tool-call level.
 - **Auditability.** Every model call, tool call (with `caller` attribution), artifact write, and validation result is recorded. `little events <run-id>` dumps committed envelopes in order.
 - **Crash safety.** SQLite WAL transactions bound recovery to committed event rows; `appendEvent` resolves only after the synchronous insert has committed.
-- **Replay determinism.** [Replay](/docs/v0.1.0-alpha/internals/replay) is a pure fold over this log; same bytes → same `MaterializedRunState`.
+- **Replay determinism.** [Replay](https://little-stack.dev/docs/workflow/v0.1.0-alpha/internals/replay) is a pure fold over this log; same bytes → same `MaterializedRunState`.
 
 ## What This Log Is Not
 

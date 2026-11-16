@@ -417,7 +417,7 @@ Every model call and tool call is event-logged. On resume, the harness fast-forw
 
 This mirrors LWIR per-step memoization one level up. Because both model calls AND tool calls are memoized, resumed sessions reach the same state byte-for-byte as the original.
 
-Sub-runs (spawned by `start_workflow` / `run_workflow`) maintain their own event logs and their own per-step memoization. The orchestrator's `harness.tool_call.started` reserves `args.subRunId` and stays in-flight until the sub-run completes; two levels of memoization compose cleanly. See [Identity Manifests](/docs/v0.1.0-alpha/internals/identity-manifests) for crash recovery scenarios.
+Sub-runs (spawned by `start_workflow` / `run_workflow`) maintain their own event logs and their own per-step memoization. The orchestrator's `harness.tool_call.started` reserves `args.subRunId` and stays in-flight until the sub-run completes; two levels of memoization compose cleanly. See [Identity Manifests](https://little-stack.dev/docs/workflow/v0.1.0-alpha/internals/identity-manifests) for crash recovery scenarios.
 
 ## Cancellation
 
@@ -479,7 +479,7 @@ The SDK sees `delegate_to_default`, invokes `workflowHarness.run(task, ctx)`, an
 
 ## Related Pages
 
-- [Memory + Scratch](/docs/v0.1.0-alpha/internals/memory-scratch) — how memory and scratch mounts are constructed and scoped
-- [Fixer](/docs/v0.1.0-alpha/internals/fixer) — the `fix_step` task in detail
-- [Identity Manifests](/docs/v0.1.0-alpha/internals/identity-manifests) — what goes into `harness.session.started.manifest`
-- [Event Log](/docs/v0.1.0-alpha/internals/event-log) — the underlying append-only SQLite/WAL event store
+- [Memory + Scratch](https://little-stack.dev/docs/workflow/v0.1.0-alpha/internals/memory-scratch) — how memory and scratch mounts are constructed and scoped
+- [Fixer](https://little-stack.dev/docs/workflow/v0.1.0-alpha/internals/fixer) — the `fix_step` task in detail
+- [Identity Manifests](https://little-stack.dev/docs/workflow/v0.1.0-alpha/internals/identity-manifests) — what goes into `harness.session.started.manifest`
+- [Event Log](https://little-stack.dev/docs/workflow/v0.1.0-alpha/internals/event-log) — the underlying append-only SQLite/WAL event store

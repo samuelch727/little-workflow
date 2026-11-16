@@ -8,6 +8,7 @@ import { z } from "zod";
 import { localHost, localSessionWorkspace } from "../local-host/index.js";
 import { resolveLocalHostPaths } from "../local-host/paths.js";
 import { LocalSessionStore, type LocalHarnessSession } from "../local-host/session-store.js";
+import { virtualHost } from "../virtual-host/virtual-host.js";
 import { withTempDir } from "../test/temp.js";
 import { resolveTraceOptions } from "../trace/options.js";
 import {
@@ -62,7 +63,7 @@ describe("justBashSandbox()", () => {
 
       const runtime = await justBashSandbox()({ workspace: localSessionWorkspace(session), files: session.files });
       const shell = runtime.shellTool();
-      const result = await (shell as any).execute({ command: "echo nope > /tmp/out.txt" }, {});
+      const result = await (shell as any).execute({ command: "echo nope > /etc/out.txt" }, {});
 
       expect(result.exitCode).not.toBe(0);
       await expect(session.files.read("/session/../tmp/out.txt")).rejects.toThrow();
@@ -126,11 +127,11 @@ describe("justBashSandbox()", () => {
         (event) => event.type === "harness.file.updated" && event.metadata?.path === "/session/large-diff.md",
       )?.metadata?.diff as { contentRef?: string; truncated?: boolean; preview?: string };
       expect(diff).toMatchObject({
-        contentRef: expect.stringMatching(/^\/artifacts\/trace\/file-diffs\//u),
+        contentRef: expect.stringMatching(/^\/\.little-harness\/trace\/file-diffs\//u),
         truncated: true,
       });
       expect(diff.preview?.length).toBeLessThanOrEqual(24);
-      expect((await session.files.read(diff.contentRef!)).text()).toContain("+after line");
+      expect((await session.traceContent!.read(diff.contentRef!)).text()).toContain("+after line");
     });
   });
 
@@ -702,7 +703,7 @@ it.each(["/dev", "/dev/", "/dev///", "///dev//", "/dev/.", "/dev/null/..", "dev/
       expect(remove).not.toHaveBeenCalled(); expect(make).not.toHaveBeenCalled();
       expect(await fs.exists("/session/destination")).toBe(false);
       expect((await session.files.read("/session/source")).text()).toBe("keep");
-      expect(await fs.readdir("/dev")).toEqual(["null"]);
+      expect(await fs.readdir("/dev")).toEqual(["null", "urandom", "zero"]);
     });
   },
 );
@@ -716,7 +717,7 @@ it("refuses null-source copies without creating or truncating managed files", as
       const shell = runtime.shellTool() as any;
       for (const destination of ["existing", "absent"]) {
         const result = await shell.execute({ command: `cp /dev/null /session/${destination}` }, {});
-        expect(result.exitCode).not.toBe(0); expect(result.stderr).toMatch(/Cannot copy the synthetic/);
+        expect(result.exitCode).not.toBe(0); expect(result.stderr).toMatch(destination === "existing" ? /cannot safely determine whether/ : /Cannot copy the synthetic/);
       }
       expect((await session.files.read("/session/existing")).text()).toBe("keep");
       await expect(session.files.read("/session/absent")).rejects.toThrow();
@@ -738,5 +739,124 @@ it("delegates explicit /dev directory mounts to their own structural policy", as
     await expect(fs.mv("/dev/.", "/session/moved")).rejects.toThrow(/EBUSY: mount point/);
     expect(await fs.exists("/session/moved")).toBe(false);
     expect(await mounted.readFile("/null")).toBe("application-owned");
+  });
+});
+
+it("serves bounded synthetic zero/random endpoints without host device access", async () => {
+  await withTempDir(async dir => {
+    const host = localHost({dataDir: dir, sandbox: "in-process"});
+    const session = await host.sessions.getOrCreate({id: "devices"});
+    const prepared = await host.prepareTurn({session, turnId: "devices", persistentDirs: []});
+    const runtime = await prepared.createSandbox({tools: {}});
+    const shell = runtime.shellTool() as any;
+    expect(await shell.execute({command: "head -c 4 /dev/zero | wc -c"}, {})).toMatchObject({stdout: expect.stringContaining("4"), exitCode: 0});
+    expect(await shell.execute({command: "head -c 4 /dev/urandom | wc -c"}, {})).toMatchObject({stdout: expect.stringContaining("4"), exitCode: 0});
+    const fs = await buildWorkspaceFs(localSessionWorkspace(session as LocalHarnessSession), []);
+    expect(await fs.readFileBuffer("/dev/zero")).toEqual(new Uint8Array(65536));
+    const a = await fs.readFileBuffer("/dev/urandom"), b = await fs.readFileBuffer("/dev/urandom");
+    expect(a.byteLength).toBe(65536); expect(a).not.toEqual(b);
+    await expect(fs.mv("/dev/zero", "/session/z")).rejects.toThrow(/synthetic/);
+    await expect(fs.cp("/dev/urandom", "/session/r")).rejects.toThrow(/synthetic/);
+  });
+});
+
+it.each(["local", "virtual"] as const)("runs process substitution on the %s host", async (kind) => {
+  await withTempDir(async (dir) => {
+    const host = kind === "local"
+      ? localHost({ dataDir: dir, sandbox: "in-process" })
+      : virtualHost({ fs: new InMemoryFs() });
+    const session = await host.sessions.getOrCreate({ id: "process-substitution" });
+    await session.files.writeText("/session/a.txt", "b\na\n");
+    await session.files.writeText("/session/b.txt", "c\na\n");
+    const prepared = await host.prepareTurn({ session, turnId: "turn_1", persistentDirs: [] });
+    const runtime = await prepared.createSandbox({});
+    try {
+      const shell = runtime.shellTool() as any;
+      expect(await shell.execute({ command: "diff <(sort a.txt) <(sort b.txt)" }, {}))
+        .toMatchObject({ stdout: "2c2\n< b\n---\n> c\n", stderr: "", exitCode: 1 });
+      expect(await shell.execute({ command: "yes | head -2" }, {}))
+        .toMatchObject({ stdout: "y\ny\n", stderr: "", exitCode: 0 });
+      const temp = await shell.execute({ command: "mktemp -p /session" }, {});
+      expect(temp.exitCode).toBe(0);
+      expect(temp.stdout).toMatch(/^\/session\//);
+
+    } finally {
+      await runtime.dispose?.();
+    }
+  });
+});
+
+it.each(["local", "virtual", "subprocess"] as const)("keeps bounded scratch for one turn only on %s", async (kind) => {
+  await withTempDir(async (dir) => {
+    const host = kind === "virtual" ? virtualHost({ fs: new InMemoryFs() }) : localHost({ dataDir: dir, sandbox: kind === "subprocess" ? "subprocess" : "in-process" });
+    const session = await host.sessions.getOrCreate({ id: "scratch" });
+    const prepared = await host.prepareTurn({ session, turnId: "first", persistentDirs: [] });
+    const runtime = await prepared.createSandbox({});
+    try {
+      const shell = runtime.shellTool() as any;
+      expect(await shell.execute({ command: 'echo x > /tmp/scratch.txt; echo rc=$?; cat /tmp/scratch.txt' }, {})).toMatchObject({ stdout: "rc=0\nx\n", exitCode: 0 });
+      expect(await shell.execute({ command: 'cat /tmp/scratch.txt' }, {})).toMatchObject({ stdout: "x\n" });
+      expect(await shell.execute({ command: 'f=$(mktemp); echo x > "$f"; cat "$f"; d=$(mktemp -d); test -d "$d"' }, {})).toMatchObject({ stdout: "x\n", exitCode: 0 });
+    } finally { await runtime.dispose?.(); }
+    const second = await host.prepareTurn({ session, turnId: "second", persistentDirs: [] });
+    const next = await second.createSandbox({});
+    try { expect(await (next.shellTool() as any).execute({ command: 'test ! -e /tmp/scratch.txt' }, {})).toMatchObject({ exitCode: 0 }); }
+    finally { await next.dispose?.(); }
+  });
+});
+
+it("caps scratch at 16 MiB and reclaims overwritten/deleted bytes", async () => {
+  await withTempDir(async (dir) => {
+    const session = await new LocalSessionStore(resolveLocalHostPaths({ dataDir: dir }, dir)).getOrCreate({ id: "scratch-cap" });
+    const fs = await buildWorkspaceFs(localSessionWorkspace(session), []);
+    await fs.writeFile("/tmp/full", new Uint8Array(16 * 1024 * 1024));
+    await expect(fs.writeFile("/tmp/overflow", "x")).rejects.toThrow(/ENOSPC/);
+    await fs.writeFile("/tmp/full", "x");
+    await fs.writeFile("/tmp/other", "y");
+    await fs.rm("/tmp/full");
+    expect(await fs.readFile("/tmp/other")).toBe("y");
+  });
+});
+
+it("pins just-bash 3.6.0 rm -rf read-only success and redirect abort (fail loudly on upstream fix)", async () => {
+  await withTempDir(async (dir) => {
+    const session = await new LocalSessionStore(resolveLocalHostPaths({ dataDir: dir }, dir)).getOrCreate({ id: "upstream" });
+    const skill = path.join(session.paths.root, ".agents", "skills", "pinned");
+    await mkdir(skill, { recursive: true });
+    await writeFile(path.join(skill, "SKILL.md"), "keep");
+    const runtime = await justBashSandbox()({ workspace: localSessionWorkspace(session), files: session.files });
+    try {
+      const shell = runtime.shellTool() as any;
+      expect(await shell.execute({ command: 'rm -rf /.agents/skills/pinned; echo rc=$?' }, {})).toMatchObject({ stdout: "rc=0\n", exitCode: 0 });
+      expect(await readFile(path.join(skill, "SKILL.md"), "utf8")).toBe("keep");
+      const denied = await shell.execute({ command: 'echo x > /etc/x; echo after' }, {});
+      expect(denied.exitCode).not.toBe(0);
+      expect(denied.stdout).not.toContain("after");
+    } finally { await runtime.dispose?.(); }
+  });
+});
+
+it("keeps workspace aliases and read-only runtime mounts beneath /tmp authoritative over scratch", async () => {
+  await withTempDir(async dir => {
+    const session = await new LocalSessionStore(resolveLocalHostPaths({ dataDir: dir }, dir)).getOrCreate({ id: "tmp-alias" });
+    const workspace = localSessionWorkspace(session);
+    const originalSession = workspace.mounts.find(m => m.mountPath === "/session")!;
+    const external = path.join(dir, "external");
+    await mkdir(external);
+    await writeFile(path.join(external, "note"), "readonly");
+    const aliased = { ...workspace, mounts: [...workspace.mounts, { ...originalSession, mountPath: "/tmp/lc-t1/session" }] };
+    const mounts = [{ mountPath: "/tmp/lc-t1/runtime", backingPath: external, mode: "ro" as const }];
+    const fs = await buildWorkspaceFs(aliased, mounts);
+    await fs.writeFile("/tmp/lc-t1/session/kept", "managed");
+    expect(await fs.readFile("/session/kept")).toBe("managed");
+    expect(await fs.readFile("/tmp/lc-t1/runtime/note")).toBe("readonly");
+    await expect(fs.writeFile("/tmp/lc-t1/runtime/note", "bad")).rejects.toThrow(/read-only/);
+    await fs.writeFile("/tmp/scratch", "ephemeral");
+    await fs.createExclusive("/tmp/atomic", { mode: 0o600 });
+    expect(await fs.readFile("/tmp/scratch")).toBe("ephemeral");
+    const next = await buildWorkspaceFs(aliased, mounts);
+    expect(await next.exists("/tmp/scratch")).toBe(false);
+    expect(await next.exists("/tmp/atomic")).toBe(false);
+    expect(await next.readFile("/tmp/lc-t1/session/kept")).toBe("managed");
   });
 });

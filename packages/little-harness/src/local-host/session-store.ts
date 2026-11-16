@@ -1,3 +1,4 @@
+import { traceContentStoreFor } from "../trace/storage.js";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import type {
   ArtifactRef,
@@ -116,6 +117,7 @@ function createLocalHarnessSession(
     paths,
     dataDir: paths.root,
     files,
+    traceContent: { read: traceContentStoreFor(files)!.read },
     artifacts: {
       async list() {
         const entries = await files.list("/artifacts", { recursive: true });

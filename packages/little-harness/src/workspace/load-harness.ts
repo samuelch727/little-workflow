@@ -3,7 +3,7 @@ import type { Dirent } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Harness, HarnessHost } from "../types.js";
-import { assembleHarness, instantiateHarness, type HarnessDefinition } from "./assemble-harness.js";
+import { assembleHarness, instantiateHarness, type HarnessDefinition, type HarnessContextOptions } from "./assemble-harness.js";
 import { discoverSkills } from "./discover-skills.js";
 import { discoverTools } from "./discover-tools.js";
 import { discoverWorkflows } from "./discover-workflows.js";
@@ -42,7 +42,7 @@ async function readInstructions(agentDir: string): Promise<string | undefined> {
   }
 }
 
-export type LoadHarnessOptions = {
+export type LoadHarnessOptions<TContext = unknown> = {
   /**
    * Run the folder's agent on this host instead of the one `agent.ts` configured, for example
    * `localHost({ dataDir })` in a test or a script. The harness's sessions come from this host.
@@ -50,27 +50,29 @@ export type LoadHarnessOptions = {
   host?: HarnessHost;
   /** Node factory fallback only; existing Harness exports keep their configured host. */
   dataDir?: string;
-};
+} & HarnessContextOptions<TContext>;
 
 /**
  * Load an agent folder into a runnable {@link Harness}. Imports `<agentDir>/agent.ts` (a Harness
- * or `(host) => Harness` factory; factories share a Node localHost per resolved dataDir), auto-discovers `tools/` and `skills/`, applies
+ * or `(host, context) => Harness` factory; factories share a Node localHost per resolved dataDir), auto-discovers `tools/` and `skills/`, applies
  * `instructions.md` as the system prompt when `agent.ts` omits `system`, and shallow-merges the
  * discovered tools/skills into the harness config (inline tools win name collisions).
  */
+export function loadHarness<TContext>(agentDir: string, options: LoadHarnessOptions<TContext>): Promise<Harness>;
+export function loadHarness(agentDir: string, options?: LoadHarnessOptions): Promise<Harness>;
 export async function loadHarness(agentDir: string, options: LoadHarnessOptions = {}): Promise<Harness> {
   const definition = await importDefault<HarnessDefinition>(join(agentDir, "agent.ts"));
   const host = options.host ?? (typeof definition === "function"
     ? await fallbackHost(options.dataDir)
     : undefined);
-  const base = await instantiateHarness(definition, host);
+  const base = await instantiateHarness(definition, host, options.context);
   const [tools, skills, workflows] = await Promise.all([
     discoverTools(agentDir),
     discoverSkills(agentDir),
     discoverWorkflows(agentDir),
   ]);
   const instructions = await readInstructions(agentDir);
-  return assembleHarness(base, { tools, skills, workflows, ...(instructions === undefined ? {} : { instructions }) }, host === undefined ? options : { host });
+  return assembleHarness(base, { tools, skills, workflows, ...(instructions === undefined ? {} : { instructions }) }, host === undefined ? {} : { host });
 }
 
 export type WorkspaceAgent = { readonly name: string; readonly dir: string };

@@ -30,7 +30,7 @@ The implementation lives in `executeParallelStep()` in `runtime.ts`. This page m
 }
 ```
 
-Validation rules (enforced by [LWIR validation](/docs/v0.1.0-alpha/internals/lwir-internals)):
+Validation rules (enforced by [LWIR validation](https://little-stack.dev/docs/workflow/v0.1.0-alpha/internals/lwir-internals)):
 
 - `maxBranches <= 100` (alpha cap), `maxConcurrency <= maxBranches`.
 - `failureMode` is `fail_fast` or `all_settled`.
@@ -181,7 +181,7 @@ After the workers drain, the runtime appends `ParallelGroupCompleted` (if there 
 
 The `parallel` step described above is a **within-workflow** construct. It fans out over a known array of items, runs each branch's step list in the same process, and fans results back into a deterministic array output — all within one LWIR execution.
 
-**Pipeline-level fan-out is a different mechanism.** When an Orchestrator session (see [Harness](/docs/v0.1.0-alpha/internals/harness)) needs to run N independent sub-workflow instances in parallel, it does so by emitting **parallel tool calls in a single agent loop turn** — not by using the `parallel` LWIR step. The model emits multiple `run_workflow` (or `start_workflow`) tool-call blocks in one turn; the harness dispatches them concurrently, each as its own sub-run with its own `WorkflowVersion`, event log, and per-step durability.
+**Pipeline-level fan-out is a different mechanism.** When an Orchestrator session (see [Harness](https://little-stack.dev/docs/workflow/v0.1.0-alpha/internals/harness)) needs to run N independent sub-workflow instances in parallel, it does so by emitting **parallel tool calls in a single agent loop turn** — not by using the `parallel` LWIR step. The model emits multiple `run_workflow` (or `start_workflow`) tool-call blocks in one turn; the harness dispatches them concurrently, each as its own sub-run with its own `WorkflowVersion`, event log, and per-step durability.
 
 Summary of the distinction:
 

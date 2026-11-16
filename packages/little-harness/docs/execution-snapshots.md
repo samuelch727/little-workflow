@@ -72,6 +72,8 @@ parked tool has an uncertain effect receipt until it actually finishes. Existing
 trace content and redaction options continue to govern the normal model/tool
 events. Replayed effects are not dispatched again by this seam.
 
+> `@little-stack/littledb` is published from `0.2.0-alpha.4`; it needs a LittleDB account. The LittleDB server is not open source. See [release status](https://little-stack.dev/docs/releases).
+
 The portable contract is mechanically prepared from the approved standalone
 artifact at source `3688a27d865e765e80bbd2807fb650d3974d6c0c`, manifest SHA-256
 `99158a3a8fafb0c48de7c8ebb9d9154d4214082bbe7b1f4171e81b382198dc55`.

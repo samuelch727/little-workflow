@@ -130,7 +130,7 @@ If a name still collides after prefixing (or if you attach without a prefix and 
 
 ## `code.run` Tools Proxy
 
-> **The default worker harness does not execute `code.run`.** A `code.run` step compiles and is dispatched, but the default `workflowHarness` checks its sandbox policy and then throws (`cannot safely execute code.run in the default workflow harness`). The contract below applies only when you supply a `worker.harness` that implements `execute_step`, and that harness owns execution and isolation. See [Security Model](/docs/v0.1.0-alpha/internals/security-model). For deterministic tool calls without a model, a `tool.call` step works with the default harness.
+> **The default worker harness does not execute `code.run`.** A `code.run` step compiles and is dispatched, but the default `workflowHarness` checks its sandbox policy and then throws (`cannot safely execute code.run in the default workflow harness`). The contract below applies only when you supply a `worker.harness` that implements `execute_step`, and that harness owns execution and isolation. See [Security Model](https://little-stack.dev/docs/workflow/v0.1.0-alpha/internals/security-model). For deterministic tool calls without a model, a `tool.call` step works with the default harness.
 
 `code.run` steps receive `{ input, tools }`. The `tools` object is a proxy over all globally-registered tools — callable as async functions, no model in the loop. This saves tokens vs routing through the model for deterministic data operations:
 
@@ -196,10 +196,10 @@ At execution time:
 - The harness reads the `execute` function from the registry by name, validates input against `inputSchema`, and invokes it.
 - The live descriptor hash is compared against the locked snapshot. A mismatch fails the run with a `RunFailedError` whose `causeCode` is `"capability_drift"`. Re-run `runWorkflow()` to produce a fresh `WorkflowVersion`. The failed run is preserved in Local World for inspection.
 
-Implementation bodies (`execute`) are deliberately excluded from the descriptor hash — only the schema surface is locked. See [Security Model](/docs/v0.1.0-alpha/internals/security-model).
+Implementation bodies (`execute`) are deliberately excluded from the descriptor hash — only the schema surface is locked. See [Security Model](https://little-stack.dev/docs/workflow/v0.1.0-alpha/internals/security-model).
 
 ## Cross-References
 
-- Memory + scratch: [Memory](/docs/v0.1.0-alpha/authoring/memory)
-- Skills for planner/worker: [Skills](/docs/v0.1.0-alpha/authoring/skills)
-- Multi-workflow composition: [Compose With Little Harness](/docs/v0.1.0-alpha/authoring/compose-with-harness)
+- Memory + scratch: [Memory](https://little-stack.dev/docs/workflow/v0.1.0-alpha/authoring/memory)
+- Skills for planner/worker: [Skills](https://little-stack.dev/docs/workflow/v0.1.0-alpha/authoring/skills)
+- Multi-workflow composition: [Compose With Little Harness](https://little-stack.dev/docs/workflow/v0.1.0-alpha/authoring/compose-with-harness)

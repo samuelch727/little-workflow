@@ -1,3 +1,4 @@
+import { combineToolSignals, executeWithToolBudget } from "../execution/tool-budget.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, join, posix } from "node:path";
@@ -82,7 +83,12 @@ export function withStepToolContext(
           ...(isObject(stepOptions) ? stepOptions : {}),
           idempotencyKey,
         };
-        const run = () => (execute as (input: unknown, options: unknown) => unknown)(input, executeOptions);
+        const executionSignal = combineToolSignals(
+          executeOptions.abortSignal as AbortSignal | undefined,
+          "abortSignal" in caller ? caller.abortSignal : undefined,
+        );
+        const run = () => executeWithToolBudget(caller, name, executionSignal, async (abortSignal) =>
+          (execute as (input: unknown, options: unknown) => unknown)(input, { ...executeOptions, abortSignal }));
         if (policy === undefined) return run();
         const path = options.fs === undefined
           ? join(options.onceDir, `${idempotencyKey}.json`)

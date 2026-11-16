@@ -162,7 +162,7 @@ async ({ input, tools }) => output
 
 The `tools` proxy does **not** use expression syntax. Calls are plain JavaScript `await tools.toolName(args)` inside the code body. Each invocation is event-logged with `caller: "code"` in the `harness.tool_call.started` event — distinguishable from model-driven tool calls.
 
-This matters for token economics: the code body can call tools and process their results without the model seeing the intermediate data. The model only sees the step's final `output`. See [Harness](/docs/v0.1.0-alpha/internals/harness) for the full event vocabulary and tool call attribution.
+This matters for token economics: the code body can call tools and process their results without the model seeing the intermediate data. The model only sees the step's final `output`. See [Harness](https://little-stack.dev/docs/workflow/v0.1.0-alpha/internals/harness) for the full event vocabulary and tool call attribution.
 
 Expressions (`{{ ... }}` templates) remain the mechanism for wiring step outputs into the next step's `with` and `input` fields — they are evaluated by the LWIR runtime before the step body runs.
 

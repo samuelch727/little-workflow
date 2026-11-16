@@ -7,8 +7,8 @@ The Cookbook collects short, task-oriented recipes — each one grounded in a re
 
 ## Recipes
 
-- [**Plan once, run many**](/docs/v0.1.0-alpha/cookbook/plan-once-run-many) — an orchestrator plans a workflow once and fans it out across many inputs in parallel. From `demos/orchestrator-fanout`. Uses the deprecated orchestrator; for new composition, see [Compose With Little Harness](/docs/v0.1.0-alpha/authoring/compose-with-harness).
-- [**Resume after a crash**](/docs/v0.1.0-alpha/cookbook/resume-after-a-crash) — a run survives a mid-flight `SIGKILL` and resumes deterministically from the durable event log, without re-running committed steps. From `demos/kill-resume`.
+- [**Plan once, run many**](https://little-stack.dev/docs/workflow/v0.1.0-alpha/cookbook/plan-once-run-many) — an orchestrator plans a workflow once and fans it out across many inputs in parallel. From `demos/orchestrator-fanout`. Uses the deprecated orchestrator; for new composition, see [Compose With Little Harness](https://little-stack.dev/docs/workflow/v0.1.0-alpha/authoring/compose-with-harness).
+- [**Resume after a crash**](https://little-stack.dev/docs/workflow/v0.1.0-alpha/cookbook/resume-after-a-crash) — a run survives a mid-flight `SIGKILL` and resumes deterministically from the durable event log, without re-running committed steps. From `demos/kill-resume`.
 
 ## More runnable demos
 
@@ -25,4 +25,4 @@ Every demo is keyless unless noted. Run one with `pnpm --filter <name> demo` (so
 | [`remote-resume`](https://github.com/samuelch727/little-workflow/tree/main/demos/remote-resume) | Durability across process boundaries — sandboxed agent bash + a restartable session-log service. | `pnpm --filter remote-resume demo` |
 | [`kb-chatbot`](https://github.com/samuelch727/little-workflow/tree/main/demos/kb-chatbot) | A Little Harness agent that calls a workflow through `asHarnessWorkflow` and reads its `outputSummary`. | `pnpm --filter kb-chatbot demo` (needs `DEEPSEEK_API_KEY`) |
 
-New to the SDK? Start with the [Quickstart](/docs/v0.1.0-alpha/getting-started/quickstart) and [Define a Workflow](/docs/v0.1.0-alpha/authoring/define-a-workflow).
+New to the SDK? Start with the [Quickstart](https://little-stack.dev/docs/workflow/v0.1.0-alpha/getting-started/quickstart) and [Define a Workflow](https://little-stack.dev/docs/workflow/v0.1.0-alpha/authoring/define-a-workflow).

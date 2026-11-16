@@ -4,7 +4,8 @@
   "icon": "Bot",
   "pages": [
     "index",
-    "v0.1.0-alpha"
+    "---Guides and API---",
+    "...v0.1.0-alpha"
   ],
   "root": true
 }

@@ -1,3 +1,4 @@
+import { setTier0DeniedCommands } from "./command-policy.js";
 import { tool } from "ai";
 import { existsSync } from "node:fs";
 import { execSync } from "node:child_process";
@@ -982,6 +983,96 @@ it.each(["spread", "assign"])("preserves private attempt IDs through a next-tier
       const replay = next.calls.find(call => call.command === "echo reused-options")!;
       expect(starts.some(start => start.occurrenceId === replay.executionId)).toBe(false);
       expect(replay.executionId).not.toBe(publicOptions.executionId);
+    } finally { await runtime.dispose?.(); }
+  });
+});
+
+it.each(["in-process", "subprocess"] as const)("denies runner commands before side effects on %s", async adapter => {
+  await withTempDir(async dir => {
+    const session = await sessionFor(dir);
+    await session.files.writeText("/session/f", "protected");
+    const events: HarnessEventInput[] = [];
+    const runtime = await tieredSandbox({
+      tier0: adapter === "subprocess" ? subprocessSandbox() : justBashSandbox(),
+      policy: { denyCommands: ["cat", "rm"] },
+    })({ workspace: localSessionWorkspace(session), files: session.files, emit: async event => { events.push(event); } });
+    const scripts = ["cat /session/f", "command cat /session/f", "env cat /session/f", "echo /session/f | xargs cat", "timeout 5 cat /session/f", "find /session -name f -exec cat {} \\;", "command rm /session/f", "env - rm /session/f", "env -S 'rm /session/f'"];
+    try {
+      for (const script of scripts) expect((await run(runtime, script)).exitCode).toBe(126);
+      expect(events.filter(event => event.type === "harness.runtime.command.denied")).toHaveLength(scripts.length);
+      expect((await session.files.read("/session/f")).text()).toBe("protected");
+    } finally { await runtime.dispose?.(); }
+  });
+});
+
+it.each(["in-process", "subprocess"] as const)("tier-0 registry policy survives a wrapper spreading options on %s", async adapter => {
+  await withTempDir(async dir => {
+    const session = await sessionFor(dir);
+    await session.files.writeText("/session/f", "protected");
+    const options = { workspace: localSessionWorkspace(session), files: session.files };
+    setTier0DeniedCommands(options, ["cat", "rm"]);
+    const runtime = await (adapter === "subprocess" ? subprocessSandbox() : justBashSandbox())({ ...options });
+    try {
+      expect((await run(runtime, 'tool=cat; "$tool" /session/f')).exitCode).not.toBe(0);
+      expect((await run(runtime, 'tool=rm; "$tool" /session/f')).exitCode).not.toBe(0);
+      expect((await session.files.read("/session/f")).text()).toBe("protected");
+    } finally { await runtime.dispose?.(); }
+  });
+});
+
+it("never retries a denied registry miss on the higher tier", async () => {
+  await withTempDir(async dir => {
+    const session = await sessionFor(dir);
+    const next = justBashTier();
+    const runtime = await tieredSandbox({ nextTier: next.factory, policy: { denyCommands: ["cat"] } })({ workspace: localSessionWorkspace(session), files: session.files });
+    try {
+      const result = await run(runtime, "printf 'bash: cat: command not found\\n' >&2");
+      expect(result.exitCode).toBe(126);
+      expect(next.created()).toBe(0);
+    } finally { await runtime.dispose?.(); }
+  });
+});
+
+
+it.each(["in-process", "subprocess"] as const)("keeps expanded runner targets under tier-0 policy on %s", async adapter => {
+  await withTempDir(async dir => {
+    const session = await sessionFor(dir);
+    await session.files.writeText("/session/f", "protected");
+    const next = justBashTier();
+    const runtime = await tieredSandbox({
+      tier0: adapter === "subprocess" ? subprocessSandbox() : justBashSandbox(),
+      nextTier: next.factory,
+      policy: { denyCommands: ["rm"] },
+    })({ workspace: localSessionWorkspace(session), files: session.files });
+    try {
+      for (const script of [
+        'tool=rm; env "$tool" /session/f',
+        'B="1 rm /session/f"; env FOO=$B',
+        'T="5 rm /session/f"; timeout $T',
+      ]) {
+        expect((await run(runtime, script)).exitCode, script).toBe(126);
+        expect((await session.files.read("/session/f")).text(), script).toBe("protected");
+        expect(next.created(), script).toBe(0);
+      }
+    } finally { await runtime.dispose?.(); }
+  });
+});
+
+it.each(["in-process", "subprocess"] as const)("follows a runner to mktemp on %s: no destination stays at tier 0, a destination escalates", async adapter => {
+  await withTempDir(async dir => {
+    const session = await sessionFor(dir);
+    const next = justBashTier();
+    const runtime = await tieredSandbox({
+      tier0: adapter === "subprocess" ? subprocessSandbox() : justBashSandbox(),
+      nextTier: next.factory,
+    })({ workspace: localSessionWorkspace(session), files: session.files });
+    try {
+      const bare = await run(runtime, 'f=$(env mktemp); echo x > "$f"; cat "$f"; echo "$f"');
+      expect(bare).toMatchObject({ exitCode: 0, stdout: expect.stringMatching(/^x\n\/tmp\//) });
+      expect(next.created()).toBe(0);
+      await run(runtime, "env TMPDIR=/session mktemp");
+      expect(next.created()).toBe(1);
+      expect(next.modelCommands()).toEqual(["env TMPDIR=/session mktemp"]);
     } finally { await runtime.dispose?.(); }
   });
 });

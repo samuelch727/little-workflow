@@ -1,3 +1,4 @@
+import { traceContentStoreFor } from "../trace/storage.js";
 import { describe, expect, it } from "vitest";
 import { createLocalFileWriter } from "../files/file-writer.js";
 import { sessionPaths, type LocalHostPaths } from "../local-host/paths.js";
@@ -156,11 +157,11 @@ describe("createEventedFileWriter", () => {
       const diff = events.find((event) => event.type === "harness.file.updated")?.metadata
         ?.diff as { contentRef?: string; preview?: string; truncated?: boolean };
       expect(diff).toMatchObject({
-        contentRef: expect.stringMatching(/^\/artifacts\/trace\/file-diffs\//u),
+        contentRef: expect.stringMatching(/^\/\.little-harness\/trace\/file-diffs\//u),
         truncated: true,
       });
       expect(diff.preview?.length).toBeLessThanOrEqual(24);
-      expect((await base.read(diff.contentRef!)).text()).toContain("+after line");
+      expect((await traceContentStoreFor(base)!.read(diff.contentRef!)).text()).toContain("+after line");
     });
   });
 

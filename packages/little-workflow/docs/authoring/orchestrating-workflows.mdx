@@ -3,11 +3,11 @@ title: Orchestrator
 description: Compose multiple workflows dynamically — chains, fan-out, and schema transformation between workflows.
 ---
 
-> **Deprecated composition surface.** Little Workflow has two ways to compose workflows, and the orchestrator is the one being retired. That means `runOrchestration({ workflows: [...], orchestrator })` and the `plan_workflow` / `run_workflow` / `start_workflow` tools it injects. Use the Harness surface instead: author each workflow with `defineWorkflow`, adapt it with `asHarnessWorkflow`, and hand the adapters to `createHarness({ workflows })`, which exposes every workflow to the agent as its own typed tool. See [Compose With Little Harness](/docs/v0.1.0-alpha/authoring/compose-with-harness), which includes a migration table. Nothing on this page has been removed and every example still runs. The orchestrator entry points emit a one-time `DeprecationWarning` (code `LWF_DEP_ORCHESTRATOR`) and are scheduled to be unexported in the next minor. One orchestrator behaviour has no Harness equivalent yet, planning once and running many; see [Plan once, run many](/docs/v0.1.0-alpha/cookbook/plan-once-run-many). `maxConcurrentSubRuns` maps to `workflowBudgets.maxConcurrentWorkflowRuns`.
+> **Deprecated composition surface.** Little Workflow has two ways to compose workflows, and the orchestrator is the one being retired. That means `runOrchestration({ workflows: [...], orchestrator })` and the `plan_workflow` / `run_workflow` / `start_workflow` tools it injects. Use the Harness surface instead: author each workflow with `defineWorkflow`, adapt it with `asHarnessWorkflow`, and hand the adapters to `createHarness({ workflows })`, which exposes every workflow to the agent as its own typed tool. See [Compose With Little Harness](https://little-stack.dev/docs/workflow/v0.1.0-alpha/authoring/compose-with-harness), which includes a migration table. Nothing on this page has been removed and every example still runs. The orchestrator entry points emit a one-time `DeprecationWarning` (code `LWF_DEP_ORCHESTRATOR`) and are scheduled to be unexported in the next minor. One orchestrator behaviour has no Harness equivalent yet, planning once and running many; see [Plan once, run many](https://little-stack.dev/docs/workflow/v0.1.0-alpha/cookbook/plan-once-run-many). `maxConcurrentSubRuns` maps to `workflowBudgets.maxConcurrentWorkflowRuns`.
 
 An **Orchestrator** is an agent that operates over multiple `WorkflowDefinition`s together. Where a Planner designs the LWIR for one workflow, the Orchestrator decides how several workflows combine at runtime: which runs sequentially, which run in parallel, and how data flows between them.
 
-There is no static pipeline graph. The pipeline emerges from the orchestrator's tool calls — a live Harness session that calls workflows as tools, reads memory, and writes its decision log as events. See [the SDK implementation spec](/docs/v0.1.0-alpha/internals/sdk-implementation) for the reasoning behind this design.
+There is no static pipeline graph. The pipeline emerges from the orchestrator's tool calls — a live Harness session that calls workflows as tools, reads memory, and writes its decision log as events. See [the SDK implementation spec](https://little-stack.dev/docs/workflow/v0.1.0-alpha/internals/sdk-implementation) for the reasoning behind this design.
 
 ## When to use an orchestrator
 
@@ -218,7 +218,7 @@ The orchestrator's harness mounts read-only views into each available workflow's
 └── candidate-scoring/                     ← ro — that workflow's accumulated lessons
 ```
 
-The orchestrator can inspect prior run lessons before deciding how to configure a planner call. See [Memory](/docs/v0.1.0-alpha/authoring/memory) for the full mount reference.
+The orchestrator can inspect prior run lessons before deciding how to configure a planner call. See [Memory](https://little-stack.dev/docs/workflow/v0.1.0-alpha/authoring/memory) for the full mount reference.
 
 ## Durability
 
@@ -239,7 +239,7 @@ The orchestrator's session is durable: every model turn and every tool call is e
 
 ## Cross-references
 
-- [Memory](/docs/v0.1.0-alpha/authoring/memory) — memory mounts the orchestrator sees
-- [Skills](/docs/v0.1.0-alpha/authoring/skills) — how to configure `orchestrator.skills`
-- [Workflow Config](/docs/v0.1.0-alpha/authoring/advanced-createlittleworkflow) — single-workflow planner path
-- [Tools](/docs/v0.1.0-alpha/authoring/tools-and-capabilities) — registering tools the orchestrator can call
+- [Memory](https://little-stack.dev/docs/workflow/v0.1.0-alpha/authoring/memory) — memory mounts the orchestrator sees
+- [Skills](https://little-stack.dev/docs/workflow/v0.1.0-alpha/authoring/skills) — how to configure `orchestrator.skills`
+- [Workflow Config](https://little-stack.dev/docs/workflow/v0.1.0-alpha/authoring/advanced-createlittleworkflow) — single-workflow planner path
+- [Tools](https://little-stack.dev/docs/workflow/v0.1.0-alpha/authoring/tools-and-capabilities) — registering tools the orchestrator can call

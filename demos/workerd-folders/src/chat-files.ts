@@ -3,6 +3,7 @@ import { InMemoryFs, type IFileSystem } from "just-bash";
 
 /** IFileSystem methods that change something, and which of their arguments name what changed. */
 const CHANGES: Record<string, (args: unknown[]) => unknown[]> = {
+  createExclusive: (args) => [args[0]],
   writeFile: (args) => [args[0]],
   appendFile: (args) => [args[0]],
   mkdir: (args) => [args[0]],

@@ -3,7 +3,7 @@ title: Replay
 description: How replayRun() rebuilds a run from events — two-level memoization across LWIR steps and harness sessions, with cross-scope sub-run durability.
 ---
 
-Replay is a pure fold over the [Event Log](/docs/v0.1.0-alpha/internals/event-log). It never touches a model, tool, code sandbox, or network. The implementation is small on purpose because all the durability work lives in the producers (`runtime.ts`, `harness/`, and `world.ts`).
+Replay is a pure fold over the [Event Log](https://little-stack.dev/docs/workflow/v0.1.0-alpha/internals/event-log). It never touches a model, tool, code sandbox, or network. The implementation is small on purpose because all the durability work lives in the producers (`runtime.ts`, `harness/`, and `world.ts`).
 
 This milestone adds a **second level of memoization** on top of the existing LWIR per-step durability: harness sessions record every model call and tool call, so crashed sessions can be resumed without replaying completed model invocations.
 

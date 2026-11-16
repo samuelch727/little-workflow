@@ -83,7 +83,15 @@ little-harness init --here --provider anthropic --model claude-sonnet-4-6
 ```
 
 `init` writes `little-harness.json` (`{ "agents": "agents" }`), creates `agents/`, and scaffolds a
-starter `support` agent. Pass `--force` to overwrite an existing workspace.
+starter `support` agent, including `agent.ts`, `tools/echo.ts`, prompt-only
+`instructions.md`, and (next alpha) `skills/answer-clearly/SKILL.md`. The agent
+source explains that its `system` property takes precedence over the instructions file.
+
+If the target already has a `package.json`, use additive `little setup` rather
+than forcing `init`: `--template existing-next` for a Next.js App Router app,
+otherwise `--template existing-node`. The refusal names the original target
+(or `--here`) so the command applies to the right folder. These additions await
+the next alpha release; `--force` remains an explicit overwrite option.
 
 The generated `package.json` pins versions instead of using `latest`: `@little-stack/harness` at the CLI's own
 version (`^0.2.0-alpha.3` for this release), `ai` at `^7.0.0`, the selected provider package at an AI SDK
@@ -105,7 +113,8 @@ See [Agent Folders](/docs/harness/v0.1.0-alpha/build-agents/agent-folders) for t
 ## `new <name>`
 
 Add another agent to an existing workspace at `agents/<name>` — an `agent.ts` (a `createHarness`
-template), an example `tools/echo.ts`, and `instructions.md`. Pass `--provider <provider>` and
+template), an example `tools/echo.ts`, prompt-only `instructions.md`, and (next
+alpha) `skills/answer-clearly/SKILL.md`. Pass `--provider <provider>` and
 `--model <model>` to choose the provider and model written into the new `agent.ts`; pass
 `--force` to overwrite an existing folder.
 
@@ -116,6 +125,15 @@ usage for `--help`; `init --workflow` points to `little setup --workflow`.
 ```bash
 little-harness new support
 ```
+
+In the next alpha, `new` fills missing `@little-stack/harness`, `ai` and `zod`
+runtime dependencies, plus the selected provider package, using the same version
+table as `init`. Existing dependency versions (including dev/peer dependencies)
+are preserved. It creates `little-harness.json` only when absent. If it changes
+`package.json`, the last line is `Next: pnpm install`; run that before testing.
+It does not print an install instruction when nothing changed or no package
+manifest exists, and does not create a package manifest itself.
+
 
 ## `test <name>`
 
@@ -323,15 +341,15 @@ Output:
 ```json
 [
   {
-    "id": "/artifacts/tool-results/search/abc123.json",
-    "path": "/artifacts/tool-results/search/abc123.json",
+    "id": "/artifacts/report.json",
+    "path": "/artifacts/report.json",
     "bytes": 38291
   }
 ]
 ```
 
-Artifacts can include developer-created outputs, automatically spooled tool
-results, and trace content refs under `/artifacts/trace/...`.
+Artifacts list explicit `/artifacts` outputs, including legacy spills already present.
+New default tool spools and host-owned trace spills are not artifacts.
 
 ## `diff <session-id> --path <harness-path>`
 
@@ -359,7 +377,7 @@ Output:
 }
 ```
 
-For large diffs, `diff.contentRef` points to `/artifacts/trace/...`.
+For large diffs, `diff.contentRef` points to `/.little-harness/trace/...`.
 
 ## `doctor <session-id>`
 

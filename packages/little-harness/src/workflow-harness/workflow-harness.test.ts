@@ -2,6 +2,10 @@ import { createHash } from "node:crypto";
 import { MockLanguageModelV4 } from "ai/test";
 import { describe, expect, it, vi } from "vitest";
 import { hashHarnessPrompt } from "../events/durability.js";
+import { contextSessionLogStore } from "../context-policy/log-store.js";
+import { contextRequestBytes } from "../context-policy/calibration.js";
+import { inMemoryContextCheckpointStore } from "../context-policy/policy.js";
+import { inMemorySessionLog } from "../remote-session/session-log-store.js";
 import {
   canonicalHarnessEventRequestDigest,
   createHarnessAppendIdempotencyKey,
@@ -25,6 +29,52 @@ type RecordedEvent = {
 };
 
 describe("workflowHarness", () => {
+  it("pairs direct Workflow measured input with the rendered prompt, including the step prompt", async () => {
+    const store = inMemoryContextCheckpointStore();
+    let sent: Record<string, unknown> | undefined;
+    const harness = createWorkflowHarness({
+      contextPolicy: { triggerTokens: 24000, summaryModel: false },
+      contextCompaction: { forSession: async () => ({ store, model: { providerId: "test", modelId: "test-model", maxOutputTokens: 1024, contextWindow: { tokens: 100000, source: "fixture" } } }) },
+      aiSdkModule: { Output: { text: () => ({ mode: "text" }) }, generateText: async request => {
+        sent = request;
+        return { text: "done", usage: { inputTokens: 500, outputTokens: 1 } };
+      } },
+    });
+    await harness.run({ kind: "execute_step", step: { id: "draft", uses: "ai.generate", with: { model: "worker", prompt: "Exact prompt" } }, stepInput: { input: "payload" }, stepContext: { stepPath: "draft", visitIndex: 0 } }, workflowHarnessTestContext({ system: "Exact Workflow system" }));
+    expect(JSON.stringify(sent!.messages)).toContain("Exact prompt");
+    expect(await store.lastInputUsage!("run_test")).toMatchObject({ inputTokens: 500, requestBytes: contextRequestBytes({ system: sent!.instructions, tools: [], messages: sent!.messages as unknown[] }) });
+  });
+  it("projects completed current-task JSON rounds before the bridge/hash and replays without tools or models", async () => {
+    const events: RecordedEvent[] = [], calls: Record<string, unknown>[] = [];
+    const log = inMemorySessionLog();
+    let count = 0;
+    const execute = vi.fn(async () => ({ id: "exact-id", status: "ok", body: "completed text ".repeat(400) }));
+    const harness = createWorkflowHarness({
+      contextPolicy: { triggerTokens: 7000, keepLastTurns: 1, summaryModel: false },
+      contextCompaction: { forSession: async ({ sessionId }) => ({
+        store: contextSessionLogStore({ log, sessionId, isCurrent: async () => true }),
+        model: { modelId: "test-model", providerId: "test", maxOutputTokens: 1024, contextWindow: { tokens: 100000, source: "synthetic" } },
+      }) },
+      aiSdkModule: { Output: { text: () => ({ mode: "text" }) }, generateText: async request => {
+        calls.push(structuredClone(request));
+        count++;
+        return count < 4 ? { toolCalls: [{ toolCallId: `c${count}`, toolName: "lookup", input: { id: count } }] } : { output: { steps: [] } };
+      } },
+    });
+    const ctx = workflowHarnessTestContext({ tools: { lookup: { execute } }, durability: {
+      ...recordDurability(events), priorEvents: async () => events.map((event, index) => ({ ...event, sequence: index + 1 })) as never,
+    } });
+    await harness.run(harnessPlanTask(), ctx);
+    expect(calls).toHaveLength(4); expect(execute).toHaveBeenCalledTimes(3);
+    const last = calls.at(-1)!.messages as any[];
+    expect(last[0]).toEqual((calls[0]!.messages as any[])[0]);
+    expect(last[1].content[0]).toMatchObject({ type: "tool-call", toolCallId: "c1", input: { id: 1 } });
+    expect(last[2].content[0].output.value).toMatchObject({ id: "exact-id", status: "ok", body: expect.stringContaining("canonical result c1") });
+    expect(last.at(-1).content[0].output.value.body).toBe("completed text ".repeat(400));
+    expect(JSON.stringify(events.filter(event => event.type === "harness.tool_call.succeeded"))).toContain("completed text ".repeat(400));
+    await harness.run(harnessPlanTask(), ctx);
+    expect(calls).toHaveLength(4); expect(execute).toHaveBeenCalledTimes(3);
+  });
   it("exposes the default harness identity", () => {
     expect(workflowHarness.harnessId).toBe("workflowHarness@1.0.0");
   });
@@ -445,6 +495,17 @@ describe("workflowHarness", () => {
       occurrenceId: "occ_tool_inflight",
       payload: { callId: "call_inflight_tool" },
     });
+  });
+
+  it("applies the context guard before active Workflow model invocation", async () => {
+    const generate = vi.fn(async () => ({ text: "unexpected", output: "unexpected" }));
+    const harness = createWorkflowHarness({ contextPolicy: { triggerTokens: 100 }, aiLoop: { generate } });
+    await expect(runWorkflowHarnessWithSession(harness, {
+      kind: "execute_step", step: { id: "draft", uses: "ai.generate", with: { model: "worker" } },
+      stepInput: { prompt: "Protected current input. ".repeat(100) },
+      stepContext: { stepPath: "draft", visitIndex: 0 },
+    }, workflowHarnessTestContext({ durability: recordDurability([]) }))).rejects.toThrow();
+    expect(generate).not.toHaveBeenCalled();
   });
 
   it("emits model events for ai.generate steps handled by an aiLoop", async () => {

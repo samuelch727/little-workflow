@@ -4,18 +4,16 @@ import { renderAgentSource } from "@little-stack/harness/scaffold";
 export const STARTER_WORKFLOW = "starter_echo";
 
 /** Both the headless CLI and Next import this server-neutral agent module. */
-export function agentSource(provider: string, model: string, workflow: boolean): Record<string, string> {
+export function agentSource(provider: string, model: string, workflow: boolean, littledb = false): Record<string, string> {
   return {
     "agent.ts": `import { createHarness, localHost } from "@little-stack/harness";
-${workflow ? 'import { loadWorkflow } from "@little-stack/workflow";\n' : ""}import { demoModel } from "./demo-model.ts";
+${workflow ? 'import { loadWorkflow } from "@little-stack/workflow";\n' : ""}${littledb ? "// Model selection is supplied by the LittleDB project.\n" : `import { demoModel } from "./demo-model.ts";
 
 // Keyless by default. Set LITTLE_DEMO=0 to call the live provider in live-model.ts (real calls and charges).
-const model = process.env.LITTLE_DEMO === "0" ? (await import("./live-model.ts")).model : demoModel;
-
+const model = process.env.LITTLE_DEMO === "0" ? (await import("./live-model.ts")).model : demoModel;\n`}
 // The system prompt is instructions.md; tools/ is discovered next to this file.
 export default createHarness({
-  model,
-  host: localHost(),
+${littledb ? "" : "  model,\n"}  host: localHost(),
 ${workflow ? `  workflows: [
     await loadWorkflow(new URL("./workflows/${STARTER_WORKFLOW}", import.meta.url), { executionMode: "durable" }),
   ],
@@ -109,19 +107,20 @@ export default defineWorkflow({
 `;
 }
 
-export function smokeSource(agents: string, workflow: boolean): string {
+export function smokeSource(agents: string, workflow: boolean, littledb = false): string {
   return `import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadHarness, localHost, streamHarness } from "@little-stack/harness";
 ${workflow ? 'import { loadWorkflow, localWorld } from "@little-stack/workflow";\n' : ""}
-// Keyless even when LITTLE_DEMO=0 is exported: loadHarness reads it when it imports agent.ts.
+${littledb ? "// Always keyless: the local smoke injects its demo model after loading the model-free agent." : "// Keyless even when LITTLE_DEMO=0 is exported: loadHarness reads it when it imports agent.ts."}
 process.env.LITTLE_DEMO = "1";
 const agentDir = join(process.cwd(), ${JSON.stringify(`${agents}/support`)});
 const dir = await mkdtemp(join(tmpdir(), "little-smoke-"));
 try {
   const harness = await loadHarness(agentDir, { host: localHost({ dataDir: join(dir, "harness") }) });
+${littledb ? `  harness.config.model = (await import("../${agents}/support/demo-model.ts")).demoModel;\n` : ""}  assert.ok(harness.config.skills.some((skill) => typeof skill === "string" && skill.endsWith("answer-clearly")), "starter skill discovered");
   const result = streamHarness({ harness, messages: [{ id: "smoke", role: "user", parts: [{ type: "text", text: "hello" }] }] });
   const body = await result.toUIMessageStreamResponse().text();
   await result.finished;
@@ -138,12 +137,12 @@ ${workflow ? `  assert.match(body, /${STARTER_WORKFLOW}/);
 `;
 }
 
-export function nextFiles(app: string, agents: string, route: string, page: string): Record<string, string> {
+export function nextFiles(app: string, agents: string, route: string, page: string, littledb = false): Record<string, string> {
   // agents is a sibling of app; relative imports also work with custom tsconfig aliases.
   const upRoute = "../".repeat(route.split("/").length + 1);
   return {
     [`${agents}/server.ts`]: `import "server-only";
-import * as nodeModule from "node:module";
+${littledb ? 'import { demoModel } from "./support/demo-model.ts";\n' : ""}import * as nodeModule from "node:module";
 import { join } from "node:path";
 import type { Harness, StreamHarnessOptions } from "@little-stack/harness";
 
@@ -155,7 +154,10 @@ const { loadHarness, streamHarness } = requirePackage("@little-stack/harness") a
 let ready: Promise<Harness> | undefined;
 
 export function getAgent(): Promise<Harness> {
-  ready ??= loadHarness(join(process.cwd(), ${JSON.stringify(agents)}, "support")).catch((error: unknown) => {
+  ready ??= loadHarness(join(process.cwd(), ${JSON.stringify(agents)}, "support"))${littledb ? `.then(async (harness) => {
+    harness.config.model = process.env.LITTLE_DEMO === "0" ? (await import("./support/live-model.ts")).model : demoModel;
+    return harness;
+  })` : ""}.catch((error: unknown) => {
     ready = undefined;
     throw error;
   });
@@ -247,4 +249,28 @@ export default function LittleChat() {
 }
 `,
   };
+}
+
+/** Local-only runner: deployed agent modules never import the keyless test model. */
+export function localAgentSource(agents: string): string {
+  return `import { createInterface } from "node:readline/promises";
+import { join } from "node:path";
+import { loadHarness, streamHarness } from "@little-stack/harness";
+const harness = await loadHarness(join(process.cwd(), ${JSON.stringify(`${agents}/support`)}));
+harness.config.model = process.env.LITTLE_DEMO === "0"
+  ? (await import("../${agents}/support/live-model.ts")).model
+  : (await import("../${agents}/support/demo-model.ts")).demoModel;
+const lines = createInterface({ input: process.stdin, output: process.stdout });
+console.log("Chatting with support. Type :exit to quit.");
+try {
+  for await (const line of lines) {
+    if (line.trim() === ":exit") break;
+    if (!line.trim()) continue;
+    const result = streamHarness({ harness, session: "local-cli", messages: [{ id: crypto.randomUUID(), role: "user", parts: [{ type: "text", text: line }] }] });
+    for await (const text of result.textStream) process.stdout.write(text);
+    await result.finished;
+    console.log();
+  }
+} finally { lines.close(); }
+`;
 }

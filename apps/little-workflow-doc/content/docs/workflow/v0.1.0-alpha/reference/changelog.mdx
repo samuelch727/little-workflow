@@ -7,6 +7,16 @@ This page summarizes the changes that matter to Little Workflow users. The full,
 
 Little Workflow is in its **alpha phase**: the LWIR wire format, public APIs, and persistence formats can change between alpha releases.
 
+## 0.2.0-alpha.4 — 16 November 2026
+
+This release adds the first public
+LittleDB client, `littledb login/deploy/chat`, managed-model setup with `--littledb`,
+starter skills and additive existing Node setup. Tracing Worlds upload workflow
+plans and flush them with traces. Harness adds per-instance folder context,
+opt-in context compaction, tool budgets, virtual `/tmp`, trace redaction and
+private spill storage. **Breaking:** restore the former default tool list with
+`taskTools: true, workflowTools: true` on a host with durable services.
+
 ## 0.2.0-alpha.3 — 12 November 2026
 
 - **Added:** Harness agent-folder compiler and standalone workerd demo, remote tools,

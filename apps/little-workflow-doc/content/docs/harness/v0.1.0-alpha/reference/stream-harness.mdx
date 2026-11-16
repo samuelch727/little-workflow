@@ -345,7 +345,7 @@ should stay hidden; local tools such as the CLI can pass a more detailed formatt
 
 Per-call override for automatic oversized tool-result spooling. When omitted,
 the setting from `createHarness()` is used. If neither is configured, Little
-Harness spools tool results larger than 16 KB into `/artifacts/tool-results`.
+Harness spools tool results larger than 16 KB into `/session/.tool-results`.
 The compact result includes `summary` metadata with text counts and, for JSON
 content, a bounded structure sketch.
 
@@ -392,9 +392,13 @@ streamHarness({
 ```
 
 `stopWhen` takes AI SDK 7 stop conditions such as `isStepCount(8)` (imported
-from `ai`). When it is omitted, Little Harness uses
-`isStepCount(workflowBudgets.maxModelSteps)` — 20 by default — so streamed turns
-can continue after executed tool calls.
+from `ai`). Caller conditions can end a turn earlier, but cannot disable the
+always-on model-step cap: `turnLimits.maxSteps` when explicitly set, otherwise
+`workflowBudgets.maxModelSteps` (20 by default). An explicit hard limit above 20
+is honored and still throws `StepLimitExceeded` at that limit. This also applies
+to condition arrays and conditions that always return false. The cap is evaluated
+first when both cap and caller conditions would stop the same step. Hard
+`turnLimits` and parking keep their separate behavior.
 
 ### `connector`
 
@@ -592,3 +596,5 @@ result.finished.then(async ({ persistence }) => {
 
 return result.toUIMessageStreamResponse();
 ```
+
+The completed result includes `stopReason: "step-limit"` when the harness's own step condition (`workflowBudgets.maxModelSteps`, or the default of 20) ends a tool-calling loop. A caller-supplied `stopWhen` that fires after a tool-calling step instead reports `stopReason: "stop-condition"`. Natural completion omits the field. Hard `turnLimits` retain their error semantics.

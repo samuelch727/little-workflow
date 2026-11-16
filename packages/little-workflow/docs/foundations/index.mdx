@@ -45,7 +45,7 @@ The `WorkflowDefinition` is not a runtime service handle. Runtime infrastructure
 
 ## Running And Composing
 
-`runWorkflow` with a single definition starts a Planner session that plans the LWIR; Workers then execute it. To compose several workflows, hand them to a Little Harness agent as typed tools (`asHarnessWorkflow` → `createHarness({ workflows })`); see [Compose With Little Harness](/docs/v0.1.0-alpha/authoring/compose-with-harness).
+`runWorkflow` with a single definition starts a Planner session that plans the LWIR; Workers then execute it. To compose several workflows, hand them to a Little Harness agent as typed tools (`asHarnessWorkflow` → `createHarness({ workflows })`); see [Compose With Little Harness](https://little-stack.dev/docs/workflow/v0.1.0-alpha/authoring/compose-with-harness).
 
 ```ts
 // Single workflow → Planner session plans the LWIR, Workers execute it
@@ -81,7 +81,7 @@ type Harness = {
 
 `HarnessContext` carries the model, system prompt, tools, runtime mounts, bash capabilities, memory mounts, scratch mounts, skills, and durability sink. Little Workflow also supplies optional `bash` and `recorder` conveniences for older custom harnesses. The harness exposes the context to the model in its agent loop; it doesn't need workflow domain knowledge.
 
-See [Harness Implementation](/docs/v0.1.0-alpha/internals/harness) for the full contract, event vocabulary, and durability model.
+See [Harness Implementation](https://little-stack.dev/docs/workflow/v0.1.0-alpha/internals/harness) for the full contract, event vocabulary, and durability model.
 
 > **The word "Harness" is overloaded.** In Little Workflow it is a per-role runtime *primitive* — the `workflowHarness` each role runs in. In Little Harness it is the whole *product* (`createHarness`). They are related but distinct; see the [Little Harness docs](https://github.com/samuelch727/little-workflow/tree/main/packages/little-harness) for the product. The default `workflowHarness` is in fact implemented on top of Little Harness.
 
@@ -100,7 +100,7 @@ The Planner and Orchestrator are run-level decision-makers. The Worker runs once
 
 ### Orchestrator tools
 
-> **Deprecated.** These tools belong to the orchestrator surface (`LWF_DEP_ORCHESTRATOR`). New code composes workflows with [`asHarnessWorkflow` and `createHarness({ workflows })`](/docs/v0.1.0-alpha/authoring/compose-with-harness), where each workflow is its own typed tool.
+> **Deprecated.** These tools belong to the orchestrator surface (`LWF_DEP_ORCHESTRATOR`). New code composes workflows with [`asHarnessWorkflow` and `createHarness({ workflows })`](https://little-stack.dev/docs/workflow/v0.1.0-alpha/authoring/compose-with-harness), where each workflow is its own typed tool.
 
 When `workflows` is an array, the Orchestrator's harness session receives three SDK-injected tools:
 
@@ -131,7 +131,7 @@ Two storage surfaces are mounted into every harness session:
 /mnt/scratch/peer-steps/         (ro; outputs of sibling steps in the current run)
 ```
 
-Memory persists across runs; scratch is cleaned up when the run ends. See [Memory and Scratch](/docs/v0.1.0-alpha/internals/memory-scratch).
+Memory persists across runs; scratch is cleaned up when the run ends. See [Memory and Scratch](https://little-stack.dev/docs/workflow/v0.1.0-alpha/internals/memory-scratch).
 
 ## OrchestrationRequest
 
@@ -182,7 +182,7 @@ A registered, immutable LWIR document plus its validation metadata:
 - compiled expression plan
 - validation result
 
-A pre-run **cost and risk estimate** belongs to this record in the target design, but nothing in alpha computes one. Cost in alpha is a post-run receipt: real dollars per step and per run, priced from recorded tokens — see [Cost Report](/docs/v0.1.0-alpha/running/inspect-runs#cost-report).
+A pre-run **cost and risk estimate** belongs to this record in the target design, but nothing in alpha computes one. Cost in alpha is a post-run receipt: real dollars per step and per run, priced from recorded tokens — see [Cost Report](https://little-stack.dev/docs/workflow/v0.1.0-alpha/running/inspect-runs#cost-report).
 
 Workers verify the snapshot before execution. If a model or tool surface has drifted, the run fails rather than silently executing against a different surface.
 
@@ -190,7 +190,7 @@ Workers verify the snapshot before execution. If a model or tool surface has dri
 
 A `Run` executes one `WorkflowVersion` with one input packet and runtime policy snapshot. A `StepAttempt` is one attempt to execute a step.
 
-Each step executes inside a **Worker** harness session. For `ai.generate` steps, the worker makes one model call and offers the model no tools. For `tool.call` and `decision` steps, execution is direct (no model in the loop) but still mediated through the harness for observability uniformity. `code.run` steps are dispatched the same way, but the **default** worker harness declines to execute the code body and throws — running `code.run` requires a developer-supplied `worker.harness`. See [Runtime Execution](/docs/v0.1.0-alpha/internals/runtime-execution).
+Each step executes inside a **Worker** harness session. For `ai.generate` steps, the worker makes one model call and offers the model no tools. For `tool.call` and `decision` steps, execution is direct (no model in the loop) but still mediated through the harness for observability uniformity. `code.run` steps are dispatched the same way, but the **default** worker harness declines to execute the code body and throws — running `code.run` requires a developer-supplied `worker.harness`. See [Runtime Execution](https://little-stack.dev/docs/workflow/v0.1.0-alpha/internals/runtime-execution).
 
 Little Workflow promises at-least-once execution with idempotent commits, not general exactly-once execution.
 

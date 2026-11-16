@@ -175,3 +175,16 @@ export {
   rejectReservedDiscoveredToolNames,
   RESERVED_DISCOVERED_TOOL_NAMES,
 } from "./workspace/tool-name-policy.js";
+
+export * from "./context-policy/index.js";
+export { sanitizeTraceValue, redactTraceText } from "./trace/redaction.js";
+// For a host that builds its own FileWriter. With a store attached to that writer, spilled
+// trace content goes to the store under TRACE_CONTENT_PREFIX and is never a session file;
+// without one it is written through the writer under /artifacts/trace.
+export {
+  attachTraceContentStore,
+  createTraceContentStore,
+  isTraceContentRef,
+  TRACE_CONTENT_PREFIX,
+  type TraceContentStore,
+} from "./trace/storage.js";

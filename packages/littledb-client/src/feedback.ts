@@ -2,9 +2,12 @@ import {
   FeedbackRequestSchema,
   FeedbackResultSchema,
   FeedbackRetractedSchema,
+  FeedbackSelectionSchema,
   type FeedbackRequest,
   type FeedbackResult,
   type FeedbackRetracted,
+  type FeedbackSelection,
+  type FeedbackAnchor,
 } from "./contract.js";
 import type { Exporter, LittleDBErrorHandler } from "./exporter.js";
 import { LittleDBError, type Transport } from "./http.js";
@@ -54,19 +57,31 @@ export type FeedbackInput = {
   readonly survey?: string | undefined;
   /** Up to 20 survey answers; each becomes a score named after its question. */
   readonly answers?: readonly FeedbackAnswer[] | undefined;
+  /** The passage, field or app-defined part this feedback is about; omit for the whole reply. */
+  readonly selection?: FeedbackSelection | undefined;
+  /** Up to 10 of your app's reason codes, trimmed and deduplicated. */
+  readonly tags?: readonly string[] | undefined;
+  /** What the reply or selected passage should have said, up to 4000 characters. */
+  readonly expected?: string | undefined;
+  /** Your app's name for who sent it. The project's `feedback.expertRoles` decides who is an expert. */
+  readonly role?: string | undefined;
   /** A few extra fields to keep with each score. */
   readonly metadata?: Readonly<Record<string, unknown>> | undefined;
 };
 
-export type { FeedbackResult, FeedbackRetracted };
+export type { FeedbackResult, FeedbackRetracted, FeedbackSelection, FeedbackAnchor };
 
 /**
  * A stable feedback id for one user and one thing they reacted to (a message id, or something
  * like `survey:<sessionId>`). Hashed, so ids from different users can never collide and no id
- * is longer than LittleDB allows.
+ * is longer than LittleDB allows. A selection adds quote/start/path/ref to the identity, so
+ * each highlight has its own id; without one the existing whole-reply id is unchanged.
  */
-export function feedbackId(userId: string, messageId: string): string {
-  return `fb_${sha256Hex(JSON.stringify([userId, messageId])).slice(0, 32)}`;
+export function feedbackId(userId: string, messageId: string, selection?: FeedbackSelection): string {
+  const parts = selection === undefined
+    ? [userId, messageId]
+    : [userId, messageId, selection.quote ?? null, selection.start ?? null, selection.path ?? null, selection.ref ?? null];
+  return `fb_${sha256Hex(JSON.stringify(parts)).slice(0, 32)}`;
 }
 
 /** Check feedback before it is sent: the request body, or the first problem as one line. */
@@ -120,6 +135,8 @@ export function createFeedbackApi(deps: { readonly transport: Transport; readonl
 export type FeedbackUser = {
   /** Pseudonymous: a hash of your user id. It is stored with every score. */
   readonly userId: string;
+  /** Your server's role for this user; a browser cannot choose it. */
+  readonly role?: string | undefined;
 };
 
 /** Where the browser's feedback goes: a trace id, or `{ sessionId }` for the session's latest trace. */
@@ -136,7 +153,8 @@ export type FeedbackReference = {
 export type FeedbackHandlerOptions = {
   /**
    * Who is sending: your session check. Return the user, or `null` to refuse with 401. The
-   * `userId` it returns is the one stored; a `userId` in the body is ignored.
+   * `userId` and `role` it returns are the ones stored; body values are ignored, and legacy
+   * `metadata.role` and `metadata.correction` are removed from browser requests.
    */
   readonly authorize: (request: Request) => FeedbackUser | null | undefined | Promise<FeedbackUser | null | undefined>;
   /**
@@ -159,8 +177,8 @@ const DEFAULT_MAX_BODY_BYTES = 16 * 1024;
 /**
  * A Fetch handler (`Request` in, `Response` out) for your own backend, so the browser can send
  * feedback without ever holding the LittleDB key. `POST` sends feedback, `DELETE` withdraws it
- * (`?id=` or `{ id }`). Ids from the browser are scoped to the signed-in user: the handler sends
- * `feedbackId(userId, id)`, so one user can neither replace nor withdraw another's answers.
+ * (`?id=`, `{ id }` or `{ messageId, selection }`). Ids from the browser are scoped to the
+ * signed-in user and optional selection, so each highlight has its own answer.
  */
 export function createFeedbackHandler(
   options: FeedbackHandlerOptions,
@@ -171,7 +189,7 @@ export function createFeedbackHandler(
   }
   const maxBytes = Math.max(1, options.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES);
 
-  async function send(request: Request, userId: string): Promise<Response> {
+  async function send(request: Request, userId: string, role?: string): Promise<Response> {
     if (!isJsonType(request.headers.get("content-type"))) {
       // Also what keeps a cross-site form from posting feedback with the user's cookies: a JSON
       // content type needs a CORS preflight.
@@ -182,7 +200,7 @@ export function createFeedbackHandler(
     const body = parseJson(text);
     if (!isRecord(body)) return reply(400, problem("bad_request", "Send feedback as a JSON object."));
 
-    const { messageId, userId: _ignored, traceId, sessionId, ...rest } = body;
+    const { messageId, userId: _ignored, role: _ignoredRole, metadata, selection: browserSelection, traceId, sessionId, ...rest } = body;
     if (messageId !== undefined && !isId(messageId)) {
       return reply(400, problem("bad_request", "messageId: expected a string of at most 200 characters."));
     }
@@ -204,32 +222,59 @@ export function createFeedbackHandler(
       return reply(400, problem("bad_request", "Send a traceId or a sessionId; messageId needs resolveTrace on the server."));
     }
 
-    // One answer per user per message: the id defaults to the message id, and either is scoped
-    // to this user.
+    // Validate the selection before using it to scope an id. These legacy metadata fields
+    // must always be stripped: the engine's D8 fallback trusts direct server callers.
+    const safeMetadata = isRecord(metadata)
+      ? Object.fromEntries(Object.entries(metadata).filter(([key]) => key !== "role" && key !== "correction"))
+      : metadata;
+    let selection: FeedbackSelection | undefined;
+    if (browserSelection !== undefined) {
+      const parsed = FeedbackSelectionSchema.safeParse(browserSelection);
+      if (!parsed.success) return reply(400, problem("bad_request", "Invalid feedback selection."));
+      selection = parsed.data;
+    }
     const ownId = rest.id ?? messageId;
     const candidate = {
       ...rest,
       ...target,
       userId,
-      ...(ownId === undefined ? {} : { id: typeof ownId === "string" ? feedbackId(userId, ownId) : ownId }),
+      role,
+      ...(metadata === undefined ? {} : { metadata: safeMetadata }),
+      ...(selection === undefined ? {} : { selection }),
+      ...(ownId === undefined ? {} : { id: typeof ownId === "string" ? feedbackId(userId, ownId, selection) : ownId }),
     };
     const checked = checkFeedback(candidate);
     if (!checked.ok) return reply(400, problem("bad_request", checked.error));
     const result = await deps.feedback(checked.value);
-    return reply(201, { traceId: result.traceId, scores: result.scores });
+    return reply(result.stale === true ? 200 : 201, result);
   }
 
   async function retract(request: Request, userId: string): Promise<Response> {
-    let id: unknown = requestUrl(request)?.searchParams.get("id") ?? undefined;
+    const query = requestUrl(request)?.searchParams;
+    let id: unknown = query?.get("id") ?? undefined;
+    let revision: unknown = query?.get("revision") ?? undefined;
+    let selection: FeedbackSelection | undefined;
     if (id === undefined) {
       const text = await readBody(request, maxBytes);
       if (text === undefined) return reply(413, problem("too_large", `The body is limited to ${maxBytes} bytes.`));
       const body = parseJson(text);
-      if (isRecord(body)) id = body.id ?? body.messageId;
+      if (isRecord(body)) {
+        id = body.id ?? body.messageId;
+        revision ??= body.revision;
+        if (body.selection !== undefined) {
+          const parsed = FeedbackSelectionSchema.safeParse(body.selection);
+          if (!parsed.success) return reply(400, problem("bad_request", "Invalid feedback selection."));
+          selection = parsed.data;
+        }
+      }
     }
     if (!isId(id)) return reply(400, problem("bad_request", "Say which feedback to withdraw: ?id= or { \"id\": ... }."));
-    const result = await deps.retractFeedback(feedbackId(userId, id));
-    return reply(200, { removed: result.removed });
+    if (typeof revision === "string" && /^\d+$/u.test(revision)) revision = Number(revision);
+    if (revision !== undefined && (typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 0)) {
+      return reply(400, problem("bad_request", "A retraction's revision is a whole number from 0."));
+    }
+    const result = await deps.retractFeedback(feedbackId(userId, id, selection), revision === undefined ? {} : { revision });
+    return reply(200, result);
   }
 
   return async (request) => {
@@ -242,7 +287,7 @@ export function createFeedbackHandler(
       if (typeof userId !== "string" || userId.length === 0 || userId.length > 200) {
         return reply(401, problem("unauthorized", "Sign in to send feedback."));
       }
-      return request.method === "DELETE" ? await retract(request, userId) : await send(request, userId);
+      return request.method === "DELETE" ? await retract(request, userId) : await send(request, userId, user?.role);
     } catch (error) {
       return failed(error, request.method === "DELETE");
     }
@@ -258,6 +303,7 @@ export function createFeedbackHandler(
         );
       }
       if (error.status === 400 || error.status === 422) return reply(400, problem("bad_request", "LittleDB did not accept this feedback."));
+      if (error.status === 409) return reply(409, problem("revision_conflict", "This feedback revision already has different answers."));
       if (error.status === 429) return reply(429, problem("rate_limited", "Too much feedback at once. Try again shortly."));
       deps.onError(error, { operation: "feedback" });
       return reply(502, problem("unavailable", "Feedback could not be saved right now."));

@@ -3,10 +3,8 @@ title: User Feedback
 description: Preview — send what your users say about the agent's replies (thumbs, ratings, comments, surveys) to LittleDB, where reviews, trials and rollback weigh it next to the judges.
 ---
 
-<Callout title="Preview — not yet available" type="warn">
-  `@little-stack/littledb` is **not published to npm yet**, and it needs a LittleDB server, which is
-  not publicly available. This page documents the client's shape so you can plan around it.
-  [Outcome Capture](/docs/v0.1.0-alpha/build-agents/outcomes) to local traces works without it.
+<Callout title="LittleDB account required" type="info">
+  `@little-stack/littledb` is published from `0.2.0-alpha.4`; it needs a LittleDB account. The LittleDB server is not open source. See [release status](https://little-stack.dev/docs/releases).
 </Callout>
 
 An LLM judge grades what it can see in a trace. Your users notice what it cannot: the refund
@@ -35,7 +33,7 @@ outcome sink and each reaction becomes user feedback; the same sink works for ou
 reports:
 
 ```ts
-// Preview — @little-stack/littledb is not published yet.
+// Alpha.4 client; requires LittleDB service access.
 import { createLittleDB } from "@little-stack/littledb";
 
 const db = createLittleDB({ url: process.env.LITTLEDB_URL!, apiKey: process.env.LITTLEDB_API_KEY! });
@@ -72,7 +70,7 @@ the harness counts it as a failed sink in the result.
 When your own server knows what the user said, send it with `db.feedback()`:
 
 ```ts
-// Preview — @little-stack/littledb is not published yet.
+// Alpha.4 client; requires LittleDB service access.
 import { feedbackId } from "@little-stack/littledb";
 
 await db.feedback({
@@ -135,7 +133,7 @@ a plain Fetch handler (`Request` in, `Response` out), so it fits a Next.js route
 server with a Request adapter:
 
 ```ts
-// app/api/feedback/route.ts. Preview — @little-stack/littledb is not published yet.
+// app/api/feedback/route.ts. Alpha.4 client; requires LittleDB service access.
 const handler = db.feedbackHandler({
   // Your session check. null answers 401.
   authorize: async (request) => {
@@ -177,6 +175,83 @@ The body takes the same fields as `db.feedback()`, plus `messageId`. The handler
 - Withdraws on `DELETE`, by `?id=` or `{ "id": ... }`.
 - Answers LittleDB's own errors with a short message and never passes on its error body or
   anything about the key. The details go to the client's `onError`.
+
+## Feedback on part of a reply
+
+Import the browser helper separately; it has no Node dependencies. Keep the same `selection`
+when changing or withdrawing an answer:
+
+```ts
+import { selectionIn } from "@little-stack/littledb/selection";
+
+const selection = selectionIn(replyElement);
+if (selection !== null) {
+  const response = await fetch("/api/feedback", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ messageId, selection, thumbs: "down", tags: ["factual"] }),
+  });
+  const result = await response.json(); // result.selection?.anchor
+}
+```
+
+To withdraw it later, reuse the saved `selection`:
+
+```ts
+if (selection !== null) {
+  await fetch("/api/feedback", {
+    method: "DELETE",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ messageId, selection }),
+  });
+}
+```
+
+The helper reads text nodes in document order, skips `data-feedback-ignore` subtrees, and trims
+padding while adjusting its UTF-16 `start`/`end` indexes. Collapsed, blank and outside ranges,
+and quotes over 2,000 UTF-16 units after trimming, return `null`. Pass a `Range` as the second
+argument to use a saved selection.
+`textSelection(text, start, end)` works without a DOM; invalid indexes, blank passages and
+quotes over 2,000 UTF-16 units throw `RangeError`.
+
+From your server, send the same first-class fields:
+
+```ts
+import { feedbackId } from "@little-stack/littledb";
+
+await db.feedback({
+  traceId, userId: hashedUserId,
+  id: feedbackId(hashedUserId, messageId, selection),
+  selection, thumbs: "down", tags: ["factual"], expected: "The corrected passage.",
+  role: signedInUser.role, // from your server's session
+});
+```
+
+Each highlight has a stable id based on `quote`, `start`, `path` and `ref`; an omitted selection
+keeps the existing whole-reply id. `selection` needs a `quote`, JSON-pointer `path`, or app-defined
+`ref`; quote context (`prefix`/`suffix`) and offsets are optional. A selection alone is not a
+feedback signal: include thumbs, a rating, a comment or survey answers too. Tags are up to 10
+reason codes of 1–50 characters, trimmed and deduplicated; `expected` is up to 4,000 characters.
+
+**Role comes from your server.** Return `{ userId, role }` from `authorize()`; the handler ignores
+body `role` and always strips browser `metadata.role` and `metadata.correction`, even if the
+server returns no role. Other metadata is kept. The project's `feedback.expertRoles` decides
+which roles are experts; other users' `expected` remains feedback, not an automatic test item.
+Trusted direct server callers can still use LittleDB's temporary legacy metadata fallback.
+
+The result's `selection.anchor.status` is `exact` for a literal match, `loose` for a normalized
+match, `position` for an offset match, `pending` while the target is incomplete, or terminal
+`not_found` when a finished target has no match. Pending/unmatched quotes remain the user's
+words, never verified agent output. Path/ref-only selections have no anchor. The local fakes
+simulate only `exact` and `not_found`, not the engine's pending lifecycle or normalized matching.
+
+The handler forwards `selection.anchor`, `stale` and `revision`: a stale POST is `200`, an applied
+one `201`, and a conflicting revision `409`. Send `revision` on DELETE too, in its JSON body or
+with `?id=...&revision=...`, to keep retries ordered. The browser sends its original message/id
+and selection; the handler scopes them to the authorized user.
+
+Selected quotes, context and expected text are stored content, like comments; treat them as
+untrusted user data and avoid putting personal information in them.
 
 ## Privacy
 

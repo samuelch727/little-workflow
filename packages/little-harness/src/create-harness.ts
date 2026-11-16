@@ -1,3 +1,4 @@
+import { validateContextPolicy } from "./context-policy/policy.js";
 import type { ToolSet } from "ai";
 import { resolveDynamicWorkflows } from "./dynamic-workflows/config.js";
 import { authoredPlansPersistentDir } from "./dynamic-workflows/authored-plans-store.js";
@@ -36,7 +37,6 @@ export const DEFAULT_WORKFLOW_BUDGETS: HarnessWorkflowBudgets = {
   // omits budgets is bound by the same numbers a harness would apply.
   maxConcurrentWorkflowRuns: DEFAULT_MAX_CONCURRENT_WORKFLOW_RUNS,
   maxQueuedWorkflowRuns: DEFAULT_MAX_QUEUED_WORKFLOW_RUNS,
-  maxAutonomousTurns: 10,
 };
 
 export function createHarness<TTools extends ToolSet = ToolSet, TExtraBody = unknown>(
@@ -49,9 +49,18 @@ export function createHarness<TTools extends ToolSet = ToolSet, TExtraBody = unk
     humanInput: rawHumanInput,
     ...restOptions
   } = options;
+  validateContextPolicy(options.contextPolicy);
   const userTools = (options.tools ?? {}) as TTools;
   assertSafeUserTools(userTools);
   const humanInput = resolveHumanInput(rawHumanInput, userTools);
+  for (const name of ["taskTools", "workflowTools"] as const) {
+    if (options[name] !== undefined && typeof options[name] !== "boolean") {
+      throw new HarnessInputError(`${name} must be a boolean.`);
+    }
+  }
+  if (options.taskTools === false && humanInput !== undefined && humanInput.tool !== false) {
+    throw new HarnessInputError(`taskTools: false cannot be used with model-facing humanInput tool ${humanInput.toolName ?? DEFAULT_ASK_PERSON_TOOL_NAME}; it directs the model to await_tasks. Leave taskTools out, or set humanInput.tool: false.`);
+  }
   const resolvedMemory = resolveHarnessMemory(options.memory);
   assertNoBuiltInFileToolCollisions(options, userTools, resolvedMemory.configs.length > 0);
   const dynamicWorkflows = resolveDynamicWorkflows(rawDynamicWorkflows);
@@ -87,10 +96,17 @@ export function createHarness<TTools extends ToolSet = ToolSet, TExtraBody = unk
 }
 
 function resolveWorkflowBudgets(overrides: Partial<HarnessWorkflowBudgets> | undefined): HarnessWorkflowBudgets {
-  return {
+  const budgets = {
     ...DEFAULT_WORKFLOW_BUDGETS,
     ...Object.fromEntries(Object.entries(overrides ?? {}).filter(([, value]) => value !== undefined)),
   };
+  for (const [name, minimum] of [["maxModelSteps", 1], ["maxToolCallsPerTurn", 0], ["maxConcurrentToolCalls", 1], ["toolDeadlineMs", 1]] as const) {
+    const value = budgets[name];
+    if (value !== undefined && (!Number.isSafeInteger(value) || value < minimum)) {
+      throw new HarnessInputError(`workflowBudgets.${name} must be an integer >= ${minimum}.`);
+    }
+  }
+  return budgets;
 }
 
 function resolveHumanInput(

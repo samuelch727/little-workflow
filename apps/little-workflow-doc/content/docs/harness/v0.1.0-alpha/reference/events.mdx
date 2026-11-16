@@ -143,7 +143,7 @@ type TraceContentRef = {
 ```
 
 When content is too large to inline, `contentRef` points to
-`/artifacts/trace/...`. The trace still records byte counts and hashes so a
+`/.little-harness/trace/...`. The trace still records byte counts and hashes so a
 developer can verify what changed.
 
 ## Session Events
@@ -188,9 +188,10 @@ harness.tool_call.succeeded
 harness.tool_call.failed
 ```
 
-Large tool outputs should point to artifacts. Automatically spooled tool results
-also emit normal `harness.file.created`, `harness.file.written_by_tool`, and
-`harness.artifact.created` events for the `/artifacts/tool-results/...` file.
+Large tool outputs can point to model-readable session files. Automatically spooled tool results
+emit normal `harness.file.created` and `harness.file.written_by_tool` events for
+`/session/.tool-results/...`, without an artifact event or a stored diff. Custom
+`outputDir` remains supported; an explicit `/artifacts/...` destination is an artifact.
 
 Tool events include a `caller` value:
 

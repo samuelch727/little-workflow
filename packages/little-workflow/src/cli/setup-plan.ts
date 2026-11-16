@@ -6,19 +6,21 @@ import { basename, join, resolve } from "node:path";
 import { parse, type ParseError } from "jsonc-parser";
 import semver from "semver";
 import { providerDependency, resolveModelChoice, resolveProvider, scaffoldAgent, scaffoldDependencyVersions } from "@little-stack/harness/scaffold";
-import { agentSource, nextFiles, smokeSource, STARTER_WORKFLOW } from "./setup-templates.js";
+import { agentSource, localAgentSource, nextFiles, smokeSource, STARTER_WORKFLOW } from "./setup-templates.js";
 import { digest, readText, STATE, type SetupPlan } from "./setup-transaction.js";
 
 /** What `planSetup` takes. Every field is optional; the defaults match `little setup`. */
 export type SetupOptions = {
-  /** `node` (default), `next`, or `existing-next` to add Little to the Next.js app at the root. */
-  template?: "node" | "next" | "existing-next";
+  /** New Node/Next project or additive existing Node/Next setup. */
+  template?: "node" | "next" | "existing-next" | "existing-node";
   /** A Harness provider catalog id for the live model. Default `openai`. */
   provider?: string;
   /** The live model id. Default: the provider's catalog choice. */
   model?: string;
   /** Wire the durable, keyless starter workflow into the agent. Default `false`. */
   workflow?: boolean;
+  /** Omit the deployed model; local entrypoints inject their own demo model. */
+  littledb?: boolean;
   /** Default: the project's lockfile or `packageManager` field, else `npm`. */
   packageManager?: "npm" | "pnpm" | "yarn";
   /** Chat route for the Next templates. Default `api/little/chat`. */
@@ -32,11 +34,12 @@ export const SETUP_DEFAULTS = {
   template: "node",
   provider: "openai",
   workflow: false,
+  littledb: false,
   route: "api/little/chat",
   page: "little",
 } as const satisfies SetupOptions;
 type Json = Record<string, any>;
-type SetupState = { schema: 1; options: ResolvedSetupOptions; hashes: Record<string, string> };
+type SetupState = { schema: 1; options: Omit<ResolvedSetupOptions, "littledb"> & { littledb?: boolean }; hashes: Record<string, string> };
 const json = (value: unknown) => `${JSON.stringify(value, null, 2)}\n`;
 const ownVersion = () => (JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8")) as { version: string }).version;
 const LOCKS = { npm: "package-lock.json", pnpm: "pnpm-lock.yaml", yarn: "yarn.lock" } as const;
@@ -77,12 +80,13 @@ export async function planSetup(rootInput: string, requested: SetupOptions = {})
     template: requested.template ?? SETUP_DEFAULTS.template,
     provider: requested.provider ?? SETUP_DEFAULTS.provider,
     workflow: requested.workflow ?? SETUP_DEFAULTS.workflow,
+    littledb: requested.littledb ?? false,
     route: requested.route ?? SETUP_DEFAULTS.route,
     page: requested.page ?? SETUP_DEFAULTS.page,
     ...(requested.model === undefined ? {} : { model: requested.model }),
     ...(requested.packageManager === undefined ? {} : { packageManager: requested.packageManager }),
   };
-  if (!["node", "next", "existing-next"].includes(input.template)) throw new Error("Template must be node, next, or existing-next.");
+  if (!["node", "next", "existing-next", "existing-node"].includes(input.template)) throw new Error("Template must be node, next, existing-next, or existing-node.");
   if (Number(process.versions.node.split(".")[0]) < 22) throw new Error("Little setup requires Node.js >=22.");
   if (!/^(api\/)[a-zA-Z0-9_/-]+$/.test(input.route) || input.route.split("/").some(x => !x || x === "." || x === "..")) throw new Error("--route must be a plain App Router path such as api/little/chat.");
   if (!/^[a-zA-Z0-9_/-]+$/.test(input.page) || input.page.split("/").some(x => !x || x === "." || x === "..")) throw new Error("--page must be a plain App Router path such as little.");
@@ -90,8 +94,9 @@ export async function planSetup(rootInput: string, requested: SetupOptions = {})
   if (oldState && (oldState.schema !== 1 || !oldState.options || !oldState.hashes)) throw new Error(`Invalid ${STATE}.`);
   if (await readText(root, ".little/setup-transaction.json") !== null) throw new Error(`Interrupted setup detected. Inspect ${root}/.little/setup-transaction.json, then run little setup '${root.replaceAll("'", "'\\''")}' --rollback.`);
   let pkg = await readObject(root, "package.json");
-  const existing = input.template === "existing-next";
-  if (existing && !pkg) throw new Error("Existing Next.js mode needs package.json at the project root.");
+  const existing = input.template.startsWith("existing-");
+  const isNext = input.template === "next" || input.template === "existing-next";
+  if (existing && !pkg) throw new Error("Existing-project mode needs package.json at the project root.");
   if (!existing && !oldState) {
     let entries: string[] = [];
     try { entries = await readdir(root); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
@@ -105,8 +110,20 @@ export async function planSetup(rootInput: string, requested: SetupOptions = {})
     if (pkg[field] !== undefined && (!pkg[field] || typeof pkg[field] !== "object" || Array.isArray(pkg[field]))) throw new Error(`package.json ${field} must be an object.`);
   }
   const packageManager = await detectPackageManager(root, pkg, input.packageManager);
-  const options: ResolvedSetupOptions = { template: input.template, provider: input.provider, model: resolveModelChoice(input.provider, input.model), workflow: input.workflow, packageManager, route: input.route, page: input.page };
-  if (oldState && JSON.stringify(oldState.options) !== JSON.stringify(options)) throw new Error("Setup options differ from the previous run. Keep its template/provider/workflow/paths or integrate changes manually; generated files are never replaced implicitly.");
+  const options: ResolvedSetupOptions = { template: input.template, provider: input.provider, model: resolveModelChoice(input.provider, input.model), workflow: input.workflow, littledb: input.littledb, packageManager, route: input.route, page: input.page };
+  // Pre-LittleDB setup states omit this flag. Preserve that representation for local mode.
+  const savedOptions = (value: SetupState["options"]) => {
+    const { littledb, ...rest } = value;
+    return littledb ? { ...rest, littledb: true } : rest;
+  };
+  if (oldState && JSON.stringify(savedOptions(oldState.options)) !== JSON.stringify(savedOptions(options))) {
+    const oldLocal = { ...oldState.options, littledb: false };
+    const newLocal = { ...options, littledb: false };
+    if (JSON.stringify(savedOptions(oldLocal)) === JSON.stringify(savedOptions(newLocal))) {
+      throw new Error(`This project was set up ${oldState.options.littledb ? "with" : "without"} --littledb; setup never replaces generated files to switch modes. Follow the by-hand steps in LITTLE.md and https://little-stack.dev/docs/get-started/setup#move-a-little-project-to-littledbs-model.`);
+    }
+    throw new Error("Setup options differ from the previous run. Keep its template/provider/workflow/paths or integrate changes manually; generated files are never replaced implicitly.");
+  }
   const plan: SetupPlan & { options: ResolvedSetupOptions } = { root, files: [], conflicts: [], warnings: [], options };
   const desired: Record<string, string> = {};
   const versions = scaffoldDependencyVersions();
@@ -117,8 +134,8 @@ export async function planSetup(rootInput: string, requested: SetupOptions = {})
   if (providerPkg) dependencies[providerPkg[0]] = providerPkg[1];
   const dev = { ...versions.devDependencies };
   let app = "src/app";
-  let agents = input.template === "node" ? "agents" : "src/agents";
-  if (input.template !== "node") {
+  let agents = isNext ? "src/agents" : "agents";
+  if (isNext) {
     dependencies["@ai-sdk/react"] = "^4.0.129";
     dependencies["server-only"] = "^0.0.1";
     if (existing) {
@@ -162,7 +179,7 @@ export async function planSetup(rootInput: string, requested: SetupOptions = {})
         }
       }
     }
-    const files = nextFiles(app, agents, options.route, options.page);
+    const files = nextFiles(app, agents, options.route, options.page, options.littledb);
     if (existing) delete files["next-env.d.ts"];
     Object.assign(desired, files);
   }
@@ -179,7 +196,7 @@ export async function planSetup(rootInput: string, requested: SetupOptions = {})
     if (!pkg.dependencies?.[name] && !pkg.devDependencies?.[name]) pkg.devDependencies = { ...pkg.devDependencies, [name]: range };
   }
   pkg.scripts = { ...pkg.scripts };
-  for (const [name, command] of Object.entries({ "little:smoke": "tsx scripts/little-smoke.mts", "little:agent": "little-harness test support", "little:typecheck": "tsc --noEmit -p tsconfig.little.json" })) {
+  for (const [name, command] of Object.entries({ "little:smoke": "tsx scripts/little-smoke.mts", "little:agent": options.littledb ? "tsx scripts/little-agent.mts" : "little-harness test support", "little:typecheck": "tsc --noEmit -p tsconfig.little.json" })) {
     if (pkg.scripts[name] !== undefined && pkg.scripts[name] !== command) plan.conflicts.push(`Script ${name} already exists. Rename it or integrate the generated command manually.`);
     else pkg.scripts[name] = command;
   }
@@ -192,18 +209,21 @@ export async function planSetup(rootInput: string, requested: SetupOptions = {})
   const harness = await readObject(root, "little-harness.json");
   if (harness?.agents !== undefined && harness.agents !== agents) plan.conflicts.push(`little-harness.json already points to ${harness.agents}; expected ${agents}.`);
   desired["little-harness.json"] = json({ ...harness, agents });
+  if (input.template === "existing-node") desired[`${agents}/support/package.json`] = json({ private: true, type: "module" });
   const staging = await mkdtemp(join(tmpdir(), "little-setup-"));
   try {
     await scaffoldAgent(staging, "support", { provider: options.provider, model: options.model });
     desired[`${agents}/support/instructions.md`] = (await readText(staging, "support/instructions.md"))!;
+    desired[`${agents}/support/skills/answer-clearly/SKILL.md`] = (await readText(staging, "support/skills/answer-clearly/SKILL.md"))!;
     desired[`${agents}/support/tools/echo.ts`] = (await readText(staging, "support/tools/echo.ts"))!;
   } finally { await rm(staging, { recursive: true, force: true }); }
-  for (const [path, text] of Object.entries(agentSource(options.provider, options.model, options.workflow))) desired[`${agents}/support/${path}`] = text;
-  desired["scripts/little-smoke.mts"] = smokeSource(agents, options.workflow);
+  for (const [path, text] of Object.entries(agentSource(options.provider, options.model, options.workflow, options.littledb))) desired[`${agents}/support/${path}`] = text;
+  desired["scripts/little-smoke.mts"] = smokeSource(agents, options.workflow, options.littledb);
+  if (options.littledb) desired["scripts/little-agent.mts"] = localAgentSource(agents);
   desired["tsconfig.little.json"] = json({
-    ...(existing ? { extends: "./tsconfig.json" } : {}),
-    compilerOptions: { target: "ES2022", module: input.template === "node" ? "NodeNext" : "ESNext", moduleResolution: input.template === "node" ? "NodeNext" : "Bundler", strict: true, allowImportingTsExtensions: true, types: ["node"], skipLibCheck: true, esModuleInterop: true, noEmit: true, ...(input.template === "node" ? {} : { jsx: "react-jsx" }) },
-    include: [`${agents}/**/*.ts`, "scripts/little-smoke.mts", ...(input.template === "node" ? [] : [`${app}/${options.route}/route.ts`, `${app}/${options.page}/**/*`, "next-env.d.ts"])], exclude: ["node_modules"],
+    ...(existing && isNext ? { extends: "./tsconfig.json" } : {}),
+    compilerOptions: { target: "ES2022", module: input.template === "node" ? "NodeNext" : "ESNext", moduleResolution: input.template === "node" ? "NodeNext" : "Bundler", strict: true, allowImportingTsExtensions: true, types: ["node"], skipLibCheck: true, esModuleInterop: true, noEmit: true, ...(!isNext ? {} : { jsx: "react-jsx" }) },
+    include: [`${agents}/**/*.ts`, "scripts/little-smoke.mts", ...(options.littledb ? ["scripts/little-agent.mts"] : []), ...(!isNext ? [] : [`${app}/${options.route}/route.ts`, `${app}/${options.page}/**/*`, "next-env.d.ts"])], exclude: ["node_modules"],
   });
   if (!existing) desired["tsconfig.json"] = json({ extends: "./tsconfig.little.json", compilerOptions: { ...(input.template === "node" ? {} : { plugins: [{ name: "next" }], isolatedModules: true, resolveJsonModule: true }) }, include: ["**/*.ts", "**/*.tsx", "**/*.mts", ".next/types/**/*.ts"], exclude: ["node_modules"] });
   const ignore = await readText(root, ".gitignore") ?? "";
@@ -211,8 +231,22 @@ export async function planSetup(rootInput: string, requested: SetupOptions = {})
   desired[".gitignore"] = ignore + (ignore && !ignore.endsWith("\n") ? "\n" : "") + ignores.filter(x => !ignore.split(/\r?\n/).includes(x)).map(x => `${x}\n`).join("");
   const envVars = provider.envVars ?? [provider.apiKeyEnvVar];
   desired[".env.little.example"] = `# Keyless by default. Explicit LITTLE_DEMO=0 enables real calls and charges.\nLITTLE_DEMO=1\n${envVars.map(x => `# ${x}=`).join("\n")}\n`;
-  desired["LITTLE.md"] = `# Little setup\n\nNode.js 22+, AI SDK 7. Created with little-workflow ${ownVersion()}.\n\nRun \`${packageManager} run little:smoke\` for a deterministic keyless Harness${options.workflow ? ' + durable Workflow' : ''} test. Run \`${packageManager} run little:agent\` to chat in the terminal using the same agent module.${input.template !== "node" ? ` Run \`${packageManager} run dev\` and open /${options.page} for useChatUI (an app-local wrapper over AI SDK useChat).` : ''}\n\nProvider: ${options.provider}; model: ${options.model}. Copy values from .env.little.example into your environment; setup never reads or writes credentials. Set LITTLE_DEMO=0 yourself to opt into real model calls. Next reads .env.local; terminal scripts need exported environment values.\n\nAgent definitions: ${agents}/support. Shared by CLI and web; Next's server-only initializer is outside agent.ts.${options.workflow ? ` The ${STARTER_WORKFLOW} workflow (workflows/${STARTER_WORKFLOW}) is wired into the agent as the ${STARTER_WORKFLOW} tool; the keyless model calls it, and smoke also runs it directly. It runs a fixed plan, so it needs no model. Replace the plan and its tool with your own steps, or swap \`plan\` for \`model\` to let a planner draft them. Its definition identity comes from its source files, so an edit is a new definition; there is no identity to bump by hand.` : ''}\n\nLocal persistence in .little-harness/ and .little-workflow/ assumes one local process and filesystem. This is not hosted or multi-tenant storage. The sample web API has no login, ignores browser userId/session ids, and chooses a fresh session per request. It refuses production live chat until you implement server-verified authentication and authorization. LITTLE_DEMO=1 explicitly enables keyless production smoke only. Add rate limits and a suitable durable host before deployment.\n\nExisting routes, scripts, configs, aliases, and env are preserved. Relative imports avoid alias assumptions. The server-only wrapper uses native Node loading from the project root for Little packages and shared definitions, avoiding bundling filesystem/native runtime internals. Keep the definitions present on disk. Setup does not rewrite your config.\n\nCompute is unavailable in this installer: its public backend/package has not been qualified. LittleDB is unpublished. Neither is installed, provisioned, or advertised as working. Channel adapters/services and monorepo templates are outside this alpha; a headless CLI does not require a separate service.\n\nRerun with identical options for a no-op. Edited generated files become conflicts. Use --plan to preview. On an interrupted generation, inspect .little/setup-transaction.json and use little setup --here --rollback; only unchanged CLI-written bytes are restored. Dependency installs can leave node_modules/cache/lockfiles, which rollback preserves.\n`;
-  if (input.template !== "node") {
+  desired["LITTLE.md"] = `# Little setup\n\nNode.js 22+, AI SDK 7. Created with little-workflow ${ownVersion()}.\n\nRun \`${packageManager} run little:smoke\` for a deterministic keyless Harness${options.workflow ? ' + durable Workflow' : ''} test. Run \`${packageManager} run little:agent\` to chat in the terminal using the same agent module.${isNext ? ` Run \`${packageManager} run dev\` and open /${options.page} for useChatUI (an app-local wrapper over AI SDK useChat).` : ''}\n\nProvider: ${options.provider}; model: ${options.model}. Copy values from .env.little.example into your environment; setup never reads or writes credentials. Set LITTLE_DEMO=0 yourself to opt into real model calls. Next reads .env.local; terminal scripts need exported environment values.\n\nAgent definitions: ${agents}/support. Shared by CLI and web; Next's server-only initializer is outside agent.ts.${options.workflow ? ` The ${STARTER_WORKFLOW} workflow (workflows/${STARTER_WORKFLOW}) is wired into the agent as the ${STARTER_WORKFLOW} tool; the keyless model calls it, and smoke also runs it directly. It runs a fixed plan, so it needs no model. Replace the plan and its tool with your own steps, or swap \`plan\` for \`model\` to let a planner draft them. Its definition identity comes from its source files, so an edit is a new definition; there is no identity to bump by hand.` : ''}\n\nLocal persistence in .little-harness/ and .little-workflow/ assumes one local process and filesystem. This is not hosted or multi-tenant storage. The sample web API has no login, ignores browser userId/session ids, and chooses a fresh session per request. It refuses production live chat until you implement server-verified authentication and authorization. LITTLE_DEMO=1 explicitly enables keyless production smoke only. Add rate limits and a suitable durable host before deployment.\n\nExisting routes, scripts, configs, aliases, and env are preserved. Relative imports avoid alias assumptions. The server-only wrapper uses native Node loading from the project root for Little packages and shared definitions, avoiding bundling filesystem/native runtime internals. Keep the definitions present on disk. Setup does not rewrite your config.\n\nCompute is unavailable in this installer: its public backend/package has not been qualified. LittleDB mode uses the client and needs a LittleDB account; the LittleDB server is not open source. Setup does not sign in, deploy, or provision a server. Channel adapters/services and monorepo templates are outside this alpha; a headless CLI does not require a separate service.\n\nRerun with identical options for a no-op. Edited generated files become conflicts. Use --plan to preview. On an interrupted generation, inspect .little/setup-transaction.json and use little setup --here --rollback; only unchanged CLI-written bytes are restored. Dependency installs can leave node_modules/cache/lockfiles, which rollback preserves.\n`;
+  desired["LITTLE.md"] += `
+## Model mode and manual migration
+
+Current mode: ${options.littledb ? "LittleDB project-selected model. agent.ts intentionally has no model. Use little:agent for local chat, not little-harness test support (which requires a model)." : "Local model selection in agent.ts; the keyless demo is the default, LITTLE_DEMO=0 opts into live-model.ts."}
+
+Setup never switches an existing project's model mode or replaces edited generated files. Follow the [Move a Little project to LittleDB’s model](https://little-stack.dev/docs/get-started/setup#move-a-little-project-to-littledbs-model) guide for the complete by-hand edits in both directions. Keep setup state; it records the original generation, not subsequent manual edits.
+
+To move to LittleDB: remove the demo-model import, the const model selection, and the model property from agent.ts. After loadHarness in scripts/little-smoke.mts add harness.config.model = (await import("../${agents}/support/demo-model.ts")).demoModel. Add the documented scripts/little-agent.mts local runner and set little:agent to "tsx scripts/little-agent.mts"; include that filename in tsconfig.little.json. For Next, add the documented local model injection to ${agents}/server.ts, outside the deployable agent.
+
+To return to local model selection: restore the demo-model import, const model = process.env.LITTLE_DEMO === "0" ? (await import("./live-model${isNext ? "" : ".ts"}")).model : demoModel, and model property in agent.ts. Remove the smoke and Next-wrapper overrides, restore little:agent to "little-harness test support", and remove the now-unused scripts/little-agent.mts and its tsconfig include. These are manual edits, not a rerun with different flags. Re-run little:typecheck and little:smoke after either change.
+
+instructions.md is the agent's system prompt when agent.ts omits system; write only instructions intended for the model there. A system field in agent.ts takes precedence. Neither mode installs, logs in to, or deploys LittleDB.
+`;
+
+  if (isNext) {
     // Next source uses extensionless TS imports so the user's root tsconfig needs
     // no allowImportingTsExtensions edit. jiti/tsx resolve the same shared modules.
     for (const [path, text] of Object.entries(desired)) {
@@ -241,7 +275,7 @@ export async function planSetup(rootInput: string, requested: SetupOptions = {})
       plan.conflicts.push(`${path}: ${oldState?.hashes[path] ? 'generated file was edited or its template changed' : 'file already exists'}. Choose another --route/--page or move it yourself.`);
     } else plan.files.push({ path, before, after });
   }
-  const stateAfter = json({ schema: 1, options, hashes });
+  const stateAfter = json({ schema: 1, options: savedOptions(options), hashes });
   const stateBefore = await readText(root, STATE);
   if (stateBefore !== stateAfter) plan.files.push({ path: STATE, before: stateBefore, after: stateAfter });
   return plan;

@@ -1,0 +1,26 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`setup model mode compatibility > keeps the nonflag agent, local chat command and smoke baseline (apart from skill assertion) 1`] = `
+"import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { loadHarness, localHost, streamHarness } from "@little-stack/harness";
+
+// Keyless even when LITTLE_DEMO=0 is exported: loadHarness reads it when it imports agent.ts.
+process.env.LITTLE_DEMO = "1";
+const agentDir = join(process.cwd(), "agents/support");
+const dir = await mkdtemp(join(tmpdir(), "little-smoke-"));
+try {
+  const harness = await loadHarness(agentDir, { host: localHost({ dataDir: join(dir, "harness") }) });
+  assert.ok(harness.config.skills.some((skill) => typeof skill === "string" && skill.endsWith("answer-clearly")), "starter skill discovered");
+  const result = streamHarness({ harness, messages: [{ id: "smoke", role: "user", parts: [{ type: "text", text: "hello" }] }] });
+  const body = await result.toUIMessageStreamResponse().text();
+  await result.finished;
+  assert.match(body, /Hello from Little/);
+  console.log("Little keyless smoke passed.");
+} finally {
+  await rm(dir, { recursive: true, force: true });
+}
+"
+`;

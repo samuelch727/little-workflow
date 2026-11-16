@@ -1,6 +1,10 @@
+import { contextInputRequest, recordContextInputUsage } from "../context-policy/calibration.js";
+import { contextPrepareStep, resolveContextRuntime } from "../context-policy/prepare.js";
+import { listTerminalArtifacts } from "./artifact-list-outcome.js";
+import { modelStepBudget } from "./model-step-budget.js";
+import { turnToolBudget } from "./tool-budget.js";
 import {
   generateText,
-  isStepCount,
   type StopCondition,
   type ModelMessage,
   type Output,
@@ -36,7 +40,6 @@ import { sanitizeTraceValue } from "../trace/redaction.js";
 import type { ResolvedHarnessTraceOptions } from "../trace/types.js";
 import { validateTraceEvent } from "../trace/validate.js";
 import type {
-  ArtifactRef,
   Harness,
   HarnessAgentOptions,
   HarnessEvent,
@@ -265,8 +268,8 @@ export async function runGenerateHarness<
       const commitTerminalPersistence = async () => {
         try {
           return await prepared!.commitPersistentDirs({ emit: emitTurnEvent });
-        } catch {
-          throw new HarnessTerminalStageError("persistence");
+        } catch (cause) {
+          throw new HarnessTerminalStageError("persistence", { cause });
         }
       };
       const reportTerminalPersistence = async (persistence: PersistenceStatus): Promise<void> => {
@@ -275,8 +278,8 @@ export async function runGenerateHarness<
           const error: PersistenceError = { session, failedCommits: persistence.failedCommits };
           await config.onPersistenceError?.(error);
           await options.onPersistenceError?.(error);
-        } catch {
-          throw new HarnessTerminalStageError("persistence");
+        } catch (cause) {
+          throw new HarnessTerminalStageError("persistence", { cause });
         }
       };
       const emitSessionCompleted = async (): Promise<void> => {
@@ -286,24 +289,18 @@ export async function runGenerateHarness<
             turnId,
             payload: { sessionId: session.id, turnId },
           });
-        } catch {
-          throw new HarnessTerminalStageError("session_completed");
+        } catch (cause) {
+          throw new HarnessTerminalStageError("session_completed", { cause });
         }
       };
       const setIdle = async (): Promise<void> => {
         try {
           await setSessionState(session, "idle");
-        } catch {
-          throw new HarnessTerminalStageError("session_status");
+        } catch (cause) {
+          throw new HarnessTerminalStageError("session_status", { cause });
         }
       };
-      const listArtifacts = async (): Promise<ArtifactRef[]> => {
-        try {
-          return await session.artifacts.list();
-        } catch {
-          throw new HarnessTerminalStageError("artifact_list");
-        }
-      };
+      const listArtifacts = () => listTerminalArtifacts(session, warnings);
       const agentFiles = createEventedFileWriter(prepared.files, emitTurnEvent, {
         defaultSource: "agent",
         traceOptions,
@@ -408,6 +405,7 @@ export async function runGenerateHarness<
         traceOptions,
       });
       const toolContext: HarnessToolExecutionContext<TExtraBody> = {
+        ...turnToolBudget(config.workflowBudgets, warnings),
         session,
         files: toolFiles,
         artifacts: createArtifactAccessor(toolFiles, session.artifacts),
@@ -471,13 +469,26 @@ export async function runGenerateHarness<
       const inbox = inboxPrepareStep(guardedModelPrepareStep(prepareStep, records), options.inbox);
       await inbox.restore({ stepNumber: 0, at: built.messages.length });
       const invocationGuard = budget ?? modelInvocationGuard({ beforeInvocation, requireConcrete: options.beforeInvocation !== undefined || snapshot !== undefined, ...(options.abortSignal ? { signal: options.abortSignal } : {}) });
-      const guardedPrepareStep = invocationGuard.wrapPrepareStep(inbox.prepareStep);
+      const contextPolicy = options.contextPolicy ?? config.contextPolicy;
+      const contextRuntime = contextPolicy ? await resolveContextRuntime({
+        ...(config.host.contextCompaction ? { host: config.host.contextCompaction } : {}),
+        sessionId: session.id, runId, model: config.model, fallbackScope: config.host,
+        ...(config.maxOutputTokens === undefined ? {} : { maxOutputTokens: config.maxOutputTokens }),
+      }) : undefined;
+      const contextInputs = new Map<number, ReturnType<typeof contextInputRequest>>();
+      const projectedPrepareStep = contextRuntime ? contextPrepareStep({
+        prepareStep: inbox.prepareStep, policy: contextPolicy, runtime: contextRuntime,
+        sessionId: session.id, system: built.system, tools,
+        onPrepared: (stepNumber, request) => contextInputs.set(stepNumber, contextInputRequest(contextRuntime, session.id, request)),
+        ...(options.abortSignal ? { signal: options.abortSignal } : {}),
+      }) : inbox.prepareStep;
+      const guardedPrepareStep = invocationGuard.wrapPrepareStep(projectedPrepareStep);
       const system = !snapshot && prepareStep === undefined
         ? runtimeSystem(built.system, runtime, options.activeTools)
         : built.system;
       const outputSpec = options.output ?? (built.output as Output.Output<TOutput> | undefined);
       const firstModelReplay =
-        options.prepareStep === undefined
+        options.prepareStep === undefined && !contextPolicy
           ? findModelReplay(
               priorEvents as readonly DurableHarnessEvent[],
               durableModelRequest({
@@ -516,6 +527,7 @@ export async function runGenerateHarness<
           warnings,
         };
       }
+      let softStopReason: "step-limit" | "stop-condition" | undefined;
       let result: Awaited<ReturnType<typeof callGenerateText>>;
       try {
         result = await callGenerateText({
@@ -526,10 +538,13 @@ export async function runGenerateHarness<
           tools,
           output: outputSpec,
           temperature: options.temperature,
+          maxOutputTokens: config.maxOutputTokens,
           abortSignal: modelAbortSignal,
           stopWhen: stopWhenWithPark(
-          options.stopWhen ?? isStepCount(limits.maxSteps ?? config.workflowBudgets?.maxModelSteps ?? 20),
+          options.stopWhen,
           limits.stopWhen,
+          reason => { softStopReason = reason; },
+          limits.maxSteps ?? config.workflowBudgets.maxModelSteps,
         ),
           prepareStep: guardedPrepareStep,
           toolChoice: options.toolChoice,
@@ -628,11 +643,13 @@ export async function runGenerateHarness<
                 metadata: eventData.metadata,
               };
               await emitTurnEvent(eventToRetry);
+              const contextInput = contextInputs.get(stepNumber);
+              if (contextRuntime && contextInput) await recordContextInputUsage(contextRuntime, contextInput, event, modelAbortSignal);
               await options.inbox?.modelResponded?.({ stepNumber, occurrenceId: started.occurrenceId });
             } catch (error) {
               const terminalError = error instanceof HarnessTerminalStageError
                 ? error
-                : new HarnessTerminalStageError("model_responded");
+                : new HarnessTerminalStageError("model_responded", { cause: error });
               if (!isFinalModelResponse(event)) {
                 modelAbortController.abort();
               }
@@ -765,6 +782,7 @@ export async function runGenerateHarness<
       const output = outputSpec === undefined ? (result.text as TOutput) : (result.output as TOutput);
       return {
         status: "completed",
+        ...(softStopReason === undefined ? {} : { stopReason: softStopReason }),
         text: result.text,
         output,
         session,
@@ -872,8 +890,8 @@ async function closeResolvedMcpGateway(
   if (!options.suppressErrors) {
     try {
       await resolvedMcp.close();
-    } catch {
-      throw new HarnessTerminalStageError("mcp_close");
+    } catch (cause) {
+      throw new HarnessTerminalStageError("mcp_close", { cause });
     }
     return;
   }
@@ -1064,6 +1082,7 @@ function resolveTurnConfig<TInput, TExtraBody, TOutput>(
   if (options.system !== undefined) {
     out.system = options.system;
   }
+  if (options.maxOutputTokens !== undefined) out.maxOutputTokens = options.maxOutputTokens;
   const runtime = resolveRuntimeOptions(config.runtime, options.runtime);
   if (runtime !== undefined) {
     out.runtime = runtime;
@@ -1098,9 +1117,10 @@ function toolsForModel(
 function stopWhenWithPark(
   stopWhen: Parameters<typeof generateText>[0]["stopWhen"],
   limit?: StopCondition<any>,
+  onSoftStop?: (reason: "step-limit" | "stop-condition") => void,
+  maxModelSteps = 20,
 ): Parameters<typeof generateText>[0]["stopWhen"] {
-  const conditions = Array.isArray(stopWhen) ? stopWhen : [stopWhen ?? isStepCount(20)];
-  return [...conditions, ...(limit === undefined ? [] : [limit]), parkedThisStep];
+  return [modelStepBudget(maxModelSteps, stopWhen, onSoftStop), ...(limit === undefined ? [] : [limit]), parkedThisStep];
 }
 
 /** The model's id, for a `price` function. */
@@ -1209,6 +1229,7 @@ async function callGenerateText(options: {
   tools: ToolSet;
   output?: Output.Output<unknown> | undefined;
   temperature?: Parameters<typeof generateText>[0]["temperature"];
+  maxOutputTokens?: Parameters<typeof generateText>[0]["maxOutputTokens"] | undefined;
   abortSignal?: AbortSignal | undefined;
   stopWhen?: Parameters<typeof generateText>[0]["stopWhen"];
   prepareStep?: Parameters<typeof generateText>[0]["prepareStep"];
@@ -1230,6 +1251,9 @@ async function callGenerateText(options: {
   };
   if (options.output !== undefined) {
     request.output = options.output;
+  }
+  if (options.maxOutputTokens !== undefined) {
+    request.maxOutputTokens = options.maxOutputTokens;
   }
   if (options.temperature !== undefined) {
     request.temperature = options.temperature;

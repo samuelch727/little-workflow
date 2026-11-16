@@ -116,7 +116,7 @@ An `ai.generate` step makes one model call on a model slot and validates the rep
 | `prompt` | Optional string. The step's instruction. `{{ ... }}` expressions are resolved at run time. |
 | `system` | Optional string. Appended to the worker's system prompt. `{{ ... }}` expressions are resolved at run time. |
 
-`with.prompt` and `with.system` use the same expression roots as `input` (`input`, `steps.<id>.output`, `item`, `workflow`, `step`). They always resolve to text: an embedded expression gives a string, and a template-only value that resolves to an object or array is JSON-stringified. See [Expressions](/docs/v0.1.0-alpha/internals/expressions).
+`with.prompt` and `with.system` use the same expression roots as `input` (`input`, `steps.<id>.output`, `item`, `workflow`, `step`). They always resolve to text: an embedded expression gives a string, and a template-only value that resolves to an object or array is JSON-stringified. See [Expressions](https://little-stack.dev/docs/workflow/v0.1.0-alpha/internals/expressions).
 
 The model sees the step as:
 
@@ -156,7 +156,7 @@ Shape rules:
 
 `code.run` declares pinned TypeScript source files and an entrypoint. A worker harness that executes it passes `{input, tools}`, where `tools` is a proxy giving direct access to all globally-registered tools without routing through the model.
 
-> **Not executed by the default worker harness.** A `code.run` step validates and compiles, but the default `workflowHarness` checks the step's sandbox policy and then throws (`cannot safely execute code.run in the default workflow harness`). To run one, supply a `worker.harness` that implements `execute_step`. Execution and isolation are then your responsibility. See [Security Model](/docs/v0.1.0-alpha/internals/security-model).
+> **Not executed by the default worker harness.** A `code.run` step validates and compiles, but the default `workflowHarness` checks the step's sandbox policy and then throws (`cannot safely execute code.run in the default workflow harness`). To run one, supply a `worker.harness` that implements `execute_step`. Execution and isolation are then your responsibility. See [Security Model](https://little-stack.dev/docs/workflow/v0.1.0-alpha/internals/security-model).
 
 ```jsonc
 {
@@ -508,7 +508,7 @@ LWIR supports a deliberate JSON Schema subset. It applies to workflow `input`/`o
 - **Records:** `propertyNames` makes string-keyed maps work. `z.record(z.string(), V)`, `z.record(z.string().min(1), V)`, `z.record(z.enum([...]), V)`, and `z.partialRecord(z.enum([...]), V)` are accepted, and keys are checked at run time on workflow input and on step and final output. A record keyed by a non-string schema, such as `z.record(z.number(), V)`, is rejected because JSON object keys are always strings.
 - **Rejected:** `pattern` (`.regex()`), `format` (`.email()`, `.url()`, …), `exclusiveMinimum`/`exclusiveMaximum` (`.positive()`, `.gt()`, `.lt()`), `default` (`.default()`), `deprecated`, `readOnly`, `writeOnly`, `patternProperties`, `if`/`then`/`else`, and `$ref`. Each is reported as `schema.invalid`. The alpha runtime would not enforce them, so accepting them would silently drop the constraint.
 
-Zod transforms, functions, `Date`, `bigint`, classes, `Map`/`Set`, and custom refinements have no JSON Schema form and cannot be used. Validate finer constraints inside a tool. See [LWIR Internals → JSON Schema Subset](/docs/v0.1.0-alpha/internals/lwir-internals#phase-3-json-schema-subset) for the validator's details.
+Zod transforms, functions, `Date`, `bigint`, classes, `Map`/`Set`, and custom refinements have no JSON Schema form and cannot be used. Validate finer constraints inside a tool. See [LWIR Internals → JSON Schema Subset](https://little-stack.dev/docs/workflow/v0.1.0-alpha/internals/lwir-internals#phase-3-json-schema-subset) for the validator's details.
 
 LWIR also rejects fields that are declared but not implemented, rather than accepting and ignoring them. These are non-empty `permissions.secrets` (no secret broker), non-empty `permissions.network` (no egress allowlist), `onFailure.repair.mode: "escalate"` and `onFailure.repair.model` (no escalated repair), and a step-level `cache` (no step cache). Each is reported as `schema.unimplemented_field`.
 

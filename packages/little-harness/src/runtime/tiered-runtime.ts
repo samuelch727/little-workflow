@@ -1,3 +1,4 @@
+import { setTier0DeniedCommands } from "./command-policy.js";
 import { HarnessInputError } from "../errors.js";
 import type {
   CreateSandboxOptions,
@@ -116,7 +117,9 @@ export function tieredSandbox<TExtraBody = unknown>(
   const tier0Factory = tiers.tier0 ?? justBashSandbox();
   return async (options) => {
     const innerOptions = subordinateTierOptions(options);
-    const tier0 = tierExecutor(await tier0Factory(innerOptions));
+    const tier0Options = { ...innerOptions };
+    if (tiers.policy?.denyCommands) setTier0DeniedCommands(tier0Options, tiers.policy.denyCommands);
+    const tier0 = tierExecutor(await tier0Factory(tier0Options));
     const tiering = createTierSwitch({
       tier0,
       innerOptions,
@@ -494,6 +497,12 @@ function createTierSwitch<TExtraBody>(options: CreateTierSwitchOptions<TExtraBod
       const gap = detectEmulationGap(result, { matrix: options.matrix });
       if (gap === undefined) {
         return result;
+      }
+      if (options.policy?.denyCommands?.includes(gap.command)) {
+        denied += 1;
+        const reasons: ClassificationReason[] = [{ kind: "policy-blocked", command: gap.command, rule: options.policy.rule ?? "denyCommands" }];
+        await emit("harness.runtime.command.denied", { command: input.command, toolCallId, executionId, reasons }, executionId);
+        return refusal(`blocked by policy (${describeReasons(reasons)})`);
       }
       const escalated = await escalate({ trigger: "emulation-gap", command: input.command, gap, toolCallId, executionId });
       if (!escalated.ok) {

@@ -209,6 +209,7 @@ const harness = createHarness({
     redaction: {
       metadataKeys: ["authorization", "cookie", "token", "password", "secret"],
       paths: ["/persistent/company/secrets"],
+      values: ["a-known-secret"],
     },
   },
 });
@@ -488,3 +489,5 @@ const saveNote = tool({
 - [Outcome Capture](/docs/harness/v0.1.0-alpha/build-agents/outcomes) documents outcome reporting and aggregation.
 - [Events](/docs/harness/v0.1.0-alpha/reference/events) documents the `HarnessEvent` envelope, durable replay payload shape, and event vocabulary.
 - [Persistent Dir Reference](/docs/harness/v0.1.0-alpha/reference/persistent-dir-reference) documents cross-session storage callbacks.
+
+`trace.redaction.values` accepts literal nonempty strings, merged across harness and run. It masks trace previews, spills and string metadata before clipping/hashing; it does not change tool/model data or authored files.

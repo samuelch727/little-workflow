@@ -1,4 +1,4 @@
-import { mkdir, readdir, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { renderAgentSource, resolveProvider } from "./provider-catalog.js";
 import { providerDependency, scaffoldDependencyVersions } from "./scaffold-versions.js";
@@ -19,8 +19,15 @@ export default tool({
 
 const INSTRUCTIONS_MD = `You are a helpful agent.
 
-Replace this file (or the \`system\` field in agent.ts) with your agent's instructions.
-agent.ts's \`system\` wins; if it is omitted, this file becomes the system prompt.
+Use the \`answer-clearly\` skill when you answer a question.
+`;
+
+const STARTER_SKILL = `---
+name: answer-clearly
+description: Give a concise answer with a useful next step.
+---
+
+Start with the direct answer. State any important uncertainty. End with one concrete next step when useful.
 `;
 
 const TSCONFIG_JSON = `{
@@ -55,7 +62,7 @@ async function exists(p: string): Promise<boolean> {
 
 /**
  * Scaffold a new agent folder at `<agentsDir>/<name>` with `agent.ts`, `instructions.md`, and an
- * example `tools/echo.ts`. Throws if the folder already exists and `force` is not set.
+ * example `tools/echo.ts` and local `skills/answer-clearly/SKILL.md`. Throws if the folder already exists and `force` is not set.
  */
 export async function scaffoldAgent(
   agentsDir: string,
@@ -67,6 +74,7 @@ export async function scaffoldAgent(
     throw new Error(`Agent folder already exists: ${dir} (use --force to overwrite)`);
   }
   await mkdir(join(dir, "tools"), { recursive: true });
+  await mkdir(join(dir, "skills", "answer-clearly"), { recursive: true });
   const writes: ReadonlyArray<readonly [string, string]> = [
     [
       join(dir, "agent.ts"),
@@ -76,6 +84,7 @@ export async function scaffoldAgent(
       }),
     ],
     [join(dir, "instructions.md"), INSTRUCTIONS_MD],
+    [join(dir, "skills", "answer-clearly", "SKILL.md"), STARTER_SKILL],
     [join(dir, "tools", "echo.ts"), ECHO_TS],
   ];
   for (const [path, content] of writes) await writeFile(path, content);
@@ -106,14 +115,20 @@ export async function initWorkspace(
 
 export async function scaffoldProject(
   root: string,
-  opts: { allowNonEmpty?: boolean; force?: boolean; projectName?: string; provider?: string; model?: string } = {},
+  opts: { allowNonEmpty?: boolean; force?: boolean; projectName?: string; provider?: string; model?: string; setupTarget?: string } = {},
 ): Promise<string[]> {
   const provider = resolveProvider(opts.provider ?? DEFAULT_PROVIDER);
   const packagePath = join(root, "package.json");
   const marker = join(root, "little-harness.json");
   const starterAgentDir = join(root, "agents", "support");
   if (!opts.force && (await exists(packagePath))) {
-    throw new Error(`Project already initialized: ${packagePath} (use --force to overwrite)`);
+    let template = "existing-node";
+    try {
+      const pkg = JSON.parse(await readFile(packagePath, "utf8"));
+      if (pkg.dependencies?.next || pkg.devDependencies?.next) template = "existing-next";
+    } catch { /* An unreadable package still must not be overwritten. */ }
+    const target = opts.setupTarget ?? shellArgument(root);
+    throw new Error(`Folder already has a package.json: ${packagePath}. To add Little without overwriting it, run: npx @little-stack/workflow@alpha setup ${target} --template ${template}`);
   }
   if (!opts.force && (await exists(marker))) {
     throw new Error(`Workspace already initialized: ${marker} (use --force to overwrite)`);
@@ -165,4 +180,9 @@ export async function scaffoldProject(
     ...(opts.model === undefined ? {} : { model: opts.model }),
   });
   return [...writes.map(([path]) => path), ...workspacePaths];
+}
+
+/** Keep suggested commands safe and runnable for paths containing spaces or shell syntax. */
+export function shellArgument(value: string): string {
+  return /^[a-zA-Z0-9_./-]+$/.test(value) ? value : `'${value.replaceAll("'", "'\"'\"'")}'`;
 }

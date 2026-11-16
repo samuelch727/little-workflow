@@ -10,8 +10,9 @@ export const setupUsage = `Usage: little setup [directory] [options]
 
 Target: a directory, or --here for the current directory.
   --here                    Use the current directory as the target
-  --template <name>         node (default), next, or existing-next (add Little to the
-                            Next.js app in the target)
+  --template <name>         node (default), next, existing-node, or existing-next
+                            Existing templates add Little to the target app
+  --littledb                Leave deployed model selection to the LittleDB project
   --workflow                Wire a durable, keyless Workflow example into Harness
   --provider <id>           Harness catalog provider for the live model (default: openai)
   --model <id>              Provider model (defaults to its catalog choice)
@@ -31,7 +32,7 @@ Target: a directory, or --here for the current directory.
 Node >=22 and AI SDK 7. No major upgrades, keys, paid provisioning or deployment.
 Existing Next: TypeScript App Router with explicit moduleResolution "bundler".
 New templates: one repo, agent definitions shared by the CLI and web entrypoint.
-Compute is unqualified; LittleDB is unpublished. Neither is installed.
+Use --littledb for a LittleDB-managed starter; a LittleDB account is required. Compute is unqualified.
 Examples:
   npx @little-stack/workflow@alpha setup my-app --template next --workflow --yes --install --allow-native-build --verify
   npx @little-stack/workflow@alpha setup agents --template node --yes --install --verify
@@ -53,6 +54,7 @@ function parseArgs(args: readonly string[]): Parsed {
     } else if (arg === "--here") { result.here = true; }
     else if (arg === "--plan") result.plan = true;
     else if (arg === "--yes" || arg === "-y") result.yes = true;
+    else if (arg === "--littledb") result.options.littledb = true;
     else if (arg === "--workflow") result.options.workflow = true;
     else if (arg === "--install") { result.install = true; result.noInstall = false; }
     else if (arg === "--no-install") { result.install = false; result.noInstall = true; }
@@ -66,7 +68,7 @@ function parseArgs(args: readonly string[]): Parsed {
     else result.dir = arg;
   }
   if (result.here && result.dir) throw new Error("Choose a directory or --here, not both.");
-  if (!["node", "next", "existing-next"].includes(result.options.template)) throw new Error("Template must be node, next, or existing-next.");
+  if (!["node", "next", "existing-next", "existing-node"].includes(result.options.template)) throw new Error("Template must be node, next, existing-next, or existing-node.");
   if (result.options.packageManager && !["npm", "pnpm", "yarn"].includes(result.options.packageManager)) throw new Error("Package manager must be npm, pnpm, or yarn.");
   return result;
 }
@@ -77,23 +79,23 @@ export async function setupCommand(args: readonly string[], io: Io = {}): Promis
   try {
     const parsed = parseArgs(args);
     if (parsed.help) { await out(setupUsage); return 0; }
-    if (parsed.compute) { await out("Compute is unavailable in setup: its public package/backend is not qualified. LittleDB is unpublished. No packages were installed or provisioned.\n"); return 0; }
+    if (parsed.compute) { await out("Compute is unavailable in setup: its public package/backend is not qualified. No packages were installed or provisioned.\n"); return 0; }
     const tty = io.isTTY ?? Boolean(process.stdin.isTTY && process.stdout.isTTY);
     let interactiveInstall = false;
     if (tty && !parsed.yes && !parsed.plan && !parsed.rollback) {
-      await out("Little Harness is included. Workflow is optional. Compute is unavailable: its public backend/package is not qualified; LittleDB is unpublished.\n");
+      await out("Little Harness is included. Workflow is optional. Use --littledb for a managed-model starter. Compute is unavailable: its public backend/package is not qualified.\n");
       const readline = createInterface({ input: process.stdin, output: process.stdout });
       try {
         if (!parsed.here && !parsed.dir) parsed.dir = (await readline.question("Project directory [little-app]: ")).trim() || "little-app";
         if (!parsed.explicitTemplate) {
-          const answer = (await readline.question("Template: new Next.js app, standalone Node agent, or add to the existing Next.js app in the target [next/node/existing-next; next]: ")).trim() || "next";
-          if (!["node", "next", "existing-next"].includes(answer)) throw new Error("Template must be node, next, or existing-next.");
+          const answer = (await readline.question("Template: new Next.js app, standalone Node agent, or add to an existing app [next/node/existing-next/existing-node; next]: ")).trim() || "next";
+          if (!["node", "next", "existing-next", "existing-node"].includes(answer)) throw new Error("Template must be node, next, existing-next, or existing-node.");
           parsed.options.template = answer as ResolvedSetupOptions["template"];
         }
         parsed.options.workflow = parsed.options.workflow || (await readline.question("Add Little Workflow's durable keyless example? [y/N]: ")).toLowerCase() === "y";
         parsed.options.provider = (await readline.question(`Live provider (any Harness catalog id) [${parsed.options.provider}]: `)).trim() || parsed.options.provider;
         parsed.options.model = (await readline.question(`Live model [${parsed.options.model ?? "catalog default"}]: `)).trim() || parsed.options.model;
-        if (parsed.options.template !== "existing-next" && !parsed.options.packageManager) {
+        if (!parsed.options.template.startsWith("existing-") && !parsed.options.packageManager) {
           const manager = (await readline.question("Package manager [npm/pnpm/yarn; npm]: ")).trim() || "npm";
           if (!["npm", "pnpm", "yarn"].includes(manager)) throw new Error("Package manager must be npm, pnpm, or yarn.");
           parsed.options.packageManager = manager as SetupOptions["packageManager"];

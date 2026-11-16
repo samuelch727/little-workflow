@@ -15,7 +15,7 @@ import { join, resolve } from "node:path";
 
 const root = resolve(import.meta.dirname, "..");
 const dirs = process.argv.slice(2);
-const packageDirs = dirs.length > 0 ? dirs : ["packages/little-harness", "packages/little-workflow"];
+const packageDirs = dirs.length > 0 ? dirs : ["packages/little-harness", "packages/little-workflow", "packages/littledb-client"];
 
 let failed = false;
 for (const dir of packageDirs) {

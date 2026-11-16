@@ -1,5 +1,6 @@
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import ts from "typescript";
 import { tmpdir } from "node:os";
 import { afterEach, expect, it, vi } from "vitest";
 import { InMemoryFs } from "just-bash";
@@ -8,6 +9,7 @@ import { virtualHost } from "../virtual-host/virtual-host.js";
 import { resolveSkills } from "../skills/skill.js";
 import { loadHarness } from "./load-harness.js";
 import { importDefault } from "./module-loader.js";
+import type { CompiledHarnessOptions } from "../compiled.js";
 import type { Harness, HarnessHost } from "../types.js";
 vi.setConfig({ testTimeout: 90_000 });
 const dirs: string[] = [];
@@ -32,10 +34,10 @@ export default (host) => { let n = 0; return createHarness({ host, model: {}, to
   return { root, dir, moduleDir: root };
 }
 function host() { return virtualHost({ fs: new InMemoryFs() }); }
-async function compiled(dir: string, moduleDir: string) {
+async function compiled<TContext = unknown>(dir: string, moduleDir: string) {
   const source = await compileHarnessFolder(dir, { moduleDir });
   const path = join(moduleDir, "generated.ts"); await writeFile(path, source);
-  return importDefault<(options: { host: HarnessHost }) => Promise<Harness>>(path);
+  return importDefault<(options: CompiledHarnessOptions<TContext>) => Promise<Harness>>(path);
 }
 it("Node and compiled loaders preserve tools, instructions, workflows and byte-exact skill assets", async () => {
   const { dir, moduleDir } = await fixture();
@@ -149,8 +151,10 @@ it("CRLF/BOM metadata matches Node and compiled assets without changing their by
 });
 it("uses shared code-unit discovery and copies cached asset bytes per chat", async () => {
   const { dir, moduleDir } = await fixture();
-  await mkdir(join(dir, "skills/Guide"));
-  await writeFile(join(dir, "skills/Guide/SKILL.md"), '---\nname: upper\ndescription: Upper\n---');
+  // Uppercase Z sorts before lowercase g by code unit, after it by locale.
+  // Distinct spellings also work on case-insensitive filesystems.
+  await mkdir(join(dir, "skills/Z-guide"));
+  await writeFile(join(dir, "skills/Z-guide/SKILL.md"), '---\nname: upper\ndescription: Upper\n---');
   const node = await loadHarness(dir, { host: host() });
   const create = await compiled(dir, moduleDir);
   const a = await create({ host: host() }), b = await create({ host: host() });
@@ -185,4 +189,381 @@ it("repeated factory loads share the resolved data-dir host and session queue", 
   try { await new Promise(resolve => setTimeout(resolve, 20)); expect(order).toEqual(["a-start"]); }
   finally { release(); await Promise.allSettled([first, second]); }
   expect(order).toEqual(["a-start", "a-end", "b-start"]);
+});
+
+
+it("forwards live construction context by reference through Node, folder and workspace loaders", async () => {
+  const { dir, moduleDir, root } = await fixture();
+  await writeFile(join(dir, "agent.ts"), `import { createHarness } from "@little-stack/harness";
+export default async (host, context) => {
+  await Promise.resolve();
+  let count = 0;
+  context.onConstruct(context);
+  return createHarness({ host, model: {}, onEvent: context.onEvent, tools: {
+    instance: { execute: async () => { const result = { id: context.chatSessionId, count: ++count }; await context.onResult(result); return result; } }
+  } });
+};`);
+  // A callable tool VALUE must never be mistaken for a discovered factory.
+  await writeFile(join(dir, "tools/callable.ts"), `export default Object.assign(() => { throw new Error("must not invoke discovered exports"); }, { description: "callable value", execute: async () => "static" });`);
+  const source = await compileHarnessWorkspace(root, { moduleDir });
+  await writeFile(join(root, "registry.ts"), source + "\nexport default loadHarness;");
+  type Context = { chatSessionId: string; onConstruct: (value: unknown) => void; onResult: (value: unknown) => Promise<void>; onEvent: () => void };
+  const workspace = await importDefault<(name: string, options: CompiledHarnessOptions<Context>) => Promise<Harness>>(join(root, "registry.ts"));
+  const create = await compiled<Context>(dir, moduleDir);
+  for (const load of [(options: CompiledHarnessOptions<Context>) => loadHarness(dir, options), create, (options: CompiledHarnessOptions<Context>) => workspace("support", options)]) {
+    const resultsA: unknown[] = [], resultsB: unknown[] = [];
+    function context(id: string, results: unknown[]): Context {
+      const value = { chatSessionId: id, onConstruct: vi.fn(), onResult: async (result: unknown) => { results.push(result); }, onEvent: vi.fn() };
+      Object.defineProperty(value, "toJSON", { value: () => { throw new Error("must not serialize context"); } });
+      Object.defineProperty(value, "privateBinding", { enumerable: true, get: () => { throw new Error("must not spread/read context"); } });
+      return value;
+    }
+    const aContext = context("a", resultsA), bContext = context("b", resultsB);
+    const aHost = host(), bHost = host();
+    const [a, b] = await Promise.all([load({ host: aHost, context: aContext }), load({ host: bHost, context: bContext })]);
+    expect(aContext.onConstruct).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(aContext.onConstruct).mock.calls[0]![0]).toBe(aContext);
+    expect(bContext.onConstruct).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(bContext.onConstruct).mock.calls[0]![0]).toBe(bContext);
+    expect(a.config.onEvent).toBe(aContext.onEvent); expect(b.config.onEvent).toBe(bContext.onEvent);
+    expect(a.config.host).toBe(aHost); expect(b.config.host).toBe(bHost);
+    expect(a.config).not.toHaveProperty("context"); expect(aHost).not.toHaveProperty("context");
+    const run = (h: Harness) => h.config.tools.instance!.execute!({} as never, {} as never);
+    expect(await run(a)).toEqual({ id: "a", count: 1 });
+    expect(await run(b)).toEqual({ id: "b", count: 1 });
+    expect(await run(a)).toEqual({ id: "a", count: 2 });
+    expect(resultsA).toEqual([{ id: "a", count: 1 }, { id: "a", count: 2 }]);
+    expect(resultsB).toEqual([{ id: "b", count: 1 }]);
+    expect(typeof a.config.tools.callable).toBe("function");
+    expect(await a.config.tools.callable!.execute!({} as never, {} as never)).toBe("static");
+  }
+});
+
+it("generated folder/workspace loaders infer required context and preserve legacy TypeScript calls", async () => {
+  const { dir, root } = await fixture();
+  await rm(join(dir, "tools"), { recursive: true });
+  await rm(join(dir, "workflows"), { recursive: true });
+  await writeFile(join(root, "package.json"), '{"type":"module"}');
+  await rm(join(root, "node_modules"));
+  await mkdir(join(root, "node_modules/@little-stack"), { recursive: true });
+  await symlink(process.cwd(), join(root, "node_modules/@little-stack/harness"));
+  await symlink(join(process.cwd(), "node_modules/@types"), join(root, "node_modules/@types"));
+  await writeFile(join(dir, "agent.ts"), `import { createHarness, type HarnessHost } from "@little-stack/harness";
+export default async (host: HarnessHost, context: { chatSessionId: string; onResult: () => void }) => createHarness({ host, model: {} as never, tools: {} });`);
+  const legacy = join(root, "agents/legacy"); await mkdir(legacy);
+  await writeFile(join(legacy, "agent.ts"), `import { createHarness, type HarnessHost } from "@little-stack/harness";
+export default (host: HarnessHost) => createHarness({ host, model: {} as never });`);
+  await writeFile(join(root, "generated.ts"), await compileHarnessFolder(dir, { moduleDir: root }));
+  await writeFile(join(root, "workspace.ts"), await compileHarnessWorkspace(root, { moduleDir: root }));
+  const path = join(root, "typecheck.ts");
+  await writeFile(path, `import create from "./generated.js";
+import { loadHarness } from "./workspace.js";
+import { loadHarness as nodeLoad, type HarnessHost } from "@little-stack/harness";
+import { instantiateHarness, type HarnessDefinition, type HarnessContext, type CompiledHarnessOptions } from "@little-stack/harness/compiled";
+declare const host: HarnessHost;
+type Context = { chatSessionId: string; onResult: () => void };
+const context: Context = { chatSessionId: "chat", onResult: () => {} };
+create({ host, context });
+loadHarness("support", { host, context });
+loadHarness("legacy", { host });
+nodeLoad<Context>("agents/support", { host, context });
+// @ts-expect-error typed Node context required
+nodeLoad<Context>("agents/support", { host });
+// @ts-expect-error required factory context omitted
+create({ host });
+// @ts-expect-error wrong factory context
+create({ host, context: { chatSessionId: 123 } });
+// @ts-expect-error required workspace factory context omitted
+loadHarness("support", { host });
+// @ts-expect-error wrong workspace context
+loadHarness("support", { host, context: { chatSessionId: 123 } });
+const legacyOptions: CompiledHarnessOptions = { host };
+declare const legacyDefinition: HarnessDefinition;
+instantiateHarness(legacyDefinition, host);
+const typedOptions: CompiledHarnessOptions<Context> = { host, context };
+declare const typedDefinition: HarnessDefinition<Context>;
+instantiateHarness(typedDefinition, host, context);
+declare const optionalDefinition: HarnessDefinition<Context | undefined>;
+instantiateHarness(optionalDefinition, host);
+instantiateHarness(optionalDefinition, host, undefined);
+instantiateHarness(optionalDefinition, host, context);
+// @ts-expect-error optional contracts still reject malformed supplied context
+instantiateHarness(optionalDefinition, host, { chatSessionId: 123 });
+// @ts-expect-error context required for typed helper
+instantiateHarness(typedDefinition, host);
+// @ts-expect-error context required for typed options
+const missing: CompiledHarnessOptions<Context> = { host };
+// Untyped exports stay permissive without recursive inference failures.
+const untypedContext: HarnessContext<any> = 123;
+const untypedOptions: CompiledHarnessOptions<HarnessContext<any>> = { host };
+type Harness = import("@little-stack/harness").Harness;
+const valueOptions: CompiledHarnessOptions<HarnessContext<Harness>> = { host };
+declare function genericFactory<T extends Context>(host: HarnessHost, context: T): Harness;
+const genericOptions: CompiledHarnessOptions<HarnessContext<typeof genericFactory>> = { host, context };
+// @ts-expect-error generic context constraint remains checked
+const wrongGeneric: CompiledHarnessOptions<HarnessContext<typeof genericFactory>> = { host, context: { chatSessionId: 123 } };
+declare function genericOptionalHost<T extends Context>(host?: HarnessHost, context?: T): Harness;
+const optionalGeneric: CompiledHarnessOptions<HarnessContext<typeof genericOptionalHost>> = { host, context };
+const omittedGeneric: CompiledHarnessOptions<HarnessContext<typeof genericOptionalHost>> = { host };
+// @ts-expect-error optional generic constraints remain checked
+const wrongOptionalGeneric: CompiledHarnessOptions<HarnessContext<typeof genericOptionalHost>> = { host, context: { chatSessionId: 123 } };
+type EitherFactory = ((host: HarnessHost, context: Context) => Harness) | ((host: HarnessHost, context: { auditId: string }) => Harness);
+const eitherOptions: CompiledHarnessOptions<HarnessContext<EitherFactory>> = { host, context: { ...context, auditId: "audit" } };
+// @ts-expect-error a factory union needs context valid for either runtime selection
+const wrongEither: CompiledHarnessOptions<HarnessContext<EitherFactory>> = { host, context };
+`);
+  const program = ts.createProgram([path], { noEmit: true, strict: true, exactOptionalPropertyTypes: true, skipLibCheck: true, target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.NodeNext, moduleResolution: ts.ModuleResolutionKind.NodeNext, allowImportingTsExtensions: true });
+  const diagnostics = ts.getPreEmitDiagnostics(program);
+  expect(ts.formatDiagnosticsWithColorAndContext(diagnostics, { getCanonicalFileName: name => name, getCurrentDirectory: () => root, getNewLine: () => "\n" })).toBe("");
+});
+
+
+// An explicit application contract adapts supplied-context inference while the
+// original export remains available for released raw host-only call checks.
+async function declaredFixture(root: string, context: string, body: string) {
+  const dir = join(root, "agents/declared");
+  await mkdir(dir, { recursive: true });
+  await writeFile(join(dir, "agent.ts"), `import type { HarnessDefinition } from "@little-stack/harness/compiled";
+import source from "../support/agent.js";
+type Context = { chatSessionId: string; onResult: () => void };
+async function declared(): Promise<HarnessDefinition<${context}>> {
+  const definition = await source;
+  return (host, context) => { ${body} };
+}
+export default declared();`);
+  await writeFile(join(root, "declared.ts"), await compileHarnessFolder(dir, { moduleDir: root }));
+  return dir;
+}
+
+it.each([
+  ["HarnessDefinition union", `function definition(): HarnessDefinition<Context> { return (host, context) => make(host); }\nexport default definition();`, true],
+  ["promised HarnessDefinition union", `function definition(): HarnessDefinition<Context> { return (host, context) => make(host); }\nexport default Promise.resolve(definition());`, true],
+  ["promised factory", `export default Promise.resolve((host: HarnessHost, context: Context) => make(host));`, true],
+  ["host-first overload", `function definition(host: HarnessHost): Harness;\nfunction definition(host: HarnessHost, context: Context): Harness;\nfunction definition(host: HarnessHost, context?: Context) { return make(host); }\nexport default definition;`, false],
+  ["context-first overload", `function definition(host: HarnessHost, context: Context): Harness;\nfunction definition(host: HarnessHost): Harness;\nfunction definition(host: HarnessHost, context?: Context) { return make(host); }\nexport default definition;`, false],
+] as const)("wrapped factories and explicit overload contracts retain their generated contract: %s", async (name, definition, required) => {
+  const { dir, root } = await fixture();
+  await rm(join(dir, "tools"), { recursive: true });
+  await rm(join(dir, "workflows"), { recursive: true });
+  await writeFile(join(root, "package.json"), '{"type":"module"}');
+  await rm(join(root, "node_modules"));
+  await mkdir(join(root, "node_modules/@little-stack"), { recursive: true });
+  await symlink(process.cwd(), join(root, "node_modules/@little-stack/harness"));
+  await symlink(join(process.cwd(), "node_modules/@types"), join(root, "node_modules/@types"));
+  await writeFile(join(dir, "agent.ts"), `import { createHarness, type Harness, type HarnessHost } from "@little-stack/harness";
+import type { HarnessDefinition } from "@little-stack/harness/compiled";
+type Context = { chatSessionId: string; onResult: () => void };
+const make = (host: HarnessHost) => createHarness({ host, model: {} as never });
+${definition}`);
+  const overloaded = name.includes("overload");
+  if (overloaded) await declaredFixture(root, "Context | undefined", "if (context === undefined) return definition(host); return definition(host, context);");
+  await writeFile(join(root, "generated.ts"), await compileHarnessFolder(dir, { moduleDir: root }));
+  await writeFile(join(root, "workspace.ts"), await compileHarnessWorkspace(root, { moduleDir: root }));
+  const path = join(root, "typecheck.ts");
+  await writeFile(path, `import create from "./${overloaded ? "declared" : "generated"}.js";
+import raw from "./generated.js";
+import { loadHarness } from "./workspace.js";
+import type { HarnessHost } from "@little-stack/harness";
+declare const host: HarnessHost;
+${overloaded ? 'raw({ host });\nloadHarness("support", { host });' : ""}
+const context = { chatSessionId: "chat", onResult: () => {} };
+create({ host, context });
+loadHarness("${overloaded ? "declared" : "support"}", { host, context });
+${required ? "// @ts-expect-error context remains required" : ""}
+create({ host });
+${required ? "// @ts-expect-error context remains required" : ""}
+loadHarness("${overloaded ? "declared" : "support"}", { host });
+// @ts-expect-error context type must not widen to unknown
+create({ host, context: { chatSessionId: 123 } });
+// @ts-expect-error context type must not widen to unknown
+loadHarness("${overloaded ? "declared" : "support"}", { host, context: { chatSessionId: 123 } });
+`);
+  const program = ts.createProgram([path], { noEmit: true, strict: true, exactOptionalPropertyTypes: true, skipLibCheck: true, target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.NodeNext, moduleResolution: ts.ModuleResolutionKind.NodeNext, allowImportingTsExtensions: true });
+  expect(ts.formatDiagnosticsWithColorAndContext(ts.getPreEmitDiagnostics(program), { getCanonicalFileName: name => name, getCurrentDirectory: () => root, getNewLine: () => "\n" })).toBe("");
+});
+
+const overloadOrders = [
+  ...["hab", "hba", "ahb", "bha", "abh", "bah", "abc", "acb", "bac", "bca", "cab", "cba"].map(order => ({ order: [...order].map(key => key === "h" ? "host" : key), promised: false })),
+  ...[0, 6, 12].map(index => { const order = [..."abcdefghijkl"]; order.splice(index, 0, "host"); return { order, promised: false }; }),
+  { order: ["a", "host", "b"], promised: true },
+  { order: ["a", "a", "a", "host", "b", "b"], promised: false },
+  { order: ["host", "host", "a", "a", "b", "b"], promised: false },
+  { order: ["a", "b", "a", "host", "host"], promised: false },
+];
+it.each(overloadOrders)("explicit overload contracts preserve every supported context: $order (promised=$promised)", async ({ order, promised }) => {
+  const { dir, root } = await fixture();
+  await rm(join(dir, "tools"), { recursive: true });
+  await rm(join(dir, "workflows"), { recursive: true });
+  await writeFile(join(root, "package.json"), '{"type":"module"}');
+  await rm(join(root, "node_modules"));
+  await mkdir(join(root, "node_modules/@little-stack"), { recursive: true });
+  await symlink(process.cwd(), join(root, "node_modules/@little-stack/harness"));
+  await symlink(join(process.cwd(), "node_modules/@types"), join(root, "node_modules/@types"));
+  const isHost = (key: string) => key === "host";
+  const contexts = order.filter(key => !isHost(key));
+  const signatures = order.map(key => `function definition(host: HarnessHost${isHost(key) ? "" : `, context: { kind: "${key}"; value: string }`}): Harness;`).join("\n");
+  await writeFile(join(dir, "agent.ts"), `import { createHarness, type Harness, type HarnessHost } from "@little-stack/harness";
+${signatures}
+function definition(host: HarnessHost, context?: { kind: string; value: string }) { return createHarness({ host, model: {} as never }); }
+export default ${promised ? "Promise.resolve(definition)" : "definition"};`);
+  const kinds = [...new Set(contexts)];
+  const contract = kinds.map(key => `{ kind: "${key}"; value: string }`).join(" | ") + (order.some(isHost) ? " | undefined" : "");
+  const dispatch = (order.some(isHost) ? "if (context === undefined) return definition(host);" : "") +
+    `switch (context.kind) { ${kinds.map(key => `case "${key}": return definition(host, context);`).join(" ")} } throw new Error("Unexpected context");`;
+  await declaredFixture(root, contract, dispatch);
+  await writeFile(join(root, "generated.ts"), await compileHarnessFolder(dir, { moduleDir: root }));
+  await writeFile(join(root, "workspace.ts"), await compileHarnessWorkspace(root, { moduleDir: root }));
+  const path = join(root, "typecheck.ts");
+  await writeFile(path, `import create from "./declared.js";
+import raw from "./generated.js";
+import { loadHarness } from "./workspace.js";
+import authored from "./agents/declared/agent.js";
+import rawAuthored from "./agents/support/agent.js";
+import { instantiateHarness } from "@little-stack/harness/compiled";
+import type { HarnessHost } from "@little-stack/harness";
+declare const host: HarnessHost;
+const definition = await authored;
+const rawDefinition = await rawAuthored;
+${order.some(isHost) ? "" : "// @ts-expect-error no raw host-only overload"}
+raw({ host });
+${order.some(isHost) ? "" : "// @ts-expect-error no raw host-only overload"}
+loadHarness("support", { host });
+${order.some(isHost) ? "" : "// @ts-expect-error no raw host-only overload"}
+instantiateHarness(rawDefinition, host);
+${contexts.map(key => `create({ host, context: { kind: "${key}", value: "live" } });\nloadHarness("declared", { host, context: { kind: "${key}", value: "live" } });\ninstantiateHarness(definition, host, { kind: "${key}", value: "live" });`).join("\n")}
+${order.some(isHost) ? "" : "// @ts-expect-error no host-only overload"}
+create({ host });
+${order.some(isHost) ? "" : "// @ts-expect-error no host-only overload"}
+loadHarness("declared", { host });
+// @ts-expect-error no overload accepts this context
+create({ host, context: { kind: "missing", value: "live" } });
+// @ts-expect-error no overload accepts this context
+loadHarness("declared", { host, context: { kind: "missing", value: "live" } });
+// @ts-expect-error the first context signature's required field is still checked
+create({ host, context: { kind: "${contexts[0]}" } });
+// @ts-expect-error the first context signature's required field is still checked
+loadHarness("declared", { host, context: { kind: "${contexts[0]}" } });
+// @ts-expect-error the helper cannot accept an undeclared context
+instantiateHarness(definition, host, { kind: "missing", value: "live" });
+// @ts-expect-error the helper retains required context fields
+instantiateHarness(definition, host, { kind: "${contexts[0]}" });
+${order.some(isHost) ? "" : "// @ts-expect-error no host-only overload"}
+instantiateHarness(definition, host);
+`);
+  const program = ts.createProgram([path], { noEmit: true, strict: true, exactOptionalPropertyTypes: true, skipLibCheck: true, target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.NodeNext, moduleResolution: ts.ModuleResolutionKind.NodeNext, allowImportingTsExtensions: true });
+  expect(ts.formatDiagnosticsWithColorAndContext(ts.getPreEmitDiagnostics(program), { getCanonicalFileName: name => name, getCurrentDirectory: () => root, getNewLine: () => "\n" })).toBe("");
+});
+
+it.each([
+  ["generic host-only", `export default <H extends HarnessHost>(host: H) => createHarness({ host, model: {} as never });`, false],
+  ["generic context", `export default <H extends HarnessHost>(host: H, context: Context) => make(host);`, true],
+  ["generic-dependent return", `export default <H extends HarnessHost>(host: H, context: Context) => Object.assign(make(host), { suppliedHost: host });`, true],
+  ["generic host-first overload", `function definition<H extends HarnessHost>(host: H): Harness;\nfunction definition<H extends HarnessHost>(host: H, context: Context): Harness;\nfunction definition(host: HarnessHost, context?: Context) { return make(host); }\nexport default definition;`, false],
+  ["generic host-last overload", `function definition<H extends HarnessHost>(host: H, context: Context): Harness;\nfunction definition<H extends HarnessHost>(host: H): Harness;\nfunction definition(host: HarnessHost, context?: Context) { return make(host); }\nexport default definition;`, false],
+  ["generic overload-dependent return", `function definition<H extends HarnessHost>(host: H): Harness & { suppliedHost: H };\nfunction definition<H extends HarnessHost>(host: H, context: Context): Harness & { suppliedHost: H };\nfunction definition(host: HarnessHost, context?: Context) { return Object.assign(make(host), { suppliedHost: host }); }\nexport default Promise.resolve(definition);`, false],
+  ["annotated generic overload", `function definition<H extends HarnessHost>(host: H): Harness & { suppliedHost: H };\nfunction definition<H extends HarnessHost>(host: H, context: Context): Harness & { suppliedHost: H };\nfunction definition(host: HarnessHost, context?: Context) { return Object.assign(make(host), { suppliedHost: host }); }\nfunction annotated(): import("@little-stack/harness/compiled").HarnessDefinition<Context> { return definition; }\nexport default annotated();`, true],
+  ["generic alternative contexts", `function definition<H extends HarnessHost>(host: H, context: Context): Harness & { suppliedHost: H };\nfunction definition<H extends HarnessHost>(host: H, context: { auditId: string }): Harness & { suppliedHost: H };\nfunction definition(host: HarnessHost, context: Context | { auditId: string }) { return Object.assign(make(host), { suppliedHost: host }); }\nexport default definition;`, true],
+] as const)("generic factory inference terminates and executes: %s", async (name, definition, required) => {
+  const { dir, root } = await fixture();
+  await rm(join(dir, "tools"), { recursive: true });
+  await rm(join(dir, "workflows"), { recursive: true });
+  await writeFile(join(root, "package.json"), '{"type":"module"}');
+  await rm(join(root, "node_modules"));
+  await mkdir(join(root, "node_modules/@little-stack"), { recursive: true });
+  await symlink(process.cwd(), join(root, "node_modules/@little-stack/harness"));
+  await symlink(join(process.cwd(), "node_modules/@types"), join(root, "node_modules/@types"));
+  await writeFile(join(dir, "agent.ts"), `import { createHarness, type Harness, type HarnessHost } from "@little-stack/harness";
+type Context = { chatSessionId: string; onResult: () => void };
+const make = (host: HarnessHost) => createHarness({ host, model: {} as never });
+${definition}`);
+  const alternate = name === "generic alternative contexts";
+  const declaredDir = alternate ? await declaredFixture(root, "Context | { auditId: string }", 'if ("auditId" in context) return definition(host, context); return definition(host, context);') : undefined;
+  await writeFile(join(root, "generated.ts"), await compileHarnessFolder(dir, { moduleDir: root }));
+  await writeFile(join(root, "workspace.ts"), (await compileHarnessWorkspace(root, { moduleDir: root })) + "\nexport default loadHarness;");
+  const path = join(root, "typecheck.ts");
+  await writeFile(path, `import create from "./${alternate ? "declared" : "generated"}.js";
+import { loadHarness } from "./workspace.js";
+import type { HarnessHost } from "@little-stack/harness";
+declare const host: HarnessHost;
+const context = { chatSessionId: "chat", onResult: () => {} };
+create({ host, context });
+loadHarness("${alternate ? "declared" : "support"}", { host, context });
+${!required ? `create({ host });\nloadHarness("${alternate ? "declared" : "support"}", { host });` : ""}
+${name === "generic alternative contexts" ? 'create({ host, context: { auditId: "audit" } });\nloadHarness("declared", { host, context: { auditId: "audit" } });' : ""}
+${["generic context", "generic-dependent return", "annotated generic overload", "generic alternative contexts"].includes(name) ? `// @ts-expect-error context remains required when its contract is reflectable or explicit
+create({ host });
+// @ts-expect-error context remains required when its contract is reflectable or explicit
+loadHarness("${alternate ? "declared" : "support"}", { host });
+// @ts-expect-error contextual generic constraints remain checked
+create({ host, context: { chatSessionId: 123 } });
+// @ts-expect-error contextual generic constraints remain checked
+loadHarness("${alternate ? "declared" : "support"}", { host, context: { chatSessionId: 123 } });` : ""}
+`);
+  const program = ts.createProgram([path], { noEmit: true, strict: true, exactOptionalPropertyTypes: true, skipLibCheck: true, target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.NodeNext, moduleResolution: ts.ModuleResolutionKind.NodeNext, allowImportingTsExtensions: true });
+  expect(ts.formatDiagnosticsWithColorAndContext(ts.getPreEmitDiagnostics(program), { getCanonicalFileName: name => name, getCurrentDirectory: () => root, getNewLine: () => "\n" })).toBe("");
+  const folder = await importDefault<(options: CompiledHarnessOptions) => Promise<Harness>>(join(root, "generated.ts"));
+  const workspace = await importDefault<(name: string, options: CompiledHarnessOptions) => Promise<Harness>>(join(root, "workspace.ts"));
+  const typedFolder = declaredDir === undefined ? undefined : await importDefault<(options: CompiledHarnessOptions) => Promise<Harness>>(join(root, "declared.ts"));
+  const suppliedHost = host();
+  const context = { chatSessionId: "chat", onResult: () => {} };
+  for (const instance of await Promise.all([folder({ host: suppliedHost, context }), workspace("support", { host: suppliedHost, context }), loadHarness(dir, { host: suppliedHost, context }), ...(typedFolder === undefined ? [] : [typedFolder({ host: suppliedHost, context }), workspace("declared", { host: suppliedHost, context }), loadHarness(declaredDir!, { host: suppliedHost, context })])])) {
+    expect(instance.config.host).toBe(suppliedHost);
+    expect(instance.sessions).toBe(suppliedHost.sessions);
+  }
+});
+
+it("raw overload inference uses the last signature, preserves host calls, and supports explicit contracts", async () => {
+  const { dir, root } = await fixture();
+  await rm(join(dir, "tools"), { recursive: true });
+  await rm(join(dir, "workflows"), { recursive: true });
+  await writeFile(join(root, "package.json"), '{"type":"module"}');
+  await rm(join(root, "node_modules"));
+  await mkdir(join(root, "node_modules/@little-stack"), { recursive: true });
+  await symlink(process.cwd(), join(root, "node_modules/@little-stack/harness"));
+  await symlink(join(process.cwd(), "node_modules/@types"), join(root, "node_modules/@types"));
+  const preamble = `import { createHarness, type Harness, type HarnessHost } from "@little-stack/harness";
+type A = { kind: "a"; value: string }; type B = { kind: "b"; value: string };
+`;
+  const body = `function definition(host: HarnessHost, context?: A | B) { return createHarness({ host, model: {} as never }); }\nexport default definition;`;
+  await writeFile(join(dir, "agent.ts"), preamble + `function definition(host: HarnessHost): Harness;
+function definition(host: HarnessHost, context: A): Harness;
+function definition(host: HarnessHost, context: B): Harness;
+` + body);
+  const lastHost = join(root, "agents/last-host"); await mkdir(lastHost);
+  await writeFile(join(lastHost, "agent.ts"), preamble + `function definition(host: HarnessHost, context: A): Harness;
+function definition(host: HarnessHost, context: B): Harness;
+function definition(host: HarnessHost): Harness;
+` + body);
+  await declaredFixture(root, '{ kind: "a"; value: string } | { kind: "b"; value: string } | undefined', 'if (context === undefined) return definition(host); if (context.kind === "a") return definition(host, context); return definition(host, context);');
+  await writeFile(join(root, "generated.ts"), await compileHarnessFolder(dir, { moduleDir: root }));
+  await writeFile(join(root, "last-host.ts"), await compileHarnessFolder(lastHost, { moduleDir: root }));
+  await writeFile(join(root, "workspace.ts"), await compileHarnessWorkspace(root, { moduleDir: root }));
+  const path = join(root, "typecheck.ts");
+  await writeFile(path, `import lastContext from "./generated.js";
+import lastHost from "./last-host.js";
+import declared from "./declared.js";
+import { loadHarness } from "./workspace.js";
+import type { HarnessHost } from "@little-stack/harness";
+declare const host: HarnessHost;
+lastContext({ host }); loadHarness("support", { host });
+lastContext({ host, context: { kind: "b", value: "ok" } });
+loadHarness("support", { host, context: { kind: "b", value: "ok" } });
+// @ts-expect-error earlier contextual alternatives need an explicit contract
+lastContext({ host, context: { kind: "a", value: "ok" } });
+// @ts-expect-error earlier contextual alternatives need an explicit contract
+loadHarness("support", { host, context: { kind: "a", value: "ok" } });
+// @ts-expect-error the inferred last context still checks required fields
+lastContext({ host, context: { kind: "b" } });
+lastHost({ host }); loadHarness("last-host", { host });
+// A final host-only signature supplies no context shape: context is unknown.
+lastHost({ host, context: { arbitrary: 123 } });
+loadHarness("last-host", { host, context: { arbitrary: 123 } });
+declared({ host }); loadHarness("declared", { host });
+declared({ host, context: { kind: "a", value: "ok" } });
+declared({ host, context: { kind: "b", value: "ok" } });
+// @ts-expect-error explicit contracts restore full supplied-context checks
+loadHarness("declared", { host, context: { kind: "a" } });
+`);
+  const program = ts.createProgram([path], { noEmit: true, strict: true, exactOptionalPropertyTypes: true, skipLibCheck: true, target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.NodeNext, moduleResolution: ts.ModuleResolutionKind.NodeNext, allowImportingTsExtensions: true });
+  expect(ts.formatDiagnosticsWithColorAndContext(ts.getPreEmitDiagnostics(program), { getCanonicalFileName: name => name, getCurrentDirectory: () => root, getNewLine: () => "\n" })).toBe("");
 });

@@ -1,3 +1,4 @@
+import { isTraceContentRef } from "./storage.js";
 import { readdir, readFile } from "node:fs/promises";
 import { createLocalFileWriter } from "../files/file-writer.js";
 import { resolveLocalHostPaths, sessionPaths } from "../local-host/paths.js";
@@ -151,7 +152,7 @@ export async function doctorSession(options: {
   const trace = await readTraceFile(session.paths.traceFile);
   const failures = trace.events.filter((event) => isFailureEvent(event.type));
   const contentRefs = trace.events.flatMap((event) => collectContentRefs(event.metadata));
-  const traceArtifactRefs = contentRefs.filter((ref) => ref.startsWith("/artifacts/trace/"));
+  const traceArtifactRefs = contentRefs.filter((ref) => isTraceContentRef(ref));
 
   return {
     sessionId: session.id,
@@ -280,11 +281,11 @@ async function hydrateDiffContent(
   if (!isObject(diff) || diff.available !== true || typeof diff.contentRef !== "string") {
     return diff;
   }
-  if (!diff.contentRef.startsWith("/artifacts/trace/")) {
+  if (!isTraceContentRef(diff.contentRef)) {
     return diff;
   }
 
-  const content = (await session.files.read(diff.contentRef)).text();
+  const content = (await (session.traceContent ?? session.files).read(diff.contentRef)).text();
   return { ...diff, content };
 }
 

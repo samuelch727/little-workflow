@@ -1,3 +1,4 @@
+import { attachTraceContentStore, traceContentStoreFor } from "../trace/storage.js";
 import type {
   ArtifactRef,
   FileContent,
@@ -27,7 +28,7 @@ export function createEventedFileWriter(
   emit: (event: TurnEvent) => Promise<void>,
   options: EventedFileWriterOptions,
 ): FileWriter {
-  return {
+  const writer: FileWriter = {
     get limits() { return base.limits; },
     write: (targetPath, content, writeOptions) =>
       writeWithEvents(base, emit, targetPath, content, options, writeOptions),
@@ -55,6 +56,9 @@ export function createEventedFileWriter(
       }
     },
   };
+  const store = traceContentStoreFor(base);
+  if (store) attachTraceContentStore(writer, store);
+  return writer;
 }
 
 export function createArtifactAccessor(
@@ -93,7 +97,9 @@ async function writeWithEvents(
     ...(writeOptions.metadata === undefined ? {} : { metadata: writeOptions.metadata }),
     ...(before === undefined ? {} : { before: binaryMetadata(before.content) }),
     after: afterVersion,
-    diff: redactionReasonForPath(ref.path, eventOptions.traceOptions)
+    diff: writeOptions.metadata?.spooledToolResult === true
+      ? { available: false as const, reason: "harness_file" as const }
+      : redactionReasonForPath(ref.path, eventOptions.traceOptions)
       ? { available: false as const, reason: "redacted" as const }
       : await createTraceDiff(before?.content, after.content, eventOptions.traceOptions, {
           files: base,

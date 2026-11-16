@@ -8,6 +8,9 @@ import { describe, expect, it } from "vitest";
 import { createHarness } from "../create-harness.js";
 import { inputType } from "../input-types/input-type.js";
 import { localHost } from "../local-host/index.js";
+import { virtualHost } from "../virtual-host/virtual-host.js";
+import { InMemoryFs } from "just-bash";
+import { resolveSkills } from "../skills/skill.js";
 import { memory } from "../memory/memory.js";
 import { skill } from "../skills/skill.js";
 import { withTempDir } from "../test/temp.js";
@@ -266,3 +269,23 @@ async function git(cwd: string, args: readonly string[]): Promise<string> {
   });
   return stdout.trim();
 }
+
+
+it.each(["local", "virtual"])("advertises a skill path readable after cd on %s host", async (kind) => {
+  await withTempDir(async (dir) => {
+    const host = kind === "local" ? localHost({ dataDir: dir, sandbox: "in-process" }) : virtualHost({ fs: new InMemoryFs() });
+    const skills = [skill({ name: "review", description: "Review", harnessDir: ".agents/skills/review", files: { "SKILL.md": "Review body" } })];
+    const harness = createHarness({ host, model, skills });
+    const session = await host.sessions.getOrCreate({ id: "skill-path" });
+    const resolvedSkills = await resolveSkills(skills);
+    const messages = await buildModelMessages({ harness, config: harness.config, session, messages: [], resolvedSkills });
+    expect(messages.system).toContain("Read details at /.agents/skills/review/SKILL.md");
+    const prepared = await host.prepareTurn({ session, turnId: "turn_1", persistentDirs: [] });
+    await prepared.stageSkills(resolvedSkills);
+    const runtime = await prepared.createSandbox({});
+    const result = await (runtime.shellTool() as any).execute({ command: "mkdir -p /session/nested; cd /session/nested; cat /.agents/skills/review/SKILL.md" }, {});
+    expect(result).toMatchObject({ stdout: "Review body", exitCode: 0 });
+    expect(await (runtime.shellTool() as any).execute({ command: "head -c 4 /dev/zero | wc -c" }, {})).toMatchObject({ stdout: "4\n", exitCode: 0 });
+    expect(await (runtime.shellTool() as any).execute({ command: "head -c 4 /dev/urandom | wc -c" }, {})).toMatchObject({ stdout: "4\n", exitCode: 0 });
+  });
+});

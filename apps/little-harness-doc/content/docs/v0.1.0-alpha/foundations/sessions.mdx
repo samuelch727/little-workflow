@@ -92,3 +92,20 @@ extraBody: {
 ```
 
 The developer decides which fields matter for storage, tools, policy, and audit.
+
+## Experimental Context Policy
+
+The SDK stays off unless `contextPolicy` is configured. Its four controls are `triggerTokens`,
+`keepLastTurns`, `summaryModel` (`false` means trim only) and `maxCompactionCostUsdPerSession`
+(default $0). A host supplies durable checkpoints and admission before paid summaries. Canonical
+messages stay caller-owned; model views can reuse validated immutable prefixes across turns.
+
+The normal `maxOutputTokens` option on the Harness, turn hook or call is also the context output
+reserve. Managed hosts use the model maximum only when it is absent. See the package's
+`docs/context-policy.md` for projection, replay and paired managed-integration limitations.
+
+Soft triggers calibrate from the session's last measured model input and the byte estimate of
+that same request. Missing or incompatible samples use conservative bytes; the hard-window
+bound remains conservative. Short image/file inputs pass unchanged, and media remains retained
+when older text is projected. Built-in local-host paid summaries with a durable local store
+are a later item; the plain SDK default supplies trim only.

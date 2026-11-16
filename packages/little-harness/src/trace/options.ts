@@ -1,4 +1,8 @@
-import type { HarnessTraceOptions, ResolvedHarnessTraceOptions } from "./types.js";
+import { HarnessInputError } from "../errors.js";
+import type {
+  HarnessTraceOptions,
+  ResolvedHarnessTraceOptions,
+} from "./types.js";
 
 const DEFAULT_REDACTED_KEYS = [
   "apiKey",
@@ -14,6 +18,14 @@ export function resolveTraceOptions(
   harnessOptions: HarnessTraceOptions | ResolvedHarnessTraceOptions | undefined,
   runOptions: HarnessTraceOptions | ResolvedHarnessTraceOptions | undefined,
 ): ResolvedHarnessTraceOptions {
+  const inputs = [harnessOptions ? harnessOptions.redaction?.values : undefined, runOptions ? runOptions.redaction?.values : undefined];
+  for (const input of inputs) {
+    if (input !== undefined && (!Array.isArray(input) || input.some(value => typeof value !== "string" || value.length === 0))) {
+      throw new HarnessInputError("trace.redaction.values must be an array of non-empty strings");
+    }
+  }
+  const values = unique(inputs.flatMap(input => Array.isArray(input) ? input : []));
+  values.sort((a, b) => b.length - a.length);
   if (
     harnessOptions === false ||
     runOptions === false ||
@@ -62,6 +74,7 @@ export function resolveTraceOptions(
         256 * 1024,
     },
     redaction: {
+      ...(values.length ? { values } : {}),
       paths: [
         ...(harnessOptions?.redaction?.paths ?? []),
         ...(runOptions?.redaction?.paths ?? []),

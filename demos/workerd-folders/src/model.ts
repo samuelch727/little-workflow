@@ -15,8 +15,8 @@ export function scriptedModel() {
     const text = user?.content.map(p => p.type === "text" ? p.text : "").join("") ?? "";
     if (text === "system") return result([{ type: "text", text: prompt.filter(m => m.role === "system").map(m => m.content).join("\n") }]);
     if (text === "history") return result([{ type: "text", text: String(prompt.filter(m => m.role === "user").length) }]);
-    const name = text.startsWith("count:") ? "word_count" : text === "counter" ? "counter" : text.startsWith("pause:") ? "wait" : "bash";
-    const input = name === "word_count" ? { text: text.slice(6) } : name === "counter" ? {} : name === "wait" ? { ms: Number(text.slice(6)) } : { command: text.startsWith("fail:") ? text.slice(5) : text };
+    const name = text.startsWith("count:") ? "word_count" : text === "context" ? "context_info" : text === "counter" ? "counter" : text.startsWith("pause:") ? "wait" : "bash";
+    const input = name === "word_count" ? { text: text.slice(6) } : (name === "counter" || name === "context_info") ? {} : name === "wait" ? { ms: Number(text.slice(6)) } : { command: text.startsWith("fail:") ? text.slice(5) : text };
     return result([{ type: "tool-call", toolCallId: crypto.randomUUID(), toolName: name, input: JSON.stringify(input) }]);
   } });
 }

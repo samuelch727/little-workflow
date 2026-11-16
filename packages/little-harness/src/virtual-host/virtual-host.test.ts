@@ -97,17 +97,19 @@ describe("virtualHost", () => {
     await session.files.writeText("/session/notes.md", "hello from the app\n");
 
     const events: HarnessEvent[] = [];
-    const result = await run(host, "chat", ["cat notes.md && echo made > made.txt && mkdir -p /artifacts/out && echo r > /artifacts/out/report.txt"], { events });
+    const result = await run(host, "chat", ["echo scratch > /tmp/not-an-artifact; cat notes.md && echo made > made.txt && mkdir -p /artifacts/out && echo r > /artifacts/out/report.txt"], { events });
 
     expect(result).toMatchObject({ exitCode: 0, stdout: "hello from the app\n" });
     expect(await fs.readFile("/session/made.txt")).toBe("made\n");
     expect((await session.artifacts.list()).map((artifact) => artifact.path)).toEqual(["/artifacts/out/report.txt"]);
     expect(events.filter((event) => event.type === "harness.file.created").map((event) => event.metadata?.path))
       .toEqual(expect.arrayContaining(["/session/made.txt", "/artifacts/out/report.txt"]));
-    // Bash sees the four workspace roots and nothing else of the filesystem.
+    expect(events.filter((event) => event.type.startsWith("harness.file.")).some((event) => String(event.metadata?.path).startsWith("/tmp"))).toBe(false);
+    expect(fs.getAllPaths().some((pathname) => pathname.includes("not-an-artifact"))).toBe(false);
+    // Bash sees workspace roots plus ephemeral scratch.
     const listing = await run(host, "chat", ["ls -a /"]);
     expect(listing.stdout.split(/\s+/u).filter((name) => !["", ".", ".."].includes(name)).sort())
-      .toEqual([".agents", "artifacts", "dev", "persistent", "session"]);
+      .toEqual([".agents", "artifacts", "dev", "persistent", "session", "tmp"]);
     expect((await run(host, "chat", [`ls ${VIRTUAL_HOST_STATE_DIR}`])).exitCode).not.toBe(0);
   });
 
@@ -267,7 +269,7 @@ describe("virtualHost", () => {
     const recalled = await run(virtualHost({ fs }), "chat", ["cat /persistent/memory/release.md"], { memory });
     expect(recalled).toMatchObject({ exitCode: 0, stdout: "The release colour is violet.\n" });
     const roots = await run(virtualHost({ fs }), "chat", ["ls -A /"], { memory });
-    expect(roots.stdout.trim().split(/\s+/u).sort()).toEqual([".agents", "artifacts", "dev", "persistent", "session"]);
+    expect(roots.stdout.trim().split(/\s+/u).sort()).toEqual([".agents", "artifacts", "dev", "persistent", "session", "tmp"]);
     expect((await run(virtualHost({ fs }), "chat", ["cat /.little-harness/data/memory/release.md"], { memory })).exitCode).not.toBe(0);
   });
 

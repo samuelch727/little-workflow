@@ -1,6 +1,7 @@
 import type { Environment, SpanInput, TraceInput, Trigger, WorkflowOrigin } from "../contract.js";
 import type { Exporter, LittleDBErrorHandler } from "../exporter.js";
 import { turnTraceId, type TurnTraceIds } from "../harness/tracer.js";
+import type { PlanUploads } from "./plans.js";
 import type { Resolution } from "../resolve.js";
 import {
   boundedId,
@@ -32,6 +33,7 @@ export type WorldEventLike = {
  * through untouched, so the wrapper is a `World` wherever the inner one is.
  */
 export type WorldLike = {
+  readWorkflowVersion?(id: string): Promise<{ readonly lwir: unknown }>;
   appendEvent(runId: string, event: { readonly type: string; readonly payload: Readonly<Record<string, unknown>> }): Promise<WorldEventLike>;
 };
 
@@ -84,6 +86,8 @@ type OpenSpan = {
   readonly attributes: Record<string, unknown>;
 };
 
+type Branch = { path: string; parent: string; attempt: number; index: number; key?: string; status: "running" | "ok" | "error" };
+
 type RunTrace = {
   readonly runId: string;
   readonly traceId: string;
@@ -105,6 +109,14 @@ type RunTrace = {
   readonly open: Map<string, OpenSpan>;
   /** The latest attempt span of each step path, to parent model and tool calls under. */
   readonly stepSpan: Map<string, string>;
+  readonly plans: Map<string, unknown>;
+  readonly scheduled: Map<string, string>;
+  /** Nearest branch lookup is bounded by path depth, not the number of branches in the run. */
+  readonly branchesByPath: Map<string, Branch>;
+  /** A group's summary reads only that group's own attempt. */
+  readonly branchesByGroup: Map<string, Map<string, Branch>>;
+  /** Structural keys built from event step ids and the enclosing group's key, never parsed paths. */
+  readonly stepKeys: Map<string, string>;
 };
 
 const MAX_OPEN_RUNS = 1_000;
@@ -122,7 +134,7 @@ export function runTraceId(runId: string): string {
 export function createTracingWorld<W extends WorldLike>(
   inner: W,
   options: TracingWorldOptions,
-  deps: { readonly exporter: Exporter; readonly onError: LittleDBErrorHandler; readonly turnTraceIds?: TurnTraceIds },
+  deps: { readonly exporter: Exporter; readonly onError: LittleDBErrorHandler; readonly turnTraceIds?: TurnTraceIds; readonly plans?: PlanUploads },
 ): W {
   const capture = options.captureContent !== false;
   const versionId = options.versionId ?? options.resolution?.versionId ?? undefined;
@@ -150,7 +162,7 @@ export function createTracingWorld<W extends WorldLike>(
       ...(endTime === undefined ? {} : { endTime }),
       ...(capture && run.input !== undefined ? { input: run.input } : {}),
       ...(capture && output !== undefined ? { output } : {}),
-      attributes: { runId: run.runId, ...run.attributes },
+      attributes: { runId: run.runId, workflow: options.workflow, ...run.attributes },
       ...(error === undefined ? {} : { error }),
     };
   }
@@ -173,6 +185,11 @@ export function createTracingWorld<W extends WorldLike>(
       attributes: {},
       open: new Map(),
       stepSpan: new Map(),
+      plans: new Map(),
+      scheduled: new Map(),
+      branchesByPath: new Map(),
+      branchesByGroup: new Map(),
+      stepKeys: new Map(),
     };
     runs.set(runId, run);
     if (runs.size > MAX_OPEN_RUNS) {
@@ -199,7 +216,7 @@ export function createTracingWorld<W extends WorldLike>(
       ...(options.experimentId === undefined ? {} : { experimentId: options.experimentId }),
       ...(options.datasetItemId === undefined ? {} : { datasetItemId: options.datasetItemId }),
       startTime: run.startTime,
-      metadata: { ...(options.metadata ?? {}), runId: run.runId },
+      metadata: { ...(options.metadata ?? {}), runId: run.runId, ...(typeof run.attributes.planHash === "string" ? { planHash: run.attributes.planHash } : {}) },
       ...(options.tags === undefined ? {} : { tags: [...options.tags] }),
       ...links,
     };
@@ -248,6 +265,16 @@ export function createTracingWorld<W extends WorldLike>(
     const open = run.open.get(key);
     if (open === undefined) return;
     run.open.delete(key);
+    const allBranches = open.type === "step"
+      ? [...(run.branchesByGroup.get(JSON.stringify([open.attributes.stepPath, open.attributes.attempt]))?.values() ?? [])]
+      : [];
+    const branches = allBranches.sort((a, b) => a.index - b.index).slice(0, 100)
+      .map((b) => ({ index: b.index, ...(capture && b.key !== undefined ? { key: b.key } : {}), status: b.status }));
+    const branchTotals = {
+      branchCount: allBranches.length,
+      branchFailed: allBranches.filter((b) => b.status === "error").length,
+      branchRunning: allBranches.filter((b) => b.status === "running").length,
+    };
     send([], [
       {
         traceId: run.traceId,
@@ -261,7 +288,7 @@ export function createTracingWorld<W extends WorldLike>(
         ...(open.model === undefined ? {} : { model: open.model }),
         ...(open.input === undefined ? {} : { input: open.input }),
         ...extra,
-        attributes: { ...open.attributes, ...(extra.attributes ?? {}) },
+        attributes: { ...open.attributes, ...(extra.attributes ?? {}), ...(branches.length > 0 || open.attributes.uses === "parallel" || extra.attributes?.uses === "parallel" ? { branches, ...branchTotals } : {}) },
       },
     ]);
   }
@@ -299,6 +326,49 @@ export function createTracingWorld<W extends WorldLike>(
     const stepPath = stringValue(payload.stepPath);
     const attempt = typeof payload.attempt === "number" ? payload.attempt : undefined;
     switch (event.type) {
+      case "PlannerDraftedWorkflow": {
+        const hash = stringValue(payload.lwirHash);
+        if (payload.valid === true && hash !== undefined && isRecord(payload.lwir)) run.plans.set(hash, payload.lwir);
+        return;
+      }
+      case "WorkflowVersionRegistered": {
+        const hash = stringValue(payload.lwirHash);
+        const workflowVersionId = stringValue(payload.workflowVersionId);
+        if (hash === undefined) return;
+        run.attributes.planHash = hash;
+        send(run.nested ? [] : [traceRow(run)], [rootSpan(run, "running")]);
+        if (workflowVersionId !== undefined && (run.plans.has(hash) || inner.readWorkflowVersion !== undefined)) {
+          const drafted = run.plans.get(hash);
+          deps.plans?.enqueue({ workflow: options.workflow, hash, workflowVersionId, complete: capture,
+            read: async () => drafted ?? (await inner.readWorkflowVersion?.(workflowVersionId))?.lwir });
+        }
+        return;
+      }
+      case "StepScheduled": {
+        if (stepPath !== undefined && typeof payload.uses === "string") run.scheduled.set(stepPath, payload.uses);
+        return;
+      }
+      case "ParallelBranchScheduled":
+      case "ParallelBranchCompleted":
+      case "ParallelBranchFailed": {
+        const path = stringValue(payload.branchPath);
+        const index = payload.branchIndex;
+        if (path === undefined || stepPath === undefined || typeof index !== "number" || !Number.isInteger(index) || index < 0) return;
+        const groupKey = JSON.stringify([stepPath, attempt ?? 1]);
+        let group = run.branchesByGroup.get(groupKey);
+        if (group === undefined) {
+          group = new Map();
+          run.branchesByGroup.set(groupKey, group);
+        }
+        const previous = group.get(path);
+        const branch: Branch = { path, parent: stepPath, attempt: attempt ?? 1, index,
+          ...(capture && typeof payload.itemKey === "string" ? { key: payload.itemKey } : {}),
+          status: event.type === "ParallelBranchCompleted" ? "ok" : event.type === "ParallelBranchFailed" ? "error" : previous?.status ?? "running" };
+        group.set(path, branch);
+        // Keep the newest attempt if an old event is replayed after it.
+        if ((run.branchesByPath.get(path)?.attempt ?? 0) <= branch.attempt) run.branchesByPath.set(path, branch);
+        return;
+      }
       case "RunStarted": {
         if (payload.input !== undefined) run.input = payload.input;
         for (const field of ["workflowVersionId", "parentRunId", "label"] as const) {
@@ -313,6 +383,22 @@ export function createTracingWorld<W extends WorldLike>(
       case "StepAttemptStarted": {
         if (stepPath === undefined) return;
         const id = boundedId("step", run.runId, stepPath, String(attempt ?? 1));
+        const stepId = stringValue(payload.stepId);
+        const uses = run.scheduled.get(stepPath);
+        const visit = /\.visit\[(\d+)\]$/u.exec(stepPath);
+        let branch: Branch | undefined;
+        for (let dot = stepPath.lastIndexOf("."); dot >= 0; dot = stepPath.lastIndexOf(".", dot - 1)) {
+          branch = run.branchesByPath.get(stepPath.slice(0, dot));
+          if (branch !== undefined || dot === 0) break;
+        }
+        const parentKey = branch === undefined ? undefined : run.stepKeys.get(branch.parent);
+        const stepKey = stepId === undefined ? undefined
+          : branch === undefined
+            // Only recognize top-level identity/visit paths. A missing group's events must not
+            // turn a child into a top-level key. The key itself always comes from stepId.
+            ? (stepPath === stepId || (visit !== null && stepPath === `${stepId}${visit[0]}`) ? stepId : undefined)
+            : parentKey === undefined ? undefined : `${parentKey}.${stepId}`;
+        if (stepKey !== undefined) run.stepKeys.set(stepPath, stepKey);
         run.stepSpan.set(stepPath, id);
         openSpan(run, `step:${stepPath}`, {
           id,
@@ -320,7 +406,14 @@ export function createTracingWorld<W extends WorldLike>(
           name: clipText(stringValue(payload.stepId) ?? stepPath, 500),
           type: "step",
           startTime: at,
-          attributes: { stepPath, attempt: attempt ?? 1 },
+          attributes: { stepPath, attempt: attempt ?? 1,
+            ...(stepId === undefined ? {} : { stepId }),
+            ...(stepKey === undefined ? {} : { stepKey }),
+            ...(uses === undefined ? {} : { uses }),
+            ...(visit === null ? {} : { visit: Number(visit[1]) }),
+            ...(branch === undefined ? {} : { branchOf: branch.parent, branchIndex: branch.index,
+              ...(capture && branch.key !== undefined ? { branchKey: branch.key } : {}) }),
+          },
         }, true);
         return;
       }
@@ -331,6 +424,8 @@ export function createTracingWorld<W extends WorldLike>(
           ...(capture ? { output: payload.output !== undefined ? payload.output : payload.outputRef } : {}),
           attributes: {
             ...(typeof metadata.uses === "string" ? { uses: metadata.uses } : {}),
+            ...((run.scheduled.get(stepPath) ?? metadata.uses) === "decision" && isRecord(payload.output) && typeof payload.output.chosen === "string"
+              ? { chosen: clipText(payload.output.chosen, 200) } : {}),
             ...(typeof payload.outputRef === "string" ? { outputRef: payload.outputRef } : {}),
           },
         });
@@ -477,7 +572,7 @@ export function createTracingWorld<W extends WorldLike>(
     try {
       observe(runId, envelope ?? { runId, type: event.type, recordedAt: nowIso(), payload: event.payload });
     } catch (error) {
-      deps.onError(error, { operation: "trace" });
+      try { deps.onError(error, { operation: "trace" }); } catch { /* Observability cannot fail a run. */ }
     }
     return envelope;
   };

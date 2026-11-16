@@ -757,14 +757,6 @@ export type HarnessAsyncTaskQueueLedger = {
     readonly attemptLeaseExpiresAt: string;
     readonly deadlineAt?: string;
   }): Promise<{ readonly claimed: boolean; readonly record?: HarnessAsyncTaskQueueRecord }>;
-  acquireToolSlot(input: {
-    readonly sessionId: string;
-    readonly queueId: string;
-    readonly taskId: HarnessTaskId;
-    readonly maxConcurrentToolCalls: number;
-    readonly leaseExpiresAt?: string;
-  }): Promise<{ readonly acquired: boolean; readonly record?: HarnessAsyncTaskQueueRecord }>;
-  releaseToolSlot(input: { readonly sessionId: string; readonly queueId: string }, reason: "completed" | "failed" | "cancelled"): Promise<void>;
   markTerminal(input: {
     readonly sessionId: string;
     readonly queueId: string;

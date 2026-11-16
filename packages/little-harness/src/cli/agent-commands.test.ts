@@ -377,3 +377,59 @@ it("resolveConnectorReplTools inventory includes descriptor-carried tools merged
     "Descriptor-only tool.",
   );
 });
+
+it("new fills bare project dependencies and marker without replacing existing choices", async () => {
+  const cwd = await tmp();
+  await writeFile(join(cwd, "package.json"), JSON.stringify({ name: "existing", scripts: { custom: "echo kept" }, devDependencies: { zod: "^4.0.0" } }));
+  let output = "";
+  expect(await newCommand(["billing", "--provider", "gateway"], { cwd, stdout: (t) => { output += t; } })).toBe(0);
+  const pkg = JSON.parse(await readFile(join(cwd, "package.json"), "utf8"));
+  expect(pkg.dependencies).toMatchObject({ "@little-stack/harness": scaffoldDependencyVersions().littleHarness, ai: scaffoldDependencyVersions().ai });
+  expect(pkg.dependencies.zod).toBeUndefined();
+  expect(pkg.devDependencies.zod).toBe("^4.0.0");
+  expect(pkg.scripts.custom).toBe("echo kept");
+  expect(JSON.parse(await readFile(join(cwd, "little-harness.json"), "utf8"))).toEqual({ agents: "agents" });
+  expect(output.trim().split("\n").at(-1)).toBe("Next: pnpm install");
+  expect(await readFile(join(cwd, "agents/billing/skills/answer-clearly/SKILL.md"), "utf8")).toContain("name: answer-clearly");
+});
+
+it("new preserves an existing harness marker", async () => {
+  const cwd = await tmp();
+  await writeFile(join(cwd, "package.json"), JSON.stringify({ name: "existing" }));
+  const marker = '{"agents":"custom-agents","custom":true}\n';
+  await writeFile(join(cwd, "little-harness.json"), marker);
+  expect(await newCommand(["billing", "--provider", "gateway"], { cwd })).toBe(0);
+  expect(await readFile(join(cwd, "little-harness.json"), "utf8")).toBe(marker);
+});
+
+it.each([
+  { target: "--here", next: false, expected: "--here --template existing-node" },
+  { target: "my-app", next: false, expected: "my-app --template existing-node" },
+  { target: "next-app", next: true, expected: "next-app --template existing-next" },
+])("init explains existing package.json for $target (Next=$next)", async ({ target, next, expected }) => {
+  const cwd = await tmp();
+  const root = target === "--here" ? cwd : join(cwd, target);
+  await mkdir(root, { recursive: true });
+  const original = JSON.stringify({ name: "existing", ...(next ? { dependencies: { next: "^16.0.0" } } : {}) });
+  await writeFile(join(root, "package.json"), original);
+  let error = "";
+  expect(await initCommand([target, "--yes", "--no-install"], { cwd, stderr: (t) => { error += t; } })).toBe(1);
+  expect(error).toContain("Folder already has a package.json:");
+  expect(error).toContain(`setup ${expected}`);
+  expect(error).not.toContain("Project already initialized");
+  expect(await readFile(join(root, "package.json"), "utf8")).toBe(original);
+});
+
+it.each([false, true])("new omits install advice when package unchanged (package exists=%s)", async (packageExists) => {
+  const cwd = await tmp();
+  const original = JSON.stringify({ name: "existing", dependencies: { "@little-stack/harness": "^0.2.0-alpha.3", ai: "^7.0.0", zod: "^4.4.3" } });
+  if (packageExists) await writeFile(join(cwd, "package.json"), original);
+  let output = "";
+  expect(await newCommand(["billing", "--provider", "gateway"], { cwd, stdout: (t) => { output += t; } })).toBe(0);
+  expect(output).not.toContain("pnpm install");
+  if (packageExists) expect(await readFile(join(cwd, "package.json"), "utf8")).toBe(original);
+  else expect(await has(join(cwd, "package.json"))).toBe(false);
+  const instructions = await readFile(join(cwd, "agents/billing/instructions.md"), "utf8");
+  expect(instructions).toBe("You are a helpful agent.\n\nUse the `answer-clearly` skill when you answer a question.\n");
+  expect(await readFile(join(cwd, "agents/billing/agent.ts"), "utf8")).toContain("// or delete this and edit instructions.md");
+});

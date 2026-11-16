@@ -58,9 +58,10 @@ Reason kinds are `tier0-supported`, `empty-script`, `unknown-command`,
 Options: `runtime` (the toggles the script would run under), `policy`
 (`{ denyCommands, rule? }`), and `matrix` (pin a capability-matrix version).
 
-Classification cannot see inside `./build.sh`, a command passed to a runner
-(`xargs cargo build`, `timeout 5 docker ps`), or which flags an emulated command
-implements. `detectEmulationGap(result)` is the back-stop: given a finished
+The classifier follows literal commands through `command`, `builtin`, `exec`, `env`, `timeout`, `nice`, `nohup`, `xargs`, `find -exec` (and its variants), `setsid`, `stdbuf`, and `sudo`. A target that is not a literal word is not followed; at tier 0 the bundled adapters still refuse a denied command because it is not in their command set. The classifier cannot read an unquoted expansion that splits into several words (`B="1 rm /session/f"; env FOO=$B` starts `rm`); tier 0 refuses the denied command there too. `command -v` and `command -V` only look up names and do not execute the queried command. Bundled tier-0 adapters also omit denied registered commands from just-bash; wrappers that spread the sandbox options preserve that policy, while custom adapters must enforce their own execution policy. On a real-shell tier the deny list guards against accidents and is not a security boundary.
+
+Classification cannot see inside `./build.sh`, every runner option grammar,
+or which flags an emulated command implements. `detectEmulationGap(result)` is the back-stop: given a finished
 Tier-0 result, it returns `{ kind: "emulation-gap", signal, command, option? }`
 when stderr shows just-bash's own `command not found` or option-parser
 rejection. It matches stderr, not the exit code, and stderr is script-writable,
@@ -167,3 +168,5 @@ provisioning emits a transition for the invocation that wins the switch; each
 unavailable result keeps its own invocation identity. The executing adapter receives
 the same execution ID as the outer trace. See
 [Runtime events](/docs/v0.1.0-alpha/reference/events#runtime-events) for attempt/resume semantics.
+
+The current qualification baseline is just-bash 3.6.0. Classification combines collector output with literal AST command names, so quoted and escaped names still pass through capability and deny checks. Process substitutions are supported; their inner commands are classified too. `mktemp` and `yes` are registered. `mktemp` and `mktemp -d` with no destination run at Tier 0 in the one-turn `/tmp`; a `mktemp` with an explicit or dynamic destination, or a script that assigns `TMPDIR` (also as `env TMPDIR=/session mktemp`), escalates, and so does a `mktemp` started by `xargs`. This does not expand the documented indirect-command blind spots.

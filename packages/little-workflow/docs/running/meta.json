@@ -5,6 +5,7 @@
     "local-world",
     "inspect-runs",
     "replay-and-durability",
-    "using-littledb"
+    "using-littledb",
+    "virtual-world"
   ]
 }

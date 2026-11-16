@@ -79,9 +79,9 @@ When validation fails, the planner agent gets the findings back and produces a r
 - maximum repair attempts (configurable, defaults conservative)
 - planner call cap per request
 
-The bounds that actually run are on *attempts and turns*, not spend — alpha has no monetary cap that can stop a planner mid-request. Budget enforcement is post-alpha; see the [Roadmap](/docs/v0.1.0-alpha/roadmap).
+The bounds that actually run are on *attempts and turns*, not spend — alpha has no monetary cap that can stop a planner mid-request. Budget enforcement is post-alpha; see the [Roadmap](https://little-stack.dev/docs/workflow/v0.1.0-alpha/roadmap).
 
-If the loop exhausts its attempts without a clean draft, the request fails. Failure is preferable to registering a workflow whose LWIR did not validate. Human-review pauses on exhausted repair are planned post-alpha (see the [Roadmap](/docs/v0.1.0-alpha/roadmap)).
+If the loop exhausts its attempts without a clean draft, the request fails. Failure is preferable to registering a workflow whose LWIR did not validate. Human-review pauses on exhausted repair are planned post-alpha (see the [Roadmap](https://little-stack.dev/docs/workflow/v0.1.0-alpha/roadmap)).
 
 ### Register
 
@@ -135,7 +135,7 @@ The planner is one of four roles that run in a harness session. All four use the
 
 Each role receives its own `ctx.tools` (SDK-injected, role-specific), its own memory and scratch mounts, and its own system prompt addendum. The harness implementation is the same (`workflowHarness` by default) — the task and context configure the behavior.
 
-A custom harness can handle all four task kinds, or delegate any of them back to `workflowHarness` by returning `{ kind: "delegate_to_default" }`. See [Harness Implementation](/docs/v0.1.0-alpha/internals/harness) for the plugin model.
+A custom harness can handle all four task kinds, or delegate any of them back to `workflowHarness` by returning `{ kind: "delegate_to_default" }`. See [Harness Implementation](https://little-stack.dev/docs/workflow/v0.1.0-alpha/internals/harness) for the plugin model.
 
 ## Skills in the Planner Session
 
@@ -147,7 +147,7 @@ cat .agents/skills/writing-loop-lwir/SKILL.md
 
 Skills are declared on `WorkflowDefinition.planner.skills` or mounted at the org level. Workflow-declared skills take priority over org-mounted skills. The planner's `skillsHash` (in its manifest) includes all active skill frontmatter — adding or removing a skill changes the hash and triggers drift detection on resume.
 
-See [Skills](/docs/v0.1.0-alpha/authoring/skills) for the directory format and mount semantics.
+See [Skills](https://little-stack.dev/docs/workflow/v0.1.0-alpha/authoring/skills) for the directory format and mount semantics.
 
 ## Memory in the Planner Session
 
@@ -158,4 +158,4 @@ Before drafting, read /mnt/memory/workflow/lessons-learned.md if it exists.
 After drafting, if you discovered anything worth remembering, append it.
 ```
 
-The planner's fixes and observations compound over time. Dreaming — a periodic offline workflow that distills many runs' lessons — is post-alpha but uses the same primitives. See [Memory and Scratch](/docs/v0.1.0-alpha/internals/memory-scratch).
+The planner's fixes and observations compound over time. Dreaming — a periodic offline workflow that distills many runs' lessons — is post-alpha but uses the same primitives. See [Memory and Scratch](https://little-stack.dev/docs/workflow/v0.1.0-alpha/internals/memory-scratch).

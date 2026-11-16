@@ -78,13 +78,9 @@ describe("createHarness", () => {
         maxConcurrentToolCalls: 10,
         maxConcurrentWorkflowRuns: 10,
         maxQueuedWorkflowRuns: 100,
-        maxAutonomousTurns: 10,
       });
       expect(harness.config.workflowBudgets).not.toHaveProperty("toolDeadlineMs");
-      expect(harness.config.workflowBudgets).not.toHaveProperty("workflowDeadlineMs");
       expect(harness.config.workflowBudgets).not.toHaveProperty("queueDeadlineMs");
-      expect(harness.config.workflowBudgets).not.toHaveProperty("maxDynamicWorkflowTokens");
-      expect(harness.config.workflowBudgets).not.toHaveProperty("maxDynamicWorkflowOutputBytes");
     });
   });
 
@@ -98,7 +94,6 @@ describe("createHarness", () => {
           maxConcurrentWorkflowRuns: 2,
           maxQueuedWorkflowRuns: 3,
           queueDeadlineMs: 30_000,
-          maxDynamicWorkflowTokens: 8_000,
         },
       });
 
@@ -108,13 +103,9 @@ describe("createHarness", () => {
         maxConcurrentToolCalls: 10,
         maxConcurrentWorkflowRuns: 2,
         maxQueuedWorkflowRuns: 3,
-        maxAutonomousTurns: 10,
         queueDeadlineMs: 30_000,
-        maxDynamicWorkflowTokens: 8_000,
       });
       expect(harness.config.workflowBudgets).not.toHaveProperty("toolDeadlineMs");
-      expect(harness.config.workflowBudgets).not.toHaveProperty("workflowDeadlineMs");
-      expect(harness.config.workflowBudgets).not.toHaveProperty("maxDynamicWorkflowOutputBytes");
     });
   });
 

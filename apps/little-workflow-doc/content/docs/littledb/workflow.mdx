@@ -1,15 +1,10 @@
 ---
 title: LittleDB with Little Workflow
-description: A tracing wrapper around any Workflow World that sends each run to LittleDB as a trace. Private source; not installable.
+description: A tracing wrapper around any Workflow World that sends each run to LittleDB as a trace. Alpha.4 client; LittleDB account required.
 ---
 
-<Callout title="Private and UNRELEASED" type="warn">
-  `@little-stack/littledb` is private source and is not on npm, and it needs a
-  LittleDB server that is not publicly available. This page describes the client
-  as it exists in the private source, so you can see the API ahead of release.
-  You cannot install it, so use the default
-  [Local World](/docs/workflow/v0.1.0-alpha/running/local-world). See
-  [LittleDB](/docs/littledb) for status and the client.
+<Callout title="LittleDB account required" type="info">
+  `@little-stack/littledb` is published from `0.2.0-alpha.4`; it needs a LittleDB account. The LittleDB server is not open source. See [release status](https://little-stack.dev/docs/releases).
 </Callout>
 
 `db.tracingWorld(inner, options)` wraps a Little Workflow `World` so each run is
@@ -47,6 +42,41 @@ Each run is one trace (by default `lw_<runId>`):
 A run that fails closes its open spans as failed. Appending an event always
 completes first; the wrapper then observes it, and a problem observing it never
 reaches the run.
+
+## The plan behind a run
+
+The wrapper automatically sends the plan that ran to LittleDB, keyed by the
+workflow slug and the plan's hash. The trace's `metadata.planHash` and the root
+workflow span's `planHash` name it; each workflow span also carries the
+`workflow` slug passed to `tracingWorld`. When several runs share a fixed trace id,
+the trace keeps the first run's hash; each nested workflow span names its own.
+Step spans also describe decisions (`chosen`), loop visits (`visit`, from zero),
+and parallel items (`branchOf`, `branchIndex`, `branchKey` and a parallel step's
+`branches`, with `running`, `ok` or `error` status). Wherever `branches` is
+present, `branchCount`, `branchFailed` and `branchRunning` give the exact integer
+totals for that attempt, before the list is capped at 100 entries. These totals
+are present in both content modes, including zeros for an empty parallel step.
+`branchOf` is the enclosing
+parallel step's exact `stepPath`, including any ancestor retry markers.
+`stepKey` is the structural path of step ids joined with `.`, such as
+`check-items.lookup`. It is built from ids, not parsed from `stepPath`, and
+contains no item keys, visits or attempt markers. If the enclosing group's key
+is unknown, the child's `stepKey` is omitted. A step's parent workflow span
+names its plan; there is no per-step `planHash` or separate `invocationKey`.
+
+No extra configuration is needed. Local and virtual Worlds expose the optional
+`readWorkflowVersion(id)` method, so a new client can upload a kept plan from
+the World's store. Older or custom Worlds without that method still trace
+runs, but cannot upload a kept plan when its draft event isn't available.
+
+Uploads happen in the background, outside the run's event append. `flush()`
+and `shutdown()` wait for queued plan reads and uploads too. A client remembers
+up to 500 stored or refused workflow/hash pairs; an incomplete plan can later
+be uploaded complete. Missing plans are silent. Upload failures go to `onError`
+with `operation: "plan"`; a 400 or 413 refusal is reported once and isn't
+retried while remembered. LittleDB's `lastSeenAt` describes accepted uploads,
+with updates at most once an hour, not the last workflow run. There are no
+periodic plan uploads.
 
 ## How a run started
 
@@ -90,8 +120,21 @@ without one it is `turnTraceId(sessionId, turnId)`. A sub-run (one with a
 | `userId`, `environment` | As on a harness trace. `environment` is `production` by default, and `experiment` for a run inside an eval worker run. |
 | `traceId` | A fixed trace id, or a function of the run id. With a fixed id, runs after the first become child spans of the first run's root. |
 | `name`, `tags`, `metadata` | The trace and root span name (default: the workflow slug), and what to add to the trace. |
-| `captureContent` | `false` sends structure and numbers only: no step outputs, run input and output, prompts or tool arguments. |
+| `captureContent` | `false` omits step outputs, run input and output, prompts and tool arguments, and uploads only the structural plan. Existing step paths still contain URL-encoded item keys; see below. |
 | `experimentId`, `datasetItemId` | Set by an [eval worker](/docs/littledb/experiments) run. |
+
+With `captureContent: false`, uploaded plans have `complete: false` and keep
+only the workflow name, step ids, kinds, dependencies, loop limits, nested
+steps, tool/model names, decision targets and parallel execution settings.
+Prompts, system text, inputs, conditions, items, item-key expressions, schemas
+and descriptions are omitted. Decision targets still appear as `chosen`, but
+`branchKey` and `branches[].key` are omitted.
+
+This is not full anonymization: existing `stepPath` values already contain
+URL-encoded parallel item keys, and paths used in `branchOf` can contain keys
+from enclosing groups. Those paths stay unchanged. Avoid using sensitive
+values as item keys even when content capture is off. `stepKey` contains only
+step ids and never contains those item keys.
 
 ## Let LittleDB improve a workflow
 

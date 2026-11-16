@@ -6,14 +6,15 @@ Little Workflow is in its **alpha phase**: breaking changes to the LWIR wire
 format, public APIs, and persistence formats are expected between alpha releases.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the
 project will adopt [Semantic Versioning](https://semver.org/) guarantees once it
-reaches beta. Versions apply to the two published packages,
-`@little-stack/harness` and `@little-stack/workflow`. Up to `0.2.0-alpha.1` they
-were published as `little-harness` and `little-workflow`; `0.2.0-alpha.1` was a
-`little-workflow`-only release. From `0.2.0-alpha.2`, the first `@little-stack`
-release, Harness and Workflow share one version number.
-`@little-stack/littledb` (formerly `@little-workflow/littledb`) is not published yet: it needs a LittleDB server that
-is not public. Little Compute is unpublished; its first release candidate is
-listed under Unreleased.
+reaches beta. Versions apply to `@little-stack/harness`, `@little-stack/workflow` and,
+from `0.2.0-alpha.4`, the first public LittleDB client, `@little-stack/littledb`.
+These three packages share one version number. Harness and Workflow were published
+as `little-harness` and `little-workflow` through `0.2.0-alpha.1` (a Workflow-only
+release); `0.2.0-alpha.2` introduced the `@little-stack` scope.
+
+`@little-stack/littledb` is published from `0.2.0-alpha.4`; it needs a LittleDB account.
+The LittleDB server is not open source.
+Little Compute remains unpublished, with its first release candidate under Unreleased.
 
 ## [Unreleased]
 
@@ -113,6 +114,86 @@ listed under Unreleased.
   - The managed Cloudflare loop, worker scale-out, the credential-injecting egress
     proxy and hard subtree budgets are not built. Node must satisfy
     `^22.23.2 || ^24.18.1`.
+
+## [0.2.0-alpha.4] - 2026-11-16
+
+### LittleDB client and setup
+
+- First public release of `@little-stack/littledb` and its `littledb` command.
+  Browser sign-in with `login`, agent-folder `deploy` (including `--all`, preview
+  branches and `--dry-run`) and terminal `chat` use an existing LittleDB service.
+  A LittleDB account is required; this package does not install the LittleDB server.
+- `little setup --littledb` writes a starter that uses the project's managed model.
+  Local skills and additive existing Node/Next.js setup share the same agent folder.
+
+### LittleDB passage feedback
+
+- Feedback can point at a highlighted passage: `selection`, plus `tags`, `expected` text and
+  `role`. Each highlight gets its own stable id, scoped per user. Whole-reply feedback ids and
+  revision/retraction behaviour are unchanged.
+- Add the browser-safe `@little-stack/littledb/selection` entry (`selectionIn` and
+  `textSelection`) for capturing a highlight. The local fakes match anchors exactly.
+- **Changed:** the browser feedback handler always removes `metadata.role` and
+  `metadata.correction` from requests and takes `role` only from `authorize()`. Return the
+  role from `authorize()`; send the corrected text as `expected`.
+
+### Context and compaction
+
+- Node and compiled Harness folder loaders accept per-instance `{ host, context }`
+  and call factories with `(host, context)`. Context stays trusted and isolate-local;
+  it is not automatically added to prompts, tools, traces, files or shell variables.
+- Add opt-in `contextPolicy` for measured request projection, older-text trimming,
+  optional summary models and immutable replay checkpoints. The SDK default is off;
+  set `contextPolicy: false` to disable an inherited policy. Canonical history stays
+  unchanged, pending calls/approvals and media stay intact, and irreducible input that
+  cannot fit fails before a model call. Workflow projects previous tool rounds within
+  its current task rather than summarizing the user task.
+
+### Onboarding scaffolds
+
+- Add starter local skills, additive existing-node setup, and LittleDB-managed model scaffolds.
+- Make Harness new fill missing runtime dependencies and workspace configuration.
+
+### LittleDB workflow plans
+
+- Add the optional `World.readWorkflowVersion(id)` capability to local and virtual Worlds.
+  Existing custom Worlds continue to work without it.
+- Automatically upload workflow plans from tracing Worlds, attach the plan hash to the trace
+  and workflow span, attach the workflow slug to each root, and record structural `stepKey`,
+  decision, loop and exact parallel-branch facts on step spans.
+  Plan uploads are background work included in `flush()` and `shutdown()`.
+- With `captureContent: false`, upload a structural plan and omit new item-key fields.
+  Existing step paths still expose URL-encoded item keys; privacy-safe paths are separate work.
+
+### Changed — Little Harness tool budgets
+
+- Enforce defaults of 100 tool execution attempts per turn (including nested bridge
+  calls) and 10 concurrent execution chains. Tool deadlines abort/discard the result
+  but cannot terminate arbitrary JavaScript or undo side effects; non-cooperative
+  calls retain their slot until settled. Emit at most one warning per policy per turn.
+- Apply the model-step cap even with caller `stopWhen`: explicit `turnLimits.maxSteps`
+  takes precedence over `workflowBudgets.maxModelSteps` (default 20), preserving
+  `StepLimitExceeded`. Preserve SDK/step and turn abort signals when gating tools.
+- **Breaking:** remove unused public budget fields `maxAutonomousTurns`,
+  `workflowDeadlineMs`, `maxDynamicWorkflowTokens`, and `maxDynamicWorkflowOutputBytes`.
+
+### Changed
+
+- Harness built-in hosts keep trace content/diff spills out of model-visible artifacts,
+  with a legacy-compatible `session.traceContent.read` API. Default tool-result spools
+  move to `/session/.tool-results` and no longer store redundant diffs. Existing
+  artifacts remain visible; custom spool directories still work.
+
+### Little Harness
+
+- Qualify Harness tests and both workerd demos on just-bash 3.6.0; classify quoted and escaped command names, including denied names, and supported process substitutions. Re-pin the capability registry with `mktemp` and `yes`. The declared `^3.0.3` dependency range is unchanged.
+- Add a writable `/tmp` to the virtual shell: an in-memory scratch mount that lasts one turn, capped at 16 MiB in total (`ENOSPC` past it). It is never an artifact, a file event or part of the trace. `mktemp` and `mktemp -d` with no destination now run at Tier 0 there; a `mktemp` with an explicit or dynamic destination, or a script that assigns `TMPDIR`, still escalates. A real-shell tier keeps its own `/tmp`.
+- Docs: the README and `docs/` shipped in both npm packages no longer link outside the package, the Workflow package docs gain the Virtual World and Setup Recovery pages, and each skill states the release it describes. Tests keep all three from drifting.
+- Both npm packages now carry their coding-agent skill: `node_modules/@little-stack/harness/skills/little-harness/` and `node_modules/@little-stack/workflow/skills/little-workflow/` (`SKILL.md`, `references/`, `agents/`). Each is byte-identical to the repository's `skills/` folder at that release, so a coding agent can read the guidance that matches the installed version instead of a copy fetched from another revision. The repository-root folders stay the only source: the copy is made when a package is packed, and the release checks fail if a packed tarball lacks it.
+- Add `trace.redaction.values`: known secret strings that are replaced with `[redacted]` in everything the trace keeps as text (previews, spilled content, event metadata), before a preview is cut or a spill is written. `bytes` and `sha256` describe the masked text, and a masked capture carries `redactionReason: "value"`. Values are literal and non-empty, and the harness's and the turn's lists are merged. Only the trace is masked: the model, tools and the agent's files keep the original.
+- `@little-stack/harness/internals` exports `sanitizeTraceValue`, `redactTraceText`, `attachTraceContentStore` and `createTraceContentStore`, so a first-party host with its own file writer can mask its own captures and keep spilled trace content out of `/artifacts`, as the bundled hosts do. A custom file writer with no store attached still spills under `/artifacts/trace`.
+- `policy.denyCommands` and the capability matrix now apply to a command started through a runner: `command`, `builtin`, `exec`, `env`, `timeout`, `nice`, `nohup`, `xargs`, `setsid`, `stdbuf`, `sudo` and `find -exec` (and its variants). `env cat f` and `echo f | xargs rm` are refused like `cat f` and `rm f`, `xargs cargo build` escalates before anything runs, and `env TMPDIR=/session mktemp` keeps `mktemp`'s destination rule. The bundled tier-0 adapters also leave denied commands out of their command set, so a name the classifier cannot read (`tool=rm; env "$tool" f`) is refused there with exit 126 and is never retried on the next tier. On a real-shell tier the deny list guards against accidents and is not a security boundary; a custom tier-0 adapter enforces its own policy. No new option.
+- **Breaking:** the task tools (`list_tasks`, `get_task`, `task_result`, `await_tasks`, `set_task_wakeup`) and the workflow tools (`list_workflows`, `get_workflow`, `get_workflow_task`, `get_workflow_run`) are offered to the model only when the agent can use them. Before, every turn offered the four workflow tools, and on a host with durable services the five task tools as well. Now the workflow tools need at least one entry in `workflows`, and the task tools need `workflows`, `agents` or `humanInput` on a host with durable services. `dynamicWorkflows` alone turns on neither. An agent with one tool and bash sends 2 tool definitions instead of 11 (728 bytes instead of 4,176). Two new `createHarness` options decide it explicitly: `taskTools` and `workflowTools` (`true` offers the group, `false` withholds it). To get the old list back, set `taskTools: true, workflowTools: true`. A host that reserves tasks itself through the orchestration services sets `taskTools: true`. `taskTools: true` on a turn without durable services, and `taskTools: false` together with the `ask_person` tool, are input errors (`humanInput: { tool: false }` with `taskTools: false` is allowed). The nine names stay reserved whether or not the tools are offered.
 
 ## [0.2.0-alpha.3] - 2026-11-12
 

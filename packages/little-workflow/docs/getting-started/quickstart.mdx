@@ -3,7 +3,7 @@ title: Quickstart
 description: Define a workflow with the ergonomic front door, run it in one call, and inspect the result.
 ---
 
-`defineWorkflow` describes a workflow: a model, inline tools keyed by name, and plain `input`/`output` schemas. It normalizes into the engine's full shape — model slots plus a planner — so you describe the job, not the plumbing. This covers a single workflow. To compose several workflows, see [Compose With Little Harness](/docs/v0.1.0-alpha/authoring/compose-with-harness). For every field (several model slots, a planner config, a fixed plan), see [Workflow Config](/docs/v0.1.0-alpha/authoring/advanced-createlittleworkflow).
+`defineWorkflow` describes a workflow: a model, inline tools keyed by name, and plain `input`/`output` schemas. It normalizes into the engine's full shape — model slots plus a planner — so you describe the job, not the plumbing. This covers a single workflow. To compose several workflows, see [Compose With Little Harness](https://little-stack.dev/docs/workflow/v0.1.0-alpha/authoring/compose-with-harness). For every field (several model slots, a planner config, a fixed plan), see [Workflow Config](https://little-stack.dev/docs/workflow/v0.1.0-alpha/authoring/advanced-createlittleworkflow).
 
 ## Install
 
@@ -27,7 +27,7 @@ Local World uses `better-sqlite3` for its embedded event store. pnpm 10 skips de
 }
 ```
 
-To scaffold a project instead, run `npx @little-stack/workflow@alpha init my-app`. The scaffold pins its dependency versions and writes this setting for you. See [CLI → Init And Add](/docs/v0.1.0-alpha/reference/cli#init-and-add).
+To scaffold a project instead, run `npx @little-stack/workflow@alpha init my-app`. The scaffold pins its dependency versions and writes this setting for you. See [CLI → Init And Add](https://little-stack.dev/docs/workflow/v0.1.0-alpha/reference/cli#init-and-add).
 
 ## Define And Run
 
@@ -87,7 +87,7 @@ console.log(result.runId); // pass this run id to the CLI below
 
 ## What The Run Cost
 
-`result.usage` is a real receipt, not a placeholder. Dollars are computed once, when the run's events are materialized, by multiplying the recorded token counts by the [bundled model registry](/docs/v0.1.0-alpha/authoring/ai-sdk-native#bundled-model-registry) rates:
+`result.usage` is a real receipt, not a placeholder. Dollars are computed once, when the run's events are materialized, by multiplying the recorded token counts by the [bundled model registry](https://little-stack.dev/docs/workflow/v0.1.0-alpha/authoring/ai-sdk-native#bundled-model-registry) rates:
 
 ```ts
 result.usage.inputTokens;       // total prompt tokens
@@ -105,13 +105,13 @@ result.usage.unpricedCalls;     // model calls it could not
 - **`null`** means **unpriced**: the run made model calls, but *none* of them matched a registry entry, so no honest dollar figure exists. `null` is never a claim that the run was free.
 - A **number** covers the `pricedCalls` only. If `unpricedCalls > 0`, the figure is a floor, not a total — check that field before quoting the number.
 
-Cache hits are billed at the model's published cache-read rate where the registry has one, and at the full input rate otherwise, so a cost is a conservative over-estimate rather than an invented discount. See [Bundled Model Registry](/docs/v0.1.0-alpha/authoring/ai-sdk-native#bundled-model-registry) for which models carry a cache rate.
+Cache hits are billed at the model's published cache-read rate where the registry has one, and at the full input rate otherwise, so a cost is a conservative over-estimate rather than an invented discount. See [Bundled Model Registry](https://little-stack.dev/docs/workflow/v0.1.0-alpha/authoring/ai-sdk-native#bundled-model-registry) for which models carry a cache rate.
 
-For a per-step breakdown of the same numbers, run `little report <run-id>` (see [CLI](/docs/v0.1.0-alpha/reference/cli#report)). Pre-run *cost estimation* and budget enforcement are a different, still-unimplemented surface — see the [Roadmap](/docs/v0.1.0-alpha/roadmap).
+For a per-step breakdown of the same numbers, run `little report <run-id>` (see [CLI](https://little-stack.dev/docs/workflow/v0.1.0-alpha/reference/cli#report)). Pre-run *cost estimation* and budget enforcement are a different, still-unimplemented surface — see the [Roadmap](https://little-stack.dev/docs/workflow/v0.1.0-alpha/roadmap).
 
 ## What `defineWorkflow` Saves You
 
-`defineWorkflow` takes a short description — one `model`, inline `tools` keyed by name, and plain `input`/`output` schemas — and normalizes it into the fully-specified shape the runtime expects: model slots, a planner config, an inferred output mode, and the declared tool names. The same call takes the full config when you need it; see [Workflow Config](/docs/v0.1.0-alpha/authoring/advanced-createlittleworkflow).
+`defineWorkflow` takes a short description — one `model`, inline `tools` keyed by name, and plain `input`/`output` schemas — and normalizes it into the fully-specified shape the runtime expects: model slots, a planner config, an inferred output mode, and the declared tool names. The same call takes the full config when you need it; see [Workflow Config](https://little-stack.dev/docs/workflow/v0.1.0-alpha/authoring/advanced-createlittleworkflow).
 
 A plain `z.array(...)` `output` infers array output. A plain object schema infers object output, and a string schema infers text. There is no `models[]` tuple to assemble, no separate `planner` block to wire, and no standalone tool registry — `tools` are keyed by name inline and exposed to the plan automatically.
 
@@ -119,7 +119,7 @@ A plain `z.array(...)` `output` infers array output. A plain object schema infer
 
 ## One Call Over A Batch
 
-The planner designs a **native parallel step** from the shape of the job: a list input (`applicants: z.array(...)`) feeding an array output (`z.array(Verdict)`). Reviewing a batch is therefore a single `runWorkflow` call. The fan-out lives in the durable, replayable plan instead of a `for` loop in your code. LWIR bounds the parallel step: `maxConcurrency` caps the branches in flight, and `maxBranches` caps the items, at most **100 per parallel step** in alpha. A run whose item list resolves to more than the step's `maxBranches` fails. For larger batches, split the input across runs. See [Parallel Execution](/docs/v0.1.0-alpha/internals/parallel) for how branches are scheduled, persisted, and resumed.
+The planner designs a **native parallel step** from the shape of the job: a list input (`applicants: z.array(...)`) feeding an array output (`z.array(Verdict)`). Reviewing a batch is therefore a single `runWorkflow` call. The fan-out lives in the durable, replayable plan instead of a `for` loop in your code. LWIR bounds the parallel step: `maxConcurrency` caps the branches in flight, and `maxBranches` caps the items, at most **100 per parallel step** in alpha. A run whose item list resolves to more than the step's `maxBranches` fails. For larger batches, split the input across runs. See [Parallel Execution](https://little-stack.dev/docs/workflow/v0.1.0-alpha/internals/parallel) for how branches are scheduled, persisted, and resumed.
 
 ## Escalating The Planner
 
@@ -144,7 +144,7 @@ const result = await reviewApplicants.run({
 });
 ```
 
-To coordinate **distinct** workflows rather than one batched workflow, hand each one to a Little Harness agent as a typed tool: `asHarnessWorkflow(def, { definitionIdentity })` passed to `createHarness({ workflows })`. See [Compose With Little Harness](/docs/v0.1.0-alpha/authoring/compose-with-harness). The older orchestrator (`runOrchestration`) is deprecated.
+To coordinate **distinct** workflows rather than one batched workflow, hand each one to a Little Harness agent as a typed tool: `asHarnessWorkflow(def, { definitionIdentity })` passed to `createHarness({ workflows })`. See [Compose With Little Harness](https://little-stack.dev/docs/workflow/v0.1.0-alpha/authoring/compose-with-harness). The older orchestrator (`runOrchestration`) is deprecated.
 
 ## Inspect The Run
 
@@ -163,7 +163,7 @@ pnpm exec little report <run-id> --table
 The planner runs in a `workflowHarness` session. It produces LWIR — a validated, canonical JSON workflow graph. The runtime then executes each step through the worker harness:
 
 - `ai.generate` steps make one model call with the step's `with.prompt`, `with.system` and resolved input. They get no tools or `bash`; a step that needs a tool is a `tool.call` step.
-- `code.run` steps have no model in the loop: the body receives `{ input, tools }` and can call registered tools directly. **The default worker harness does not execute them.** It validates the step's sandbox policy and then throws, because `code.run` needs an isolated runtime. To run `code.run` steps, supply a `worker.harness` that implements `execute_step`; see [Security Model](/docs/v0.1.0-alpha/internals/security-model).
+- `code.run` steps have no model in the loop: the body receives `{ input, tools }` and can call registered tools directly. **The default worker harness does not execute them.** It validates the step's sandbox policy and then throws, because `code.run` needs an isolated runtime. To run `code.run` steps, supply a `worker.harness` that implements `execute_step`; see [Security Model](https://little-stack.dev/docs/workflow/v0.1.0-alpha/internals/security-model).
 - `tool.call` steps invoke a single named tool from the registry.
 
 The compiled artifact (LWIR + capability snapshots) is the `WorkflowVersion`. Durability guarantees: completed steps are never re-executed on resume.

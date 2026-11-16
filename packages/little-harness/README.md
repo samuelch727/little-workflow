@@ -1,10 +1,12 @@
 # Little Harness
 
-For a guided Next.js or standalone setup, including additive existing Next.js integration, use `npx @little-stack/workflow@alpha setup`. See [unified setup](../little-workflow/docs/setup.md).
+For a guided Next.js or standalone setup, including additive existing Next.js integration, use `npx @little-stack/workflow@alpha setup`. See [unified setup](https://little-stack.dev/docs/get-started/setup).
 
 Little Harness is the agent runtime package underneath Little Workflow. It provides local sessions, file/artifact handling, model/tool loop helpers, sandboxes for the agent's `bash` tool, durability events, chat connectors, and a workflow-specific harness adapter.
 
-In the Little stack, Harness and Workflow are the SDK and LittleDB is the product: you build the agent here, and LittleDB (private for now; client in [`packages/littledb-client`](../littledb-client)) traces what it does, scores it, and improves it through one `onEvent` hook. The agent's work lives in a workspace: the folder tier is Harness's own just-bash sandbox over the user's files, and a container joins as the `nextTier` of `tieredSandbox()` only when a command needs a real machine, managed by LittleDB's hosted service (private for now) or self-hosted with Little Compute (not included in this public source snapshot). Harness runs fully without either.
+> `@little-stack/littledb` is published from `0.2.0-alpha.4`; it needs a LittleDB account. The LittleDB server is not open source. See [release status](https://little-stack.dev/docs/releases). Little Compute remains unpublished.
+
+In the Little stack, Harness and Workflow are the SDK and LittleDB is the product: you build the agent here, and LittleDB (account required; server not open source; client in [LittleDB client guide](https://little-stack.dev/docs/littledb)) traces what it does, scores it, and improves it through one `onEvent` hook. The agent's work lives in a workspace: the folder tier is Harness's own just-bash sandbox over the user's files, and a container joins as the `nextTier` of `tieredSandbox()` only when a command needs a real machine, managed by LittleDB's hosted service (account required) or self-hosted with Little Compute (not included in this public source snapshot). Harness runs fully without either.
 
 ## Install
 
@@ -47,6 +49,8 @@ pnpm add chat @chat-adapter/slack @chat-adapter/state-redis
 Swap the adapter (`@chat-adapter/discord`, `@chat-adapter/telegram`, `@chat-adapter/web`, ...) and state
 (`@chat-adapter/state-memory`, `@chat-adapter/state-redis`, ...) packages for the platforms you target.
 Chat SDK is not required for `createHarness`, `streamHarness`, or `loadHarness`.
+
+**Using a coding agent?** The package ships the skill for this exact version at `node_modules/@little-stack/harness/skills/little-harness/SKILL.md`. Point the agent at that file so its guidance matches the version you installed.
 
 ## License
 
@@ -148,7 +152,7 @@ isolation boundary — see `docs/api-reference.md` ("The Tier-0 security contrac
 Where there is no disk, such as workerd serving many chats from one process,
 `virtualHost({ fs })` keeps each session's workspace in the just-bash filesystem you pass, and
 `justBashSandbox()` runs `bash` over it. Your app routes chats and saves each chat's filesystem;
-`demos/workerd-chats` does both with a Durable Object per chat.
+[Run on workerd](https://little-stack.dev/docs/harness/v0.1.0-alpha/runtime/virtual-host) does both with a Durable Object per chat.
 
 ## Workflows As Tools
 
@@ -260,5 +264,5 @@ assets. The generated registry accepts a per-chat host; Node `loadHarness` and
 the compiled runtime share merge and validation rules. Use a host factory for
 chat-local mutable tools. These APIs ship in `0.2.0-alpha.3`.
 
-See [the standalone offline demo](../../demos/workerd-folders/README.md) for the
+See [the agent-folder compiler guide](https://little-stack.dev/docs/harness/v0.1.0-alpha/build-agents/agent-folders) for the
 compiler contract, limitations, setup and real self-hosted workerd tests.

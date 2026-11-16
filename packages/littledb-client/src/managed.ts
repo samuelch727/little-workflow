@@ -334,7 +334,7 @@ export function createManagedHarness<C extends Content, M, O extends object, TEx
         {
           ...state,
           model,
-          modelDecision: session.modelDecision === null ? null : { ...session.modelDecision },
+          modelDecision: session.modelDecision === null ? null : JSON.parse(JSON.stringify(session.modelDecision)),
         },
         "warnings" in served ? (served.warnings as HarnessExecutionSnapshot["warnings"]) : [],
       );

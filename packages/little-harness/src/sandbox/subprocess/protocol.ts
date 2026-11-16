@@ -29,6 +29,7 @@ export type SubprocessRuntimeToggles = Pick<
 export type ParentToWorkerMessage =
   | {
       readonly type: "init";
+      readonly deniedCommands?: readonly string[];
       readonly id: number;
       readonly workspace: SerializedWorkspaceSpec;
       readonly runtime: SubprocessRuntimeToggles;

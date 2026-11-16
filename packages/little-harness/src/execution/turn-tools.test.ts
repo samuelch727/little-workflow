@@ -86,6 +86,7 @@ it("snapshots bash as absent when runtime.bash is false", () => {
 async function assembleForTest(opts: {
   dynamic: ResolvedDynamicWorkflows | undefined;
   agents?: boolean;
+  taskTools?: boolean;
 }) {
   const config = {
     host: {},
@@ -96,6 +97,7 @@ async function assembleForTest(opts: {
     memory: [],
     trace: {},
     workflowBudgets: {},
+    taskTools: opts.taskTools,
     workflows: [],
     ...(opts.dynamic ? { dynamicWorkflows: opts.dynamic } : {}),
     ...(opts.agents
@@ -518,4 +520,8 @@ it("stays silent when dispose succeeds and never throws when the emitter fails",
       throw new Error("boom");
     },
   } as unknown as HarnessSandbox)).resolves.toBeUndefined();
+});
+
+it("rejects explicit task tools when the turn has no orchestration", async () => {
+  await expect(assembleForTest({ dynamic: undefined, taskTools: true })).rejects.toThrow(/taskTools.*durable/);
 });

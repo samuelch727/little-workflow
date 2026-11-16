@@ -1,4 +1,5 @@
 import type { IFileSystem } from "just-bash";
+import type { StoredWorkflowPlan } from "./run-plan.js";
 import type {
   ArtifactInput,
   ArtifactManifest,
@@ -23,6 +24,8 @@ export interface World {
   /** Optional single-process filesystem backing all run data at POSIX paths. */
   readonly files?: IFileSystem;
   readonly maxConcurrentSteps?: number;
+  /** Read the plan a run executed. Optional for older and custom World adapters. */
+  readWorkflowVersion?(workflowVersionId: string): Promise<StoredWorkflowPlan>;
   appendEvent(runId: RunId, event: EventInput): Promise<EventEnvelope>;
   listEvents(runId: RunId): Promise<readonly EventEnvelope[]>;
   writeArtifact(input: ArtifactInput): Promise<ArtifactManifest>;

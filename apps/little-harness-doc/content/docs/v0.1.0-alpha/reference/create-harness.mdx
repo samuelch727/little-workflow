@@ -194,7 +194,7 @@ to app tools and the built-in `bash` tool.
 toolResultSpooling: {
   maxInlineBytes: 32_000,
   previewBytes: 512,
-  outputDir: "/artifacts/tool-results",
+  outputDir: "/session/.tool-results",
 }
 ```
 
@@ -269,12 +269,13 @@ trace: {
   redaction: {
     metadataKeys: ["authorization", "cookie", "token", "password", "secret"],
     paths: ["/persistent/company/secrets"],
+      values: ["a-known-secret"],
   },
 }
 ```
 
 By default, Little Harness records metadata, small previews, and bounded text
-diffs. Large captured content is written under `/artifacts/trace/...` and
+diffs. Large captured content is written under `/.little-harness/trace/...` and
 referenced by `contentRef`. Raw mounted file contents, hidden provider
 reasoning, credentials, and binary payload bodies are not written to the trace.
 
@@ -597,6 +598,36 @@ the current compatible checkpoint head, not arbitrary historical matching trees.
 annotation creates a new node; returning to an older tree after an intervening change does not reuse that
 historical node. The retained advanced profile keeps its existing non-coalescing replay behavior.
 
+### `taskTools` and `workflowTools`
+
+`boolean`, optional. These are harness configuration options, not per-turn overrides.
+
+`workflowTools` offers `list_workflows`, `get_workflow`, `get_workflow_task`, and
+`get_workflow_run`. When omitted, the group is offered only when `workflows` is
+nonempty. Set it to `true` to offer the group explicitly or `false` to withhold it.
+
+`taskTools` offers `list_tasks`, `get_task`, `task_result`, `await_tasks`, and
+`set_task_wakeup`. When omitted, the group is offered on a host with durable
+services only when `workflows` is nonempty, `agents` is configured, or `humanInput`
+is configured. A host that reserves tasks itself sets `taskTools: true`.
+The default never inspects stored tasks or workflow runs. `dynamicWorkflows` alone
+enables neither group: ad hoc and agent-defined runs do not create task records,
+and the workflow inspection tools cannot read their authored-plan history.
+
+`taskTools: true` requires durable services; the turn fails with an input error
+on a host without them. `taskTools: false` with model-facing `humanInput`
+(`humanInput.tool !== false`) is an input error because its configured tool directs
+the model to `await_tasks`. Leave `taskTools` out, or set `humanInput.tool: false`.
+Hidden human input still enables task tools by default. A configured workflow can use `taskTools: false` to keep its
+workflow tools while withholding the task group.
+
+This changes the previous always-offered defaults. On a durable host, set
+`taskTools: true, workflowTools: true` to restore them. The nine tool names stay
+reserved even when the groups are not offered; configured tools, MCP tools and
+workflow handles cannot use those names.
+Snapshot v1 uses owner-installed tools; explicit built-in groups require further
+qualification there and are rejected rather than silently omitted.
+
 ### `humanInput`
 
 `boolean | HumanInputOptions`
@@ -606,7 +637,8 @@ Lets the agent ask a person a question without waiting on the answer. Adds the
 tool's execution context. The agent gets the answer from `await_tasks`; if it is
 not in yet, the turn parks. A tool can also wait for the answer itself with
 `ask(question, { wait: true })`. Needs a host with durable services, such as
-`localHost`.
+`localHost`. With `tool: false` and application tools that wait,
+`taskTools: false` withholds the task group.
 
 ```ts
 const harness = createHarness({
@@ -701,18 +733,35 @@ folders also discover workflows from `workflows/*.ts`. See
 
 `Partial<HarnessWorkflowBudgets>`
 
-Per-session limits. Omitted fields keep their defaults. The most commonly tuned
-fields:
+Limits with explicit turn or workflow-run scopes. Omitted fields keep their defaults:
 
 | Field | Default | Effect |
 |---|---|---|
+| `maxToolCallsPerTurn` | `100` | Counts execution attempts across all model steps in one turn, including failed and nested bridge calls. Excess calls return tool errors without execution. |
+| `maxConcurrentToolCalls` | `10` | Concurrent tool execution chains per turn, including bash and custom tools on every host. Nested bridge calls reuse their caller’s slot and serialize siblings. |
+| `toolDeadlineMs` | unset | Maximum time from invocation (including slot wait) to the tool result. |
+| `queueDeadlineMs` | unset | Workflow-run admission queue deadline only. |
 | `maxConcurrentWorkflowRuns` | `10` | Workflow-tool runs in flight at once per session; extra calls wait (FIFO). |
 | `maxQueuedWorkflowRuns` | `100` | Calls allowed to wait; past this a call fails with `causeCode: "max_queued_workflow_runs"`. |
-| `maxModelSteps` | `20` | Default step limit (`isStepCount(maxModelSteps)`) when a call passes no `stopWhen`. |
+| `maxModelSteps` | `20` | Per-turn model-step cap even with caller `stopWhen`; explicit `turnLimits.maxSteps` takes precedence. |
 
 ```ts
 workflowBudgets: { maxConcurrentWorkflowRuns: 2, maxModelSteps: 12 }
 ```
+
+Tool deadlines pass a combined abort signal to the tool and return a model-visible tool
+error plus a policy warning even if the tool ignores abort. Late results are discarded.
+Timeout does **not** terminate arbitrary JavaScript or undo side effects. A timed-out
+execution keeps its concurrency slot until it and its nested children actually settle;
+queued calls also have a deadline, so a non-cooperative tool cannot strand them forever
+when `toolDeadlineMs` is set. Without a deadline, waiting is unbounded.
+Completed durable replays do not execute or spend another tool-call slot.
+
+`maxAutonomousTurns`, `workflowDeadlineMs`, `maxDynamicWorkflowTokens` and
+`maxDynamicWorkflowOutputBytes` were unused and are no longer accepted fields.
+Workflow-run concurrency and queue settings do not impose custom-tool limits.
+Policy warnings are deduplicated per policy per turn. SDK/step and turn abort signals
+remain parents of the tool gate signal, with or without a deadline.
 
 ### `turnLimits`
 
@@ -1040,3 +1089,5 @@ It contains no LittleDB runtime/service import. Build/typecheck/test verify the
 reviewable vendored manifest and every text payload hash before generation; changed generated files are
 refused rather than silently overwritten. Both packages run the same conformance
 vectors. Updating the pin requires an explicit reviewed artifact update.
+
+`trace.redaction.values` accepts literal nonempty strings, merged across harness and run. It masks trace previews, spills and string metadata before clipping/hashing; it does not change tool/model data or authored files.

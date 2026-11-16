@@ -67,14 +67,14 @@ By default, Little Harness records:
 
 - byte counts, hashes, media types, paths, and lifecycle metadata
 - small previews for model text, tool inputs, tool outputs, and diffs
-- artifact references for large captured content
+- host-owned content references for large captured content
 - before/after file metadata for file changes
 - bounded unified diffs for text file changes
 
-Large captured content is written under `/artifacts/trace/...` and referenced by
+Large captured content is written under `/.little-harness/trace/...` and referenced by
 path. Large tool results that are sent back to the model are written under
-`/artifacts/tool-results/...` and also appear as ordinary file and artifact
-events.
+`/session/.tool-results/...` and emit file events, not artifact events. Spool writes
+do not capture a second diff (`diff.reason: "harness_file"`).
 
 The trace does not capture:
 
@@ -136,14 +136,13 @@ a trace backend decision before a local harness works.
 
 ## Sending traces to LittleDB
 
-> **Preview:** the `@little-stack/littledb` client is not published yet and needs a LittleDB
-> service that is not publicly available. See [Using LittleDB](/docs/littledb/harness).
+> `@little-stack/littledb` is published from `0.2.0-alpha.4`; it needs a LittleDB account. The LittleDB server is not open source. See [release status](https://little-stack.dev/docs/releases). See [Using LittleDB](/docs/littledb/harness).
 
 The local trace stays where it is. To also see turns in LittleDB, hand a LittleDB tracer to
 `createHarness({ onEvent })` or to a per-run `generateHarness`/`streamHarness` call:
 
 ```ts
-// Preview — @little-stack/littledb is not published yet.
+// Alpha.4 client; requires LittleDB service access.
 const db = createLittleDB({ url: process.env.LITTLEDB_URL!, apiKey: process.env.LITTLEDB_API_KEY! });
 const tracer = db.harnessTracer({ harness: "support-desk" });
 
@@ -167,3 +166,46 @@ UTF-8 bytes. Raise the preview limit when LittleDB should show more prompt and o
 a preview alone does not establish that full content was captured.
 
 LittleDB also accepts OpenTelemetry (OTLP/HTTP) traces, for apps that already export them.
+
+### Preview truncation versus content spill
+
+`previewTruncated` means the preview string is shorter than the captured sanitized text. It can be `true` even when `truncated` is `false`: content can fit the inline-content bound but exceed the smaller preview bound. `truncated` means the full content exceeds the inline bound and is spilled; if storage cannot retain it, inspect `unavailableReason` rather than assuming a readable spill exists. Older traces may omit `previewTruncated` and remain valid.
+
+## Host-owned spill storage and upgrades
+
+Built-in Local Host stores trace spill bytes beside `trace.ndjson` in `trace-content/`.
+Virtual Host stores them under `/.little-harness/sessions/<key>/trace-content/` in the
+backing filesystem. Neither location is mounted into bash. `contentRef` is a logical
+`/.little-harness/trace/<label>/<sha16>.<ext>` reference, not a model-readable path.
+File diffs use the `file-diffs/` subdirectory. Host apps read either with:
+
+```ts
+const content = await session.traceContent?.read(contentRef);
+if (content) console.log(content.text());
+```
+
+The reader, trace validation, doctor, and diff hydration also accept old
+`/artifacts/trace/...` references. Existing spill artifacts stay listed; no filtering,
+deleting, or automatic migration occurs. New spools default to `/session/.tool-results`;
+explicit `toolResultSpooling.outputDir` still wins. Trace spill writes no longer emit
+`harness.file.*` or `harness.artifact.created`: use trace events and their `contentRef`
+instead of looking for `source: "trace"` or `traceContent`/`traceDiff` file metadata.
+A custom host's own `FileWriter` keeps the legacy artifact-backed spill writer.
+
+A missing `session.traceContent` reader means the custom host does not expose host-owned trace content; the optional read returns `undefined`. Built-in hosts provide the reader. Trace writes use an internal host registry, not a writable capability on `FileWriter`.
+
+## Known secret values
+
+Set `trace.redaction.values: ["a-known-secret"]` to mask literal strings with
+`[redacted]` in retained trace text. Harness-level and run-level values are combined;
+longer values match first, and an empty string throws `HarnessInputError`. There are no
+patterns or callbacks. Omitting `values` preserves existing trace output.
+
+Redaction runs before preview clipping and spill storage (including a custom host's
+legacy file writer), and inside structured JSON string values before escaping.
+`bytes` and `sha256` describe the redacted text. A replacement marks captured content
+`redacted: true, redactionReason: "value"`; existing path and metadata-key rules take
+precedence. Binary bodies are not captured as text.
+
+Only the trace changes: tools, model inputs/outputs and agent-authored files retain their
+original values. This option does not scrub application data or revoke credentials.

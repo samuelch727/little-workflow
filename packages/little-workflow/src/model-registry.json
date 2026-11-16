@@ -26,10 +26,10 @@
   "anthropic/claude-sonnet-5-5": {
     "description": "Balanced reasoning and speed model for general agent tasks.",
     "capabilities": ["text", "structured", "tools", "vision"],
-    "pricing": { "input": 2, "output": 10, "cachedInput": 0.2, "currency": "USD" },
+    "pricing": { "input": 2, "output": 10, "cachedInput": 0.1, "currency": "USD" },
     "contextWindow": 1000000,
     "pricingSource": "https://platform.claude.com/docs/en/about-claude/pricing",
-    "pricingVerifiedAt": "2026-10-14"
+    "pricingVerifiedAt": "2026-11-12"
   },
   "anthropic/claude-haiku-5-5": {
     "description": "Fast, low-cost model for high-volume steps such as extraction, routing and short drafts.",

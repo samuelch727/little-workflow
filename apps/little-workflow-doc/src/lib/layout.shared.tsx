@@ -9,7 +9,7 @@ export function baseOptions(): BaseLayoutProps {
       url: '/',
     },
     links: [
-      { text: 'Documentation', url: '/docs', active: 'url' },
+      { text: 'Docs', url: '/docs', active: 'url' },
       { text: 'How they fit', url: '/docs/how-they-fit', active: 'url' },
       { text: 'Releases', url: '/docs/releases', active: 'url' },
     ],

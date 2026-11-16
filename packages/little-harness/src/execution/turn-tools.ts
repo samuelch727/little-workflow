@@ -148,7 +148,13 @@ export async function assembleTurnTools<TExtraBody>(
         bash: bashSnapshotFromRuntime(config.runtime),
       }),
     });
-    const taskControlTools = orchestration === undefined
+    // Infer only from this configuration, never from stored tasks or queued runs.
+    // Keep optional values unresolved until assembly: folder loading may add workflows.
+    const offerTaskTools = config.taskTools ?? (
+      (config.workflows?.length ?? 0) > 0 || config.agents !== undefined || config.humanInput !== undefined
+    );
+    const offerWorkflowTools = config.workflowTools ?? (config.workflows?.length ?? 0) > 0;
+    const taskControlTools = orchestration === undefined || !offerTaskTools
       ? {}
       : createTaskControlTools({
           sessionId: session.id,
@@ -160,7 +166,7 @@ export async function assembleTurnTools<TExtraBody>(
           results: orchestration.results,
           modelFacingSafeOnly: true,
         });
-    const workflowInspectionTools = createWorkflowInspectionTools({
+    const workflowInspectionTools = !offerWorkflowTools ? {} : createWorkflowInspectionTools({
       sessionId: session.id,
       workflows: manifest.workflows,
       ...(orchestration === undefined
@@ -216,6 +222,9 @@ export async function assembleTurnTools<TExtraBody>(
           ...createDynamicWorkflowTools(dynamicWorkflowConfig),
           ...(agentWorkflowConfig === undefined ? {} : createDefineWorkflowTool(agentWorkflowConfig)),
         };
+    if (config.taskTools === true && orchestration === undefined) {
+      throw new HarnessInputError("taskTools: true requires durable orchestration services for this turn.");
+    }
     if (config.agents !== undefined && orchestration === undefined) {
       throw new HarnessInputError("Agent Groups require Harness orchestration services.");
     }
@@ -288,7 +297,11 @@ export async function assembleTurnTools<TExtraBody>(
     return {
       mcp,
       resolvedSkills: turnResolvedSkills,
-      manifest,
+      manifest: {
+        ...manifest,
+        taskControlToolNames: Object.keys(taskControlTools).sort(),
+        workflowInspectionToolNames: Object.keys(workflowInspectionTools).sort(),
+      },
       turnTools,
       warnings,
       ...(humanInput === undefined ? {} : { ask: humanInput.ask }),

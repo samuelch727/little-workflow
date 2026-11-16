@@ -1,3 +1,4 @@
+import { combineToolSignals, executeWithToolBudget } from "../execution/tool-budget.js";
 import type { ToolSet } from "ai";
 import { ASK_FOR_CALL, type CallAwareAsk } from "../human-input/tool.js";
 import { sha256Hex } from "../ids.js";
@@ -11,7 +12,7 @@ import type {
 
 const DEFAULT_MAX_INLINE_BYTES = 16 * 1024;
 const DEFAULT_PREVIEW_BYTES = 512;
-const DEFAULT_OUTPUT_DIR = "/artifacts/tool-results";
+const DEFAULT_OUTPUT_DIR = "/session/.tool-results";
 
 export function wrapToolsWithHarnessContext<TTools extends ToolSet, TExtraBody>(
   tools: TTools,
@@ -78,7 +79,15 @@ export function wrapToolsWithHarnessContext<TTools extends ToolSet, TExtraBody>(
                 executeOptions.toolCallId = replayState.callId;
               }
               // A workflow this tool starts hands the same context to the tools its steps call.
-              const result = await runWithCallerToolContext(ctx, () => execute(input, executeOptions));
+              const executionSignal = combineToolSignals(
+                executeOptions.abortSignal as AbortSignal | undefined,
+                isObject(options) ? options.abortSignal as AbortSignal | undefined : undefined,
+                ctx.abortSignal,
+              );
+              const result = await executeWithToolBudget(ctx, name, executionSignal, (abortSignal) => {
+                const callContext = { ...ctx, abortSignal };
+                return runWithCallerToolContext(callContext, () => execute(input, { ...executeOptions, abortSignal }));
+              });
               return spoolToolResultIfNeeded(name, result, executeOptions, ctx);
             }
           : undefined,

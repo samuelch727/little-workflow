@@ -13,7 +13,7 @@ This replaces the orchestrator: `runOrchestration({ workflows: [...], orchestrat
 pnpm add @little-stack/workflow@alpha @little-stack/harness@alpha ai@^7 zod @ai-sdk/anthropic
 ```
 
-Both packages need Node.js 22 or later and take `ai` as a peer dependency (`^7.0.0`). pnpm 10 projects must also allow the `better-sqlite3` build. See [Quickstart → Install](/docs/v0.1.0-alpha/getting-started/quickstart#install).
+Both packages need Node.js 22 or later and take `ai` as a peer dependency (`^7.0.0`). pnpm 10 projects must also allow the `better-sqlite3` build. See [Quickstart → Install](https://little-stack.dev/docs/workflow/v0.1.0-alpha/getting-started/quickstart#install).
 
 ## Author, Adapt, Hand To The Agent
 
@@ -101,7 +101,7 @@ The adapter wires the definition's inline `tools` into every run, the same way `
 ## What The Calling Model Sees
 
 - **Tool name.** Built from the workflow id: each dot-separated segment has non-alphanumeric characters replaced with `_`, and the segments are joined with `_`. `billing.refund` becomes `billing_refund`, and `kb.ingest-file` becomes `kb_ingest_file`.
-- **Tool input.** The workflow's input schema, converted to JSON Schema. Annotations like `.describe()` reach the model. Input must stay inside the [LWIR schema subset](/docs/v0.1.0-alpha/reference/lwir-reference#schema-subset).
+- **Tool input.** The workflow's input schema, converted to JSON Schema. Annotations like `.describe()` reach the model. Input must stay inside the [LWIR schema subset](https://little-stack.dev/docs/workflow/v0.1.0-alpha/reference/lwir-reference#schema-subset).
 - **Tool result.** A compact envelope, not the typed output object:
 
 ```ts
@@ -115,7 +115,7 @@ The adapter wires the definition's inline `tools` into every run, the same way `
 
 ## Bounding Fan-Out: `workflowBudgets`
 
-A model can emit several workflow tool calls in one step. All workflow tools in a session share one admission bound, and the agent's [dynamic workflow](/docs/v0.1.0-alpha/reference/api-reference#dynamicworkflows) plans count against the same pool:
+A model can emit several workflow tool calls in one step. All workflow tools in a session share one admission bound, and the agent's [dynamic workflow](https://little-stack.dev/docs/workflow/v0.1.0-alpha/reference/api-reference#dynamicworkflows) plans count against the same pool:
 
 ```ts
 createHarness({
@@ -173,7 +173,7 @@ const refund = await loadWorkflow(new URL("./workflows/refund", import.meta.url)
 | `allowUntypedInput`, `allowLossyStandardSchema` | Same as on `asHarnessWorkflow`. |
 | `sourceIdentity` | A stable source identity, such as a commit SHA. Required in durable mode when the import graph has dynamic or unresolved local imports. |
 
-`little add harness` connects a folder workflow to a Little Harness agent. It writes `agents/<agent>/workflows/<name>.ts`, which default-exports `loadWorkflow(...)` for the manifest folder, and Little Harness discovers it from the agent folder. `little test <name>` runs a folder workflow on its own. See [CLI](/docs/v0.1.0-alpha/reference/cli#init-and-add).
+`little add harness` connects a folder workflow to a Little Harness agent. It writes `agents/<agent>/workflows/<name>.ts`, which default-exports `loadWorkflow(...)` for the manifest folder, and Little Harness discovers it from the agent folder. `little test <name>` runs a folder workflow on its own. See [CLI](https://little-stack.dev/docs/workflow/v0.1.0-alpha/reference/cli#init-and-add).
 
 ## Migrating From The Orchestrator
 
@@ -183,6 +183,6 @@ const refund = await loadWorkflow(new URL("./workflows/refund", import.meta.url)
 | `start_workflow(workflowId, input)` | The workflow's own typed tool, such as `billing_refund(input)` |
 | `maxConcurrentSubRuns` | `workflowBudgets.maxConcurrentWorkflowRuns` / `maxQueuedWorkflowRuns` |
 | Sub-run ids on `harness.tool_call.succeeded.payload.result.runId` | `runId` on the workflow tool result. Runs are stored under the session's `workflows` directory. |
-| `plan_workflow` once, then `run_workflow` × N (plan once, run many) | **Not available yet.** See [Plan once, run many](/docs/v0.1.0-alpha/cookbook/plan-once-run-many). |
+| `plan_workflow` once, then `run_workflow` × N (plan once, run many) | **Not available yet.** See [Plan once, run many](https://little-stack.dev/docs/workflow/v0.1.0-alpha/cookbook/plan-once-run-many). |
 
 The orchestrator still works in this release and emits a one-time `DeprecationWarning` (code `LWF_DEP_ORCHESTRATOR`). It is scheduled to be unexported in the next minor release.

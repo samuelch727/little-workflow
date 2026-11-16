@@ -16,7 +16,7 @@ import {
 } from "../connectors/tool-extensions.js";
 import { rejectReservedDiscoveredToolNames } from "../workspace/tool-name-policy.js";
 import { loadHarness, loadWorkspace } from "../workspace/index.js";
-import { DEFAULT_PROVIDER, scaffoldAgent as writeAgent, scaffoldProject } from "./agent-scaffold.js";
+import { DEFAULT_PROVIDER, scaffoldAgent as writeAgent, scaffoldProject, shellArgument } from "./agent-scaffold.js";
 import {
   CUSTOM_MODEL_CHOICE,
   modelChoices,
@@ -28,7 +28,7 @@ import {
   type ProviderId,
 } from "./provider-catalog.js";
 import { runRepl } from "./repl.js";
-import { providerDependency } from "./scaffold-versions.js";
+import { providerDependency, scaffoldDependencyVersions } from "./scaffold-versions.js";
 
 type PromptAnswers = {
   customModel?: string;
@@ -76,6 +76,7 @@ export async function initCommand(args: readonly string[], io: AgentCommandIo): 
       allowNonEmpty: parsed.here,
       force: parsed.force,
       projectName,
+      setupTarget: parsed.here ? "--here" : shellArgument(answers.projectName),
       provider: provider.id,
       ...(answers.model === undefined ? {} : { model: answers.model }),
     });
@@ -122,8 +123,13 @@ export async function newCommand(args: readonly string[], io: AgentCommandIo): P
       provider: provider.id,
       ...(parsed.model === undefined ? {} : { model: parsed.model }),
     });
-    await addProviderDependency(cwdOf(io), provider);
-    await out(io, `Created agent '${name}' (${created.length} files). Try: little-harness test ${name}\n`);
+    const dependenciesChanged = await addRuntimeDependencies(cwdOf(io), provider);
+    try {
+      await writeFile(join(cwdOf(io), "little-harness.json"), `${JSON.stringify({ agents: "agents" }, null, 2)}\n`, { flag: "wx" });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    }
+    await out(io, `Created agent '${name}' (${created.length} files). Try: little-harness test ${name}\n${dependenciesChanged ? "Next: pnpm install\n" : ""}`);
     return 0;
   } catch (error) {
     await err(io, `${error instanceof Error ? error.message : String(error)}\n`);
@@ -372,26 +378,38 @@ async function runInstall(cwd: string, io: AgentCommandIo): Promise<void> {
   });
 }
 
-async function addProviderDependency(root: string, provider: ProviderDefinition): Promise<void> {
+async function addRuntimeDependencies(root: string, provider: ProviderDefinition): Promise<boolean> {
   const providerPackage = providerDependency(provider);
-  if (providerPackage === undefined) {
-    return;
-  }
+
   const packagePath = join(root, "package.json");
   let packageJson: Record<string, unknown>;
   try {
     packageJson = JSON.parse(await readFile(packagePath, "utf8")) as Record<string, unknown>;
   } catch {
-    return;
+    return false;
   }
   const dependencies = isRecord(packageJson.dependencies) ? packageJson.dependencies : {};
-  if (dependencies[providerPackage[0]] === undefined) {
-    packageJson.dependencies = {
-      ...dependencies,
-      [providerPackage[0]]: providerPackage[1],
-    };
+  const dev = isRecord(packageJson.devDependencies) ? packageJson.devDependencies : {};
+  const peer = isRecord(packageJson.peerDependencies) ? packageJson.peerDependencies : {};
+  const versions = scaffoldDependencyVersions();
+  const required: Record<string, string> = {
+    "@little-stack/harness": versions.littleHarness,
+    ai: versions.ai,
+    zod: versions.zod,
+  };
+  if (providerPackage) required[providerPackage[0]] = providerPackage[1];
+  let changed = false;
+  for (const [name, version] of Object.entries(required)) {
+    if (dependencies[name] === undefined && dev[name] === undefined && peer[name] === undefined) {
+      dependencies[name] = version;
+      changed = true;
+    }
+  }
+  if (changed) {
+    packageJson.dependencies = dependencies;
     await writeFile(packagePath, `${JSON.stringify(packageJson, null, 2)}\n`);
   }
+  return changed;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

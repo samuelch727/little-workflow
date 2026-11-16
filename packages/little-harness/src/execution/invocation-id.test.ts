@@ -151,7 +151,7 @@ for (const api of ["generate", "stream"] as const) {
         expect(events.map(e => e.type)).toEqual(["harness.tool_call.started", "harness.tool_call.succeeded"]);
         expect(events[1]!.occurrenceId).toBe(events[0]!.occurrenceId);
         const session = await harness.config.host.sessions.getOrCreate({ id: "s" });
-        const files = await session.files.list("/artifacts/tool-results/inspect", { recursive: true });
+        const files = await session.files.list("/session/.tool-results/inspect", { recursive: true });
         expect(files).toHaveLength(1);
         expect(await (await session.files.read(files[0]!.path)).text()).toBe(output);
       });

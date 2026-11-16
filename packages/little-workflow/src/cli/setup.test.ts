@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { setupCommand } from "./setup-command.js";
 import { planSetup, type SetupOptions } from "./setup-plan.js";
 import { applySetupPlan, applySetupPlanWithHooks, recoverSetup, rollbackSetup } from "./setup-transaction.js";
-import { liveModelSource } from "./setup-templates.js";
+import { agentSource, smokeSource, liveModelSource } from "./setup-templates.js";
 
 const dirs: string[] = [];
 afterEach(async () => { for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true }); });
@@ -542,6 +542,7 @@ describe("setup vocabulary", () => {
       provider: "openai",
       model: plan.options.model,
       workflow: false,
+      littledb: false,
       packageManager: "npm",
       route: "api/little/chat",
       page: "little",
@@ -609,4 +610,120 @@ describe("generated starter", () => {
       expect(source).not.toMatch(/createHarness|@little-stack\/harness/);
     });
   }
+});
+
+describe("ONB04 additive scaffolds", () => {
+  it("preserves a CommonJS existing Node project, adds no Next dependencies, and reruns as a noop", async () => {
+    const root = await temp();
+    const pkg = { name: "existing", scripts: { start: "node server.js" }, dependencies: { express: "^5.0.0" } };
+    await writeFile(join(root, "package.json"), JSON.stringify(pkg));
+    await writeFile(join(root, "tsconfig.json"), '{"compilerOptions":{"module":"commonjs"}}');
+    await mkdir(join(root, "scripts"));
+    await writeFile(join(root, "scripts/seed.mts"), "export function seed(rows) { return rows.map((r) => r.id); }");
+    const opts = options({ template: "existing-node", littledb: true });
+    const plan = await planSetup(root, opts);
+    expect(plan.conflicts).toEqual([]);
+    expect(await readdir(root)).toEqual(["package.json", "scripts", "tsconfig.json"]);
+    await applySetupPlan(plan);
+    const result = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
+    expect(result.scripts.start).toBe(pkg.scripts.start);
+    expect(result.type).toBeUndefined();
+    expect(result.dependencies.express).toBe("^5.0.0");
+    expect(result.dependencies.next).toBeUndefined();
+    expect(result.dependencies["@ai-sdk/react"]).toBeUndefined();
+    expect(result.scripts["little:agent"]).toBe("tsx scripts/little-agent.mts");
+    expect(await readFile(join(root, "tsconfig.json"), "utf8")).toBe('{"compilerOptions":{"module":"commonjs"}}');
+    expect(JSON.parse(await readFile(join(root, "agents/support/package.json"), "utf8")).type).toBe("module");
+    expect(JSON.parse(await readFile(join(root, "tsconfig.little.json"), "utf8")).include).toEqual(["agents/**/*.ts", "scripts/little-smoke.mts", "scripts/little-agent.mts"]);
+    expect((await planSetup(root, opts)).files).toEqual([]);
+  });
+
+  it.each((["node", "next", "existing-node", "existing-next"] as const).flatMap(template => [false, true].map(littledb => ({ template, littledb }))))("$template littledb=$littledb includes a discovered starter skill", async ({ template, littledb }) => {
+    const root = await temp();
+    if (template.startsWith("existing-")) {
+      await writeFile(join(root, "package.json"), JSON.stringify({ name: "existing", dependencies: template === "existing-next" ? { next: "^16.0.0", react: "^19.0.0", "react-dom": "^19.0.0" } : {} }));
+      if (template === "existing-next") {
+        await mkdir(join(root, "app"));
+        await writeFile(join(root, "tsconfig.json"), '{"compilerOptions":{"moduleResolution":"bundler"}}');
+      }
+    }
+    const plan = await planSetup(root, options({ template, littledb }));
+    expect(plan.conflicts).toEqual([]);
+    await applySetupPlan(plan);
+    const agents = template === "next" ? "src/agents" : "agents";
+    const source = await readFile(join(root, agents, "support/agent.ts"), "utf8");
+    if (littledb) expect(source).not.toMatch(/demo-model|live-model|model,|model:/);
+    else expect(source).toContain("  model,");
+    expect(await readFile(join(root, agents, "support/skills/answer-clearly/SKILL.md"), "utf8")).toContain("answer-clearly");
+    const smoke = await readFile(join(root, "scripts/little-smoke.mts"), "utf8");
+    expect(smoke.includes("harness.config.model =")).toBe(littledb);
+    expect(smoke).toContain("starter skill discovered");
+  });
+
+  it("existing-node rollback restores original package/config and removes generated files", async () => {
+    const root = await temp();
+    const original = '{"name":"keep","scripts":{"start":"node index.js"}}';
+    await writeFile(join(root, "package.json"), original);
+    await writeFile(join(root, "index.js"), "console.log('keep');");
+    const plan = await planSetup(root, options({ template: "existing-node" }));
+    await applySetupPlanWithHooks(plan, { afterWrite: async () => { throw new Error("interrupt"); } }).catch(() => {});
+    expect(await rollbackSetup(root)).toEqual([]);
+    expect(await readFile(join(root, "package.json"), "utf8")).toBe(original);
+    expect(await readFile(join(root, "index.js"), "utf8")).toBe("console.log('keep');");
+  });
+});
+
+
+describe("setup model mode compatibility", () => {
+  it("reads pre-flag setup state as local and preserves absent littledb in saved options", async () => {
+    const root = await temp();
+    const opts = options();
+    await applySetupPlan(await planSetup(root, opts));
+    const statePath = join(root, ".little/setup.json");
+    const original = await readFile(statePath, "utf8");
+    expect(JSON.parse(original).options).not.toHaveProperty("littledb");
+    const next = await planSetup(root, { ...opts, littledb: false });
+    expect(next.files).toEqual([]);
+    expect(await readFile(statePath, "utf8")).toBe(original);
+  });
+
+  it.each([false, true])("refuses a mode-only change from littledb=%s with manual migration instructions", async littledb => {
+    const root = await temp();
+    await applySetupPlan(await planSetup(root, options({ littledb })));
+    const before = await readFile(join(root, "agents/support/agent.ts"), "utf8");
+    await expect(planSetup(root, options({ littledb: !littledb }))).rejects.toThrow(littledb ? "set up with --littledb" : "set up without --littledb");
+    await expect(planSetup(root, options({ littledb: !littledb }))).rejects.toThrow("https://little-stack.dev/docs/get-started/setup#move-a-little-project-to-littledbs-model");
+    expect(await readFile(join(root, "agents/support/agent.ts"), "utf8")).toBe(before);
+    const guide = await readFile(join(root, "LITTLE.md"), "utf8");
+    expect(guide).toContain("To move to LittleDB");
+    expect(guide).toContain("To return to local model selection");
+    if (littledb) expect(guide).toContain("not little-harness test support");
+  });
+
+  it("keeps the nonflag agent, local chat command and smoke baseline (apart from skill assertion)", async () => {
+    expect(agentSource("openai", "gpt-test", false)["agent.ts"]).toBe(`import { createHarness, localHost } from "@little-stack/harness";
+import { demoModel } from "./demo-model.ts";
+
+// Keyless by default. Set LITTLE_DEMO=0 to call the live provider in live-model.ts (real calls and charges).
+const model = process.env.LITTLE_DEMO === "0" ? (await import("./live-model.ts")).model : demoModel;
+
+// The system prompt is instructions.md; tools/ is discovered next to this file.
+export default createHarness({
+  model,
+  host: localHost(),
+});
+`);
+    const plan = await planSetup(await temp(), options());
+    const generated = (path: string) => plan.files.find(file => file.path === path)!.after!;
+    expect(JSON.parse(generated("package.json")).scripts["little:agent"]).toBe("little-harness test support");
+    expect(JSON.parse(generated("tsconfig.little.json")).include).toEqual(["agents/**/*.ts", "scripts/little-smoke.mts"]);
+    expect(smokeSource("agents", false)).toMatchSnapshot();
+  });
+});
+
+it.each(["node", "next"] as const)("prints %s import form in migration guide", async template => {
+  const plan = await planSetup(await temp(), options({ template, littledb: true }));
+  const guide = plan.files.find(file => file.path === "LITTLE.md")!.after!;
+  expect(guide).toContain('import("./live-model' + (template === "next" ? "" : ".ts") + '")');
+  expect(guide).toContain("https://little-stack.dev/docs/get-started/setup#move-a-little-project-to-littledbs-model) guide");
 });

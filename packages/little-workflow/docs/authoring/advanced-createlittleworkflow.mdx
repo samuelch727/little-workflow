@@ -3,7 +3,7 @@ title: Workflow Config
 description: Every defineWorkflow field — schemas, model slots, planner, fixed plan, worker, tools, and memory.
 ---
 
-`defineWorkflow()` describes a job — the goal, the model options, the planner that designs the execution plan (or a fixed plan), the tools available, and the memory the planner can draw on. The runtime does the rest. [Define a Workflow](/docs/v0.1.0-alpha/authoring/define-a-workflow) covers the common shape; this page lists the full config.
+`defineWorkflow()` describes a job — the goal, the model options, the planner that designs the execution plan (or a fixed plan), the tools available, and the memory the planner can draw on. The runtime does the rest. [Define a Workflow](https://little-stack.dev/docs/workflow/v0.1.0-alpha/authoring/define-a-workflow) covers the common shape; this page lists the full config.
 
 ## Full Config
 
@@ -85,7 +85,7 @@ const candidateReview = defineWorkflow({
 |---|---|---|---|
 | `id` | yes | `string` | Stable identifier; hashed into `WorkflowDefinitionHash` |
 | `description` | recommended | `string` | Human-readable; shown to the planner, and used as the tool description by `asHarnessWorkflow` |
-| `policy` | no | `string` | Rules the runtime adds, word for word, to the system prompt of every `ai.generate` step; see [A policy](/docs/v0.1.0-alpha/authoring/define-a-workflow#a-policy) |
+| `policy` | no | `string` | Rules the runtime adds, word for word, to the system prompt of every `ai.generate` step; see [A policy](https://little-stack.dev/docs/workflow/v0.1.0-alpha/authoring/define-a-workflow#a-policy) |
 | `label` | no | `string` | Run label; defaults to the workflow id |
 | `input` | no | Zod, Standard Schema, or JSON Schema | Validated at run start |
 | `suggestedInput` | no | schema | A hint shown to the planner; not used to validate input |
@@ -93,7 +93,7 @@ const candidateReview = defineWorkflow({
 | `model` | one of `model`, `models`, `plan` | AI SDK model or `ModelSlot` | One execution model |
 | `models` | one of `model`, `models`, `plan` | `ModelSlot[]` (≥ 1) | Execution model options the planner can assign to LWIR steps |
 | `planner` | no | model or `PlannerConfig` | See below; defaults to the first model |
-| `plan` | no | `{ steps }` or `LwirWorkflow` | A fixed plan that replaces the planner; see [Define a Workflow → A fixed plan](/docs/v0.1.0-alpha/authoring/define-a-workflow#a-fixed-plan) |
+| `plan` | no | `{ steps }` or `LwirWorkflow` | A fixed plan that replaces the planner; see [Define a Workflow → A fixed plan](https://little-stack.dev/docs/workflow/v0.1.0-alpha/authoring/define-a-workflow#a-fixed-plan) |
 | `worker` | no | `WorkerConfig` | Defaults to the SDK `workflowHarness` |
 | `tools` | no | `Record<string, Tool>`, `ToolRegistry`, or `string[]` | Tools the LWIR can reference; defaults to none |
 | `toolSelection` | no | `ToolSelectionPolicy` | Which declared tools the plan may reference; default `"planner_selected"` |
@@ -148,7 +148,7 @@ All fields optional. If `worker` is omitted, the SDK uses `workflowHarness`. Wor
 What the default worker does per step type:
 
 - `ai.generate` — one model call with the step's `with.prompt`, `with.system` and resolved input. It is offered no tools and no bash; use a `tool.call` step to call a tool.
-- `code.run` — **not executed by the default worker.** It validates the step's sandbox policy and then throws. Supply your own `worker.harness` implementing `execute_step` to run `code.run` bodies; see [Security Model](/docs/v0.1.0-alpha/internals/security-model).
+- `code.run` — **not executed by the default worker.** It validates the step's sandbox policy and then throws. Supply your own `worker.harness` implementing `execute_step` to run `code.run` bodies; see [Security Model](https://little-stack.dev/docs/workflow/v0.1.0-alpha/internals/security-model).
 - `tool.call` — invokes the single named tool from the registry; no agent loop.
 
 ### `MemoryConfig`
@@ -161,7 +161,7 @@ type MemoryConfig = {
 };
 ```
 
-The defaults reflect the trust boundary: a workflow writes its own memory; org memory is shared reference material (write access requires explicit opt-in via override). See [Memory](/docs/v0.1.0-alpha/authoring/memory).
+The defaults reflect the trust boundary: a workflow writes its own memory; org memory is shared reference material (write access requires explicit opt-in via override). See [Memory](https://little-stack.dev/docs/workflow/v0.1.0-alpha/authoring/memory).
 
 ## Model Slots
 
@@ -177,7 +177,7 @@ const b = model(openai("gpt-4o-mini"), { description: "Summarizer." });
 // → slot id "gpt-4o-mini-tiger" (deterministic from description hash)
 ```
 
-Supply `id: "my-alias"` to override auto-derivation. See [AI SDK Native](/docs/v0.1.0-alpha/authoring/ai-sdk-native) for the full `model()` API.
+Supply `id: "my-alias"` to override auto-derivation. See [AI SDK Native](https://little-stack.dev/docs/workflow/v0.1.0-alpha/authoring/ai-sdk-native) for the full `model()` API.
 
 ## Running The Workflow
 
@@ -191,7 +191,7 @@ const result = await runWorkflow(candidateReview, { jobDescription, candidate },
 });
 ```
 
-`runWorkflow` runs the planner for the workflow, then executes the plan. The `world` option defaults to `localWorld()`, and `tools` defaults to the tools declared inline on the workflow. To compose workflows, use [Compose With Little Harness](/docs/v0.1.0-alpha/authoring/compose-with-harness). See [Run A Workflow](/docs/v0.1.0-alpha/running/run-a-workflow) for every option.
+`runWorkflow` runs the planner for the workflow, then executes the plan. The `world` option defaults to `localWorld()`, and `tools` defaults to the tools declared inline on the workflow. To compose workflows, use [Compose With Little Harness](https://little-stack.dev/docs/workflow/v0.1.0-alpha/authoring/compose-with-harness). See [Run A Workflow](https://little-stack.dev/docs/workflow/v0.1.0-alpha/running/run-a-workflow) for every option.
 
 ## Skills
 
@@ -206,17 +206,17 @@ planner: {
 },
 ```
 
-The harness auto-injects skill summaries into the system prompt at session start; the model reads full bodies on-demand via bash from `.agents/skills/<name>/SKILL.md`. Skills for the Planner and AI Worker are declared separately (under `planner.skills` and `worker.skills` respectively). See [Skills](/docs/v0.1.0-alpha/authoring/skills).
+The harness auto-injects skill summaries into the system prompt at session start; the model reads full bodies on-demand via bash from `.agents/skills/<name>/SKILL.md`. Skills for the Planner and AI Worker are declared separately (under `planner.skills` and `worker.skills` respectively). See [Skills](https://little-stack.dev/docs/workflow/v0.1.0-alpha/authoring/skills).
 
 ## Tools
 
-See [Tools](/docs/v0.1.0-alpha/authoring/tools-and-capabilities) for the full tool API: `tool()` from AI SDK, `createToolRegistry`, MCP integration, and the `code.run` tools proxy.
+See [Tools](https://little-stack.dev/docs/workflow/v0.1.0-alpha/authoring/tools-and-capabilities) for the full tool API: `tool()` from AI SDK, `createToolRegistry`, MCP integration, and the `code.run` tools proxy.
 
 ## Cross-References
 
-- Model slots + factory: [AI SDK Native](/docs/v0.1.0-alpha/authoring/ai-sdk-native)
-- Tool registry, MCP, code.run proxy: [Tools](/docs/v0.1.0-alpha/authoring/tools-and-capabilities)
-- Memory stores + run scratch: [Memory](/docs/v0.1.0-alpha/authoring/memory)
-- Skills format + loading: [Skills](/docs/v0.1.0-alpha/authoring/skills)
-- Multi-workflow composition: [Compose With Little Harness](/docs/v0.1.0-alpha/authoring/compose-with-harness) (the [Orchestrator](/docs/v0.1.0-alpha/authoring/orchestrating-workflows) is deprecated)
-- `runWorkflow` options: [Run A Workflow](/docs/v0.1.0-alpha/running/run-a-workflow)
+- Model slots + factory: [AI SDK Native](https://little-stack.dev/docs/workflow/v0.1.0-alpha/authoring/ai-sdk-native)
+- Tool registry, MCP, code.run proxy: [Tools](https://little-stack.dev/docs/workflow/v0.1.0-alpha/authoring/tools-and-capabilities)
+- Memory stores + run scratch: [Memory](https://little-stack.dev/docs/workflow/v0.1.0-alpha/authoring/memory)
+- Skills format + loading: [Skills](https://little-stack.dev/docs/workflow/v0.1.0-alpha/authoring/skills)
+- Multi-workflow composition: [Compose With Little Harness](https://little-stack.dev/docs/workflow/v0.1.0-alpha/authoring/compose-with-harness) (the [Orchestrator](https://little-stack.dev/docs/workflow/v0.1.0-alpha/authoring/orchestrating-workflows) is deprecated)
+- `runWorkflow` options: [Run A Workflow](https://little-stack.dev/docs/workflow/v0.1.0-alpha/running/run-a-workflow)

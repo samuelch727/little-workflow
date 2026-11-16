@@ -1,3 +1,4 @@
+import { restrictTier0Commands } from "../../runtime/command-policy.js";
 import { Bash } from "just-bash";
 import { createInterface } from "node:readline";
 import {
@@ -49,10 +50,10 @@ async function handleInit(message: Extract<ParentToWorkerMessage, { type: "init"
       : message.toolBridge
         ? { invokeTool }
         : message.runtime.javascript ?? true;
-  bash = new Bash(bashOptionsForRuntime(fs, workspace.workingDir, message.runtime, {
+  bash = new Bash(restrictTier0Commands(bashOptionsForRuntime(fs, workspace.workingDir, message.runtime, {
     javascript,
     defenseInDepth: defenseInDepthForAdapter("subprocess"),
-  }));
+  }), message.deniedCommands));
   currentCwd = workspace.workingDir;
   currentEnv = bash.getEnv();
   send({ type: "ready", id: message.id });

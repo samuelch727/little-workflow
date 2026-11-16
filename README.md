@@ -13,7 +13,8 @@ The Little stack is three things that fit together:
   and improves them: a reviewer reads the traces and proposes a change, LittleDB
   tests the change on your own past conversations, checks it against your
   guardrails, and puts it live or asks a person. It rolls back what makes things
-  worse. LittleDB is private for now; the client in this repository
+  worse. LittleDB needs an account; the server is not open source. The client in
+  this repository
   ([`packages/littledb-client`](./packages/littledb-client)) is how an app talks to it.
 - **Little Harness and Little Workflow** are the SDK. You build agents with
   Harness (sessions, tools, skills, files, artifacts, traces, chat connectors) and
@@ -25,7 +26,7 @@ The Little stack is three things that fit together:
   (an emulated shell over the user's files, in process, in milliseconds). A
   command that needs a real machine (git, a package manager, a build, tests)
   wakes a container that sleeps again after ten idle minutes. Managed
-  workspaces come with LittleDB's hosted service (LittleDB is private for now);
+  workspaces come with LittleDB's hosted service (LittleDB account required);
   self-hosted workspaces run with
   Little Compute on rootless Podman (not included in this public source snapshot).
 
@@ -51,7 +52,7 @@ your app or the CLI
 |---|---|
 | [`@little-stack/harness`](./packages/little-harness) | The agent runtime: sessions, tools, skills, files, traces, persistence, connectors, sandboxed execution, and the workflow harness adapter underneath Little Workflow. |
 | [`@little-stack/workflow`](./packages/little-workflow) | Workflow authoring, planner compilation, LWIR validation, durable Local World execution and replay, and the `little` CLI. |
-| [`@little-stack/littledb`](./packages/littledb-client) | The LittleDB client: one URL and one API key for traces, versions, scores, user feedback and experiments. Not published: it needs a LittleDB server, which is not public. |
+| [`@little-stack/littledb`](./packages/littledb-client) | The LittleDB client: one URL and one API key for traces, versions, scores, user feedback and experiments. Published from alpha.4; needs a LittleDB account; the LittleDB server is not open source. |
 
 Both published packages target **AI SDK 7** (`ai` is a peer dependency) and **Node.js 22+**:
 
@@ -118,7 +119,7 @@ pnpm --filter kill-resume demo   # keyless durability proof
 ```
 packages/little-harness     # the agent runtime primitives
 packages/little-workflow    # the workflow SDK + `little` CLI
-packages/littledb-client    # the LittleDB client (private until LittleDB is public)
+packages/littledb-client    # the LittleDB client (published from alpha.4; account required)
 demos/                      # runnable demos
 apps/                       # documentation sites
 skills/                     # authored agent skills for the packages

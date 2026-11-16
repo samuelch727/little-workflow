@@ -459,6 +459,7 @@ describe("generateHarness", () => {
         host: localHost({ dataDir: dir }),
         model,
         system: "Use tasks.",
+        taskTools: true,
       });
 
       const result = await generateHarness({ harness, type: "job", input: {} });
@@ -512,7 +513,7 @@ describe("generateHarness", () => {
           };
         },
       });
-      const harness = createHarness({ host, model, system: "Wait for tasks." });
+      const harness = createHarness({ host, model, taskTools: true, system: "Wait for tasks." });
 
       const result = await generateHarness({
         harness,
@@ -917,7 +918,7 @@ describe("generateHarness", () => {
       const spooledPath = (await result.session.files.read("/artifacts/mcp-runtime-path.txt")).text().trim();
       assertCompletedTurn(result);
       expect(result.text).toBe("final after mcp runtime spooling");
-      expect(spooledPath).toMatch(/^\/artifacts\/tool-results\/mcp_call_tool\/.+\.txt$/u);
+      expect(spooledPath).toMatch(/^\/session\/\.tool-results\/mcp_call_tool\/.+\.txt$/u);
       expect((await result.session.files.read(spooledPath)).text()).toBe(longResult);
       expect(close).toHaveBeenCalledTimes(1);
     });
@@ -1411,7 +1412,7 @@ describe("generateHarness", () => {
       const spooledPath = (await result.session.files.read("/artifacts/runtime-bridge-path.txt")).text().trim();
       assertCompletedTurn(result);
       expect(result.text).toBe("final after runtime spooling");
-      expect(spooledPath).toMatch(/^\/artifacts\/tool-results\/longLookup\/.+\.txt$/u);
+      expect(spooledPath).toMatch(/^\/session\/\.tool-results\/longLookup\/.+\.txt$/u);
       expect((await result.session.files.read(spooledPath)).text()).toBe(longResult);
       expect(
         events.filter((event) =>
@@ -1424,7 +1425,7 @@ describe("generateHarness", () => {
           event.type === "harness.artifact.created" &&
           event.metadata?.artifact?.path === spooledPath
         ),
-      ).toHaveLength(1);
+      ).toHaveLength(0);
     });
   });
 
@@ -1634,7 +1635,7 @@ describe("generateHarness", () => {
 
           if (call === 2) {
             expect(JSON.stringify(options.prompt)).toContain(
-              "/artifacts/tool-results/longLookup/call_1.txt",
+              "/session/.tool-results/longLookup/call_1.txt",
             );
             return {
               content: [
@@ -1644,7 +1645,7 @@ describe("generateHarness", () => {
                   toolName: "bash",
                   input: JSON.stringify({
                     command:
-                      "grep -o LONG_TOOL_SENTINEL_8472 /artifacts/tool-results/longLookup/call_1.txt > /artifacts/readback.txt",
+                      "grep -o LONG_TOOL_SENTINEL_8472 /session/.tool-results/longLookup/call_1.txt > /artifacts/readback.txt",
                   }),
                 },
               ],
@@ -1689,7 +1690,7 @@ describe("generateHarness", () => {
 
       assertCompletedTurn(result);
       expect(result.text).toBe("final after readback");
-      expect((await result.session.files.read("/artifacts/tool-results/longLookup/call_1.txt")).text()).toBe(
+      expect((await result.session.files.read("/session/.tool-results/longLookup/call_1.txt")).text()).toBe(
         longResult,
       );
       expect((await result.session.files.read("/artifacts/readback.txt")).text()).toBe(

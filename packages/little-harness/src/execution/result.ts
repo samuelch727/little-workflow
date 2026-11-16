@@ -24,6 +24,8 @@ export type HarnessParkedResult = {
 
 export type HarnessCompletedResult<TOutput = string> = {
   status: "completed";
+  /** A soft stop completed while calling tools: harness step cap or caller condition. */
+  stopReason?: "step-limit" | "stop-condition";
   text: string;
   output: TOutput;
   session: HarnessSession;
@@ -42,6 +44,8 @@ export type HarnessTurnResult<TOutput = string> =
 
 export type StreamHarnessCompletedResult = {
   status: "completed";
+  /** A soft stop completed while calling tools: harness step cap or caller condition. */
+  stopReason?: "step-limit" | "stop-condition";
   session: HarnessSession;
   artifacts: ArtifactRef[];
   trace: TraceRef;

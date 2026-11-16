@@ -22,7 +22,7 @@ export type ResolvedHarnessTraceOptions = {
 export type HarnessTraceContentOptions = {
   /** Legacy option name: maximum UTF-16 code units in a preview, not a UTF-8 storage quota. */
   previewBytes: number;
-  /** Maximum UTF-8 bytes before full optional content is stored in an artifact. */
+  /** Maximum UTF-8 bytes before full optional content is spilled to host-owned storage. */
   maxInlineBytes: number;
   captureReasoning: boolean;
   captureModelMessages: boolean;
@@ -39,12 +39,17 @@ export type HarnessTraceFileDiffOptions = {
 export type HarnessTraceRedactionOptions = {
   paths: string[];
   metadataKeys: string[];
+  /** Literal secrets masked only in retained trace text, before preview and spill. */
+  values?: string[];
 };
 
 export type TraceContentRef = {
   captured: boolean;
   preview?: string;
+  /** Full content exceeds the inline bound and is spilled, unless unavailableReason explains failure. */
   truncated?: boolean;
+  /** Preview is shorter than the captured sanitized text. Absent in older traces. */
+  previewTruncated?: boolean;
   contentRef?: string;
   bytes?: number;
   sha256?: string;
@@ -68,7 +73,7 @@ export type TraceFileDiff =
     }
   | {
       available: false;
-      reason: "disabled" | "non_text" | "too_large" | "redacted" | "content_unavailable";
+      reason: "disabled" | "non_text" | "too_large" | "redacted" | "content_unavailable" | "harness_file" | "storage_limit";
     };
 
 export type TraceErrorEnvelope = {

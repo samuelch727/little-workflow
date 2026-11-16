@@ -30,7 +30,7 @@ worker session, the harness bash path allowlist described below, runtime tool pe
 (`allow` / `deny` / `ask`), and package/skill/tool snapshotting with fail-closed drift detection.
 **Approval gates, short-lived scoped secrets, side-effect idempotency keys, trace redaction, the
 policy decision audit log, and process-level sandboxing are not implemented** — see "Code
-Sandboxing — Alpha Policy" below and the [Roadmap](/docs/v0.1.0-alpha/roadmap). Do not treat an
+Sandboxing — Alpha Policy" below and the [Roadmap](https://little-stack.dev/docs/workflow/v0.1.0-alpha/roadmap). Do not treat an
 unimplemented control as a boundary you can rely on.
 
 - planner and executor permission separation
@@ -59,7 +59,7 @@ The harness's bash tool enforces a path allowlist computed at session start. For
    - Path inside a read-only root and the command is a write → rejected with `"path is read-only"`.
 4. The command executes only when all checks pass.
 
-The model never receives a path reference it isn't allowed to access. `..` traversal and symlink escapes are stopped at the canonicalization step. See [Memory and Scratch](/docs/v0.1.0-alpha/internals/memory-scratch) for how the allowlist is constructed per role.
+The model never receives a path reference it isn't allowed to access. `..` traversal and symlink escapes are stopped at the canonicalization step. See [Memory and Scratch](https://little-stack.dev/docs/workflow/v0.1.0-alpha/internals/memory-scratch) for how the allowlist is constructed per role.
 
 ## Memory Poisoning Mitigations
 
@@ -71,7 +71,7 @@ Memory Stores are the cross-run persistent layer. Three controls bound the risk 
 
 3. **No automated promotion.** Dreaming (post-alpha) outputs to a separate "dreamed" store; a human or admin reviews before promoting to org-level read-write. The runtime provides no automatic escalation path.
 
-Not in alpha: memory mutation audit log, automated PII or unsafe-content scanning before writes, memory-redaction APIs. See [Memory and Scratch](/docs/v0.1.0-alpha/internals/memory-scratch) for the full scoping design.
+Not in alpha: memory mutation audit log, automated PII or unsafe-content scanning before writes, memory-redaction APIs. See [Memory and Scratch](https://little-stack.dev/docs/workflow/v0.1.0-alpha/internals/memory-scratch) for the full scoping design.
 
 ## Capability Drift Detection
 
@@ -85,7 +85,7 @@ In this milestone, drift detection applies at **three manifest scopes**:
 | `PlannerManifest` | Workflow-compile level | Harness id, model slot id, system prompt, skills, workflow definition hash, tool registry, memory store ids |
 | `WorkerManifest` | Per-step level | Harness id, workflow + version ids, step config, model slot (ai.generate only), skills, allowed tools |
 
-On resume, each manifest is recomputed and compared to the hash stored in `harness.session.started`. Any mismatch fails closed. See [Identity and Manifests](/docs/v0.1.0-alpha/internals/identity-manifests) for the full hash composition.
+On resume, each manifest is recomputed and compared to the hash stored in `harness.session.started`. Any mismatch fails closed. See [Identity and Manifests](https://little-stack.dev/docs/workflow/v0.1.0-alpha/internals/identity-manifests) for the full hash composition.
 
 **Skill body changes are not drift.** Only the skill's frontmatter (`name` + `description`) is hashed. Refining a skill body is treated as knowledge improvement, not a capability surface change. Adding or removing a skill changes the `skillsHash` → drift fires.
 

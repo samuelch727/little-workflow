@@ -296,7 +296,7 @@ The agent can inspect the file with shell commands, scripts, or follow-up tools.
 The model does not need every row in context.
 
 When a tool returns an oversized result instead of writing the file itself,
-Little Harness spools that value to `/artifacts/tool-results/<toolName>/` and
+Little Harness spools that value to `/session/.tool-results/<toolName>/` and
 returns a compact file reference. Configure this with `toolResultSpooling` on
 `createHarness()`, `generateHarness()`, or `streamHarness()`. The reference
 includes `summary` metadata so the model can see line/character counts and a

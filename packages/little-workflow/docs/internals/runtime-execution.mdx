@@ -94,7 +94,7 @@ For every LWIR step, the runtime:
 5. The harness emits `harness.session.completed` (with output + usage) or `harness.session.failed`.
 6. The runtime validates output against the step's output schema, writes the artifact, appends `StepCompleted` or `StepFailed`.
 
-`harness.session.started` carries the `WorkerManifest`. On resume, the manifest is recomputed and compared; a mismatch raises `CapabilityDriftError` (applied at the harness session level). See [Identity + Manifests](/docs/v0.1.0-alpha/internals/identity-manifests).
+`harness.session.started` carries the `WorkerManifest`. On resume, the manifest is recomputed and compared; a mismatch raises `CapabilityDriftError` (applied at the harness session level). See [Identity + Manifests](https://little-stack.dev/docs/workflow/v0.1.0-alpha/internals/identity-manifests).
 
 ### `harness.session.started` event shape
 
@@ -179,7 +179,7 @@ The fixer is a full agent loop. It gets the failed code body, the error, the out
 
 The fixer task kind is `fix_step` — it maps to `HarnessRole: "fixer"` in the session started event.
 
-See [Fixer](/docs/v0.1.0-alpha/internals/fixer) for the full fixer spec.
+See [Fixer](https://little-stack.dev/docs/workflow/v0.1.0-alpha/internals/fixer) for the full fixer spec.
 
 ## Per-Step Events
 
@@ -248,7 +248,7 @@ When `executeWorkflowVersionUnlocked()` starts with an existing event log:
 5. Skips steps whose `StepCompleted` events are committed.
 6. For steps whose harness session started but did not complete: checks harness-level events — completed model/tool calls fast-forward from the event cache; only the in-flight call re-executes.
 
-This is the two-level durability model: LWIR per-step memoization composed with harness per-model-call + per-tool-call memoization. See [Replay](/docs/v0.1.0-alpha/internals/replay) for a full treatment.
+This is the two-level durability model: LWIR per-step memoization composed with harness per-model-call + per-tool-call memoization. See [Replay](https://little-stack.dev/docs/workflow/v0.1.0-alpha/internals/replay) for a full treatment.
 
 ## Cancellation And Timeout
 

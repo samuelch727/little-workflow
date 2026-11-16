@@ -245,9 +245,9 @@ await writeFile("src/agents.generated.ts", await compileHarnessWorkspace(".", {
 ```
 
 For a single folder, `compileHarnessFolder("agents/support", { moduleDir: "src" })`
-returns a module whose default export is an async factory accepting `{ host }`.
+returns a module whose default export is an async factory accepting `{ host, context? }`.
 For a workspace, the generated module exports `agents` and
-`loadHarness(name, { host })`. Both require the application's per-chat host:
+`loadHarness(name, { host, context? })`. Both require the application's per-chat host:
 
 ```ts
 import { virtualHost } from "@little-stack/harness";
@@ -271,6 +271,66 @@ Keep imported tools stateless; module-level state is shared, while factory-local
 state belongs to that invocation. Existing default-exported Harnesses remain
 supported, with both `config.host` and `sessions` overridden by the supplied host.
 
+### Per-instance application context (alpha.4)
+
+Context forwarding is **not in `0.2.0-alpha.3`**. In this source version, both
+compiled loaders and Node's `loadHarness` accept trusted `context` and forward it
+as the factory's second argument. Existing `(host) => Harness` factories and
+Harness object exports keep working.
+
+```ts
+// agents/support/agent.ts
+import { createHarness, type HarnessHost } from "@little-stack/harness";
+import { lookupOrderTool, type OrderAgentContext } from "../../app/orders.js";
+
+export default (host: HarnessHost, { env, userId, onEvent }: OrderAgentContext) =>
+  createHarness({
+    host,
+    model: env.model,
+    onEvent,
+    tools: { lookup_order: lookupOrderTool(env.DB, userId) },
+  });
+```
+
+```ts
+// Application code, once per instance, using trusted bindings and identity.
+const harness = await loadHarness("support", {
+  host,
+  context: { env, userId, onEvent },
+});
+```
+
+`OrderAgentContext` is your application's type for its bindings, user identity and
+callback. Construct contextual models and tools inside the agent factory.
+Context is forwarded by reference within the receiving isolate. It is not
+serialized, cloned, frozen or validated, and callbacks do not transfer between
+workers or processes. Keep each chat's host, identity and mutable context scoped
+correctly; persist callback effects explicitly when needed.
+
+Context is not automatically added to prompts, tool arguments, session metadata,
+files, traces or Bash. Agent code can explicitly expose selected values, so the
+application still owns validation and access control.
+
+The generated single-folder loader and literal workspace names infer context
+from the factory's second parameter. Host-only factories keep accepting `{ host }`.
+For overloaded or generic factories, export an explicit `HarnessDefinition<Context>`
+contract or a concrete adapter. Use `Context | undefined` only when the factory
+supports omission. Unannotated overloads follow TypeScript's last-signature rule;
+a final host-only signature provides no supplied-context shape checks.
+
+`HarnessDefinition<T>` and `CompiledHarnessOptions<T>` are exported from
+`@little-stack/harness/compiled`. Promised definitions are supported. Dynamic
+agent names and untyped modules have unknown context; the app must validate the
+pairing. Explicit Node calls may use `loadHarness<Context>(folder, { host, context })`.
+These are compile-time checks; there is no runtime context-schema validation.
+
+Discovered `tools/*` still default-export tool values or promises of values.
+The loader does not invoke those exports as factories or pass context into them.
+Construct a contextual tool inline in `agent.ts`, as with `lookup_order` above;
+default-exporting a tool factory does not construct it. Inline tools keep
+precedence over discovered names. Imported module state is shared; schedules
+and connectors remain application-owned.
+
 The compiled path shares Node's merge and workflow/name validation rules. It embeds
 `instructions.md` and bare `skills/<name>/SKILL.md` folders with nested binary or
 text assets. `skill.ts` takes precedence and must export inline
@@ -285,3 +345,12 @@ runtime still process trusted imports; this is not a sandbox. Rebuild after fold
 changes, enable `allowImportingTsExtensions` with `noEmit` for generated-source
 typechecking, and keep Node-only modules out of your worker. Scheduling, connectors,
 chat routing, storage, authentication and network policy remain application-owned.
+
+### Starter folders (next alpha)
+
+`init`, `new`, and every setup template include a local
+`skills/answer-clearly/SKILL.md` beside the agent's tools and prompt-only
+instructions. See the CLI reference's `init` and `new` sections for dependency,
+workspace marker and installation behavior. Additive setup supports existing
+Node and Next projects; `--littledb` leaves deployed model selection to LittleDB
+while the generated local entrypoints remain keyless.

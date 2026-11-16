@@ -32,10 +32,13 @@ curl -H 'content-type: application/json' \
 ```
 
 The `other` agent uses the same URL layout. `counter` demonstrates per-chat factory
-state; `system` shows instructions and skill metadata; `history` counts user turns;
+state; `context` returns the application-selected chat identity and invokes that
+chat's result callback; `system` shows instructions and skill metadata; `history` counts user turns;
 `fail:<command>` deliberately fails after executing a tool for recovery checks;
 `pause:500` exercises the discovered asynchronous tool; any other text runs bash.
-GET the messages URL to read that chat's saved history.
+GET the messages URL to read that chat's saved history and its in-memory result
+callback records/event count. Callback records, event counts and factory counters
+reset on process restart.
 
 The router keys Durable Objects by the tuple `[agent, chat]`. Each object gets its
 own filesystem, host, agent factory invocation, history and turn queue. Different
@@ -44,6 +47,23 @@ chats can overlap, while one chat's turns execute serially in arrival order.
 but use a host factory for mutable tool closures and per-chat models. Module-level
 state and default-exported tool objects are shared JavaScript code: keep them
 stateless, or create stateful tools inside the agent factory.
+
+The support factory accepts `(host, context)`. The worker supplies its model
+factory, a synthetic private marker, router-selected `chatSessionId`, `onResult`
+and `onEvent` through `{ host, context }`. Context forwarding is unreleased and
+not part of `0.2.0-alpha.3`. The marker is synthetic test data, never an actual
+credential. The live callbacks and bindings stay in the receiving isolate;
+they are not serialized, persisted, or automatically exposed to prompts, tool
+arguments, traces or Bash. The `context_info` tool deliberately returns only the
+chat identity and counter. Message-body `context` is ignored. The `other` folder
+keeps its legacy host-only factory.
+
+Generated loaders infer context from typed factories (workspace literal names);
+overloaded/generic exports should declare `HarnessDefinition<Context>` (including
+`undefined` when omission is supported). Raw overloads use the last signature;
+dynamic name strings and untyped modules require application validation. No
+runtime context schema or cross-isolate function transfer is supplied. Discovered
+tools remain default-exported values/promises, not invoked context factories.
 
 `data/` stores Durable Object SQLite files. Regular files and history survive a
 process restart; empty directories, filesystem symlinks and factory counters do
@@ -101,7 +121,8 @@ The last command compiles and bundles the actual folders, launches the native
 self-hosted workerd binary against a temporary SQLite directory, and tests Node
 loader parity, discovered tools, offline skill reads, factory isolation, measured
 overlapping tool intervals, per-chat serialization, chat/agent file and history
-isolation, and process restart. Temporary processes and data are cleaned up.
+isolation, per-instance application context/callbacks, prompt/Bash context
+non-exposure, ignored message-body context, and process restart. Temporary processes and data are cleaned up.
 Node and workerd intentionally advertise different shell capabilities; parity
 compares authored instructions and the skill catalog without those host details.
 

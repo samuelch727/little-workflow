@@ -2,16 +2,14 @@
 
 The LittleDB client for Little Harness and Little Workflow apps: one URL and one API key.
 
-> **Not published yet.** The package is private while LittleDB itself is not public. The demos
-> in this repository use it from the workspace.
+> `@little-stack/littledb` is published from `0.2.0-alpha.4`; it needs a LittleDB account. The LittleDB server is not open source. See [release status](https://little-stack.dev/docs/releases).
 
 LittleDB is the product of the Little stack: tracing and self-improvement for agents. Little
 Harness and Little Workflow are the SDK that feeds it, and this client is the connection: it
 sends each Harness turn and Workflow run as a trace, forwards what users said, resolves which
 version to run, and runs LittleDB's experiments inside your app, where the tools and model keys
 are. Managed workspaces, part of LittleDB's hosted service, report each turn's tier and
-infrastructure cost through the same traces (the `compute` field). See LittleDB's
-`docs/pricing.md` for what is charged for.
+infrastructure cost through the same traces (the `compute` field). See the [LittleDB guide](https://little-stack.dev/docs/littledb) for service details.
 
 ```ts
 import { createLittleDB } from "@little-stack/littledb";
@@ -23,6 +21,24 @@ Nothing here puts LittleDB on your app's critical path. Traces and scores are qu
 batches in the background (retried, bounded, never thrown). `resolve` is cached and falls back
 to the last answer, then to the config in your code. Call `await db.shutdown()` before the
 process exits so the queue is sent.
+
+## Installation and commands
+
+Install the client with `pnpm add @little-stack/littledb@alpha`.
+For agent bundling, install `@little-stack/harness@alpha ai@^7` in your project;
+add `@little-stack/workflow@alpha` when using workflows. Harness and Workflow are
+optional peers so the tracing client and `littledb --help` work without them.
+Node.js 22 or newer is required. `esbuild` compiles agent folders and `typescript`
+reads their provenance, so both are runtime dependencies of the bundling command.
+
+```sh
+npx @little-stack/littledb@alpha --help
+npx @little-stack/littledb@alpha login --url https://littledb.example.com --project my-project
+npx @little-stack/littledb@alpha deploy agents --all --branch dev --dry-run
+```
+
+The client needs a LittleDB account; the server is not open source.
+Installing this client does not install or deploy the server.
 
 ## Resolve: which version to run
 
@@ -224,6 +240,83 @@ sink never throws: a failure goes to `onError` and is counted by the harness as 
 User ids should be pseudonymous (LittleDB stores them with each score). Comments are stored as
 text and shown to LittleDB's reviewer as untrusted data, never as instructions.
 
+### Feedback on part of a reply
+
+Import the browser helper separately; it has no Node dependencies. Keep the same `selection`
+when changing or withdrawing an answer:
+
+```ts
+import { selectionIn } from "@little-stack/littledb/selection";
+
+const selection = selectionIn(replyElement);
+if (selection !== null) {
+  const response = await fetch("/api/feedback", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ messageId, selection, thumbs: "down", tags: ["factual"] }),
+  });
+  const result = await response.json(); // result.selection?.anchor
+}
+```
+
+To withdraw it later, reuse the saved `selection`:
+
+```ts
+if (selection !== null) {
+  await fetch("/api/feedback", {
+    method: "DELETE",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ messageId, selection }),
+  });
+}
+```
+
+The helper reads text nodes in document order, skips `data-feedback-ignore` subtrees, and trims
+padding while adjusting its UTF-16 `start`/`end` indexes. Collapsed, blank and outside ranges,
+and quotes over 2,000 UTF-16 units after trimming, return `null`. Pass a `Range` as the second
+argument to use a saved selection.
+`textSelection(text, start, end)` works without a DOM; invalid indexes, blank passages and
+quotes over 2,000 UTF-16 units throw `RangeError`.
+
+From your server, send the same first-class fields:
+
+```ts
+import { feedbackId } from "@little-stack/littledb";
+
+await db.feedback({
+  traceId, userId: hashedUserId,
+  id: feedbackId(hashedUserId, messageId, selection),
+  selection, thumbs: "down", tags: ["factual"], expected: "The corrected passage.",
+  role: signedInUser.role, // from your server's session
+});
+```
+
+Each highlight has a stable id based on `quote`, `start`, `path` and `ref`; an omitted selection
+keeps the existing whole-reply id. `selection` needs a `quote`, JSON-pointer `path`, or app-defined
+`ref`; quote context (`prefix`/`suffix`) and offsets are optional. A selection alone is not a
+feedback signal: include thumbs, a rating, a comment or survey answers too. Tags are up to 10
+reason codes of 1–50 characters, trimmed and deduplicated; `expected` is up to 4,000 characters.
+
+**Role comes from your server.** Return `{ userId, role }` from `authorize()`; the handler ignores
+body `role` and always strips browser `metadata.role` and `metadata.correction`, even if the
+server returns no role. Other metadata is kept. The project's `feedback.expertRoles` decides
+which roles are experts; other users' `expected` remains feedback, not an automatic test item.
+Trusted direct server callers can still use LittleDB's temporary legacy metadata fallback.
+
+The result's `selection.anchor.status` is `exact` for a literal match, `loose` for a normalized
+match, `position` for an offset match, `pending` while the target is incomplete, or terminal
+`not_found` when a finished target has no match. Pending/unmatched quotes remain the user's
+words, never verified agent output. Path/ref-only selections have no anchor. The local fakes
+simulate only `exact` and `not_found`, not the engine's pending lifecycle or normalized matching.
+
+The handler forwards `selection.anchor`, `stale` and `revision`: a stale POST is `200`, an applied
+one `201`, and a conflicting revision `409`. Send `revision` on DELETE too, in its JSON body or
+with `?id=...&revision=...`, to keep retries ordered. The browser sends its original message/id
+and selection; the handler scopes them to the authorized user.
+
+Selected quotes, context and expected text are stored content, like comments; treat them as
+untrusted user data and avoid putting personal information in them.
+
 ## Trace a workflow
 
 ```ts
@@ -366,3 +459,39 @@ events and Worlds structurally.
 `pnpm test` runs against an in-memory LittleDB. `src/live.test.ts` runs against a real server
 when one answers at `LITTLEDB_TEST_URL` (default `http://127.0.0.1:7340`, key
 `LITTLEDB_TEST_API_KEY`, default `ldb_dev_local_key`).
+
+
+## The `littledb` command
+
+The scoped package name must be typed in full with `npx`; the unscoped name belongs to a different package. The `littledb` command ships in `@little-stack/littledb` from `0.2.0-alpha.4`.
+
+```sh
+npx @little-stack/workflow@alpha setup my-app --template node --littledb --yes --install --verify
+cd my-app
+npx @little-stack/littledb@alpha login --url https://<your-littledb> --project <slug>
+npx @little-stack/littledb@alpha deploy agents --all --branch dev
+echo "Say hello in one sentence." | npx @little-stack/littledb@alpha chat support --branch dev
+```
+
+`login` opens browser approval and saves the terminal key with mode 0600. Interrupted polling resumes with the same command. `login --key <management-key> --project <slug>` supports scripts; prefer `LITTLEDB_MANAGEMENT_KEY` for CI so secrets do not enter shell history. `logout` removes `config.json`, `login-pending.json`, and the legacy `agents.json` sign-in in `~/.config/littledb`, and names those deletions in its output. It does not revoke keys; revoke them in LittleDB Settings. `whoami` shows the address, organization, project and scopes, never the key.
+
+Commands retain the agent tool's arguments:
+
+- `build [folder] [--out file]`, `deploy [folder] [--all --branch name] [--dry-run]`.
+- `agents`, `status <agent>`, `versions <agent> [--branch name]`, `history <agent>`.
+- `promote <agent> <branch|vN> [--to branch]`, `rollback <agent> [--branch name] [--to vN]`, `production <agent> <branch>`, `branch delete <agent> <branch>`, `url <agent> [--branch name]`.
+- `chat <agent|url> [--branch name]` reads a piped message or opens an interactive terminal.
+- `secrets set|list|rm` accepts an agent and name, or a name with `--all-agents`; secret values are read from stdin only.
+- `users` configures access or lists, exports and deletes end-user data; `origins` configures allowed website origins.
+- `models` lists, adds, removes and selects models.
+- `schedules`, `credits`, `limits`, `retention`, `webhooks`, `email` and `user-secret` manage developer settings.
+
+`--url`, `LITTLEDB_URL`, or the saved `~/.config/littledb/config.json` names LittleDB, not its agents service. The service address is discovered automatically; `LITTLEDB_AGENTS_URL` overrides it. CI may use `LITTLEDB_URL`, `LITTLEDB_MANAGEMENT_KEY` and `LITTLEDB_PROJECT` with no file. The legacy `~/.config/littledb/agents.json` remains readable. Without an agents service, the client library can still send runs.
+
+Deployment output names the reporting organization/project and next chat/promote commands. `deploy --rotate-tracing-key` explicitly replaces the project's tracing key and invalidates its previous copy, potentially affecting another service. No rotation happens automatically. Demo-model starters warn that replies are canned.
+
+The browser client and protocol are available as `@little-stack/littledb/agents/client` and `/agents/protocol`; Node bundling is `/agents/bundle`. The package root does not load esbuild or TypeScript. Operator commands `dev`, `admin`, `init` and `link` remain in the private `littledb-agents` executable.
+
+The extra subpaths `/agents/cli`, `/agents/cli/git`, `/agents/bundle/plugins`,
+`/agents/bundle/provenance` and `/agents/bundle/workspace` are internal integration
+points for LittleDB’s own tool and may change without notice.

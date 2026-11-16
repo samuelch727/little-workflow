@@ -3,7 +3,7 @@ title: SDK API
 description: The minimal authoring + runtime surface that ships with v0.1.0-alpha.
 ---
 
-Alpha exposes the front door, tool registry, a one-shot runner, the Little Harness adapter (`asHarnessWorkflow`, `loadWorkflow`), cost reporting, harness primitives, and skill/memory configuration. Pipelines (`chainWorkflows`, `transform`), skill packs, plugins, and a long-lived runtime object are not part of the alpha API (see the [Roadmap](/docs/v0.1.0-alpha/roadmap)). `createRuntime` is not exported.
+Alpha exposes the front door, tool registry, a one-shot runner, the Little Harness adapter (`asHarnessWorkflow`, `loadWorkflow`), cost reporting, harness primitives, and skill/memory configuration. Pipelines (`chainWorkflows`, `transform`), skill packs, plugins, and a long-lived runtime object are not part of the alpha API (see the [Roadmap](https://little-stack.dev/docs/workflow/v0.1.0-alpha/roadmap)). `createRuntime` is not exported.
 
 The package requires Node.js 22+ and takes `ai` (`^7.0.0`) as a peer dependency. It has these entry points:
 
@@ -17,7 +17,7 @@ The package requires Node.js 22+ and takes `ai` (`^7.0.0`) as a peer dependency.
 
 Imports below come from `@little-stack/workflow` unless they name another entry point.
 
-For the implementation contract behind these exports, see [SDK Implementation Spec](/docs/v0.1.0-alpha/internals/sdk-implementation).
+For the implementation contract behind these exports, see [SDK Implementation Spec](https://little-stack.dev/docs/workflow/v0.1.0-alpha/internals/sdk-implementation).
 
 ## Tool Registry
 
@@ -192,7 +192,7 @@ const candidateReview = defineWorkflow({
 | `id` | yes | `string` | Stable identifier; hashed into `WorkflowDefinitionHash` |
 | `description` | recommended | `string` | Shown to the planner, and used as the tool description by `asHarnessWorkflow` |
 | `label` | no | `string` | Human-readable run label; defaults to the workflow id. `RunWorkflowOptions.label` overrides it per run |
-| `input` | recommended | Zod, Standard Schema, or JSON Schema | Validated at run start; must fit the [LWIR schema subset](/docs/v0.1.0-alpha/reference/lwir-reference#schema-subset) |
+| `input` | recommended | Zod, Standard Schema, or JSON Schema | Validated at run start; must fit the [LWIR schema subset](https://little-stack.dev/docs/workflow/v0.1.0-alpha/reference/lwir-reference#schema-subset) |
 | `suggestedInput` | no | Zod or JSON Schema | A schema hint shown to the planner; not used to validate input |
 | `output` | recommended | schema or `OutputMode` | Plain schema (array/object/text inferred) or an explicit `output.*` mode; see [Output Modes](#output-modes) |
 | `model` | one of `model`, `models`, `plan` | `AiSdkModel` or `ModelSlot` | One execution model |
@@ -317,7 +317,7 @@ Slot id derivation:
 
 The bundled model registry (`packages/little-workflow/src/model-registry.json`) provides default descriptions, pricing (USD per 1M tokens, with an optional `cachedInput` cache-read rate), and contextWindow for known models. For an unknown model `getModelInfoFor()` returns `undefined`, so `description` is left unset unless you supply one.
 
-Registry pricing is not written into events — durable events are token-only. It is applied at materialization time, where a model with no registry entry produces `costUsd: null` for that call and increments `usage.unpricedCalls`. `null` means *unpriced*, never *free*; an unpriced call is never folded in as `0`. See [Run A Workflow → Usage And Cost](/docs/v0.1.0-alpha/running/run-a-workflow#usage-and-cost).
+Registry pricing is not written into events — durable events are token-only. It is applied at materialization time, where a model with no registry entry produces `costUsd: null` for that call and increments `usage.unpricedCalls`. `null` means *unpriced*, never *free*; an unpriced call is never folded in as `0`. See [Run A Workflow → Usage And Cost](https://little-stack.dev/docs/workflow/v0.1.0-alpha/running/run-a-workflow#usage-and-cost).
 
 ### `skill()` factory
 
@@ -468,7 +468,7 @@ const custom = await runWorkflow(candidateReview, { jobDescription, candidate },
 const same = await reviewApplicants.run({ role: "Staff Engineer", applicants });
 ```
 
-`runWorkflow` runs one workflow. `world` defaults to `localWorld()` and `tools` to the tools declared inline on the workflow, so a typical run needs no plumbing. `workflow.run(input, options?)` is identical. Both return `RunResult<TOutput>` with a typed `.output`, `.runId`, `.usage` and `.plan` (whether the plan was drafted, kept, adapted or fixed, and whether the planner model was called) — see [`RunResult`](/docs/v0.1.0-alpha/running/run-a-workflow#return-shape) for the full shape. A failed run rejects with a `RunFailedError`; see [Error Types](#error-types).
+`runWorkflow` runs one workflow. `world` defaults to `localWorld()` and `tools` to the tools declared inline on the workflow, so a typical run needs no plumbing. `workflow.run(input, options?)` is identical. Both return `RunResult<TOutput>` with a typed `.output`, `.runId`, `.usage` and `.plan` (whether the plan was drafted, kept, adapted or fixed, and whether the planner model was called) — see [`RunResult`](https://little-stack.dev/docs/workflow/v0.1.0-alpha/running/run-a-workflow#return-shape) for the full shape. A failed run rejects with a `RunFailedError`; see [Error Types](#error-types).
 
 Passing an array throws a `TypeError`: compose several workflows with `asHarnessWorkflow` + `createHarness({ workflows })`, or use the deprecated `runOrchestration`.
 
@@ -511,7 +511,7 @@ type RunTrigger = {
 };
 ```
 
-See [Run A Workflow → Options](/docs/v0.1.0-alpha/running/run-a-workflow#options) for what each field does. The planner and models are not run options: set them on `defineWorkflow`.
+See [Run A Workflow → Options](https://little-stack.dev/docs/workflow/v0.1.0-alpha/running/run-a-workflow#options) for what each field does. The planner and models are not run options: set them on `defineWorkflow`.
 
 ### `runOrchestration` *(deprecated)*
 
@@ -533,11 +533,11 @@ const result = await runOrchestration({
 
 `RunOrchestrationOptions` is `RunWorkflowOptions` without the outer-loop fields, plus `workflows` (a non-empty array), `input`, `orchestrator` (required), and `maxConcurrentSubRuns`.
 
-> **Deprecated.** The orchestrator composition surface is being retired in favour of `asHarnessWorkflow` + `createHarness({ workflows })`. `runWorkflow` is **not** deprecated. See [Compose With Little Harness](/docs/v0.1.0-alpha/authoring/compose-with-harness).
+> **Deprecated.** The orchestrator composition surface is being retired in favour of `asHarnessWorkflow` + `createHarness({ workflows })`. `runWorkflow` is **not** deprecated. See [Compose With Little Harness](https://little-stack.dev/docs/workflow/v0.1.0-alpha/authoring/compose-with-harness).
 
 ### `OrchestratorConfig`
 
-> **Deprecated.** Part of the orchestrator composition surface. Compose with `asHarnessWorkflow` + `createHarness({ workflows })` instead ([guide](/docs/v0.1.0-alpha/authoring/compose-with-harness)); scheduled to be unexported in the next minor. `createOrchestratorTools` and `workflowSnapshotsForOrchestrator` are deprecated with it.
+> **Deprecated.** Part of the orchestrator composition surface. Compose with `asHarnessWorkflow` + `createHarness({ workflows })` instead ([guide](https://little-stack.dev/docs/workflow/v0.1.0-alpha/authoring/compose-with-harness)); scheduled to be unexported in the next minor. `createOrchestratorTools` and `workflowSnapshotsForOrchestrator` are deprecated with it.
 
 ```ts
 type OrchestratorConfig = {
@@ -577,7 +577,7 @@ type StoredWorkflowPlan = {
 };
 ```
 
-Reads the plan a run executed from the world the run used. Pass `result.workflowVersionId` or `result.plan.workflowVersionId`. An id the world does not hold rejects with an error naming the directory it looked in. Validate or inspect the LWIR with [`@little-stack/workflow/lwir`](/docs/v0.1.0-alpha/reference/lwir-reference).
+Reads the plan a run executed from the world the run used. Pass `result.workflowVersionId` or `result.plan.workflowVersionId`. An id the world does not hold rejects with an error naming the directory it looked in. Validate or inspect the LWIR with [`@little-stack/workflow/lwir`](https://little-stack.dev/docs/workflow/v0.1.0-alpha/reference/lwir-reference).
 
 ### `gradeRun` and `listRunGrades`
 
@@ -603,11 +603,11 @@ type RunGrade = GradeRunInput & {
 };
 ```
 
-`gradeRun` records whether a finished run did its job. A `"fail"` grade sends the plan that run executed back to the planner on the next run, with the reason, instead of keeping it without a planner call; see [Grading Runs](/docs/v0.1.0-alpha/running/run-a-workflow#grading-runs). It rejects a run id the world does not hold and a run that never got a plan. `listRunGrades` returns grades oldest first.
+`gradeRun` records whether a finished run did its job. A `"fail"` grade sends the plan that run executed back to the planner on the next run, with the reason, instead of keeping it without a planner call; see [Grading Runs](https://little-stack.dev/docs/workflow/v0.1.0-alpha/running/run-a-workflow#grading-runs). It rejects a run id the world does not hold and a run that never got a plan. `listRunGrades` returns grades oldest first.
 
 ## Little Harness Composition
 
-The supported way to compose workflows. See [Compose With Little Harness](/docs/v0.1.0-alpha/authoring/compose-with-harness) for the guide.
+The supported way to compose workflows. See [Compose With Little Harness](https://little-stack.dev/docs/workflow/v0.1.0-alpha/authoring/compose-with-harness) for the guide.
 
 ### `asHarnessWorkflow`
 
@@ -666,7 +666,7 @@ priceModelCall(
 ).costUsd;                                 // number, or null when the model is not in the registry
 ```
 
-Rates come from the bundled [model registry](/docs/v0.1.0-alpha/authoring/ai-sdk-native#bundled-model-registry). `costUsd: null` means unpriced, never free.
+Rates come from the bundled [model registry](https://little-stack.dev/docs/workflow/v0.1.0-alpha/authoring/ai-sdk-native#bundled-model-registry). `costUsd: null` means unpriced, never free.
 
 ## Harness Contract
 

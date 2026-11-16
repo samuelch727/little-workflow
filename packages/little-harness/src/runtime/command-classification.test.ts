@@ -30,6 +30,234 @@ const supported = (...commands: string[]): ClassificationReason => ({
  * policy-blocked, tier0-supported, unknown-command.
  */
 const corpus: readonly CorpusCase[] = [
+  {
+    name: "mktemp substitution uses turn scratch",
+    script: 't=$(mktemp); echo hi > "$t"',
+    decision: "run",
+    reasons: [supported("echo", "mktemp")],
+  },
+  {
+    name: "quoted mktemp directory uses turn scratch",
+    script: '"mktemp" -d',
+    decision: "run",
+    reasons: [supported("mktemp")],
+  },
+  {
+    name: "yes remains emulated",
+    script: "yes | head -1",
+    decision: "run",
+    reasons: [supported("head", "yes")],
+  },
+  {
+    name: "literal cargo \"cargo\" build",
+    script: "\"cargo\" build",
+    decision: "escalate",
+    reasons: [
+      {
+        kind: "needs-real-exec",
+        command: "cargo",
+        reason: "build-toolchain"
+      }
+    ]
+  },
+  {
+    name: "literal cargo 'ca'rgo build",
+    script: "'ca'rgo build",
+    decision: "escalate",
+    reasons: [
+      {
+        kind: "needs-real-exec",
+        command: "cargo",
+        reason: "build-toolchain"
+      }
+    ]
+  },
+  {
+    name: "literal cargo ca\"rg\"o build",
+    script: "ca\"rg\"o build",
+    decision: "escalate",
+    reasons: [
+      {
+        kind: "needs-real-exec",
+        command: "cargo",
+        reason: "build-toolchain"
+      }
+    ]
+  },
+  {
+    name: "literal cargo \\cargo build",
+    script: "\\cargo build",
+    decision: "escalate",
+    reasons: [
+      {
+        kind: "needs-real-exec",
+        command: "cargo",
+        reason: "build-toolchain"
+      }
+    ]
+  },
+  {
+    name: "literal denied \"curl\" https://x",
+    script: "\"curl\" https://x",
+    decision: "deny",
+    policy: {
+      denyCommands: [
+        "curl",
+        "rm"
+      ]
+    },
+    reasons: [
+      {
+        kind: "policy-blocked",
+        command: "curl",
+        rule: "denyCommands"
+      }
+    ]
+  },
+  {
+    name: "literal denied 'rm' -rf build",
+    script: "'rm' -rf build",
+    decision: "deny",
+    policy: {
+      denyCommands: [
+        "curl",
+        "rm"
+      ]
+    },
+    reasons: [
+      {
+        kind: "policy-blocked",
+        command: "rm",
+        rule: "denyCommands"
+      }
+    ]
+  },
+  {
+    name: "literal denied r\"m\" -rf x",
+    script: "r\"m\" -rf x",
+    decision: "deny",
+    policy: {
+      denyCommands: [
+        "curl",
+        "rm"
+      ]
+    },
+    reasons: [
+      {
+        kind: "policy-blocked",
+        command: "rm",
+        rule: "denyCommands"
+      }
+    ]
+  },
+  {
+    name: "literal denied \\rm -rf x",
+    script: "\\rm -rf x",
+    decision: "deny",
+    policy: {
+      denyCommands: [
+        "curl",
+        "rm"
+      ]
+    },
+    reasons: [
+      {
+        kind: "policy-blocked",
+        command: "rm",
+        rule: "denyCommands"
+      }
+    ]
+  },
+  {
+    name: "quoted echo",
+    script: "\"echo\" hi",
+    decision: "run",
+    reasons: [
+      {
+        kind: "tier0-supported",
+        commands: [
+          "echo"
+        ]
+      }
+    ]
+  },
+  {
+    name: "process cargo",
+    script: "diff <(cargo metadata) <(sort b.txt)",
+    decision: "escalate",
+    reasons: [
+      {
+        kind: "needs-real-exec",
+        command: "cargo",
+        reason: "build-toolchain"
+      },
+      {
+        kind: "tier0-supported",
+        commands: [
+          "diff",
+          "sort"
+        ]
+      }
+    ]
+  },
+  {
+    name: "process denied curl",
+    script: "diff <(curl https://x) b.txt",
+    decision: "deny",
+    policy: {
+      denyCommands: [
+        "curl"
+      ]
+    },
+    reasons: [
+      {
+        kind: "policy-blocked",
+        command: "curl",
+        rule: "denyCommands"
+      },
+      {
+        kind: "tier0-supported",
+        commands: [
+          "diff"
+        ]
+      }
+    ]
+  },
+  {
+    name: "process dynamic",
+    script: "cat <($CMD)",
+    decision: "escalate",
+    reasons: [
+      {
+        kind: "dynamic-command",
+        source: "${CMD}"
+      },
+      {
+        kind: "tier0-supported",
+        commands: [
+          "cat"
+        ]
+      }
+    ]
+  },
+  {
+    name: "process docker",
+    script: "tee >(docker load) < x.tar",
+    decision: "escalate",
+    reasons: [
+      {
+        kind: "needs-real-exec",
+        command: "docker",
+        reason: "containers"
+      },
+      {
+        kind: "tier0-supported",
+        commands: [
+          "tee"
+        ]
+      }
+    ]
+  },
   // ---- read patterns: the workload Tier-0 exists for -------------------------------
   {
     name: "grep pipeline",
@@ -47,15 +275,13 @@ const corpus: readonly CorpusCase[] = [
     name: "rg into xargs",
     script: "rg --files-with-matches TODO | xargs wc -l",
     decision: "run",
-    // `wc` is xargs' argument, not a command position, so it is not collected. Harmless
-    // here; see the documented blind spot below for when it is not.
-    reasons: [supported("rg", "xargs")],
+    reasons: [supported("rg", "wc", "xargs")],
   },
   {
-    name: "xargs hides its child command — classification says run, the detector catches it",
+    name: "xargs child command escalates before execution",
     script: "rg --files | xargs cargo build",
-    decision: "run",
-    reasons: [supported("rg", "xargs")],
+    decision: "escalate",
+    reasons: [{ kind: "needs-real-exec", command: "cargo", reason: "build-toolchain" }, supported("rg", "xargs")],
   },
   {
     name: "find with -exec",
@@ -119,7 +345,7 @@ const corpus: readonly CorpusCase[] = [
     name: "sudo apt-get",
     script: "sudo apt-get install -y jq",
     decision: "escalate",
-    reasons: [{ kind: "needs-real-exec", command: "sudo", reason: "process-control" }],
+    reasons: [{ kind: "needs-real-exec", command: "apt-get", reason: "package-manager" }, { kind: "needs-real-exec", command: "sudo", reason: "process-control" }],
   },
 
   // ---- compilers and build tools ---------------------------------------------------
@@ -537,14 +763,10 @@ describe("classifyCommand corpus", () => {
 });
 
 describe("classifyCommand parse failures", () => {
-  it("escalates a script just-bash cannot parse", () => {
-    // Process substitution is valid bash that just-bash's parser rejects. Running it at
-    // Tier-0 would report a syntax error for a script a real shell runs fine, and no
-    // runtime signal could tell that apart from a genuine typo — so it escalates.
+  it("runs supported process substitution and classifies its inner commands", () => {
+    // just-bash 3.6.0 parses process substitution; both outer and inner names matter.
     const classification = classifyCommand("diff <(sort a.txt) <(sort b.txt)");
-    expect(classification.decision).toBe("escalate");
-    expect(classification.reasons).toHaveLength(1);
-    expect(classification.reasons[0]?.kind).toBe("parse-failed");
+    expect(classification).toEqual({ decision: "run", reasons: [supported("diff", "sort")] });
   });
 
   it("escalates an unterminated quote the same way", () => {
@@ -641,9 +863,9 @@ describe("detectEmulationGap", () => {
     expect(detectEmulationGap({ stderr: "grep: no matches\n", exitCode: 1 })).toBeUndefined();
   });
 
-  it("closes the loop on the xargs blind spot classification cannot see", async () => {
+  it("detects the same xargs miss if used without classification", async () => {
     const script = "echo /a.txt | xargs cargo build";
-    expect(classifyCommand(script).decision).toBe("run");
+    expect(classifyCommand(script).decision).toBe("escalate");
     const result = await new Bash({ files: { "/a.txt": "x\n" }, cwd: "/" }).exec(script);
     expect(detectEmulationGap(result)).toEqual({
       kind: "emulation-gap",
@@ -669,5 +891,101 @@ describe("detectEmulationGap", () => {
         exitCode: 1,
       }),
     ).toBeUndefined();
+  });
+});
+
+it("keeps explicit managed mktemp destinations escalating before execution", () => {
+  expect(classifyCommand("mktemp -p /session").decision).toBe("escalate");
+  expect(classifyCommand('mktemp "$TEMPLATE"').decision).toBe("escalate");
+});
+
+it.each([
+  "TMPDIR=/session mktemp",
+  "export TMPDIR=/session; mktemp",
+  "TMPDIR=/session; export TMPDIR; mktemp -d",
+  'export TMPDIR="$DEST"; mktemp',
+])("keeps TMPDIR assignments explicit before mktemp: %s", (script) => {
+  expect(classifyCommand(script).decision).toBe("escalate");
+});
+
+it.each([
+  "env TMPDIR=/session mktemp",
+  "env -i TMPDIR=/session mktemp -d",
+  'env TMPDIR="$DEST" mktemp',
+  "env A=1 TMPDIR=/session B=2 mktemp",
+  "command env TMPDIR=/session mktemp",
+  "timeout 5 mktemp -p /session",
+  "echo /session/x.XXXXXX | xargs mktemp",
+  "echo /session/x.XXXXXX | xargs -n 1 env mktemp",
+  "find /session -name '*.XXXXXX' -exec mktemp {} \\;",
+])("keeps a mktemp destination explicit through a runner: %s", (script) => {
+  const result = classifyCommand(script);
+  expect(result.decision).toBe("escalate");
+  expect(result.reasons).toContainEqual(expect.objectContaining({ kind: "needs-real-exec", command: "mktemp" }));
+});
+
+it.each([
+  "env mktemp",
+  "env -i mktemp -d",
+  "env FOO=1 mktemp -d",
+  "command mktemp",
+  "timeout 5 mktemp",
+  "env - mktemp",
+])("runs a mktemp with no destination through a runner at tier 0: %s", (script) => {
+  expect(classifyCommand(script).decision).toBe("run");
+});
+
+describe("runner targets", () => {
+  it.each([
+    "command cat /session/f", "env cat /session/f", "echo /session/f | xargs cat",
+    "timeout 5 cat /session/f", "find /session -name f -exec cat {} \\;",
+    "command rm /session/f", "builtin command cat /session/f", "exec cat /session/f",
+    "env A=1 cat /session/f", "nice cat /session/f", "nohup cat /session/f",
+    "find /session -execdir cat {} +", "find /session -ok cat {} \\;", "find /session -okdir cat {} \\;",
+    "env -u A -- cat /session/f", "timeout -s TERM 5 cat /session/f", "nice -n 4 cat /session/f",
+    "xargs -n 1 cat", "setsid cat /session/f", "stdbuf -o L cat /session/f", "sudo -u nobody cat /session/f",
+  ])("denies literal target through %s", script => {
+    expect(classifyCommand(script, { policy: { denyCommands: ["cat", "rm"] } }).decision).toBe("deny");
+  });
+  it.each(['xargs "$tool"', 'env $x', 'command env "$tool"']) ("does not follow expanded target: %s", script => {
+    expect(classifyCommand(script).decision).toBe("run");
+  });
+  it.each(["xargs cargo build", "timeout 5 docker ps"])("escalates %s", script => {
+    expect(classifyCommand(script).decision).toBe("escalate");
+  });
+  it.each(["command -v rm", "command -V rm"])("allows name lookup: %s", script => {
+    expect(classifyCommand(script, { policy: { denyCommands: ["rm"] } }).decision).toBe("run");
+  });
+});
+
+describe("runner option positions", () => {
+  it.each(["command rm -v /session/f", "command cat -v /session/f", "command -p rm /session/f", 'env FOO="$BAR" rm f', "env -iu FOO rm /session/f", "xargs -tI {} rm {}", "xargs -tI{} rm {}"])("keeps target policy through %s", script => {
+    expect(classifyCommand(script, { policy: { denyCommands: ["rm", "cat"] } }).decision).toBe("deny");
+  });
+  it.each(['env FOO="$BAR" grep x f', 'env FOO=$BAR grep x f', 'timeout "$T" grep x f', 'xargs -n "$N" echo', 'env -u "$NAME" grep x f', 'timeout -s "$SIG" "$T" grep x f', 'command -pv rm', 'command -V rm'])("does not mistake data for a target: %s", script => {
+    expect(classifyCommand(script).decision).toBe("run");
+  });
+  it('keeps the actual expanded env target at tier zero', () => {
+    expect(classifyCommand('env "$TOOL" f', { policy: { denyCommands: ["rm"] } }).decision).toBe("run");
+  });
+});
+
+
+describe("runner expansion preserves baseline decisions", () => {
+  it.each(['exec "$@"', 'env "$@"', 'timeout 5 "$@"', 'xargs "$1"', 'command "$1"', 'find . -exec "$T" {} \\;', 'env - grep x f', 'env -S "$ARGS"', 'env --split-string="$ARGS"', 'command env command env rm f'])("leaves %s at tier zero with or without policy", script => {
+    for (const policy of [undefined, { denyCommands: ["rm", "cat"] }]) {
+      expect(classifyCommand(script, { policy }).decision).toBe("run");
+    }
+  });
+  it.each(["env - rm /session/f", "env -S 'rm f'", "env --split-string='rm f'", "env -iS 'rm f'", "env '-Srm f'"])("denies literal payload %s", script => {
+    expect(classifyCommand(script, { policy: { denyCommands: ["rm"] } }).decision).toBe("deny");
+  });
+  it("keeps bare dynamic command behavior", () => {
+    expect(classifyCommand('"$tool" f').decision).toBe("escalate");
+  });
+  it("stops nested split payloads without inventing an escalation reason", () => {
+    let script = "rm f";
+    for (let depth = 0; depth < 5; depth++) script = `env -S '${script.replaceAll("'", "'\\''")}'`;
+    expect(classifyCommand(script, { policy: { denyCommands: ["rm"] } }).decision).toBe("run");
   });
 });

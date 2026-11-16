@@ -55,6 +55,6 @@ Dependency artifacts (`node_modules`, package-manager caches and changed lockfil
 
 `.little-harness/` and `.little-workflow/` are single-process local filesystem persistence. They are not hosted multi-tenant state. The sample API has no login, strips/ignores browser identity, and assigns fresh server-generated sessions. Production live mode is refused until you implement server-verified authentication, authorization, rate limiting and a suitable persistent execution host. Explicit `LITTLE_DEMO=1` permits a keyless production smoke.
 
-Little Compute and LittleDB are not published on npm. `little setup --compute` explains this and makes no changes. No paid provisioning, deployment or third-party channel setup occurs.
+**Alpha.4:** `--littledb` adds the LittleDB client and a managed-model starter; the service requires access. Little Compute remains unpublished. `little setup --compute` explains this and makes no changes. No paid provisioning, deployment or third-party channel setup occurs.
 
 A headless CLI alone does not require a monorepo. A later workspace template could put shared definitions in `packages/agents`, web in `apps/web`, and independent channel/service entrypoints in other apps. Repository boundaries, runtimes, services and channels are separate choices. This alpha does not create that template or invent WhatsApp/Telegram/Slack adapters.

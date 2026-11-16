@@ -3,7 +3,7 @@ title: Inspect Runs
 description: The event log is the only inspection surface in v0.1.0-alpha.
 ---
 
-Alpha is artifact-first and event-driven. The runtime stores facts in the event log and payloads on the filesystem. Inspection in alpha means dumping the event log; the polished inspector (list, timeline, stream, per-step inspect, artifact CLI) is planned post-alpha (see the [Roadmap](/docs/v0.1.0-alpha/roadmap)).
+Alpha is artifact-first and event-driven. The runtime stores facts in the event log and payloads on the filesystem. Inspection in alpha means dumping the event log; the polished inspector (list, timeline, stream, per-step inspect, artifact CLI) is planned post-alpha (see the [Roadmap](https://little-stack.dev/docs/workflow/v0.1.0-alpha/roadmap)).
 
 ## Event Vocabulary
 
@@ -299,12 +299,12 @@ Model calls made outside any step — a planner or orchestrator session — appe
 
 ## Automatic Retry And Replay
 
-Automatic retry re-executes a failed step attempt inside the same run using the same WorkflowVersion and input. Alpha retry is best used for idempotent steps; production-grade dedup arrives in [v0.1.0](/docs/v0.1.0-alpha/roadmap).
+Automatic retry re-executes a failed step attempt inside the same run using the same WorkflowVersion and input. Alpha retry is best used for idempotent steps; production-grade dedup arrives in [v0.1.0](https://little-stack.dev/docs/workflow/v0.1.0-alpha/roadmap).
 
 Replay reconstructs state from event history. It does not call models, tools, shell, code, or external APIs. Harness session events (Layer C) are replayed in addition to LWIR step events (Layer A) — committed model turns and tool calls are fast-forwarded without re-invoking the model or tool. This is what proves the kill-and-resume invariant.
 
-The user-invoked `little retry` command is not part of alpha. It is planned post-alpha (see the [Roadmap](/docs/v0.1.0-alpha/roadmap)).
+The user-invoked `little retry` command is not part of alpha. It is planned post-alpha (see the [Roadmap](https://little-stack.dev/docs/workflow/v0.1.0-alpha/roadmap)).
 
-Fork (branching a run from a checkpoint with changed input, prompts, or policy) is planned post-alpha (see the [Roadmap](/docs/v0.1.0-alpha/roadmap)).
+Fork (branching a run from a checkpoint with changed input, prompts, or policy) is planned post-alpha (see the [Roadmap](https://little-stack.dev/docs/workflow/v0.1.0-alpha/roadmap)).
 
-See [Durability](/docs/v0.1.0-alpha/running/replay-and-durability) for the full resume model, crash scenarios, and `CapabilityDriftError` behavior.
+See [Durability](https://little-stack.dev/docs/workflow/v0.1.0-alpha/running/replay-and-durability) for the full resume model, crash scenarios, and `CapabilityDriftError` behavior.

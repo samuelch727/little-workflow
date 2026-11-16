@@ -3,7 +3,7 @@ title: Durability
 description: What survives a process kill in v0.1.0-alpha, and what replay can and cannot do.
 ---
 
-Alpha durability operates at two levels: per-LWIR-step memoization (unchanged from the prior milestone) and per-harness-session memoization (new). Together they give deterministic fast-forward from any crash point. Content-addressed blob storage is planned post-alpha (see the [Roadmap](/docs/v0.1.0-alpha/roadmap)); lease fencing, outbox dispatch, and reconciler arrive in [v0.1.0](/docs/v0.1.0-alpha/roadmap).
+Alpha durability operates at two levels: per-LWIR-step memoization (unchanged from the prior milestone) and per-harness-session memoization (new). Together they give deterministic fast-forward from any crash point. Content-addressed blob storage is planned post-alpha (see the [Roadmap](https://little-stack.dev/docs/workflow/v0.1.0-alpha/roadmap)); lease fencing, outbox dispatch, and reconciler arrive in [v0.1.0](https://little-stack.dev/docs/workflow/v0.1.0-alpha/roadmap).
 
 ## What Survives A Process Kill
 
@@ -116,7 +116,7 @@ To resume cleanly, restore the prior state.
 To start fresh, run with a new runId.
 ```
 
-Drift is fail-closed. The dev's options are: restore the prior environment and resume, or start a fresh run with a new `runId`. See the [Manifests](/docs/v0.1.0-alpha/authoring/orchestrating-workflows) section for what counts as drift at each harness scope.
+Drift is fail-closed. The dev's options are: restore the prior environment and resume, or start a fresh run with a new `runId`. See the [Manifests](https://little-stack.dev/docs/workflow/v0.1.0-alpha/authoring/orchestrating-workflows) section for what counts as drift at each harness scope.
 
 ## Replay Versus Retry
 
@@ -129,10 +129,10 @@ Drift is fail-closed. The dev's options are: restore the prior environment and r
 
 **Retry** is for transient failures. Alpha retries a failed step using the same WorkflowVersion and input. Without lease fencing or `sideEffectKey`s (those arrive in v0.1.0), retry is best used for idempotent steps; a non-idempotent tool that crashed after committing externally but before recording its result will be invoked twice.
 
-**Fork** — branching a new run from a checkpoint with changed input, model slot mapping, prompts, policy, or output schema — is planned post-alpha (see the [Roadmap](/docs/v0.1.0-alpha/roadmap)).
+**Fork** — branching a new run from a checkpoint with changed input, model slot mapping, prompts, policy, or output schema — is planned post-alpha (see the [Roadmap](https://little-stack.dev/docs/workflow/v0.1.0-alpha/roadmap)).
 
 ## The Alpha Demo
 
 The kill-and-resume demo is the alpha milestone. Stop a run mid-flight, restart the process, and replay should rebuild state from `.little-workflow/` and continue without re-calling completed model or tool steps.
 
-That demo exercises both Layer A (LWIR step memoization) and Layer C (harness session memoization). Production-grade crash consistency — fencing late writers, deduplicating external commits, reconciling crashed dispatches — arrives in [v0.1.0](/docs/v0.1.0-alpha/roadmap).
+That demo exercises both Layer A (LWIR step memoization) and Layer C (harness session memoization). Production-grade crash consistency — fencing late writers, deduplicating external commits, reconciling crashed dispatches — arrives in [v0.1.0](https://little-stack.dev/docs/workflow/v0.1.0-alpha/roadmap).

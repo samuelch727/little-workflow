@@ -38,7 +38,7 @@ The alpha SDK ships as a single `@little-stack/workflow` package. This milestone
 
 ### Control Plane
 
-`defineWorkflow()` produces a `WorkflowDefinition`. A `WorkflowDefinitionHash` (new in this milestone — see [Identity + Manifests](/docs/v0.1.0-alpha/internals/identity-manifests)) is computed once at authoring time: it is the sha256 of the definition's identity-bearing fields (planner config, models, schemas, tools, memory config). This is distinct from `WorkflowVersion`, which is the per-run LWIR hash (unchanged).
+`defineWorkflow()` produces a `WorkflowDefinition`. A `WorkflowDefinitionHash` (new in this milestone — see [Identity + Manifests](https://little-stack.dev/docs/workflow/v0.1.0-alpha/internals/identity-manifests)) is computed once at authoring time: it is the sha256 of the definition's identity-bearing fields (planner config, models, schemas, tools, memory config). This is distinct from `WorkflowVersion`, which is the per-run LWIR hash (unchanged).
 
 Two entry points start a run:
 
@@ -61,7 +61,7 @@ type HarnessTask =
   | { kind: "fix_step";     step; error; attempts };
 ```
 
-One contract, four task kinds. See [Harness](/docs/v0.1.0-alpha/internals/harness) for the full spec.
+One contract, four task kinds. See [Harness](https://little-stack.dev/docs/workflow/v0.1.0-alpha/internals/harness) for the full spec.
 
 **Worker unification:** the prior alpha had separate `RuntimeAiAdapter`, `RuntimeCodeRunner`, and tool-dispatch paths. All three are now unified through the worker harness. `ai.generate` steps make one model call with no tools; `code.run` steps validate and compile, but the default worker harness refuses to execute them (it checks the step's sandbox policy and then throws), so running one needs a custom `worker.harness` that implements `execute_step`; `tool.call` steps invoke the named tool directly. The harness emits the same event vocabulary for all.
 
@@ -71,7 +71,7 @@ When the Orchestrator calls `run_workflow`, the SDK creates a **sub-run** with i
 
 The orchestrator's harness records `harness.tool_call.started` with `args.subRunId` and `harness.tool_call.succeeded` with `result.runId`. Two levels of memoization compose cleanly — the orchestrator's session memoizes completed tool calls; each sub-run memoizes completed LWIR steps.
 
-See [Runtime Execution](/docs/v0.1.0-alpha/internals/runtime-execution) and [Replay](/docs/v0.1.0-alpha/internals/replay) for how both levels interact.
+See [Runtime Execution](https://little-stack.dev/docs/workflow/v0.1.0-alpha/internals/runtime-execution) and [Replay](https://little-stack.dev/docs/workflow/v0.1.0-alpha/internals/replay) for how both levels interact.
 
 ### Storage Layer
 
@@ -84,7 +84,7 @@ Three storage surfaces, all filesystem-backed in alpha (`localWorld`):
 | **Memory Stores** | `<dataDir>/memory/workflows/<id>/`, `pipelines/<key>/`, `org/` | Cross-run | Mounted at `/mnt/memory/` inside harness sessions |
 | **Run Scratch** | `<dataDir>/runs/<runId>/scratch/` (hierarchical) | Per run | Mounted at `/mnt/scratch/` inside harness sessions |
 
-Memory Stores persist across runs and accumulate lessons. Run Scratch is ephemeral — orchestrator writes for planners, planners write for workers — and expires with the run. See [Memory + Scratch](/docs/v0.1.0-alpha/internals/memory-scratch).
+Memory Stores persist across runs and accumulate lessons. Run Scratch is ephemeral — orchestrator writes for planners, planners write for workers — and expires with the run. See [Memory + Scratch](https://little-stack.dev/docs/workflow/v0.1.0-alpha/internals/memory-scratch).
 
 ---
 
@@ -246,7 +246,7 @@ Three hashes give auditable identity at three different scopes:
 | `WorkflowVersion` (= LWIR hash) | Planner emits LWIR | The complete LWIR graph — per run |
 | `ManifestHash` | Each harness session starts | The session's capability surface (model, harness, skills, tools, memory stores) |
 
-See [Identity + Manifests](/docs/v0.1.0-alpha/internals/identity-manifests) for drift detection details.
+See [Identity + Manifests](https://little-stack.dev/docs/workflow/v0.1.0-alpha/internals/identity-manifests) for drift detection details.
 
 ## Why One Package
 

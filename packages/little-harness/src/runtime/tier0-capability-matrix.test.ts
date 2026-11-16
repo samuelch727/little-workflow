@@ -12,6 +12,7 @@ import {
   tier0CapabilityMatrix,
   TIER0_ALWAYS_COMMANDS_SNAPSHOT,
   TIER0_BUILTINS,
+  TIER0_FILESYSTEM_UNSERVABLE_COMMANDS,
   TIER0_JAVASCRIPT_COMMANDS_SNAPSHOT,
   TIER0_MATRIX_SCHEMA_VERSION,
   TIER0_NETWORK_COMMANDS_SNAPSHOT,
@@ -36,7 +37,12 @@ describe("tier0CapabilityMatrix", () => {
   it("derives the command table from just-bash instead of a hand-kept list", () => {
     const matrix = tier0CapabilityMatrix();
     for (const name of getCommandNames()) {
-      expect(matrix.commands.get(name)).toBe("always");
+      if (TIER0_FILESYSTEM_UNSERVABLE_COMMANDS.includes(name)) {
+        expect(matrix.commands.has(name)).toBe(false);
+        expect(matrix.needsRealExec.get(name)).toBe("host-filesystem");
+      } else {
+        expect(matrix.commands.get(name)).toBe("always");
+      }
     }
     for (const name of getPythonCommandNames()) {
       expect(matrix.commands.get(name)).toBe("python");

@@ -1,13 +1,14 @@
 import { RootProvider } from 'fumadocs-ui/provider/next';
 import './global.css';
-import { Inter } from 'next/font/google';
+import { Bricolage_Grotesque, Figtree, JetBrains_Mono } from 'next/font/google';
 import type { Metadata } from 'next';
 import { appName, siteUrl } from '@/lib/shared';
 import { StackIconMotion } from '@/components/stack-icon-motion';
 
-const inter = Inter({
-  subsets: ['latin'],
-});
+// Figtree for reading, Bricolage Grotesque for headings, JetBrains Mono for code.
+const body = Figtree({ subsets: ['latin'], variable: '--font-body' });
+const display = Bricolage_Grotesque({ subsets: ['latin'], variable: '--font-display' });
+const code = JetBrains_Mono({ subsets: ['latin'], variable: '--font-code' });
 
 export const metadata = {
   metadataBase: new URL(siteUrl),
@@ -27,7 +28,7 @@ export const metadata = {
 
 export default function Layout({ children }: LayoutProps<'/'>) {
   return (
-    <html lang="en" className={inter.className} suppressHydrationWarning>
+    <html lang="en" className={`${body.variable} ${display.variable} ${code.variable}`} suppressHydrationWarning>
       <body className="flex flex-col min-h-screen">
         <RootProvider>{children}<StackIconMotion /></RootProvider>
       </body>

@@ -193,6 +193,12 @@ export const ResolvedModelSchema = z.object({
   id: z.string(),
   paidBy: z.enum(["key", "credits"]),
   source: z.enum(["version", "agent", "project"]),
+  contextWindow: z.object({ tokens: z.number().int().positive(), source: z.string().url(), checkedAt: z.string() }).optional(),
+  contextPolicy: z.union([z.literal(false), z.object({
+    triggerTokens: z.number().int().positive(), keepLastTurns: z.number().int().positive().optional(),
+    summaryModel: z.union([z.literal(false), z.string()]).optional(),
+    maxCompactionCostUsdPerSession: z.number().finite().nonnegative().optional(),
+  }).strict()]).optional(),
 });
 
 export const ResolveResponseSchema = z.object({
@@ -387,6 +393,38 @@ export const FeedbackRatingSchema = z
   .strictObject({ value: z.number().finite(), scale: FeedbackScale.optional() })
   .refine(onScale, { message: "A rating runs from 1 to its scale (default 5).", path: ["value"] });
 
+const FeedbackOffset = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
+// Unicode mode treats a valid surrogate pair as one code point, so only lone surrogates fail.
+const FeedbackText = z.string().regex(/^[^\uD800-\uDFFF]*$/u, "Must not contain lone UTF-16 surrogates.");
+const FeedbackPath = FeedbackText.max(200).regex(/^(?:\/(?:[^~]|~[01])*)?$/u, "Expected a JSON pointer.");
+
+/** Part of a reply; offsets are JavaScript (UTF-16) string indexes in the displayed text. */
+export const FeedbackSelectionSchema = z
+  .strictObject({
+    quote: FeedbackText.min(1).max(2000).optional(),
+    prefix: FeedbackText.max(64).optional(),
+    suffix: FeedbackText.max(64).optional(),
+    start: FeedbackOffset.optional(),
+    end: FeedbackOffset.optional(),
+    path: FeedbackPath.optional(),
+    ref: FeedbackText.min(1).max(200).optional(),
+  })
+  .refine((selection) => selection.quote !== undefined || selection.path !== undefined || selection.ref !== undefined, {
+    message: "A selection needs a quote, path or ref.",
+  })
+  .refine((selection) => selection.start === undefined || selection.end === undefined || selection.start <= selection.end, {
+    message: "A selection's start must not exceed its end.",
+    path: ["end"],
+  });
+
+/** How LittleDB found the selected words in the trace output. */
+export const FeedbackAnchorSchema = z.object({
+  status: z.enum(["exact", "loose", "position", "not_found", "pending"]),
+  start: FeedbackOffset.optional(),
+  end: FeedbackOffset.optional(),
+  path: FeedbackPath.optional(),
+});
+
 /** `POST /v1/feedback`: what an end user said about a turn, stored as scores with source `user`. */
 export const FeedbackRequestSchema = z
   .object({
@@ -411,6 +449,10 @@ export const FeedbackRequestSchema = z
     comment: z.string().min(1).max(4000).optional(),
     survey: z.string().min(1).max(200).optional(),
     answers: z.array(FeedbackAnswerSchema).min(1).max(20).optional(),
+    selection: FeedbackSelectionSchema.optional(),
+    tags: z.array(z.string().trim().min(1).max(50)).max(10).transform((tags) => [...new Set(tags)]).optional(),
+    expected: z.string().min(1).max(4000).optional(),
+    role: z.string().min(1).max(50).optional(),
     metadata: z.record(z.string(), z.unknown()).optional(),
   })
   .refine((feedback) => feedback.traceId !== undefined || feedback.sessionId !== undefined, {
@@ -436,6 +478,7 @@ export const FeedbackResultSchema = z.object({
   traceId: z.string(),
   stale: z.boolean().optional(),
   revision: z.number().optional(),
+  selection: z.object({ anchor: FeedbackAnchorSchema }).optional(),
   scores: z.array(
     z.object({
       id: z.string(),
@@ -478,5 +521,25 @@ export type AgentWorkflowList = z.infer<typeof AgentWorkflowListSchema>;
 export type ClaimedRun = z.infer<typeof ClaimedRunSchema>;
 export type CompleteRun = z.infer<typeof CompleteRunSchema>;
 export type FeedbackRequest = z.infer<typeof FeedbackRequestSchema>;
+export type FeedbackSelection = z.infer<typeof FeedbackSelectionSchema>;
+export type FeedbackAnchor = z.infer<typeof FeedbackAnchorSchema>;
 export type FeedbackResult = z.infer<typeof FeedbackResultSchema>;
 export type FeedbackRetracted = z.infer<typeof FeedbackRetractedSchema>;
+
+/** Plans can be structurally projected; they need not contain executable inputs or schemas. */
+export const WorkflowPlanSchema = z.object({
+  steps: z.array(z.object({ id: z.string(), uses: z.string() }).passthrough()),
+}).passthrough();
+export const WorkflowPlanUploadSchema = z.object({
+  workflow: Slug,
+  plan: WorkflowPlanSchema,
+  complete: z.boolean(),
+  workflowVersionId: Id,
+});
+export type WorkflowPlanUpload = z.infer<typeof WorkflowPlanUploadSchema>;
+export type StoredWorkflowPlan = WorkflowPlanUpload & {
+  readonly hash: string;
+  readonly shapeHash: string;
+  readonly firstSeenAt: string;
+  readonly lastSeenAt: string;
+};

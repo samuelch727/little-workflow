@@ -1,7 +1,11 @@
+import { contextInputRequest, recordContextInputUsage } from "../context-policy/calibration.js";
+import { contextPrepareStep, resolveContextRuntime } from "../context-policy/prepare.js";
+import { listTerminalArtifacts } from "./artifact-list-outcome.js";
+import { modelStepBudget } from "./model-step-budget.js";
+import { turnToolBudget } from "./tool-budget.js";
 import { randomUUID } from "node:crypto";
 import {
   createUIMessageStreamResponse,
-  isStepCount,
   type StopCondition,
   streamText,
   toUIMessageStream,
@@ -398,7 +402,7 @@ async function runStreamHarnessTurn<TOutput, TInput, TExtraBody>(
           return {
             status: "completed",
             session,
-            artifacts: await session.artifacts.list(),
+            artifacts: await listTerminalArtifacts(session, warnings),
             trace: prepared.trace,
             persistence,
             commitManual: createManualCommit(prepared, session, emitTurnEvent, options),
@@ -449,6 +453,7 @@ async function runStreamHarnessTurn<TOutput, TInput, TExtraBody>(
         traceOptions,
       });
       const toolContext: HarnessToolExecutionContext<TExtraBody> = {
+        ...turnToolBudget(config.workflowBudgets, warnings),
         session,
         files: toolFiles,
         artifacts: createArtifactAccessor(toolFiles, session.artifacts),
@@ -511,13 +516,26 @@ async function runStreamHarnessTurn<TOutput, TInput, TExtraBody>(
       const inbox = inboxPrepareStep(guardedModelPrepareStep(prepareStep, records), options.inbox);
       await inbox.restore({ stepNumber: 0, at: built.messages.length });
       const invocationGuard = budget ?? modelInvocationGuard({ beforeInvocation, requireConcrete: options.beforeInvocation !== undefined || snapshot !== undefined, ...(options.abortSignal ? { signal: options.abortSignal } : {}) });
-      const guardedPrepareStep = invocationGuard.wrapPrepareStep(inbox.prepareStep);
+      const contextPolicy = options.contextPolicy ?? config.contextPolicy;
+      const contextRuntime = contextPolicy ? await resolveContextRuntime({
+        ...(config.host.contextCompaction ? { host: config.host.contextCompaction } : {}),
+        sessionId: session.id, runId, model: config.model, fallbackScope: config.host,
+        ...(config.maxOutputTokens === undefined ? {} : { maxOutputTokens: config.maxOutputTokens }),
+      }) : undefined;
+      const contextInputs = new Map<number, ReturnType<typeof contextInputRequest>>();
+      const projectedPrepareStep = contextRuntime ? contextPrepareStep({
+        prepareStep: inbox.prepareStep, policy: contextPolicy, runtime: contextRuntime,
+        sessionId: session.id, system: built.system, tools,
+        onPrepared: (stepNumber, request) => contextInputs.set(stepNumber, contextInputRequest(contextRuntime, session.id, request)),
+        ...(options.abortSignal ? { signal: options.abortSignal } : {}),
+      }) : inbox.prepareStep;
+      const guardedPrepareStep = invocationGuard.wrapPrepareStep(projectedPrepareStep);
       const system = !snapshot && prepareStep === undefined
         ? runtimeSystem(built.system, runtime, options.activeTools)
         : built.system;
       const outputSpec = options.output ?? (built.output as Output.Output<TOutput> | undefined);
       const firstModelReplay =
-        options.prepareStep === undefined
+        options.prepareStep === undefined && !contextPolicy
           ? findModelReplay(
               priorEvents as readonly DurableHarnessEvent[],
               durableModelRequest({
@@ -563,7 +581,7 @@ async function runStreamHarnessTurn<TOutput, TInput, TExtraBody>(
         return {
           status: "completed",
           session,
-          artifacts: await session.artifacts.list(),
+          artifacts: await listTerminalArtifacts(session, warnings),
           trace: prepared.trace,
           persistence,
           commitManual: createManualCommit(prepared, session, emitTurnEvent, options),
@@ -571,6 +589,7 @@ async function runStreamHarnessTurn<TOutput, TInput, TExtraBody>(
         };
       }
       let streamWarnings: unknown[] | undefined;
+      let softStopReason: "step-limit" | "stop-condition" | undefined;
       const result = callStreamText({
         promptCaching: config.promptCaching !== false,
         model: invocationGuard.wrapModel(config.model),
@@ -579,10 +598,13 @@ async function runStreamHarnessTurn<TOutput, TInput, TExtraBody>(
         tools,
         output: outputSpec,
         temperature: options.temperature,
+          maxOutputTokens: config.maxOutputTokens,
         abortSignal: options.abortSignal,
         stopWhen: stopWhenWithPark(
-          options.stopWhen ?? isStepCount(limits.maxSteps ?? config.workflowBudgets?.maxModelSteps ?? 20),
+          options.stopWhen,
           limits.stopWhen,
+          reason => { softStopReason = reason; },
+          limits.maxSteps ?? config.workflowBudgets.maxModelSteps,
         ),
         prepareStep: guardedPrepareStep,
         toolChoice: options.toolChoice,
@@ -681,11 +703,13 @@ async function runStreamHarnessTurn<TOutput, TInput, TExtraBody>(
               metadata: eventData.metadata,
             };
             await emitTurnEvent(eventToRetry);
+            const contextInput = contextInputs.get(stepNumber);
+            if (contextRuntime && contextInput) await recordContextInputUsage(contextRuntime, contextInput, event, options.abortSignal);
             await options.inbox?.modelResponded?.({ stepNumber, occurrenceId: started.occurrenceId });
           } catch (error) {
             const terminalError = error instanceof HarnessTerminalStageError
               ? error
-              : new HarnessTerminalStageError("model_responded");
+              : new HarnessTerminalStageError("model_responded", { cause: error });
             // A later step stops at its prepareStep, which fails the stream.
             records.fail({
               stepNumber,
@@ -850,7 +874,7 @@ async function runStreamHarnessTurn<TOutput, TInput, TExtraBody>(
         return {
           ...parked,
           session,
-          artifacts: await session.artifacts.list(),
+          artifacts: await listTerminalArtifacts(session, warnings),
           trace: prepared.trace,
           warnings: [...warnings, ...collectedValue.warnings],
         };
@@ -858,8 +882,9 @@ async function runStreamHarnessTurn<TOutput, TInput, TExtraBody>(
 
       return {
         status: "completed",
+        ...(softStopReason === undefined ? {} : { stopReason: softStopReason }),
         session,
-        artifacts: await session.artifacts.list(),
+        artifacts: await listTerminalArtifacts(session, warnings),
         trace: prepared.trace,
         persistence,
         commitManual: createManualCommit(prepared, session, emitTurnEvent, options),
@@ -1073,6 +1098,7 @@ function callStreamText(options: {
   tools: ToolSet;
   output?: Output.Output<unknown> | undefined;
   temperature?: Parameters<typeof streamText>[0]["temperature"];
+  maxOutputTokens?: Parameters<typeof streamText>[0]["maxOutputTokens"] | undefined;
   abortSignal?: AbortSignal | undefined;
   stopWhen?: Parameters<typeof streamText>[0]["stopWhen"];
   prepareStep?: Parameters<typeof streamText>[0]["prepareStep"];
@@ -1099,6 +1125,9 @@ function callStreamText(options: {
   };
   if (options.output !== undefined) {
     request.output = options.output;
+  }
+  if (options.maxOutputTokens !== undefined) {
+    request.maxOutputTokens = options.maxOutputTokens;
   }
   if (options.temperature !== undefined) {
     request.temperature = options.temperature;
@@ -1261,6 +1290,7 @@ function resolveTurnConfig<TInput, TExtraBody, TOutput>(
   if (options.system !== undefined) {
     out.system = options.system;
   }
+  if (options.maxOutputTokens !== undefined) out.maxOutputTokens = options.maxOutputTokens;
   const runtime = resolveRuntimeOptions(config.runtime, options.runtime);
   if (runtime !== undefined) {
     out.runtime = runtime;
@@ -1295,9 +1325,10 @@ function toolsForModel(
 function stopWhenWithPark(
   stopWhen: Parameters<typeof streamText>[0]["stopWhen"],
   limit?: StopCondition<any>,
+  onSoftStop?: (reason: "step-limit" | "stop-condition") => void,
+  maxModelSteps = 20,
 ): Parameters<typeof streamText>[0]["stopWhen"] {
-  const conditions = Array.isArray(stopWhen) ? stopWhen : [stopWhen ?? isStepCount(20)];
-  return [...conditions, ...(limit === undefined ? [] : [limit]), parkedThisStep];
+  return [modelStepBudget(maxModelSteps, stopWhen, onSoftStop), ...(limit === undefined ? [] : [limit]), parkedThisStep];
 }
 
 /** The model's id, for a `price` function. */

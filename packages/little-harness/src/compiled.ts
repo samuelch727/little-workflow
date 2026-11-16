@@ -1,5 +1,5 @@
 /** Portable runtime assembly for generated agent-folder modules. No filesystem or TS loader. */
-export { assembleHarness, instantiateHarness, type HarnessDefinition, type CompiledHarnessOptions } from "./workspace/assemble-harness.js";
+export { assembleHarness, instantiateHarness, type HarnessDefinition, type HarnessContext, type HarnessContextOptions, type CompiledHarnessOptions } from "./workspace/assemble-harness.js";
 export { validateDiscoveredWorkflow } from "./workspace/validate-workflow.js";
 
 import type { SkillInput } from "./types.js";

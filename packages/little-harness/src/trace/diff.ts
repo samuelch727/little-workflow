@@ -1,3 +1,4 @@
+import { traceContentStoreFor } from "./storage.js";
 import { sha256Hex } from "../ids.js";
 import type { FileWriter } from "../types.js";
 import type { ResolvedHarnessTraceOptions, TraceFileDiff } from "./types.js";
@@ -39,25 +40,21 @@ export async function createTraceDiff(
   };
 
   if (out.truncated && options.files) {
-    const ref = await options.files.writeText(
-      `/artifacts/trace/file-diffs/${safePathSegment(options.path ?? "diff")}/${sha256.slice(
-        0,
-        16,
-      )}.diff`,
-      unified,
-      {
-        mediaType: "text/x-diff",
-        source: "trace",
-        artifact: {
-          metadata: {
-            traceDiff: true,
-            path: options.path,
-            bytes,
-          },
-        },
-      },
-    );
-    out.contentRef = ref.path;
+    const limit = options.files.limits?.maxFileBytes;
+    if (limit !== undefined && bytes > limit) return { ...out, available: false, reason: "storage_limit" };
+    const store = traceContentStoreFor(options.files);
+    const prefix = store ? "/.little-harness/trace" : "/artifacts/trace";
+    const ref = `${prefix}/file-diffs/${safePathSegment(options.path ?? "diff")}/${sha256.slice(0, 16)}.diff`;
+    if (store) {
+      await store.write(ref, unified);
+      out.contentRef = ref;
+    } else {
+      const written = await options.files.writeText(ref, unified, {
+        source: "trace", mediaType: "text/x-diff",
+        artifact: { metadata: { traceDiff: true, path: options.path, bytes } },
+      });
+      out.contentRef = written.path;
+    }
   }
 
   return out;

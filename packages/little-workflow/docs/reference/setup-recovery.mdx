@@ -1,0 +1,108 @@
+---
+title: Setup Recovery
+description: Recover an interrupted little setup run with recoverSetup() and the CLI.
+---
+
+`little setup` journals its writes so an interrupted run can be recovered. This
+page covers `@little-stack/workflow` `0.2.0-alpha.2`, published on 3 November
+2026 on the `alpha` and `latest` npm tags.
+
+## `recoverSetup()`
+
+```ts
+// Exported from "@little-stack/workflow/scaffold".
+function recoverSetup(root: string): Promise<SetupRecoveryResult>;
+
+type SetupRecoveryResult = {
+  status: "nothing-to-recover" | "rolled-back" | "completed-cleanup" | "manual-recovery-required";
+  retained: string[];
+};
+```
+
+| `status` | Meaning |
+| --- | --- |
+| `nothing-to-recover` | No setup journal was found in `root`. Nothing changed. |
+| `rolled-back` | An uncommitted setup was undone: CLI-owned files that were still unchanged were restored. |
+| `completed-cleanup` | The journal was already committed (installation and verification had succeeded), so recovery finished its cleanup and kept the generated project files. It does not undo a committed setup. |
+| `manual-recovery-required` | Recovery preserved files it could not safely restore. `retained` lists them, and the journal is kept for manual recovery. |
+
+`recoverSetup()` can throw for an invalid journal or a still-running installer.
+Stop the installer before you recover.
+
+`recoverSetup()` also accepts a second options argument with one field,
+`allowOwnProcess`. The setup CLI sets it when a failed apply rolls back the
+journal its own process wrote. Application code should call
+`recoverSetup(root)` only, and must not use the option to recover while an
+installer is still running.
+
+A caller that handles every outcome:
+
+```ts
+import { recoverSetup } from "@little-stack/workflow/scaffold";
+
+const recovery = await recoverSetup("/path/to/my-app");
+switch (recovery.status) {
+  case "nothing-to-recover":
+    console.log("No interrupted setup in this directory.");
+    break;
+  case "rolled-back":
+    console.log("Interrupted setup undone.");
+    break;
+  case "completed-cleanup":
+    console.log("Setup had completed; cleanup finished and project files were kept.");
+    break;
+  case "manual-recovery-required":
+    console.error(`Edited files were preserved: ${recovery.retained.join(", ")}`);
+    console.error("Inspect .little/setup-transaction.json and finish recovery by hand.");
+    process.exitCode = 1;
+    break;
+}
+```
+
+`rollbackSetup()` is no longer exported in `0.2.0-alpha.2`. Call
+`recoverSetup()` and read `retained` instead.
+
+## Planning and applying
+
+`planSetup(root, options?)` fills in the defaults itself, so every option is
+optional: `template` defaults to `"node"`, `provider` to `"openai"`,
+`workflow` to `false`, `route` to `"api/little/chat"` and `page` to `"little"`.
+The returned plan carries the resolved options. `applySetupPlan(plan, options?)`
+takes one option, `complete`, a callback that runs after every file is placed and
+before the transaction commits (the CLI installs and verifies there); a throw
+rolls the files back.
+
+```ts
+import { applySetupPlan, planSetup } from "@little-stack/workflow/scaffold";
+
+const plan = await planSetup("/path/to/my-app", { template: "next", workflow: true });
+if (plan.conflicts.length === 0) await applySetupPlan(plan);
+```
+
+## CLI recovery
+
+`little setup --rollback`:
+
+- needs a project directory or `--here`; it no longer defaults to the current
+  directory;
+- is named exactly by the interrupted-setup error, which prints the recovery
+  command with the real project directory, shell-quoted;
+- prints a different message for each of the four outcomes above;
+- exits with an error for `manual-recovery-required`.
+
+```bash
+little setup my-app --rollback
+# or, from inside that directory:
+little setup --here --rollback
+```
+
+## Migration
+
+These steps apply when you move from `little-workflow` `0.2.0-alpha.1`
+to `@little-stack/workflow` `0.2.0-alpha.2`:
+
+- Replace `rollbackSetup(root)` with `recoverSetup(root)`. Check `status`, so
+  "no journal found" is not mistaken for a completed recovery; the old return
+  value is `retained`.
+- Scripts that run `little setup --rollback` without a directory must pass the
+  project directory or `--here`. Passing it already works with `0.2.0-alpha.1`.

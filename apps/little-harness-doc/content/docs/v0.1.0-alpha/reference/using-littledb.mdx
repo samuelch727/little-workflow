@@ -3,12 +3,8 @@ title: Using LittleDB
 description: Preview — let LittleDB manage a harness's prompt and model, send each turn to LittleDB as a trace, record scores, and put agent-made workflows behind review, with one URL and one API key.
 ---
 
-<Callout title="Preview — not yet available" type="warn">
-  `@little-stack/littledb` is **not published to npm yet**, and it needs a LittleDB server, which is
-  not publicly available. This page documents the client's shape so you can plan around it; the
-  examples below will not work until the package and service are released. Everything else in
-  Little Harness — including [Outcome Capture](/docs/v0.1.0-alpha/build-agents/outcomes) to local
-  traces — works without it.
+<Callout title="LittleDB account required" type="info">
+  `@little-stack/littledb` is published from `0.2.0-alpha.4`; it needs a LittleDB account. The LittleDB server is not open source. See [release status](https://little-stack.dev/docs/releases).
 </Callout>
 
 LittleDB is an optional service that stores traces and their scores, holds the **versions** of an
@@ -29,7 +25,7 @@ Everything goes through one client, made from one URL and one project API key. `
 serves LittleDB (API and web UI) on `http://127.0.0.1:7340` and prints a key for local apps.
 
 ```ts
-// Preview — @little-stack/littledb is not published yet.
+// Alpha.4 client; requires LittleDB service access.
 import { createLittleDB } from "@little-stack/littledb";
 
 const db = createLittleDB({ url: process.env.LITTLEDB_URL!, apiKey: process.env.LITTLEDB_API_KEY! });
@@ -43,7 +39,7 @@ the queue is sent.
 ## Trace a harness
 
 ```ts
-// Preview — @little-stack/littledb is not published yet.
+// Alpha.4 client; requires LittleDB service access.
 import { createHarness, generateHarness, localHost } from "@little-stack/harness";
 
 const tracer = db.harnessTracer({ harness: "support-desk" });
@@ -90,7 +86,7 @@ Each turn then runs the version its session runs, traced with that version, on e
 runs a turn (`generateHarness`, `streamHarness`, connectors, schedules, `little-harness start`):
 
 ```ts
-// Preview — @little-stack/littledb is not published yet.
+// Alpha.4 client; requires LittleDB service access.
 import { littleDBFromEnv } from "@little-stack/littledb";
 import { z } from "zod";
 
@@ -152,7 +148,7 @@ and its resolution to `db.harnessTracer({ harness, resolution })`.
 ## Scores
 
 ```ts
-// Preview — @little-stack/littledb is not published yet.
+// Alpha.4 client; requires LittleDB service access.
 db.score({ traceId: tracer.traceIdFor(sessionId)!, name: "task_success", value: 1, source: "code" });
 ```
 
@@ -177,7 +173,7 @@ trials and rollback weigh it next to the judges. There are three ways in:
 in LittleDB. Each returns an ordinary `memory()` option, so the agent still reads and edits files:
 
 ```ts
-// Preview — @little-stack/littledb is not published yet.
+// Alpha.4 client; requires LittleDB service access.
 createHarness<typeof tools, DeskUser>({
   // ...
   turnOptions: desk.turnOptions,
@@ -220,7 +216,7 @@ recurring work into a workflow with `define_workflow`. LittleDB's registry makes
 **draft version** in LittleDB with a **proposal** a person approves:
 
 ```ts
-// Preview — @little-stack/littledb is not published yet.
+// Alpha.4 client; requires LittleDB service access.
 import { dynamicWorkflows, localWorld } from "@little-stack/workflow";
 
 createHarness({
@@ -250,7 +246,7 @@ LittleDB plans experiments (a candidate version against a dataset); your app run
 owns the tools and the model keys:
 
 ```ts
-// Preview — @little-stack/littledb is not published yet.
+// Alpha.4 client; requires LittleDB service access.
 const worker = support.evalWorker({
   run: async (run) => {
     // Inside a run, the managed harness runs the run's candidate and traces into the run's trace.

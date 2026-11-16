@@ -1,3 +1,4 @@
+import { attachTraceContentStore, traceContentStoreFor } from "./storage.js";
 import { describe, expect, it, vi } from "vitest";
 import { sha256Hex } from "../ids.js";
 import { createEventedFileWriter } from "../execution/evented-file-writer.js";
@@ -17,7 +18,7 @@ describe("captureTraceContent", () => {
       const value = "界😀界😀";
       const ref = await captureTraceContent({ value, label: "response", files, traceOptions: options });
       expect(files.limits).toEqual({ maxFileBytes: 10 });
-      expect(ref).toEqual({ captured: false, preview: "界😀", truncated: true, bytes: 14, sha256: sha256Hex(new TextEncoder().encode(value)), mediaType: "text/plain", unavailableReason: "storage_limit", storageLimitBytes: 10 });
+      expect(ref).toEqual({ captured: false, preview: "界😀", previewTruncated: true, truncated: true, bytes: 14, sha256: sha256Hex(new TextEncoder().encode(value)), mediaType: "text/plain", unavailableReason: "storage_limit", storageLimitBytes: 10 });
       expect(new TextEncoder().encode(ref.preview).byteLength).toBe(7);
       expect(ref.preview!.length).toBe(3);
       expect(write).not.toHaveBeenCalled();
@@ -33,16 +34,19 @@ describe("captureTraceContent", () => {
       const traceOptions = resolveTraceOptions({ content: { previewBytes: 2, maxInlineBytes: 1 } }, undefined);
       const value = "界😀";
       const files = { ...session.files, limits: { maxFileBytes: 7 } };
+      attachTraceContentStore(files, traceContentStoreFor(session.files)!);
       const ref = await captureTraceContent({ value, label: "exact", files, traceOptions });
       expect(ref.captured).toBe(true);
       expect(ref.preview).toBe("界");
-      expect((await files.read(ref.contentRef!)).text()).toBe(value);
+      expect((await traceContentStoreFor(files)!.read(ref.contentRef!)).text()).toBe(value);
       const over = await captureTraceContent({ value: `${value}x`, label: "one-byte-over", files, traceOptions });
       expect(over).toMatchObject({ captured: false, bytes: 8, unavailableReason: "storage_limit", storageLimitBytes: 7 });
       expect(over).not.toHaveProperty("contentRef");
       const failure = new Error("Synthetic required storage failure");
       for (const limits of [undefined, { maxFileBytes: 7 }]) {
-        await expect(captureTraceContent({ value, label: "fails", files: { ...files, limits, writeText: async () => { throw failure; } }, traceOptions })).rejects.toBe(failure);
+        const failingFiles = { ...files, limits };
+        attachTraceContentStore(failingFiles, { ...traceContentStoreFor(files)!, write: async () => { throw failure; } });
+        await expect(captureTraceContent({ value, label: "fails", files: failingFiles, traceOptions })).rejects.toBe(failure);
       }
       const redacted = await captureTraceContent({ value: { safe: "visible", token: "private" }, label: "redacted", files, traceOptions });
       expect(redacted).toMatchObject({ captured: false, redacted: true, unavailableReason: "storage_limit", sha256: sha256Hex(new TextEncoder().encode(JSON.stringify({ safe: "visible", token: "[redacted]" }, null, 2))) });
@@ -96,6 +100,7 @@ describe("captureTraceContent", () => {
       ).resolves.toEqual({
         captured: true,
         preview: "short result",
+        previewTruncated: false,
         truncated: false,
         bytes: 12,
         sha256: expect.any(String),
@@ -122,14 +127,15 @@ describe("captureTraceContent", () => {
       expect(ref).toEqual({
         captured: true,
         preview: "xxxxxxxx",
+        previewTruncated: true,
         truncated: true,
-        contentRef: expect.stringMatching(/^\/artifacts\/trace\/model-response\//),
+        contentRef: expect.stringMatching(/^\/\.little-harness\/trace\/model-response\//),
         bytes: 80,
         sha256: expect.any(String),
         mediaType: "text/plain",
       });
-      await expect(session.files.read(ref.contentRef!)).resolves.toMatchObject({ path: ref.contentRef });
-      expect((await session.files.read(ref.contentRef!)).text()).toBe(large);
+      await expect(session.traceContent!.read(ref.contentRef!)).resolves.toMatchObject({ path: ref.contentRef });
+      expect((await session.traceContent!.read(ref.contentRef!)).text()).toBe(large);
     });
   });
 
@@ -246,5 +252,14 @@ describe("captureTraceContent", () => {
         code: "ENOENT",
       });
     });
+  });
+});
+
+ it.each([[5, false], [300, true], [2000, true]] as const)("separates preview clipping from spill for %i characters", async (length, clipped) => {
+  await withTempDir(async dir => {
+    const session = await localHost({ dataDir: dir }).sessions.getOrCreate({ id: "preview-flags" });
+    const ref = await captureTraceContent({ value: "x".repeat(length), label: "flags", files: session.files, traceOptions: resolveTraceOptions({content: {previewBytes: 100, maxInlineBytes: 1000}}, undefined) });
+    expect(ref.previewTruncated).toBe(clipped);
+    expect(ref.truncated).toBe(length > 1000);
   });
 });

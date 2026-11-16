@@ -3,13 +3,13 @@ title: Roadmap
 description: Where Little Workflow is headed after the alpha — framed as direction, not shipped versions.
 ---
 
-The alpha (currently `0.2.0-alpha.3`) is the minimum implementation that proves the thesis: a developer-supplied control plane compiles to validated LWIR and executes durably enough for a local development loop. Everything below is **direction**, not a shipped release. Dates and version numbers are deliberately omitted — the shape of the work is what matters.
+The alpha release (`0.2.0-alpha.4`) is the minimum implementation that proves the thesis: a developer-supplied control plane compiles to validated LWIR and executes durably enough for a local development loop. Everything below is **direction**, not a shipped release. Dates and version numbers are deliberately omitted — the shape of the work is what matters.
 
 ## Composition on the Harness surface
 
-The orchestrator is deprecated in favour of [`asHarnessWorkflow` + `createHarness({ workflows })`](/docs/v0.1.0-alpha/authoring/compose-with-harness), and is scheduled to be unexported in the next minor:
+The orchestrator is deprecated in favour of [`asHarnessWorkflow` + `createHarness({ workflows })`](https://little-stack.dev/docs/workflow/v0.1.0-alpha/authoring/compose-with-harness), and is scheduled to be unexported in the next minor:
 
-- **Plan once, run many on the Harness surface.** Prepared runs would let an agent plan a workflow once and run the compiled version across many inputs. The protocol already reserves `prepareForHarness` / `runPreparedForHarness`, but neither side implements them yet. Until they do, this pattern stays on the orchestrator; see [Plan once, run many](/docs/v0.1.0-alpha/cookbook/plan-once-run-many).
+- **Plan once, run many on the Harness surface.** Prepared runs would let an agent plan a workflow once and run the compiled version across many inputs. The protocol already reserves `prepareForHarness` / `runPreparedForHarness`, but neither side implements them yet. Until they do, this pattern stays on the orchestrator; see [Plan once, run many](https://little-stack.dev/docs/workflow/v0.1.0-alpha/cookbook/plan-once-run-many).
 - Bridging a workflow run's events into the calling agent's trace as a nested span. Today they stay in the workflow's own run record.
 
 ## Beta polish
@@ -33,6 +33,8 @@ Moving beyond the single-process Local World:
 
 ## High-throughput fan-out and ecosystem
 
+> `@little-stack/littledb` is published from `0.2.0-alpha.4`; it needs a LittleDB account. The LittleDB server is not open source. See [release status](https://little-stack.dev/docs/releases).
+
 - Sharded fan-out and tree reducers for large parallel workloads (alpha caps a parallel step at 100 branches).
 - Live OpenRouter model-registry sync (alpha ships a bundled registry).
 - **Dreaming** — consolidating memory and outcomes across many sessions into proposed improvements. It is not part of the `@little-stack/workflow` package. It exists today only in the LittleDB service (its reviewer and proposals) and the [`demos/`](https://github.com/samuelch727/little-workflow/tree/main/demos) that use it (`kb-chatbot`, `support-desk`), and LittleDB is not public yet.
@@ -43,4 +45,4 @@ Moving beyond the single-process Local World:
 - Custom step types and recursive pipelines.
 - Visual workflow authoring and inspection.
 
-See the [Changelog](/docs/v0.1.0-alpha/reference/changelog) for what has actually shipped, and [Comparisons](/docs/comparisons) for where Little Workflow sits next to other tools.
+See the [Changelog](https://little-stack.dev/docs/workflow/v0.1.0-alpha/reference/changelog) for what has actually shipped, and [Comparisons](https://little-stack.dev/docs/workflow/comparisons) for where Little Workflow sits next to other tools.

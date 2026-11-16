@@ -16,6 +16,8 @@ The alpha runtime uses just-bash for:
 - network disabled by default
 - Runtime Tool Bridge exposure for configured Little Harness tools inside `js-exec`
 
+Symbolic links cannot be created in `/session`, `/artifacts` or `/persistent`; listings skip links that an older version stored. If terminal artifact discovery fails after an answer completes, the result includes an `artifact_list_warning` instead of failing the answer.
+
 ## Runtime Shape
 
 ```txt
@@ -124,3 +126,19 @@ Plain `mkdir /dev` fails with `EEXIST`; `mkdir -p /dev` succeeds without changin
 The SDK requires just-bash 3.0.3 or later for correct descriptor order, including
 `>/dev/null 2>&1`; both orders and later redirect overrides are covered in Node and
 native workerd tests. See the [upstream fix](https://github.com/vercel-labs/just-bash/pull/286).
+
+### Synthetic byte sources
+
+`/dev/zero` and `/dev/urandom` are virtual read-only byte sources, not mounts of host devices. Each whole-file read returns a bounded 64 KiB buffer (zero bytes or fresh cryptographic random bytes); `head -c 4 /dev/urandom` works without exposing host `/dev`. Reads are finite, not POSIX infinite device streams. Structural copy/move operations on synthetic endpoints are refused. `/dev/null` retains its sink/EOF behavior.
+
+## Turn-local scratch
+
+`/tmp` is an in-memory scratch mount capped at 16 MiB. It lasts one turn: later shell
+commands in the turn can read its files, and the next turn starts empty. Scratch files
+are not artifacts, persisted workspace files, file events or trace-store files.
+`mktemp` and `mktemp -d` use this mount; exceeding its capacity fails with `ENOSPC`.
+Explicit or dynamic `mktemp` destinations retain real-shell escalation on tiered hosts,
+so custom managed stores without atomic creation do not lose the existing fallback.
+Explicit workspace/runtime mounts under `/tmp` retain their original backing and access
+policy; scratch applies only to otherwise-unmounted paths.
+An escalated real-shell command sees its sandbox's own `/tmp`, not this virtual mount.

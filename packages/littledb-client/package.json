@@ -1,7 +1,6 @@
 {
   "name": "@little-stack/littledb",
-  "version": "0.1.0-alpha.2",
-  "private": true,
+  "version": "0.2.0-alpha.4",
   "description": "LittleDB client for Little Harness and Little Workflow: managed harnesses and workflows, resolve versions, trace turns and runs, review agent-made workflows, run experiments, send user feedback.",
   "license": "Apache-2.0",
   "repository": {
@@ -48,30 +47,89 @@
     "./testing": {
       "types": "./dist/testing.d.ts",
       "default": "./dist/testing.js"
+    },
+    "./selection": {
+      "types": "./dist/selection.d.ts",
+      "default": "./dist/selection.js"
+    },
+    "./agents/bundle": {
+      "types": "./dist/agents/bundle/index.d.ts",
+      "default": "./dist/agents/bundle/index.js"
+    },
+    "./agents/client": {
+      "types": "./dist/agents/client/index.d.ts",
+      "default": "./dist/agents/client/index.js"
+    },
+    "./agents/protocol": {
+      "types": "./dist/agents/protocol.d.ts",
+      "default": "./dist/agents/protocol.js"
+    },
+    "./agents/bundle/plugins": {
+      "types": "./dist/agents/bundle/plugins.d.ts",
+      "default": "./dist/agents/bundle/plugins.js"
+    },
+    "./agents/bundle/provenance": {
+      "types": "./dist/agents/bundle/provenance.d.ts",
+      "default": "./dist/agents/bundle/provenance.js"
+    },
+    "./agents/bundle/workspace": {
+      "types": "./dist/agents/bundle/workspace.d.ts",
+      "default": "./dist/agents/bundle/workspace.js"
+    },
+    "./agents/cli": {
+      "types": "./dist/cli/main.d.ts",
+      "default": "./dist/cli/main.js"
+    },
+    "./agents/cli/git": {
+      "types": "./dist/cli/git.d.ts",
+      "default": "./dist/cli/git.js"
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "README.md",
+    "LICENSE"
   ],
   "engines": {
     "node": ">=22"
   },
   "scripts": {
-    "build": "node scripts/prepare-harness-contract.mjs && tsc -p tsconfig.build.json && node scripts/prepare-harness-contract.mjs --copy-dist",
+    "build": "node scripts/prepare-harness-contract.mjs && tsc -p tsconfig.build.json && node scripts/prepare-harness-contract.mjs --copy-dist && node -e \"require('node:fs').chmodSync('dist/cli.js', 0o755)\"",
     "prepack": "pnpm run build",
     "typecheck": "node scripts/prepare-harness-contract.mjs && tsc --noEmit",
     "test": "node scripts/prepare-harness-contract.mjs && vitest run",
     "lint": "node scripts/prepare-harness-contract.mjs && tsc --noEmit"
   },
   "dependencies": {
-    "zod": "^4.4.3"
+    "zod": "^4.4.3",
+    "esbuild": "^0.28.0",
+    "typescript": "^6.0.0"
   },
   "devDependencies": {
     "@little-stack/harness": "workspace:^",
     "@little-stack/workflow": "workspace:^",
     "ai": "^7.0.126",
     "@types/node": "^22.0.0",
-    "typescript": "^6.0.0",
-    "vitest": "^4.0.0"
+    "vitest": "^4.0.0",
+    "happy-dom": "^21.0.4"
+  },
+  "bin": {
+    "littledb": "./dist/cli.js"
+  },
+  "publishConfig": {
+    "access": "public",
+    "tag": "alpha"
+  },
+  "peerDependencies": {
+    "@little-stack/harness": "^0.2.0-alpha.4",
+    "@little-stack/workflow": "^0.2.0-alpha.4"
+  },
+  "peerDependenciesMeta": {
+    "@little-stack/harness": {
+      "optional": true
+    },
+    "@little-stack/workflow": {
+      "optional": true
+    }
   }
 }

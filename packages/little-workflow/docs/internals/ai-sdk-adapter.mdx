@@ -3,7 +3,7 @@ title: AI SDK Integration
 description: How the default workflowHarness uses the AI SDK internally — generateText/streamText, Output.* mapping, tool interop, and durability.
 ---
 
-The alpha SDK integrates with the AI SDK in one place: the default `workflowHarness` implementation in `packages/little-harness/src/workflow-harness/workflow-harness.ts`. The prior `RuntimeAiAdapter` and `PlannerAdapter` interfaces are gone — worker execution for all step types is unified through the harness (see [Harness](/docs/v0.1.0-alpha/internals/harness)). The AI SDK's `tool({...})` from the `"ai"` package is now the canonical tool primitive — import it directly and pass it to `createToolRegistry`.
+The alpha SDK integrates with the AI SDK in one place: the default `workflowHarness` implementation in `packages/little-harness/src/workflow-harness/workflow-harness.ts`. The prior `RuntimeAiAdapter` and `PlannerAdapter` interfaces are gone — worker execution for all step types is unified through the harness (see [Harness](https://little-stack.dev/docs/workflow/v0.1.0-alpha/internals/harness)). The AI SDK's `tool({...})` from the `"ai"` package is now the canonical tool primitive — import it directly and pass it to `createToolRegistry`.
 
 This page covers how `workflowHarness` uses the AI SDK under the hood.
 
@@ -147,7 +147,7 @@ Usage normalization handles both AI SDK naming styles (`inputTokens`/`promptToke
 
 Usage lands in `harness.model.responded.payload.response.usage` and is rolled up per session into `harness.session.completed.payload.usage`. Both are **token-only**: this package cannot see the model registry — it lives in `@little-stack/workflow`, which depends on the harness — so a cost computed here could only ever be a stub. `@little-stack/workflow`'s event recorder rejects a `costUsd` on any recorded usage payload, which makes the wrong design unrepresentable rather than merely discouraged.
 
-What the harness does contribute to pricing is **identity**: `harness.model.responded.payload.model` records `{ provider, modelId }` on the payload (not just the trace metadata) so the downstream materializer has a registry key to price against. See [Event Log → Pricing](/docs/v0.1.0-alpha/internals/event-log#pricing).
+What the harness does contribute to pricing is **identity**: `harness.model.responded.payload.model` records `{ provider, modelId }` on the payload (not just the trace metadata) so the downstream materializer has a registry key to price against. See [Event Log → Pricing](https://little-stack.dev/docs/workflow/v0.1.0-alpha/internals/event-log#pricing).
 
 The `ctx.abortSignal` is forwarded to the AI SDK request and to tool `execute()` calls, both as the `abortSignal` execute option and as `signal` on the AI SDK 7 `context` option (formerly `experimental_context`).
 

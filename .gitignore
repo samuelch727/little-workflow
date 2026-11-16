@@ -63,3 +63,7 @@ packages/little-workflow/session_*/
 # Python qualification helper caches are local execution artifacts.
 **/__pycache__/
 *.py[cod]
+
+# Generated from root skills during package prepack.
+/packages/little-harness/skills/
+/packages/little-workflow/skills/

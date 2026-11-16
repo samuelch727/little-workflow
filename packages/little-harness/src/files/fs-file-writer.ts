@@ -88,7 +88,13 @@ async function collect(
 ): Promise<void> {
   for (const name of await fs.readdir(dir)) {
     const entryPath = path.posix.join(dir, name);
-    const stat = await fs.stat(entryPath);
+    // Persisted filesystems may contain old links or concurrently removed entries.
+    const stat = await fs.lstat(entryPath).catch(error => {
+      const normalized = filesystemError(error);
+      if (normalized && typeof normalized === "object" && "code" in normalized && normalized.code === "ENOENT") return undefined;
+      throw normalized;
+    });
+    if (stat === undefined || stat.isSymbolicLink) continue;
     if (stat.isDirectory) {
       out.push({ path: entryPath, kind: "directory" });
       if (recursive) {

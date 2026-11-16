@@ -1,3 +1,6 @@
+import { createTestPlanStore } from "./testing-plans.js";
+import { testFeedbackSelection } from "./testing-feedback.js";
+import type { StoredWorkflowPlan } from "./contract.js";
 // `@little-stack/littledb/testing`: LittleDB in memory, for your app's tests. It answers the same
 // `/v1` requests the client sends, so `managedHarness`, `resolve`, tracing and feedback run as
 // they do against a server, and the test sets which version is live, starts a trial, rolls back
@@ -93,6 +96,8 @@ export type TestLittleDB = {
   /** Queue an experiment run for an eval worker to claim. */
   queueRun(run: ClaimedRun): void;
   readonly traces: ReadonlyMap<string, TraceInput>;
+  /** Stored workflow plans, keyed by JSON.stringify([workflow, hash]). */
+  readonly plans: ReadonlyMap<string, StoredWorkflowPlan>;
   spansOf(traceId: string): SpanInput[];
   readonly scores: ReadonlyMap<string, ScoreInput>;
   /** Every request the client made: method, path and body. */
@@ -124,6 +129,7 @@ const canonical = (value: unknown): string =>
 /** LittleDB in memory, with a client connected to it. */
 export function testLittleDB(options: TestLittleDBOptions = {}): TestLittleDB {
   const { live, agentModel, ...clientOptions } = options;
+  const planStore = createTestPlanStore();
   const subjects = new Map<string, TestSubject>();
   const traces = new Map<string, TraceInput>();
   const spans = new Map<string, SpanInput>();
@@ -402,6 +408,8 @@ export function testLittleDB(options: TestLittleDBOptions = {}): TestLittleDB {
     const body = typeof init?.body === "string" ? (JSON.parse(init.body) as unknown) : undefined;
     requests.push({ method, path, body });
     if (down) throw new TypeError("fetch failed: LittleDB is down (testLittleDB)");
+    const planResponse = planStore.route(method, path, body);
+    if (planResponse) return json(planResponse.status, planResponse.body);
     if (method === "POST" && path === "/v1/resolve") return resolve(body);
     if (method === "POST" && path === "/v1/ingest") {
       const parsed = IngestBatchSchema.safeParse(body);
@@ -416,7 +424,11 @@ export function testLittleDB(options: TestLittleDBOptions = {}): TestLittleDB {
       if (!parsed.success) return json(400, { error: { code: "bad_request", message: parsed.error.message } });
       const traceId = parsed.data.traceId ?? [...traces.values()].filter((t) => t.sessionId === parsed.data.sessionId).at(-1)?.id;
       if (traceId === undefined) return json(404, { error: { code: "not_found", message: "That session has no trace yet." } });
-      return json(201, { traceId, scores: [] });
+      const output = parsed.data.spanId === undefined
+        ? traces.get(traceId)?.output
+        : [...spans.values()].find((span) => span.traceId === traceId && span.id === parsed.data.spanId)?.output;
+      const selection = testFeedbackSelection(parsed.data.selection, output);
+      return json(201, { traceId, scores: [], ...(selection === undefined ? {} : { selection }) });
     }
     if (method === "GET" && path.startsWith("/v1/agent-workflows")) return json(200, { workflows: [] });
     if (method === "POST" && path === "/v1/worker/claim") {
@@ -479,6 +491,7 @@ export function testLittleDB(options: TestLittleDBOptions = {}): TestLittleDB {
       runs.push(run);
     },
     traces,
+    plans: planStore.plans,
     spansOf: (traceId) => [...spans.values()].filter((span) => span.traceId === traceId),
     scores,
     requests,

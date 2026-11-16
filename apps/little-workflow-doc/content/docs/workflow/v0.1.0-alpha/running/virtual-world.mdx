@@ -79,3 +79,8 @@ filesystem object explicitly.
   named `format` is still validated normally.
 - This is single-process storage. Sharing it across processes requires a
   different storage and locking contract.
+
+## Native dependency
+
+The current root import loads `better-sqlite3` transitively, even when only
+`virtualWorld` is used; it is not a lightweight workerd-safe entry point yet.

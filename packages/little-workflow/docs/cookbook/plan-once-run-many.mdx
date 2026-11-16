@@ -3,7 +3,7 @@ title: Plan once, run many
 description: An orchestrator plans a workflow once and fans it out across many inputs in parallel.
 ---
 
-> **Deprecated surface, and the gap that keeps it alive.** This recipe runs on the orchestrator (`plan_workflow` + `run_workflow`), which is being retired in favour of `asHarnessWorkflow` + `createHarness({ workflows })`; see [Compose With Little Harness](/docs/v0.1.0-alpha/authoring/compose-with-harness). The replacement covers bounded fan-out: `workflowBudgets.maxConcurrentWorkflowRuns` / `maxQueuedWorkflowRuns` cap how many workflow tool calls run at once, as `maxConcurrentSubRuns` did. It does not yet cover planning once. A Harness workflow tool plans and runs inside a single tool call, so there is no `workflowVersionId` to hold and reuse across N inputs. The protocol reserves the seam: `HarnessWorkflow` declares optional `prepareForHarness` / `runPreparedForHarness`, and `HarnessPreparedWorkflow` carries a `versionId`. Neither side implements it today. Until it lands, plan once, run many stays on the orchestrator. It still works, and its entry points emit a one-time `DeprecationWarning` (code `LWF_DEP_ORCHESTRATOR`).
+> **Deprecated surface, and the gap that keeps it alive.** This recipe runs on the orchestrator (`plan_workflow` + `run_workflow`), which is being retired in favour of `asHarnessWorkflow` + `createHarness({ workflows })`; see [Compose With Little Harness](https://little-stack.dev/docs/workflow/v0.1.0-alpha/authoring/compose-with-harness). The replacement covers bounded fan-out: `workflowBudgets.maxConcurrentWorkflowRuns` / `maxQueuedWorkflowRuns` cap how many workflow tool calls run at once, as `maxConcurrentSubRuns` did. It does not yet cover planning once. A Harness workflow tool plans and runs inside a single tool call, so there is no `workflowVersionId` to hold and reuse across N inputs. The protocol reserves the seam: `HarnessWorkflow` declares optional `prepareForHarness` / `runPreparedForHarness`, and `HarnessPreparedWorkflow` carries a `versionId`. Neither side implements it today. Until it lands, plan once, run many stays on the orchestrator. It still works, and its entry points emit a one-time `DeprecationWarning` (code `LWF_DEP_ORCHESTRATOR`).
 
 When you have one workflow shape and many inputs — score every candidate, analyze every company, process every ticket — you do **not** want to re-plan for each input. The Orchestrator role plans the sub-workflow once and runs it across N inputs in parallel, up to `maxConcurrentSubRuns`.
 
@@ -64,7 +64,7 @@ const result = await runOrchestration({
 });
 ```
 
-`runOrchestration` **requires** an `orchestrator` config, and `maxConcurrentSubRuns` (default 10) caps how many sub-runs execute at once. The demo uses deterministic stub harnesses so it runs keyless; in production the planner/orchestrator/worker harnesses are model-backed. See [Orchestrating Workflows](/docs/v0.1.0-alpha/authoring/orchestrating-workflows) for the full role model.
+`runOrchestration` **requires** an `orchestrator` config, and `maxConcurrentSubRuns` (default 10) caps how many sub-runs execute at once. The demo uses deterministic stub harnesses so it runs keyless; in production the planner/orchestrator/worker harnesses are model-backed. See [Orchestrating Workflows](https://little-stack.dev/docs/workflow/v0.1.0-alpha/authoring/orchestrating-workflows) for the full role model.
 
 ## Run it
 

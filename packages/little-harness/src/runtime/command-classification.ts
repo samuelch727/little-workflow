@@ -124,19 +124,18 @@ const NODE_BIN_SHIM = /(?:^|\/)node_modules\/\.bin\/[^/]+$/u;
  *
  * 1. just-bash's own `CommandCollectorPlugin`, which walks the parsed AST and reports
  *    every command name the script references — through pipes, `&&`, subshells, command
- *    substitutions, loop bodies, and heredoc-fed commands alike. This is the authoritative
- *    list of names, and it is why quoting is not a problem: `echo "docker ps"` references
+ *    substitutions, loop bodies, and heredoc-fed commands alike. The AST literal-name pass
+ *    supplements omitted quoted and escaped names; `echo "docker ps"` still references
  *    `echo` only.
- * 2. A walk of `parse(script)` for the three facts the collector cannot express — shell
- *    functions defined in the script (which shadow matrix entries), command names that are
+ * 2. A walk of `parse(script)` for facts the collector cannot fully express — literal names,
+ *    shell functions defined in the script (which shadow matrix entries), command names that are
  *    not statically readable, and literal `bash -c` / `eval` payloads worth following.
  *
  * A name that resolves to nothing runnable escalates rather than fails: `cargo` is not a
  * broken command, it is a command this tier does not have.
  *
- * Known blind spots, all of which fall through to {@link detectEmulationGap}: a command
- * passed as an argument to a runner (`xargs cargo build`, `timeout 5 docker ps`,
- * `env FOO=1 cargo build`), the contents of a script file, and which *flags* each emulated
+ * Known blind spots, all of which fall through to {@link detectEmulationGap}: the contents
+ * of a script file, unrecognized runner option grammars, and which *flags* each emulated
  * command implements.
  */
 export function classifyCommand(
@@ -242,10 +241,14 @@ type ClassifyContext = {
 };
 
 type ScriptFacts = {
+  mktempExplicitDestination: boolean;
+  readonly literalNames: Set<string>;
   readonly functionNames: Set<string>;
   readonly dynamicSources: Set<string>;
   readonly opaqueScripts: Set<string>;
   readonly nestedScripts: string[];
+  /** Literal env -S payloads stop silently at the bound, unlike shell/eval payloads. */
+  readonly runnerScripts: string[];
 };
 
 function classifyInto(script: string, context: ClassifyContext, depth: number): void {
@@ -282,14 +285,17 @@ function classifyInto(script: string, context: ClassifyContext, depth: number): 
   }
 
   const facts: ScriptFacts = {
+    mktempExplicitDestination: false,
+    literalNames: new Set(),
     functionNames: new Set(),
     dynamicSources: new Set(),
     opaqueScripts: new Set(),
     nestedScripts: [],
+    runnerScripts: [],
   };
   inspectNode(ast, facts);
 
-  for (const command of collected) {
+  for (const command of new Set([...collected, ...facts.literalNames])) {
     classifyName(command, facts, context);
   }
   for (const source of facts.dynamicSources) {
@@ -297,6 +303,9 @@ function classifyInto(script: string, context: ClassifyContext, depth: number): 
   }
   for (const command of facts.opaqueScripts) {
     addReason(context, { kind: "opaque-script", command });
+  }
+  for (const nested of facts.runnerScripts) {
+    if (depth < MAX_NESTED_DEPTH) classifyInto(nested, context, depth + 1);
   }
   for (const nested of facts.nestedScripts) {
     if (depth + 1 > MAX_NESTED_DEPTH) {
@@ -317,6 +326,12 @@ function classifyName(command: string, facts: ScriptFacts, context: ClassifyCont
   // semantics, and the reason `cargo() { echo stub; }; cargo build` is Tier-0 runnable.
   if (facts.functionNames.has(command)) {
     context.supported.add(command);
+    return;
+  }
+  // Keep explicit or dynamic mktemp destinations on the real-shell path. A custom
+  // managed backing store may lack atomic creation; never execute then replay.
+  if (command === "mktemp" && facts.mktempExplicitDestination) {
+    addReason(context, { kind: "needs-real-exec", command, reason: "host-filesystem" });
     return;
   }
   if (context.matrix.builtins.has(command)) {
@@ -448,6 +463,9 @@ function inspectNode(node: unknown, facts: ScriptFacts): void {
     return;
   }
   const record = node as Record<string, unknown>;
+  if (record["type"] === "Assignment" && record["name"] === "TMPDIR") {
+    facts.mktempExplicitDestination = true;
+  }
   if (record["type"] === "FunctionDef" && typeof record["name"] === "string") {
     facts.functionNames.add(record["name"]);
   }
@@ -459,7 +477,7 @@ function inspectNode(node: unknown, facts: ScriptFacts): void {
   }
 }
 
-function inspectSimpleCommand(node: Record<string, unknown>, facts: ScriptFacts): void {
+function inspectSimpleCommand(node: Record<string, unknown>, facts: ScriptFacts, runnerDepth = 0): void {
   const name = node["name"];
   if (name === null || name === undefined) {
     return; // assignment-only command: `FOO=1`
@@ -470,6 +488,15 @@ function inspectSimpleCommand(node: Record<string, unknown>, facts: ScriptFacts)
     facts.dynamicSources.add(describeWord(name));
     return;
   }
+  facts.literalNames.add(literal);
+  if (["export", "declare", "typeset", "local", "readonly"].includes(literal) &&
+      args.some((arg) => /^TMPDIR(?:\+)?=/.test(wordLiteral(arg) ?? describeWord(arg)))) {
+    facts.mktempExplicitDestination = true;
+  }
+  if (literal === "mktemp" && args.some((arg) => !["-d", "--directory", "-u", "--dry-run"].includes(wordLiteral(arg) ?? ""))) {
+    facts.mktempExplicitDestination = true;
+  }
+  inspectRunner(literal, args, facts, runnerDepth);
   if (literal === "bash" || literal === "sh") {
     inspectShellInvocation(literal, args, facts);
     return;
@@ -489,6 +516,80 @@ function inspectSimpleCommand(node: Record<string, unknown>, facts: ScriptFacts)
       facts.opaqueScripts.add(target);
     }
   }
+}
+
+/** Follow literal runner targets without evaluating shell words or option values. */
+function inspectRunner(name: string, args: unknown[], facts: ScriptFacts, depth = 0): void {
+  const runners = new Set(["command", "builtin", "exec", "env", "timeout", "nice", "nohup", "xargs", "setsid", "stdbuf", "sudo"]);
+  const follow = (index: number) => {
+    if (index >= args.length) return;
+    const target = wordLiteral(args[index]);
+    // Tier 0 enforces denied names after expansion. Escalating an unreadable
+    // target would hand it to a tier where that command-set restriction is absent.
+    if (target === undefined || depth >= MAX_NESTED_DEPTH) return;
+    // xargs appends words from its input, so a mktemp it starts can be handed a destination.
+    if (name === "xargs" && args.slice(index).some((arg) => wordLiteral(arg) === "mktemp")) {
+      facts.mktempExplicitDestination = true;
+    }
+    inspectSimpleCommand({ name: args[index], args: args.slice(index + 1) }, facts, depth + 1);
+  };
+  if (name === "find") {
+    for (let i = 0; i < args.length; i++) {
+      if (["-exec", "-execdir", "-ok", "-okdir"].includes(wordLiteral(args[i]) ?? "")) follow(i + 1);
+    }
+    return;
+  }
+  if (!runners.has(name)) return;
+  let i = 0;
+  const assignment = (arg: unknown) => /^[A-Za-z_][A-Za-z0-9_]*=/.test(describeWord(arg));
+  const takesValue: Record<string, readonly string[]> = {
+    exec: ["-a"], env: ["-u", "--unset", "-C", "--chdir"],
+    timeout: ["-s", "--signal", "-k", "--kill-after"], nice: ["-n", "--adjustment"],
+    xargs: ["-a", "--arg-file", "-d", "--delimiter", "-E", "-I", "--replace", "-L", "--max-lines", "-n", "--max-args", "-P", "--max-procs", "-s", "--max-chars"],
+    stdbuf: ["-i", "-o", "-e", "--input", "--output", "--error"],
+    sudo: ["-u", "--user", "-g", "--group", "-h", "--host", "-p", "--prompt", "-C", "--close-from", "-T", "--command-timeout"],
+  };
+  for (; i < args.length; i++) {
+    const word = wordLiteral(args[i]);
+    if ((name === "env" || name === "sudo") && assignment(args[i])) break;
+    if (word === undefined) {
+      if (name === "timeout") break; // duration is data, even when expanded
+      follow(i); return;
+    }
+    if (word === "--") { i++; break; }
+    if (name === "env" && word === "-") continue; // equivalent to -i
+    if (!word.startsWith("-") || word === "-") break;
+    // Only literal split payloads can be inspected without evaluating shell data.
+    if (name === "env" && (word === "--split-string" || word.startsWith("--split-string="))) {
+      const payload = word === "--split-string" ? wordLiteral(args[i + 1]) : word.slice("--split-string=".length);
+      if (payload !== undefined && depth < MAX_NESTED_DEPTH) facts.runnerScripts.push(payload);
+      return;
+    }
+    // Only leading runner options count; a target's -v is not command lookup.
+    if (name === "command" && /^-[^-]*[vV]/.test(word)) return;
+    if (takesValue[name]?.includes(word)) { i++; continue; }
+    if (/^-[^-]/.test(word)) {
+      for (let offset = 1; offset < word.length; offset++) {
+        if (name === "env" && word[offset] === "S") {
+          const payload = offset + 1 < word.length ? word.slice(offset + 1) : wordLiteral(args[i + 1]);
+          if (payload !== undefined && depth < MAX_NESTED_DEPTH) facts.runnerScripts.push(payload);
+          return;
+        }
+        if (takesValue[name]?.includes(`-${word[offset]}`)) {
+          if (offset === word.length - 1) i++; // next word is the option value
+          break; // remaining cluster text is an attached value
+        }
+      }
+    }
+  }
+  if (name === "env" || name === "sudo") {
+    for (; i < args.length && assignment(args[i]); i++) {
+      // `env TMPDIR=/session mktemp` names a destination, like `TMPDIR=/session mktemp`.
+      if (/^TMPDIR=/.test(describeWord(args[i]))) facts.mktempExplicitDestination = true;
+    }
+  }
+  if (name === "timeout") i++; // duration, never a command
+  follow(i);
 }
 
 function inspectShellInvocation(shell: string, args: unknown[], facts: ScriptFacts): void {

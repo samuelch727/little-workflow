@@ -1,5 +1,6 @@
 import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import * as path from "node:path";
+import { attachTraceContentStore, createTraceContentStore } from "../trace/storage.js";
 import { sha256Hex } from "../ids.js";
 import type { LocalSessionPaths } from "../local-host/paths.js";
 import type {
@@ -26,7 +27,7 @@ export function createLocalFileWriter(
   paths: LocalSessionPaths,
   options: LocalFileWriterOptions = {},
 ): FileWriter {
-  return {
+  const files: FileWriter = {
     write: (targetPath, content, writeOptions) =>
       writeFileAt(paths, targetPath, content, options, writeOptions),
     writeText: (targetPath, text, writeOptions) =>
@@ -40,6 +41,17 @@ export function createLocalFileWriter(
     list: (targetPath, options) => listFilesAt(paths, targetPath, options),
     remove: (targetPath, removeOptions) => removeFileAt(paths, targetPath, options, removeOptions),
   };
+  const root = path.join(paths.root, "trace-content");
+  attachTraceContentStore(files, createTraceContentStore(
+      files,
+      async (relative) => new Uint8Array(await readFile(path.join(root, relative))),
+      async (relative, text) => {
+        const target = path.join(root, relative);
+        await mkdir(path.dirname(target), { recursive: true });
+        await writeFile(target, text, "utf8");
+      },
+    ));
+  return files;
 }
 
 async function writeFileAt(

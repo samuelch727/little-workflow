@@ -30,7 +30,8 @@ const traceContentRefSchema = z
     captured: z.boolean(),
     preview: z.string().optional(),
     truncated: z.boolean().optional(),
-    contentRef: z.string().startsWith("/artifacts/trace/").optional(),
+    previewTruncated: z.boolean().optional(),
+    contentRef: z.string().refine((value) => value.startsWith("/artifacts/trace/") || value.startsWith("/.little-harness/trace/")).optional(),
     bytes: z.number().int().nonnegative().optional(),
     sha256: z.string().regex(/^[a-f0-9]{64}$/u).optional(),
     mediaType: z.string().min(1).optional(),
@@ -56,7 +57,7 @@ const traceFileDiffSchema = z.discriminatedUnion("available", [
       format: z.literal("unified"),
       preview: z.string().optional(),
       truncated: z.boolean(),
-      contentRef: z.string().startsWith("/artifacts/trace/").optional(),
+      contentRef: z.string().refine((value) => value.startsWith("/artifacts/trace/") || value.startsWith("/.little-harness/trace/")).optional(),
       bytes: z.number().int().nonnegative().optional(),
       sha256: z.string().regex(/^[a-f0-9]{64}$/u).optional(),
     })
@@ -64,7 +65,7 @@ const traceFileDiffSchema = z.discriminatedUnion("available", [
   z
     .object({
       available: z.literal(false),
-      reason: z.enum(["disabled", "non_text", "too_large", "redacted", "content_unavailable"]),
+      reason: z.enum(["disabled", "non_text", "too_large", "redacted", "content_unavailable", "harness_file", "storage_limit"]),
     })
     .passthrough(),
 ]);
@@ -187,7 +188,7 @@ const toolBaseMetadataSchema = z
     caller: z.enum(["model", "code", "runtime", "host"]),
     input: traceContentRefSchema.optional(),
     output: traceContentRefSchema.optional(),
-    contentRef: z.string().startsWith("/artifacts/trace/").optional(),
+    contentRef: z.string().refine((value) => value.startsWith("/artifacts/trace/") || value.startsWith("/.little-harness/trace/")).optional(),
     spooled: spooledToolOutputSchema.optional(),
     command: z.string().optional(),
     exitCode: z.number().int().optional(),
@@ -446,6 +447,11 @@ export function validateTraceEvent(event: unknown): HarnessEvent<HarnessTraceEve
 
 function metadataSchemaFor(type: HarnessTraceEventType): z.ZodTypeAny {
   switch (type) {
+    case "harness.context.input_usage":
+      return z.object({ requestHash: z.string(), requestBytes: z.number().int().positive(), inputTokens: z.number().int().positive() }).passthrough();
+    case "harness.context.attempt":
+    case "harness.context.checkpoint":
+      return z.object({ attemptId: z.string() }).passthrough();
     case "harness.snapshot.catalog_presented":
     case "harness.snapshot.file_opened":
     case "harness.snapshot.tool_effect":

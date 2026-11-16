@@ -6,7 +6,9 @@ Local-first TypeScript workflows that an AI planner designs for itself. You desc
 
 > **Alpha.** Breaking changes to the LWIR wire format, public APIs, and persistence formats are expected between alpha releases.
 
-In the Little stack, Workflow and Harness are the SDK and LittleDB is the product. A workflow's planner, worker and fixer roles run in a harness, so a run lives in the same workspace as the agent that started it (managed by LittleDB's hosted service, private for now, or self-hosted with Little Compute; not included in this public source snapshot), and LittleDB (private for now; client in [`packages/littledb-client`](../littledb-client)) records each run as a trace and improves the workflow's step prompts and models the same way it improves an agent. Workflow runs fully without either.
+> `@little-stack/littledb` is published from `0.2.0-alpha.4`; it needs a LittleDB account. The LittleDB server is not open source. See [release status](https://little-stack.dev/docs/releases). Little Compute remains unpublished.
+
+In the Little stack, Workflow and Harness are the SDK and LittleDB is the product. A workflow's planner, worker and fixer roles run in a harness, so a run lives in the same workspace as the agent that started it (managed by LittleDB's hosted service, account required, or self-hosted with Little Compute; not included in this public source snapshot), and LittleDB (account required; server not open source; client in [LittleDB client guide](https://little-stack.dev/docs/littledb)) records each run as a trace and improves the workflow's step prompts and models the same way it improves an agent. Workflow runs fully without either.
 
 ## Install
 
@@ -23,6 +25,8 @@ pnpm add @little-stack/workflow@alpha ai@^7 zod @ai-sdk/anthropic   # or any AI 
   ```
 
 Or scaffold a project with pinned versions and this setting already in place: `npx @little-stack/workflow@alpha init my-app`.
+
+**Using a coding agent?** The package ships the skill for this exact version at `node_modules/@little-stack/workflow/skills/little-workflow/SKILL.md`. Point the agent at that file so its guidance matches the version you installed.
 
 ## Example
 

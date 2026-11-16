@@ -597,7 +597,7 @@ function errorMessage(error: unknown): string {
 function usage(): string {
   return [
     "Usage:",
-    "  little setup [directory | --here] [--template node|next|existing-next] [--workflow]",
+    "  little setup [directory | --here] [--template node|next|existing-next|existing-node] [--workflow] [--littledb]",
     "  little init [name | --here] [--workflow-name <name>] [--with-harness] [--provider <id>] [--model <id>]",
     "  little add workflow <name> | little add harness",
     "  little validate <workflow.json>",

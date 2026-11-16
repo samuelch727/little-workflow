@@ -1,4 +1,11 @@
 {
   "title": "Reference",
-  "pages": ["api-reference", "cli", "lwir-reference", "glossary", "changelog"]
+  "pages": [
+    "api-reference",
+    "cli",
+    "lwir-reference",
+    "glossary",
+    "changelog",
+    "setup-recovery"
+  ]
 }

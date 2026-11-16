@@ -1,3 +1,5 @@
+import { tier0DeniedCommands } from "../../runtime/command-policy.js";
+import { AsyncResource } from "node:async_hooks";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
@@ -161,6 +163,7 @@ class SubprocessWorkerClient {
    * serial, so the in-flight exec owns tool-call attribution until it settles.
    */
   private inFlightParentToolCallId: string | undefined;
+  private inFlightToolCall: SubprocessWorkerClient["handleToolCall"] | undefined;
 
   constructor(
     private readonly sandboxOptions: SubprocessSandboxOptions,
@@ -212,6 +215,9 @@ class SubprocessWorkerClient {
       ...(input.timeoutMs === undefined ? {} : { timeoutMs: input.timeoutMs }),
     };
     this.inFlightParentToolCallId = parentToolCallId;
+    // stdout listeners inherit worker-start context, not the current command. Restore
+    // this command’s execution chain for nested budget/abort and caller context.
+    this.inFlightToolCall = AsyncResource.bind(this.handleToolCall.bind(this));
     try {
       return await new Promise<ShellCommandResult>((resolve) => {
         let watchdog: ReturnType<typeof setTimeout> | undefined;
@@ -254,6 +260,7 @@ class SubprocessWorkerClient {
       });
     } finally {
       this.inFlightParentToolCallId = undefined;
+      this.inFlightToolCall = undefined;
     }
   }
 
@@ -360,6 +367,7 @@ class SubprocessWorkerClient {
     }
     this.send({
       type: "init",
+      deniedCommands: tier0DeniedCommands(this.environmentOptions) ?? [],
       id: initId,
       workspace: serializeWorkspace(this.environmentOptions.workspace),
       runtime: {
@@ -417,7 +425,7 @@ class SubprocessWorkerClient {
       return;
     }
     if (message.type === "tool_call") {
-      void this.handleToolCall(child, message.id, message.path, message.argsJson);
+      void this.inFlightToolCall?.(child, message.id, message.path, message.argsJson);
       return;
     }
     if (message.type === "diag_result") {

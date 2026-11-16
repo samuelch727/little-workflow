@@ -94,6 +94,8 @@ export async function prepareSnapshotTurn<T extends Turn>(
     turn.stopWhen ||
     turn.providerOptions ||
     turn.headers ||
+    turn.maxOutputTokens !== undefined ||
+    config.maxOutputTokens !== undefined ||
     turn.toolChoice ||
     (turn.maxRetries !== undefined && turn.maxRetries !== 0) ||
     (turn.temperature !== undefined && turn.temperature !== snapshot.content.temperature)
@@ -106,6 +108,8 @@ export async function prepareSnapshotTurn<T extends Turn>(
     runtime.bash !== false ||
     config.mcp ||
     config.workflows?.length ||
+    config.taskTools === true ||
+    config.workflowTools === true ||
     config.dynamicWorkflows ||
     config.agents ||
     config.checkpoints ||
@@ -115,7 +119,7 @@ export async function prepareSnapshotTurn<T extends Turn>(
     (turn as { type?: unknown }).type !== undefined
   )
     fail(
-      "Snapshot v1 currently qualifies inline skills and installed tools with bash:false; MCP, workflows, agents, checkpoints, model-facing humanInput, memory, external skills and typed input require further qualification.",
+      "Snapshot v1 currently qualifies inline skills and installed tools with bash:false; MCP, workflows, taskTools:true, workflowTools:true, agents, checkpoints, model-facing humanInput, memory, external skills and typed input require further qualification.",
     );
   if (turn.system !== undefined && turn.system !== snapshot.content.system)
     fail("A call cannot replace the snapshot system.");

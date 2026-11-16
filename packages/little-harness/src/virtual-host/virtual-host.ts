@@ -1,3 +1,4 @@
+import { attachTraceContentStore, createTraceContentStore, traceContentStoreFor } from "../trace/storage.js";
 import { InMemoryFs, type IFileSystem } from "just-bash";
 import * as path from "node:path";
 import { createFsFileWriter } from "../files/fs-file-writer.js";
@@ -239,6 +240,15 @@ function createVirtualSession(
   let statusCache = initialStatus;
   let readOnlyPersistentDirs: readonly string[] = [];
   const files = createFsFileWriter(fs, { getReadOnlyPersistentDirs: () => readOnlyPersistentDirs });
+  attachTraceContentStore(files, createTraceContentStore(
+      files,
+      async (relative) => fs.readFileBuffer(`${paths.dir}/trace-content/${relative}`),
+      async (relative, text) => {
+        const target = `${paths.dir}/trace-content/${relative}`;
+        await fs.mkdir(path.posix.dirname(target), { recursive: true });
+        await fs.writeFile(target, text);
+      },
+    ));
   const writeStatus = async (status: HarnessSessionStatus) => {
     statusCache = status;
     await fs.writeFile(paths.status, JSON.stringify(status, null, 2));
@@ -248,6 +258,7 @@ function createVirtualSession(
     id,
     dataDir: path.posix.join(VIRTUAL_HOST_STATE_DIR, "data", "sessions", pathKey),
     files,
+    traceContent: { read: traceContentStoreFor(files)!.read },
     artifacts: {
       async list() {
         const entries = await files.list("/artifacts", { recursive: true });

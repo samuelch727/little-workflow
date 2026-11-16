@@ -5,7 +5,7 @@ description: The build contract for the v0.1.0-alpha Little Workflow SDK.
 
 This page is the alpha implementation contract. It translates the product spec into the packages, types, runtime services, and tests needed to build the SDK.
 
-For a deeper, diagrammed walkthrough of how each module is actually wired (planner pipeline, runtime loop, parallel branching, event log, replay), see [Implementation Details](/docs/v0.1.0-alpha/internals).
+For a deeper, diagrammed walkthrough of how each module is actually wired (planner pipeline, runtime loop, parallel branching, event log, replay), see [Implementation Details](https://little-stack.dev/docs/workflow/v0.1.0-alpha/internals).
 
 Alpha is intentionally local and narrow: compile one developer-authored workflow into validated LWIR, execute it in Local World, persist every result boundary, and prove replay after a process kill. The harness milestone extends this with a unified agent-runtime primitive (Harness), memory + scratch storage, skills, and the Orchestrator role for multi-workflow composition.
 
@@ -250,7 +250,7 @@ All executions emit `harness.session.started`, `harness.execute_step.started, ha
 
 ### `code.run` execution
 
-> **As shipped, the default `workflowHarness` does not implement this.** Its `executeCodeRunStep` validates the step's sandbox policy and then throws (`cannot safely execute code.run in the default workflow harness`). The sketch below is the contract a custom `worker.harness` must satisfy; see [Security Model](/docs/v0.1.0-alpha/internals/security-model).
+> **As shipped, the default `workflowHarness` does not implement this.** Its `executeCodeRunStep` validates the step's sandbox policy and then throws (`cannot safely execute code.run in the default workflow harness`). The sketch below is the contract a custom `worker.harness` must satisfy; see [Security Model](https://little-stack.dev/docs/workflow/v0.1.0-alpha/internals/security-model).
 
 The `tools` proxy is constructed from the full `ToolRegistry`. Each tool invocation is event-logged with `caller: "code"`:
 
@@ -425,7 +425,7 @@ Alpha LWIR uses these executable step types:
 - `decision` — routes execution or terminates scope
 - `parallel` — bounded branch group; coordination only (not a step executed by a harness)
 
-Every step accepts an optional `maxVisits` integer (default `1`). When `maxVisits > 1`, the step can be revisited via a back-edge from a `decision` step. See [LWIR Reference](/docs/v0.1.0-alpha/reference/lwir-reference) for cycle rules and expression accessors (`lastOutput`, `allVisits`).
+Every step accepts an optional `maxVisits` integer (default `1`). When `maxVisits > 1`, the step can be revisited via a back-edge from a `decision` step. See [LWIR Reference](https://little-stack.dev/docs/workflow/v0.1.0-alpha/reference/lwir-reference) for cycle rules and expression accessors (`lastOutput`, `allVisits`).
 
 ## Local World
 
@@ -519,7 +519,7 @@ little events <runId> --type harness.tool_call.* --caller code
 little replay <runId>
 ```
 
-See [CLI Reference](/docs/v0.1.0-alpha/reference/cli) for the full event filtering surface.
+See [CLI Reference](https://little-stack.dev/docs/workflow/v0.1.0-alpha/reference/cli) for the full event filtering surface.
 
 ## Test Contract
 

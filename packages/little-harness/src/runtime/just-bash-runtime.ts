@@ -1,10 +1,12 @@
+import { restrictTier0Commands, tier0DeniedCommands } from "./command-policy.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { copyFile, cp, mkdir, readdir, readFile, rm, stat } from "node:fs/promises";
-import { Bash, MountableFs, type BashOptions, type ExecOptions, type IFileSystem } from "just-bash";
+import { Bash, InMemoryFs, MountableFs, type BashOptions, type ExecOptions, type IFileSystem } from "just-bash";
 import type {
   BashExecResult,
   BufferEncoding,
   CpOptions,
+  CreateExclusiveOptions,
   ByteString,
   FileContent as BashFileContent,
   FsStat,
@@ -64,7 +66,13 @@ export async function buildWorkspaceFs(
       })
     : undefined;
 
-  const fs = new WorkspaceFs({ base: new UnmanagedRootFs() });
+  // Scratch is a fallback namespace, not a peer mount: existing workspace and
+  // runtime aliases (including /tmp/<sandbox>/session) must remain authoritative.
+  // MountableFs rejects overlapping peers, but routes an explicit mount before
+  // its base filesystem. Both layers are constructed once per turn.
+  const scratchRoot = new MountableFs({ base: new UnmanagedRootFs() });
+  scratchRoot.mount("/tmp", new InMemoryFs({}, { maxTotalBytes: 16 * 1024 * 1024 }));
+  const fs = new WorkspaceFs({ base: scratchRoot });
   for (const [mountPath, mount] of workspaceMounts) {
     if (mountPath === "/.agents") {
       continue;
@@ -185,10 +193,10 @@ async function startJustBashSandbox(
     traceOptions,
     () => toolBridgeScope.getStore(),
   );
-  const bash = new Bash(bashOptionsForRuntime(fs, workspace.workingDir, runtime, {
+  const bash = new Bash(restrictTier0Commands(bashOptionsForRuntime(fs, workspace.workingDir, runtime, {
     javascript: javascriptConfig(runtime?.javascript, toolBridge),
     defenseInDepth: defenseInDepthForAdapter("in-process"),
-  }));
+  }), tier0DeniedCommands(options)));
   let currentCwd = workspace.workingDir;
   let currentEnv = bash.getEnv();
 
@@ -516,6 +524,10 @@ class SingleFileFs implements IFileSystem {
     private readonly fileName: string,
   ) {}
 
+  async createExclusive(pathname: string, options: CreateExclusiveOptions): Promise<void> {
+    return atomicCreate(this.delegate, this.filePath(pathname), options);
+  }
+
   readFile(pathname: string, options?: ReadFileOption | BufferEncoding): Promise<string> {
     return this.delegate.readFile(this.filePath(pathname), options);
   }
@@ -650,6 +662,11 @@ class SessionFs implements IFileSystem {
     private readonly agents: IFileSystem,
   ) {}
 
+  async createExclusive(pathname: string, options: CreateExclusiveOptions): Promise<void> {
+    const target = this.writableRoute(pathname);
+    return atomicCreate(target.fs, target.path, options);
+  }
+
   readFile(pathname: string, options?: ReadFileOption | BufferEncoding): Promise<string> {
     const target = this.route(pathname);
     return target.fs.readFile(target.path, options);
@@ -745,9 +762,9 @@ class SessionFs implements IFileSystem {
     return target.fs.chmod(target.path, mode);
   }
 
-  symlink(target: string, linkPath: string): Promise<void> {
-    const link = this.writableRoute(linkPath);
-    return link.fs.symlink(target, link.path);
+  async symlink(_target: string, linkPath: string): Promise<void> {
+    this.writableRoute(linkPath);
+    throw Object.assign(new Error(`EPERM: operation not permitted, symlink '${linkPath}'`), { code: "EPERM" });
   }
 
   link(existingPath: string, newPath: string): Promise<void> {
@@ -805,6 +822,11 @@ class PolicyFs implements IFileSystem {
     private readonly delegate: IFileSystem,
     private readonly options: PolicyFsOptions,
   ) {}
+
+  async createExclusive(pathname: string, options: CreateExclusiveOptions): Promise<void> {
+    this.assertWritable(pathname);
+    return atomicCreate(this.delegate, pathname, options);
+  }
 
   readFile(pathname: string, options?: ReadFileOption | BufferEncoding): Promise<string> {
     return this.delegate.readFile(pathname, options);
@@ -929,7 +951,7 @@ class PolicyFs implements IFileSystem {
 }
 
 const SYNTHETIC_DIRS: ReadonlySet<string> = new Set(["/", "/dev"]);
-const SYNTHETIC_PATHS: ReadonlySet<string> = new Set([...SYNTHETIC_DIRS, "/dev/null"]);
+const SYNTHETIC_PATHS: ReadonlySet<string> = new Set([...SYNTHETIC_DIRS, "/dev/null", "/dev/zero", "/dev/urandom"]);
 
 // A synthetic sink/EOF endpoint, not a host device mount or a general writable /dev.
 function isNullDevice(pathname: string): boolean {
@@ -947,7 +969,7 @@ class WorkspaceFs extends MountableFs {
   private assertStructuralOperation(operation: "move" | "copy", src: string, dest: string): void {
     const synthetic = this.syntheticPath(src) ?? this.syntheticPath(dest);
     if (synthetic !== undefined) {
-      const kind = synthetic === "/dev/null" ? "endpoint" : "directory";
+      const kind = SYNTHETIC_DIRS.has(synthetic) ? "directory" : "endpoint";
       throw accessDenied(`Cannot ${operation} the synthetic ${synthetic} ${kind}`);
     }
   }
@@ -962,13 +984,20 @@ class WorkspaceFs extends MountableFs {
 }
 
 class UnmanagedRootFs implements IFileSystem {
+  async createExclusive(pathname: string, options: CreateExclusiveOptions): Promise<void> {
+    throw accessDenied(`Cannot create unmanaged harness path: ${pathname}`);
+  }
+
   async readFile(pathname: string): Promise<string> {
-    if (isNullDevice(pathname)) return "";
-    throw notFound(pathname);
+    return Array.from(await this.readFileBuffer(pathname), (byte) => String.fromCharCode(byte)).join("");
   }
 
   async readFileBuffer(pathname: string): Promise<Uint8Array> {
     if (isNullDevice(pathname)) return new Uint8Array();
+    const normalized = path.posix.normalize(pathname);
+    // Whole-file API: bounded synthetic reads, never an OS device or infinite allocation.
+    if (normalized === "/dev/zero") return new Uint8Array(65536);
+    if (normalized === "/dev/urandom") return crypto.getRandomValues(new Uint8Array(65536));
     throw notFound(pathname);
   }
 
@@ -989,7 +1018,7 @@ class UnmanagedRootFs implements IFileSystem {
   async stat(pathname: string): Promise<FsStat> {
     const normalized = path.posix.normalize(pathname);
     if (SYNTHETIC_DIRS.has(normalized)) return directoryStat();
-    if (normalized === "/dev/null") return { ...directoryStat(), isDirectory: false, isFile: false, mode: 0o666 };
+    if (SYNTHETIC_PATHS.has(normalized)) return { ...directoryStat(), isDirectory: false, isFile: false, mode: normalized === "/dev/null" ? 0o666 : 0o444 };
     throw notFound(pathname);
   }
 
@@ -1012,8 +1041,8 @@ class UnmanagedRootFs implements IFileSystem {
   async readdir(pathname: string): Promise<string[]> {
     const normalized = path.posix.normalize(pathname);
     if (normalized === "/") return ["dev"];
-    if (normalized === "/dev") return ["null"];
-    if (normalized === "/dev/null") throw notDirectory(pathname);
+    if (normalized === "/dev") return ["null", "zero", "urandom"];
+    if (SYNTHETIC_PATHS.has(normalized)) throw notDirectory(pathname);
     throw notFound(pathname);
   }
 
@@ -1114,4 +1143,11 @@ function accessDenied(message: string): Error {
   const error = new Error(message) as NodeJS.ErrnoException;
   error.code = "EACCES";
   return error;
+}
+
+function atomicCreate(fs: IFileSystem, pathname: string, options: CreateExclusiveOptions): Promise<void> {
+  if (!fs.createExclusive) {
+    throw Object.assign(new Error("ENOSYS: filesystem cannot create entries atomically"), { code: "ENOSYS" });
+  }
+  return fs.createExclusive(pathname, options);
 }

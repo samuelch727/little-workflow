@@ -9,8 +9,8 @@ The Little stack is three things that fit together.
   traces, scores them (code checks, AI judges, people, and what your users
   said), and improves them: a reviewer reads the traces and proposes a change,
   LittleDB tests the change on your own past conversations, checks it against
-  your guardrails, and puts it live or asks a person. LittleDB is private
-  source for now, and Harness and Workflow run fully without it.
+  your guardrails, and puts it live or asks a person. LittleDB needs an account;
+  the server is not open source. Harness and Workflow run fully without it.
 - **Little Harness** and **Little Workflow** are the SDK. You build agents with
   Harness, and bounded, durable jobs with Workflow. LittleDB traces both and
   improves both. Most projects start and stay with Harness; Workflow is
@@ -92,7 +92,7 @@ container, is the source of truth; the container is borrowed.
 
 Two ways to run one:
 
-- **Managed** with LittleDB's hosted service (private for now): LittleDB holds
+- **Managed** with LittleDB's hosted service (account required): LittleDB holds
   each user's workspace, the Harness folder tier runs for most turns, and a
   container wakes only when a command needs it. Each turn reports its tier and
   infrastructure cost to LittleDB.

@@ -9,6 +9,8 @@ import type {
 } from "just-bash";
 import * as path from "node:path";
 
+type CreateExclusiveOptions = { mode: number; directory?: boolean };
+
 type DirentEntry = Awaited<ReturnType<NonNullable<IFileSystem["readdirWithFileTypes"]>>>[number];
 type ReadFileOption = Parameters<IFileSystem["readFile"]>[1];
 type WriteFileOption = Parameters<IFileSystem["writeFile"]>[2];
@@ -27,6 +29,13 @@ export class SubtreeFs implements IFileSystem {
   ) {
     const normalized = path.posix.normalize(root.startsWith("/") ? root : `/${root}`);
     this.root = normalized === "/" ? "" : normalized.replace(/\/+$/u, "");
+  }
+
+  async createExclusive(pathname: string, options: CreateExclusiveOptions): Promise<void> {
+    if (!this.delegate.createExclusive) {
+      throw Object.assign(new Error("ENOSYS: filesystem cannot create entries atomically"), { code: "ENOSYS" });
+    }
+    return this.delegate.createExclusive(this.inner(pathname), options);
   }
 
   readFile(pathname: string, options?: ReadFileOption | BufferEncoding): Promise<string> {
@@ -114,10 +123,8 @@ export class SubtreeFs implements IFileSystem {
     return this.delegate.chmod(this.inner(pathname), mode);
   }
 
-  symlink(target: string, linkPath: string): Promise<void> {
-    // An absolute target names a path in this view, so it moves with the view; a relative
-    // one resolves against the link's own folder either way.
-    return this.delegate.symlink(target.startsWith("/") ? this.inner(target) : target, this.inner(linkPath));
+  async symlink(_target: string, linkPath: string): Promise<void> {
+    throw Object.assign(new Error(`EPERM: operation not permitted, symlink '${linkPath}'`), { code: "EPERM" });
   }
 
   link(existingPath: string, newPath: string): Promise<void> {

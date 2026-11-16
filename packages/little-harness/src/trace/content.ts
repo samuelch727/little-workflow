@@ -1,3 +1,4 @@
+import { traceContentStoreFor } from "./storage.js";
 import { sha256Hex } from "../ids.js";
 import type { FileWriter } from "../types.js";
 import {
@@ -50,15 +51,18 @@ export async function captureTraceContent(
     return { captured: false };
   }
 
+  const valueRedacted = sanitized.reason === "value";
+
   const preview = textPreview(serialized.text, options.traceOptions.content.previewBytes);
   const base: TraceContentRef = {
     captured: true,
     preview,
+    previewTruncated: preview.length < serialized.text.length,
     truncated: serialized.bytes > options.traceOptions.content.maxInlineBytes,
     bytes: serialized.bytes,
     sha256: sha256Hex(serialized.bytesContent),
     mediaType: serialized.mediaType,
-    ...(sanitized.redacted ? { redacted: true, redactionReason: "metadataKey" } : {}),
+    ...(sanitized.redacted || valueRedacted ? { redacted: true, redactionReason: sanitized.redacted && sanitized.reason !== "value" ? "metadataKey" : "value" } : {}),
   };
 
   if (serialized.bytes <= options.traceOptions.content.maxInlineBytes) {
@@ -72,10 +76,12 @@ export async function captureTraceContent(
     return { ...base, captured: false, unavailableReason: "storage_limit", storageLimitBytes: limit };
   }
 
-  const path = `/artifacts/trace/${safePathSegment(options.label)}/${sha256Hex(
+  const store = traceContentStoreFor(options.files);
+  const path = `${store ? "/.little-harness/trace" : "/artifacts/trace"}/${safePathSegment(options.label)}/${sha256Hex(
     serialized.bytesContent,
   ).slice(0, 16)}.${serialized.extension}`;
-  await options.files.writeText(path, serialized.text, {
+  if (store) await store.write(path, serialized.text);
+  else await options.files.writeText(path, serialized.text, {
     mediaType: serialized.mediaType,
     source: "trace",
     artifact: {

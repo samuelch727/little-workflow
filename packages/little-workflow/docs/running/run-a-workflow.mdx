@@ -3,7 +3,7 @@ title: Run A Workflow
 description: How to execute a workflow definition against a world, with options, return shape, errors, and streaming.
 ---
 
-`runWorkflow()` is the alpha entry point. It provisions a one-shot runtime, executes one run, returns the result, and tears the runtime down. It suits scripts, tests, and the kill-and-resume demo. A long-lived runtime for processes that serve many runs is not part of the alpha API. To serve workflows from a long-lived agent process, hand them to Little Harness; see [Compose With Little Harness](/docs/v0.1.0-alpha/authoring/compose-with-harness).
+`runWorkflow()` is the alpha entry point. It provisions a one-shot runtime, executes one run, returns the result, and tears the runtime down. It suits scripts, tests, and the kill-and-resume demo. A long-lived runtime for processes that serve many runs is not part of the alpha API. To serve workflows from a long-lived agent process, hand them to Little Harness; see [Compose With Little Harness](https://little-stack.dev/docs/workflow/v0.1.0-alpha/authoring/compose-with-harness).
 
 `runWorkflow(workflow, input, options?)` runs one workflow. `workflow.run(input, options?)` on a `defineWorkflow` result is the same call. The deprecated orchestrator, which composes several workflows, has its own function, `runOrchestration` (see below).
 
@@ -33,7 +33,7 @@ console.log(result.output);
 
 ## Multiple Workflows (Orchestration, Deprecated)
 
-> **Deprecated (`LWF_DEP_ORCHESTRATOR`).** `runOrchestration` is being retired. To compose workflows, adapt each one with `asHarnessWorkflow` and pass them to `createHarness({ workflows })`; see [Compose With Little Harness](/docs/v0.1.0-alpha/authoring/compose-with-harness). It still works in this release and emits a one-time `DeprecationWarning`.
+> **Deprecated (`LWF_DEP_ORCHESTRATOR`).** `runOrchestration` is being retired. To compose workflows, adapt each one with `asHarnessWorkflow` and pass them to `createHarness({ workflows })`; see [Compose With Little Harness](https://little-stack.dev/docs/workflow/v0.1.0-alpha/authoring/compose-with-harness). It still works in this release and emits a one-time `DeprecationWarning`.
 
 `runOrchestration` runs an orchestrator: a harness session with tools to plan and run sub-workflows. It takes the workflows, the shared input, and the `orchestrator` config in one options object.
 
@@ -60,7 +60,7 @@ The orchestrator has tools to compose sub-workflows:
 - `run_workflow(workflowVersionId, input)` — execute a previously-planned version with the given input.
 - `start_workflow(workflowId, input)` — convenience for plan + run in one call.
 
-For batched parallel work (same workflow shape, many items), the orchestrator calls `plan_workflow` once then `run_workflow` N times in parallel tool calls. Each sub-workflow run has its own `runId` reserved in `harness.tool_call.started.payload.args.subRunId` and returned as `harness.tool_call.succeeded.payload.result.runId`. See [Orchestrator](/docs/v0.1.0-alpha/authoring/orchestrating-workflows) for the full composition model.
+For batched parallel work (same workflow shape, many items), the orchestrator calls `plan_workflow` once then `run_workflow` N times in parallel tool calls. Each sub-workflow run has its own `runId` reserved in `harness.tool_call.started.payload.args.subRunId` and returned as `harness.tool_call.succeeded.payload.result.runId`. See [Orchestrator](https://little-stack.dev/docs/workflow/v0.1.0-alpha/authoring/orchestrating-workflows) for the full composition model.
 
 ## Options
 
@@ -109,10 +109,12 @@ type OrchestratorConfig = {      // deprecated
 };
 ```
 
+> `@little-stack/littledb` is published from `0.2.0-alpha.4`; it needs a LittleDB account. The LittleDB server is not open source. See [release status](https://little-stack.dev/docs/releases).
+
 - **`world`** — the runtime backend. Defaults to `localWorld()`, which stores runs in `.little-workflow/`; pass `localWorld({ dataDir })` to use another directory. Production worlds (Postgres + Redis + S3) arrive after alpha.
 - **`input`** (the second argument) — validated against the workflow's `input` schema before the run starts. A mismatch throws before any model is called.
 - **`tools`** — a `ToolRegistry` created with `createToolRegistry()`. Defaults to the tools declared inline on the workflow (`defineWorkflow({ tools: { ... } })`). Required when the workflow names tools (`tools: ["name"]`) that it does not declare inline.
-- **`mcp`** — declarative MCP servers. Little Harness resolves them into gateway tools (normally `mcp_list_tools` and `mcp_call_tool`); list those names in the workflow's `tools` when steps need MCP. See [Tools → MCP Integration](/docs/v0.1.0-alpha/authoring/tools-and-capabilities#mcp-integration).
+- **`mcp`** — declarative MCP servers. Little Harness resolves them into gateway tools (normally `mcp_list_tools` and `mcp_call_tool`); list those names in the workflow's `tools` when steps need MCP. See [Tools → MCP Integration](https://little-stack.dev/docs/workflow/v0.1.0-alpha/authoring/tools-and-capabilities#mcp-integration).
 - **`permissions`** — runtime tool-call gate; see [Permissions](#permissions).
 - **`bash`** — run-level default for the SDK-injected Bash tool sandbox. Workflow-level `workflow.bash` wins for planner/worker/fixer sessions; `orchestrator.bash` wins for the orchestrator session. Defaults are network off, Python on, JavaScript on, all inside explicit mounts.
 - **`runId`** — optional durable run identity. If omitted, one is generated. Reusing a terminal `runId` validates persisted state and replays the result.
@@ -123,7 +125,7 @@ type OrchestratorConfig = {      // deprecated
 - **`progress`** — callback invoked with `{ currentStep?, lastEvent? }` after each recorded `StepScheduled`, `StepAttemptStarted`, `StepFailed`, and `StepCompleted` event.
 - **`workflowVersionReuseStrategy`** — `"planner_reviewed"` (default) reuses the newest `WorkflowVersion` that completed a run of the same workflow. When the planner would read nothing new since it planned that version or last reviewed and kept it (same definition, tools, model slots, output contract and input shape; only input values differ), the run keeps that version without a planner call. Otherwise the planner is shown it and keeps it, adapts it, or drafts a fresh one. `"planner_reviews_each_run"` shows the planner that version on every run; use it when input values change what the plan should be, such as an input that carries instructions (`{ task: "..." }`). `"always_fresh"` always plans from scratch. This overrides the definition's setting. [`result.plan`](#which-plan-ran) says which happened.
 - **`maxAttempts`** — default retry budget for step attempts unless a step declares its own retry policy.
-- **`maxOuterCycles`** — default `1` (single-cycle). Set to `> 1` to engage the outer loop, which calls `planner.supervise()` after each cycle. See [Durability](/docs/v0.1.0-alpha/running/replay-and-durability) for the outer-loop resume model.
+- **`maxOuterCycles`** — default `1` (single-cycle). Set to `> 1` to engage the outer loop, which calls `planner.supervise()` after each cycle. See [Durability](https://little-stack.dev/docs/workflow/v0.1.0-alpha/running/replay-and-durability) for the outer-loop resume model.
 - **`outerLoopId`** — resume an existing outer-loop session by ID. If omitted and `maxOuterCycles > 1`, a new `outerLoopId` is generated.
 - **`orchestrator`**, **`maxConcurrentSubRuns`** *(deprecated, `runOrchestration` only)* — the orchestrator harness config and the maximum sub-workflow runs it may have in flight (default `10`). On the Harness surface, `workflowBudgets.maxConcurrentWorkflowRuns` plays this role.
 
@@ -247,7 +249,7 @@ Cache hits are priced at the model's published cache-read rate when the registry
 
 Per-step totals are available from `MaterializedRunState.steps[stepPath].usage` and from `little report <run-id>`. Per-session token rollups are in the individual `harness.session.completed` events — those are a convenience for session consumers and are deliberately *not* re-summed into the run total, because they restate model calls that were already counted individually.
 
-Budget **enforcement** against these numbers is post-alpha; so is pre-run cost estimation. See the [Roadmap](/docs/v0.1.0-alpha/roadmap).
+Budget **enforcement** against these numbers is post-alpha; so is pre-run cost estimation. See the [Roadmap](https://little-stack.dev/docs/workflow/v0.1.0-alpha/roadmap).
 
 ## Errors
 
@@ -285,7 +287,7 @@ try {
 
 `outerLoopId` and `lastCycleOutput` are set only when `causeCode === "outer_loop_exhausted"`. `failedStepPath` is set on `max_visits_exceeded`. All other fields are always present.
 
-Budget enforcement (`BudgetExhaustedError`) arrives post-alpha (see the [Roadmap](/docs/v0.1.0-alpha/roadmap)). Tool-call permission denial, by contrast, ships in alpha — see [Permissions](#permissions).
+Budget enforcement (`BudgetExhaustedError`) arrives post-alpha (see the [Roadmap](https://little-stack.dev/docs/workflow/v0.1.0-alpha/roadmap)). Tool-call permission denial, by contrast, ships in alpha — see [Permissions](#permissions).
 
 Recoverable step failures (transient network, rate limits) are retried automatically inside the same run and never bubble up here unless the retry policy is exhausted.
 
@@ -300,7 +302,7 @@ setTimeout(() => controller.abort(), 5_000);
 await runWorkflow(myWorkflow, input, { signal: controller.signal });
 ```
 
-Cancellation is propagated into any in-flight harness sessions (planner, orchestrator, or worker). See [Durability](/docs/v0.1.0-alpha/running/replay-and-durability) for the crash and cancellation recovery model.
+Cancellation is propagated into any in-flight harness sessions (planner, orchestrator, or worker). See [Durability](https://little-stack.dev/docs/workflow/v0.1.0-alpha/running/replay-and-durability) for the crash and cancellation recovery model.
 
 ## Permissions
 
@@ -323,7 +325,7 @@ A rule's `tool` is a **glob** over the tool name: `*` stands for any run of char
 
 ## Streaming
 
-Streaming responses are not a public alpha surface; use the `progress` callback for step-level progress. Streaming session events to `runWorkflow` callers is on the [Roadmap](/docs/v0.1.0-alpha/roadmap).
+Streaming responses are not a public alpha surface; use the `progress` callback for step-level progress. Streaming session events to `runWorkflow` callers is on the [Roadmap](https://little-stack.dev/docs/workflow/v0.1.0-alpha/roadmap).
 
 ## Replay
 
@@ -335,4 +337,4 @@ To inspect an existing run's event log directly, use the CLI:
 little events run_123
 ```
 
-User-invoked retry-from-step (`little retry`) and `little fork` are not part of the alpha CLI. Alpha supports only automatic retry while a run is executing, plus replay from the event log. See [Durability](/docs/v0.1.0-alpha/running/replay-and-durability) for the replay-vs-retry semantics that alpha does support.
+User-invoked retry-from-step (`little retry`) and `little fork` are not part of the alpha CLI. Alpha supports only automatic retry while a run is executing, plus replay from the event log. See [Durability](https://little-stack.dev/docs/workflow/v0.1.0-alpha/running/replay-and-durability) for the replay-vs-retry semantics that alpha does support.

@@ -1,3 +1,5 @@
+import { createTestPlanStore } from "../testing-plans.js";
+import { testFeedbackSelection } from "../testing-feedback.js";
 // An in-memory stand-in for the LittleDB `/v1` API, served through a `fetch` function. It checks
 // request bodies against the contract and keeps what it was sent, so tests can assert on it.
 import {
@@ -8,6 +10,9 @@ import {
   ResolveRequestSchema,
   type ClaimedRun,
   type FeedbackRequest,
+  type FeedbackResult,
+  type FeedbackAnchor,
+  type FeedbackSelection,
   type ScoreInput,
   type SpanInput,
   type TraceInput,
@@ -30,12 +35,20 @@ export type FakeFeedbackScore = {
   readonly author?: string;
   readonly survey?: string;
   readonly metadata?: Record<string, unknown>;
+  readonly selection?: FeedbackSelection;
+  readonly anchor?: FeedbackAnchor;
+  readonly tags?: string[];
+  readonly expected?: string;
+  readonly role?: string;
 };
 
 /** What a report says, as LittleDB's fence compares it: not where it lands, `at` or `metadata`. */
 function feedbackDigest(body: FeedbackRequest): string {
   const comment = body.comment?.trim();
-  return JSON.stringify([body.name, body.thumbs, body.rating, body.answers, comment === "" ? undefined : comment, body.survey, body.userId, body.spanId]);
+  return JSON.stringify([
+    body.name, body.thumbs, body.rating, body.answers, comment === "" ? undefined : comment, body.survey, body.userId, body.spanId,
+    body.selection, body.tags, body.expected, body.role,
+  ]);
 }
 
 /** One score per answer, as LittleDB maps feedback: thumbs 1/0, ratings to 0..1, labels for the rest. */
@@ -70,6 +83,10 @@ function feedbackScores(body: FeedbackRequest, traceId: string, nextId: () => st
     ...(body.id === undefined ? {} : { feedbackId: body.id }),
     ...(body.userId === undefined ? {} : { author: body.userId }),
     ...(body.survey === undefined ? {} : { survey: body.survey }),
+    ...(body.selection === undefined ? {} : { selection: body.selection }),
+    ...(body.tags === undefined ? {} : { tags: body.tags }),
+    ...(body.expected === undefined ? {} : { expected: body.expected }),
+    ...(body.role === undefined ? {} : { role: body.role }),
     metadata: {
       ...body.metadata,
       ...row.metadata,
@@ -89,6 +106,7 @@ type AgentWorkflowVersion = {
 };
 
 export function fakeLittleDB(options: { readonly apiKey?: string } = {}) {
+  const planStore = createTestPlanStore();
   const apiKey = options.apiKey ?? "ldb_test_key";
   const requests: FakeRequest[] = [];
   const traces = new Map<string, TraceInput>();
@@ -97,7 +115,7 @@ export function fakeLittleDB(options: { readonly apiKey?: string } = {}) {
   const feedback = new Map<string, FakeFeedbackScore>();
   // LittleDB's fence (G24): per feedback id, the highest revision applied, whether it was a
   // retraction, and what the report said.
-  const feedbackRevisions = new Map<string, { revision: number; retracted: boolean; digest?: string }>();
+  const feedbackRevisions = new Map<string, { revision: number; retracted: boolean; digest?: string; answer?: FeedbackResult }>();
   let feedbackCounter = 0;
   const ingestBatches: unknown[] = [];
   const agentWorkflows = new Map<string, { subjectId: string; description?: string; versions: AgentWorkflowVersion[]; trial?: Record<string, unknown> }>();
@@ -118,6 +136,8 @@ export function fakeLittleDB(options: { readonly apiKey?: string } = {}) {
     }
     const { method, path, body } = request;
     if (request.authorization !== `Bearer ${apiKey}`) return error(401, "unauthorized", "Bad API key.");
+    const planResponse = planStore.route(method, path, body);
+    if (planResponse) return planResponse;
     if (method === "POST" && path === "/v1/ingest") {
       const parsed = IngestBatchSchema.safeParse(body);
       if (!parsed.success) return error(400, "bad_request", parsed.error.message);
@@ -201,10 +221,15 @@ export function fakeLittleDB(options: { readonly apiKey?: string } = {}) {
         input.traceId ?? [...traces.values()].filter((trace) => trace.sessionId === input.sessionId).at(-1)?.id;
       if (traceId === undefined) return error(404, "not_found", "That session has no trace yet.");
       const rows = feedbackScores(input, traceId, () => `fbs_${String(++feedbackCounter)}`);
-      const answer = json(201, {
+      const output = input.spanId === undefined
+        ? traces.get(traceId)?.output
+        : [...spans.values()].find((span) => span.traceId === traceId && span.id === input.spanId)?.output;
+      const selection = testFeedbackSelection(input.selection, output);
+      const answer: FeedbackResult = {
         traceId,
         scores: rows.map((row) => ({ id: row.id, name: row.name, value: row.value ?? null, label: row.label ?? null })),
-      });
+        ...(selection === undefined ? {} : { selection }),
+      };
       if (input.id !== undefined) {
         const fence = feedbackRevisions.get(input.id);
         const digest = feedbackDigest(input);
@@ -215,14 +240,14 @@ export function fakeLittleDB(options: { readonly apiKey?: string } = {}) {
           if (input.revision === undefined || fence.revision > input.revision) return stale;
           if (fence.revision === input.revision) {
             if (fence.retracted) return stale;
-            if (fence.digest === digest) return answer;
+            if (fence.digest === digest) return json(201, fence.answer ?? answer);
             return error(409, "revision_conflict", "This revision of the feedback was already applied with different answers.");
           }
         }
-        if (input.revision !== undefined) feedbackRevisions.set(input.id, { revision: input.revision, retracted: false, digest });
+        if (input.revision !== undefined) feedbackRevisions.set(input.id, { revision: input.revision, retracted: false, digest, answer });
       }
-      for (const row of rows) feedback.set(row.id, row);
-      return answer;
+      for (const row of rows) feedback.set(row.id, { ...row, ...(selection === undefined ? {} : { anchor: selection.anchor }) });
+      return json(201, answer);
     }
     const retract = /^\/v1\/feedback\/([^/?]+)(?:\?revision=(\d+))?$/u.exec(path);
     if (method === "DELETE" && retract !== null) {
@@ -287,6 +312,7 @@ export function fakeLittleDB(options: { readonly apiKey?: string } = {}) {
     apiKey,
     fetch: fetchImpl,
     requests,
+    plans: planStore.plans,
     traces,
     spans,
     scores,

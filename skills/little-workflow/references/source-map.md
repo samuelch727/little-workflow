@@ -2,6 +2,8 @@
 
 Use source and tests to verify docs when behavior matters.
 
+The paths below are repository paths. An installed package has no `src/` and no tests: `packages/little-workflow/src/<path>.ts` is `node_modules/@little-stack/workflow/dist/<path>.js`, with its types in `dist/<path>.d.ts`. The Harness rows map the same way under `node_modules/@little-stack/harness/dist/`.
+
 | Task | Source files |
 | --- | --- |
 | Public exports | `packages/little-workflow/src/index.ts` (root, pinned by `src/index.test.ts`), `packages/little-workflow/src/entries/` (`lwir.ts`, `eval.ts`, `internals.ts`), `packages/little-workflow/src/scaffold.ts` |
@@ -13,9 +15,9 @@ Use source and tests to verify docs when behavior matters.
 | LWIR schema, schema subset, and canonicalization | `packages/little-workflow/src/lwir.ts`, `packages/little-workflow/src/canonical.ts`, `packages/little-workflow/src/schema.ts` |
 | LWIR input-cone hashing (`inputConeHash`) | `packages/little-workflow/src/lwir-input-cone.ts` |
 | Dynamic-workflow lowering + factory (`dynamicWorkflows()`, its `registry` and `world` options) | `packages/little-workflow/src/dynamic-workflow.ts` (helper, `DynamicWorkflowWorld` types), `dynamic-workflow-plan.ts` (parse), `dynamic-workflow-lower.ts` (lower + subset check), `dynamic-workflow-factory.ts` (compile/freeze/run-once, per-run World) |
-| LittleDB tracing World (private, unpublished) | `packages/littledb-client/src/workflow/tracing-world.ts` |
-| LittleDB workflow eval worker (private, unpublished): `db.workflowEvalWorker` | `packages/littledb-client/src/workflow/eval-worker.ts` |
-| LittleDB user feedback (private, unpublished): `db.feedback`, `db.feedbackHandler`, the outcome sink | `packages/littledb-client/src/feedback.ts`, `packages/littledb-client/src/harness/outcome-sink.ts` |
+| LittleDB tracing World (LittleDB account required) | `packages/littledb-client/src/workflow/tracing-world.ts` |
+| LittleDB workflow eval worker (LittleDB account required): `db.workflowEvalWorker` | `packages/littledb-client/src/workflow/eval-worker.ts` |
+| LittleDB user feedback (LittleDB account required): `db.feedback`, `db.feedbackHandler`, the outcome sink | `packages/littledb-client/src/feedback.ts`, `packages/littledb-client/src/harness/outcome-sink.ts` |
 | Cost: pricing, registry, reports | `packages/little-workflow/src/pricing.ts` (`priceModelCall`), `packages/little-workflow/src/model-registry.ts` + `model-registry.json`, `packages/little-workflow/src/run-report.ts` (`runReport`, `formatRunReport`) |
 | Eval-set bundles (experimental) | `packages/little-workflow/src/eval-set.ts`, `packages/little-workflow/src/eval-set-store.ts` |
 | Tool registry and MCP attachment | `packages/little-workflow/src/tool-registry.ts` |

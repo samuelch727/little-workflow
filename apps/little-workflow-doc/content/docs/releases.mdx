@@ -1,61 +1,68 @@
 ---
 title: Releases
-description: What each Little product has published, what is source-only, and what UNRELEASED means on this site.
+description: Published package versions, release notes and migrations for alpha.4.
 ---
 
-Only Little Harness and Little Workflow are installable. Status below was
-checked on 2026-11-12.
+Little Harness, Little Workflow and the LittleDB client are published as
+`0.2.0-alpha.4`. This is the first public `@little-stack/littledb` release.
+All three packages share one version number. The LittleDB client needs a LittleDB
+account; the LittleDB server is not open source. Little Compute remains unpublished.
 
-| Product | Package | Status | Install |
+| Product | Package | Status | Command |
 | --- | --- | --- | --- |
-| [Little Harness](/docs/harness) | `@little-stack/harness` | Published `0.2.0-alpha.3` on 12 November 2026, on `alpha` | `pnpm add @little-stack/harness@alpha ai@^7 zod @ai-sdk/<provider>` |
-| [Little Workflow](/docs/workflow) | `@little-stack/workflow` | Published `0.2.0-alpha.3` on 12 November 2026, on `alpha` | `pnpm add @little-stack/workflow@alpha ai@^7 zod @ai-sdk/<provider>` |
-| [LittleDB](/docs/littledb) | `@little-stack/littledb` | Private source, `0.1.0-alpha.2`, marked private. Not on npm, and no public repository | Not installable |
-| [Workspaces, managed](/docs/how-they-fit#workspaces) | none: part of LittleDB's hosted service | Private, with LittleDB. Not on npm | Not installable |
-| [Workspaces, self-hosted (Little Compute)](/docs/compute) | `@little-stack/compute` | Unpublished source; control plane frozen 2026-10-23. Not on npm, and not in the public `samuelch727/little-workflow` repository | Not installable |
+| [Little Harness](/docs/harness) | `@little-stack/harness` | Published `0.2.0-alpha.4` | `little-harness` |
+| [Little Workflow](/docs/workflow) | `@little-stack/workflow` | Published `0.2.0-alpha.4` | `little` |
+| [LittleDB client](/docs/littledb) | `@little-stack/littledb` | First public release, `0.2.0-alpha.4` | `littledb` |
+| Managed workspaces | Part of the LittleDB service | LittleDB account required | No standalone npm package |
+| [Little Compute](/docs/compute) | `@little-stack/compute` | Unpublished | No public install path |
 
-Both published packages need Node.js 22 or newer and an AI SDK 7 provider
-package. To create a project instead of installing by hand, use
-[Setup](/docs/get-started/setup).
+The SDKs require Node.js 22+ and AI SDK 7. Create a project
+with `npx @little-stack/workflow@alpha setup my-app --littledb --yes --install --verify`,
+then use `npx @little-stack/littledb@alpha login --url <LittleDB> --project <slug>`
+with a LittleDB account. See [Setup](/docs/get-started/setup).
+
+## Alpha.4 changes and migration
+
+- **Breaking:** task and workflow tools are offered only when an agent can use
+  them. To restore the previous tool list, set `taskTools: true, workflowTools: true`
+  on `createHarness` with durable services available. The names remain reserved.
+- Setup gains managed-model starters, starter skills and additive existing Node
+  setup. The LittleDB CLI provides browser `login`, agent-folder `deploy` and `chat`.
+- Harness gains per-instance folder context, shorter tool lists, tool budgets,
+  virtual `/tmp`, command-runner denial, trace value redaction and private spill storage.
+  Both SDK packages carry their release-matched coding-agent skills and package docs.
+- Tracing Worlds upload workflow plans in the background; `flush()` and `shutdown()`
+  include that work. Content suppression sends structural plans, not full anonymization.
+- Context compaction is opt-in through `contextPolicy`; it projects the model view
+  while retaining canonical history. The SDK default is off. Workflow projects prior
+  tool rounds within its current task rather than summarizing the task itself.
 
 ## Package names
 
-The 3 November 2026 release is the first under the `@little-stack` npm scope.
-Harness and Workflow now share version `0.2.0-alpha.3`; command names do not change.
-LittleDB and Little Compute remain unpublished.
-
-| Previous name | Current name | Command |
-| --- | --- | --- |
-| `little-harness` | `@little-stack/harness` | `little-harness` |
-| `little-workflow` | `@little-stack/workflow` | `little` |
-| (unpublished) | `@little-stack/compute` | `little-compute` |
-| `@little-workflow/littledb` (private) | `@little-stack/littledb` (private) | none |
-
-To move an existing project, replace the dependency names in `package.json`
-and the module names in imports, including subpaths such as
-`little-harness/connectors`, which becomes `@little-stack/harness/connectors`.
-The packages already published under the old names stay installable.
+Harness and Workflow moved from `little-harness` and `little-workflow` to
+`@little-stack/harness` and `@little-stack/workflow` in alpha.2. Replace dependency
+and import names, including subpaths. The old published packages remain installable.
+The LittleDB client was formerly `@little-workflow/littledb`; from alpha.4 it
+uses `@little-stack/littledb` and the `littledb` command.
 
 ## Release notes and migrations
 
 - **Little Workflow:** [Changelog](/docs/workflow/v0.1.0-alpha/reference/changelog),
-  including `0.2.0-alpha.3` and the historical first scoped release.
+  including alpha.4 and the historical first scoped release.
 - **Little Harness:** [Alpha Migrations](/docs/harness/v0.1.0-alpha/reference/alpha-migrations)
-  covers moving from `little-harness` `0.2.0-alpha.0` to
-  `@little-stack/harness` `0.2.0-alpha.2`.
+  covers the package rename and migration from `little-harness` to `@little-stack/harness`.
+  Alpha.4's default-tool migration is described above.
 - **Setup recovery:** [Setup Recovery](/docs/workflow/v0.1.0-alpha/reference/setup-recovery)
-  documents the `recoverSetup()` API and CLI published in `0.2.0-alpha.2`.
+  documents the `recoverSetup()` API and CLI available since alpha.2.
 
 ## What UNRELEASED means
 
-Sections labeled **UNRELEASED** depend on LittleDB or Little Compute, which
-are not published on npm. Harness and Workflow features previously marked
-that way on this site ship in `0.2.0-alpha.3`, including compiler, remote tools,
-command correlation and workerd streaming. Earlier features shipped in alpha.2.
+UNRELEASED identifies source-only functionality outside the published SDK/client
+release, including Little Compute. The hosted LittleDB service is separate from
+the client; installing the client does not install the LittleDB server.
 
 ## The `v0.1.0-alpha` URL segment
 
-Harness and Workflow pages live under `/docs/harness/v0.1.0-alpha/...` and
-`/docs/workflow/v0.1.0-alpha/...`. That segment is a historical URL kept so old
-links stay stable. It is not a package version: the published packages are
-both `0.2.0-alpha.3`. There are no other version sections.
+The Harness and Workflow documentation keeps this historical URL segment so
+existing links work. It is not the npm package version; alpha.4 package versions
+are `0.2.0-alpha.4`.

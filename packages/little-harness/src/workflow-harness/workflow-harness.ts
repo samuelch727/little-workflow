@@ -1,3 +1,5 @@
+import { contextInputRequest, recordContextInputUsage } from "../context-policy/calibration.js";
+import { compactContext, resolveContextRuntime, type ContextPolicy, type ContextCompactionHost, type ContextCompactionRuntime } from "../context-policy/index.js";
 import * as defaultAiSdkModule from "ai";
 import { createEventId, sha256Hex } from "../ids.js";
 import {
@@ -73,6 +75,8 @@ export type AiSdkModuleLike = {
 };
 
 export type CreateWorkflowHarnessOptions = {
+  readonly contextPolicy?: false | ContextPolicy;
+  readonly contextCompaction?: ContextCompactionHost;
   readonly aiLoop?: AiLoopAdapter;
   readonly aiSdkModule?: AiSdkModuleLike;
   readonly modelCallTimeoutMs?: number;
@@ -440,7 +444,7 @@ async function runAiGenerateStep(
   // On a self-repair re-run the runtime sets `with.outputRepairNote` with the validator findings
   // and the required schema. Surface it to the model as a trailing user turn so the worker can
   // actually correct its output — without it, the re-run is a blind retry.
-  const messages = outputRepairNote === undefined
+  let messages: { role: string; content: unknown }[] = outputRepairNote === undefined
     ? [{ role: "user", content: stepInput }]
     : [{ role: "user", content: stepInput }, { role: "user", content: outputRepairNote }];
   const model = ctx.model.model;
@@ -456,6 +460,23 @@ async function runAiGenerateStep(
   // side-effecting tool. Tool use in a workflow is expressed as explicit tool.call steps.
   const executableTools: Record<string, unknown> = {};
   const tools = workflowToolRefs(executableTools);
+  let contextRuntime: ContextCompactionRuntime | undefined;
+  let measuredInput: ReturnType<typeof contextInputRequest> | undefined;
+  if (options.contextPolicy) {
+    const runtime = await resolveContextRuntime({
+      ...(options.contextCompaction ? { host: options.contextCompaction } : {}),
+      sessionId: ctx.session.runId, runId: ctx.session.runId, fallbackScope: options,
+      model: { provider: ctx.model.providerId, modelId: ctx.model.modelId },
+    });
+    contextRuntime = runtime;
+    const facing = toAiSdkMessages({ messages, step });
+    measuredInput = contextInputRequest(runtime, ctx.session.runId, { messages: facing, system, tools });
+    // A direct step has only its current input/repair note: measure the real rendered
+    // prompt, but never summarize either as an earlier conversation turn.
+    await compactContext({ policy: { ...options.contextPolicy, summaryModel: false }, runtime,
+      sessionId: ctx.session.runId, messages: facing as unknown as import("ai").ModelMessage[],
+      system, tools, signal: ctx.abortSignal });
+  }
   const request = {
     model: ctx.model.modelId,
     system,
@@ -522,6 +543,7 @@ async function runAiGenerateStep(
       step,
       input: stepInput,
     });
+    if (contextRuntime && measuredInput) await recordContextInputUsage(contextRuntime, measuredInput, result, ctx.abortSignal);
     const output = result.output ?? result.text ?? "";
     const usage = normalizeHarnessUsage(result.usage);
     const responseText = modelResponseText(result, output);
@@ -598,11 +620,34 @@ async function runModelLikeTask(
   const taskDescriptor = { kind: task.kind };
   const maxTurns = 25;
 
+  const contextRuntime = options.contextPolicy ? await resolveContextRuntime({
+    ...(options.contextCompaction ? { host: options.contextCompaction } : {}),
+    sessionId: ctx.session.runId, runId: ctx.session.runId, fallbackScope: options,
+    model: { provider: ctx.model.providerId, modelId: ctx.model.modelId },
+  }) : undefined;
   for (let turn = 1; turn <= maxTurns; turn += 1) {
+    // Budget the real AI SDK representation, then project only tool result values back
+    // into Workflow's durable wire format. Calls/task input and replay identities stay exact.
+    const facing = contextRuntime ? toAiSdkMessages({ messages, step: "step" in task ? task.step : taskDescriptor }) : [];
+    const projected = contextRuntime ? await compactContext({
+      policy: options.contextPolicy ? { ...options.contextPolicy, summaryModel: false } : false,
+      runtime: contextRuntime, sessionId: ctx.session.runId,
+      messages: facing as unknown as import("ai").ModelMessage[], system, tools, signal: ctx.abortSignal,
+      projectCompletedWorkflowRounds: true,
+    }) : [];
+    const projectedMessages = contextRuntime ? messages.map((raw, index) => {
+      if (propertyValue(raw, "role") !== "tool") return raw;
+      const parts = propertyValue(projected[index], "content");
+      if (!Array.isArray(parts)) throw new Error("Invalid Workflow context projection.");
+      const entries = propertyValue(raw, "content");
+      return { ...raw as object, content: (Array.isArray(entries) ? entries : [entries]).map((entry, part) => ({
+        ...entry, result: propertyValue(propertyValue(parts[part], "output"), "value"),
+      })) };
+    }) : messages;
     const request = {
       model: ctx.model.modelId,
       system,
-      messages: [...messages],
+      messages: contextRuntime ? [...projected] : [...projectedMessages],
       tools,
       scope,
       task: taskDescriptor,
@@ -646,9 +691,9 @@ async function runModelLikeTask(
             stepNumber: turn,
             model: { provider: ctx.model.providerId, modelId: ctx.model.modelId },
             request: {
-              promptHash: sha256Hex(JSON.stringify({ system, messages })),
+              promptHash: sha256Hex(JSON.stringify({ system, messages: request.messages })),
               system: traceContentRef(system),
-              messages: messages.map((message) => traceMessageForMetadata(message)),
+              messages: request.messages.map((message) => traceMessageForMetadata(message)),
               tools,
             },
           },
@@ -660,7 +705,7 @@ async function runModelLikeTask(
         result = await options.aiLoop.generate({
           model: ctx.model.model,
           system,
-          messages,
+          messages: [...projectedMessages],
           tools: executableTools,
           signal: ctx.abortSignal,
           step: "step" in task ? task.step : taskDescriptor,
@@ -693,6 +738,7 @@ async function runModelLikeTask(
         throw error;
       }
 
+      if (contextRuntime) await recordContextInputUsage(contextRuntime, contextInputRequest(contextRuntime, ctx.session.runId, { messages: projected, system, tools }), result, ctx.abortSignal);
       const output = result.output ?? result.text ?? "";
       const usage = normalizeHarnessUsage(result.usage);
       const responseText = modelResponseText(result, output);
@@ -1352,7 +1398,7 @@ function modelFacingTools(
   return facing;
 }
 
-function toAiSdkMessages(options: Parameters<AiLoopAdapter["generate"]>[0]): readonly JsonObject[] {
+function toAiSdkMessages(options: Pick<Parameters<AiLoopAdapter["generate"]>[0], "messages" | "step">): readonly JsonObject[] {
   const configuredPrompt = stringProperty(propertyValue(options.step, "with"), "prompt");
   const messages: JsonObject[] = [];
   let userSeen = false;

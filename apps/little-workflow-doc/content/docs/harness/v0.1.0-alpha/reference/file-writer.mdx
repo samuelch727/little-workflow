@@ -188,7 +188,7 @@ return {
 ```
 
 If a tool accidentally returns a very large value, Little Harness can
-automatically write it through `ctx.files` under `/artifacts/tool-results/` and
+automatically write it through `ctx.files` under `/session/.tool-results/` and
 return a compact file reference to the model. That reference includes
 line/character counts and, when the value is JSON, a bounded structure sketch.
 

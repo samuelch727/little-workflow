@@ -23,7 +23,7 @@ description: How the alpha world stores events, artifact manifests, blobs, and r
     <outerLoopId>.json         # outer-loop session manifest
 ```
 
-- `events/` — SQLite/WAL event store keyed by run id and sequence. See [Event Log](/docs/v0.1.0-alpha/internals/event-log).
+- `events/` — SQLite/WAL event store keyed by run id and sequence. See [Event Log](https://little-stack.dev/docs/workflow/v0.1.0-alpha/internals/event-log).
 - `artifacts/` — one manifest per artifact, paired with the raw blob in `artifacts/blobs/`. Content-addressed by `sha256` of the payload.
 - `locks/` — directory-based locks for run execution fencing. Each lock holds an `owner.json` with `{ pid, token, createdAt }`.
 - `outer-loops/` — one JSON manifest per outer-loop session. Written and updated transactionally by the outer-loop scheduler.
@@ -79,7 +79,7 @@ function withWriteChain(key, fn) {
 - For events the key is `events:${resolve(dataDir)}:${runId}`.
 - For artifacts the key is `artifact:<dataDir>:<artifactId>`.
 
-Two callers in the same process target the same run id ⇒ they queue. The runtime's [in-process fence](/docs/v0.1.0-alpha/internals/runtime-execution#in-process-fence) keeps two runs from racing the same run id, and the filesystem lock keeps two processes from racing the same data directory.
+Two callers in the same process target the same run id ⇒ they queue. The runtime's [in-process fence](https://little-stack.dev/docs/workflow/v0.1.0-alpha/internals/runtime-execution#in-process-fence) keeps two runs from racing the same run id, and the filesystem lock keeps two processes from racing the same data directory.
 
 ## Artifact Pipeline
 

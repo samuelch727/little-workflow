@@ -3,7 +3,7 @@ title: LWIR Internals
 description: The structural validator behind validateLwir() — what it accepts, what it rejects, and what the runtime depends on.
 ---
 
-[LWIR](/docs/v0.1.0-alpha/reference/lwir-reference) is the canonical JSON document the runtime executes. `lwir.ts` is the only place LWIR is parsed and structurally validated. Every other module — the compiler, the runtime, replay — assumes a value that passed `validateLwir()`.
+[LWIR](https://little-stack.dev/docs/workflow/v0.1.0-alpha/reference/lwir-reference) is the canonical JSON document the runtime executes. `lwir.ts` is the only place LWIR is parsed and structurally validated. Every other module — the compiler, the runtime, replay — assumes a value that passed `validateLwir()`.
 
 This page maps the validator phases against the source.
 
@@ -113,7 +113,7 @@ Unsupported keys (`patternProperties`, `if/then/else`, `$ref`, `$dynamicRef`, `f
 | `step.duplicate_id` | Two steps in the same list share an id. |
 | `step.invalid_needs` | `needs` is present but not a string array. |
 | `step.missing_dependency` | A `needs[]` entry or a `{{ steps.X.output }}` reference points to an id that doesn't exist. |
-| `step.undeclared_dependency` | An expression references a step id that is real, but the step did not list it in `needs`. A planner's draft rarely reports it: the compiler adds the missing `needs` entry first (see [LWIR](/docs/v0.1.0-alpha/reference/lwir-reference#needs-a-planner-left-out)). A fixed plan still reports it. |
+| `step.undeclared_dependency` | An expression references a step id that is real, but the step did not list it in `needs`. A planner's draft rarely reports it: the compiler adds the missing `needs` entry first (see [LWIR](https://little-stack.dev/docs/workflow/v0.1.0-alpha/reference/lwir-reference#needs-a-planner-left-out)). A fixed plan still reports it. |
 | `output.missing_schema` | A step references another step's `json`-mode output without that step declaring a schema. |
 | `lwir.invalid_cycle` | The dependency graph has a cycle that violates the decision-step rules (see below). |
 | `lwir.output_ambiguous_for_multi_visit` | `{{ steps.X.output }}` is used on a step with `maxVisits > 1`. Use `lastOutput` or `allVisits`. |
@@ -189,7 +189,7 @@ This milestone introduces a second identity primitive alongside it:
 
 A single `WorkflowDefinition` can produce many `WorkflowVersion`s (different inputs → different LWIR). The `WorkflowDefinitionHash` is what the orchestrator's manifest tracks for each available workflow; `WorkflowVersion` is what worker sessions reference when executing steps.
 
-See [Identity and Manifests](/docs/v0.1.0-alpha/internals/identity-manifests) for how the two hashes compose with the three manifest types.
+See [Identity and Manifests](https://little-stack.dev/docs/workflow/v0.1.0-alpha/internals/identity-manifests) for how the two hashes compose with the three manifest types.
 
 ## Registration
 
@@ -205,7 +205,7 @@ return {
 };
 ```
 
-`compiler.ts` calls this with the planner's draft and wraps the result with the compiled-lock seed described on the [Compile Pipeline](/docs/v0.1.0-alpha/internals/compile-pipeline#stage-8-register-and-lock) page.
+`compiler.ts` calls this with the planner's draft and wraps the result with the compiled-lock seed described on the [Compile Pipeline](https://little-stack.dev/docs/workflow/v0.1.0-alpha/internals/compile-pipeline#stage-8-register-and-lock) page.
 
 ## What This Validator Is Not
 

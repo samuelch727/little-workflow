@@ -19,6 +19,8 @@ import {
 The root entry point exports only what an app needs to build and run an agent. `src/index.test.ts`
 pins the list. Everything else has its own subpath:
 
+> `@little-stack/littledb` is published from `0.2.0-alpha.4`; it needs a LittleDB account. The LittleDB server is not open source. See [release status](https://little-stack.dev/docs/releases). Little Compute remains unpublished.
+
 - `@little-stack/harness/sandbox` — for writing your own sandbox: `createShellRuntime`,
   `createEnvironmentToolBridge`, `createRuntimeToolBridge`, `localSessionWorkspace`, `resolveSandbox`,
   the just-bash building blocks, tracked-mount helpers and tier-0 command classification
@@ -77,7 +79,7 @@ from validated input. The app stores these atomically with effects and rejects d
 Same-run replays need the retained original started event: a recognized replay missing its
 occurrence has no invocation ID. No log means no crash recovery of identity. New-turn retries,
 bash and standalone writes need business keys. Timeouts mean uncertain outcomes.
-See the [remote-tools guide](../../../apps/little-harness-doc/content/docs/v0.1.0-alpha/build-agents/remote-tools.mdx)
+See the [remote-tools guide](https://little-stack.dev/docs/harness/v0.1.0-alpha/build-agents/remote-tools)
 for authenticated headers, host retention details and examples.
 
 Use `@little-stack/harness/agents` (**experimental**, may change between alpha releases) when you
@@ -192,7 +194,7 @@ export async function POST(req: Request) {
 }
 ```
 
-`createHarness` requires a `host` and `model`. For local development, use `localHost({ dataDir })`; it stores sessions under `.little-harness/` by default. Where there is no disk, such as workerd with a Durable Object per chat, use `virtualHost({ fs })`: it keeps each session's workspace (`/session`, `/artifacts`, `/persistent`, `/.agents`) and its status in the just-bash filesystem you pass, and your app saves that filesystem between turns. `dataFs` chooses where `localDir()` and memory keep their backing folders: an `IFileSystem` or async `(sessionId) => IFileSystem` factory, defaulting to the session's `fs`, under `/.little-harness/data/` outside bash's view. Sharing `dataFs` shares folders without making writes transactional across sessions; cross-Durable-Object sharing is the app's job. Virtual sources must be relative POSIX paths without `..`; `projectDir()` still needs `localHost()`. Enable `dynamicWorkflows()` from `@little-stack/workflow` on `virtualHost()` to run one-shot plans and defined workflows without disk: the default World is `virtualWorld` over the host's `dataFs`, with run files and kept plans under `dataRoot` (default `/.little-harness/data/`). Persistence follows the app's filesystem save policy; Worlds sharing storage must receive the same filesystem object so their in-process locks coordinate. On workerd, just-bash loads its browser build, so `python3`, `node` (`js-exec`), `sqlite3`, `tar`, `yq` and `xan` are not available. See the "Run on workerd" docs page and `demos/workerd-chats`.
+`createHarness` requires a `host` and `model`. For local development, use `localHost({ dataDir })`; it stores sessions under `.little-harness/` by default. Where there is no disk, such as workerd with a Durable Object per chat, use `virtualHost({ fs })`: it keeps each session's workspace (`/session`, `/artifacts`, `/persistent`, `/.agents`) and its status in the just-bash filesystem you pass, and your app saves that filesystem between turns. `dataFs` chooses where `localDir()` and memory keep their backing folders: an `IFileSystem` or async `(sessionId) => IFileSystem` factory, defaulting to the session's `fs`, under `/.little-harness/data/` outside bash's view. Sharing `dataFs` shares folders without making writes transactional across sessions; cross-Durable-Object sharing is the app's job. Virtual sources must be relative POSIX paths without `..`; `projectDir()` still needs `localHost()`. Enable `dynamicWorkflows()` from `@little-stack/workflow` on `virtualHost()` to run one-shot plans and defined workflows without disk: the default World is `virtualWorld` over the host's `dataFs`, with run files and kept plans under `dataRoot` (default `/.little-harness/data/`). Persistence follows the app's filesystem save policy; Worlds sharing storage must receive the same filesystem object so their in-process locks coordinate. On workerd, just-bash loads its browser build, so `python3`, `node` (`js-exec`), `sqlite3`, `tar`, `yq` and `xan` are not available. See [Run on workerd](https://little-stack.dev/docs/harness/v0.1.0-alpha/runtime/virtual-host).
 
 ## `createHarness(...)`
 
@@ -916,7 +918,7 @@ createHarness({
 
 The bridge is also unavailable when `runtime.javascript === false`, when `runtime.bash === false`, or when a per-call `activeTools` / `prepareStep` setting hides `bash` from the provider.
 
-Oversized tool results are automatically spooled to `/artifacts/tool-results`
+Oversized tool results are automatically spooled to `/session/.tool-results`
 unless disabled with `toolResultSpooling: false`. The compact response includes
 the artifact path, byte count, media type, preview, line/character counts, and a
 bounded JSON structure sketch when the stored content can be parsed as JSON.
@@ -1405,3 +1407,7 @@ transactional store for distributed writers. Whole-storage rollback is not detec
 `beforeInvocation` fence. Its rejection blocks actual provider entry; record failures
 and cancellation are checked again after awaiting it. Aliases with the fence are
 refused; pass concrete model handles. `onEvent` remains observational.
+
+### Managed filesystem links and terminal artifact discovery
+
+In-process hosts refuse creation of symbolic links in managed workspace roots. Existing links in a persisted virtual filesystem are not followed by file/artifact listings; links and entries that vanish with `ENOENT` are skipped, while other listing errors propagate. A failure to list artifacts after a model response completes does not turn that answer into a model failure: both `generateHarness` and `streamHarness().finished` return an empty artifact list and an `artifact_list_warning` with `metadata.stage: "artifact_list"` and the filesystem error code when available. Other terminal-stage errors retain their original `cause` without including it in the public error message.

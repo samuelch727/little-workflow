@@ -3,9 +3,9 @@ title: Implementation Details
 description: How the v0.1.0-alpha SDK actually works, end to end, anchored on the shipped source.
 ---
 
-This section is a guided tour of the alpha SDK internals. The [SDK Implementation Spec](/docs/v0.1.0-alpha/internals/sdk-implementation) lists the contract; these pages walk through how that contract is implemented in the `@little-stack/workflow` package — every diagram traces a real path through the source.
+This section is a guided tour of the alpha SDK internals. The [SDK Implementation Spec](https://little-stack.dev/docs/workflow/v0.1.0-alpha/internals/sdk-implementation) lists the contract; these pages walk through how that contract is implemented in the `@little-stack/workflow` package — every diagram traces a real path through the source.
 
-If you only need to use the SDK, start with the [Quickstart](/docs/v0.1.0-alpha/getting-started/quickstart) and [Core Mental Model](/docs/v0.1.0-alpha/foundations). Read on here if you want to extend, debug, or audit the runtime.
+If you only need to use the SDK, start with the [Quickstart](https://little-stack.dev/docs/workflow/v0.1.0-alpha/getting-started/quickstart) and [Core Mental Model](https://little-stack.dev/docs/workflow/v0.1.0-alpha/foundations). Read on here if you want to extend, debug, or audit the runtime.
 
 ## End-To-End View
 
@@ -55,16 +55,16 @@ The shipped code in `packages/little-workflow/src/` corresponds 1:1 to these sta
 
 The pages are ordered along the lifecycle of a workflow:
 
-1. [Architecture](/docs/v0.1.0-alpha/internals/architecture) — package layout, module dependency graph.
-2. [Compile pipeline](/docs/v0.1.0-alpha/internals/compile-pipeline) — how `compileWorkflow()` turns a definition into a locked `WorkflowVersion`.
-3. [LWIR internals](/docs/v0.1.0-alpha/internals/lwir-internals) — the JSON document the runtime executes, plus its validator.
-4. [Planner output](/docs/v0.1.0-alpha/internals/compile-pipeline) — what the AI planner actually emits, end to end.
-5. [Expressions](/docs/v0.1.0-alpha/internals/expressions) — the deterministic `{{ ... }}` mini-language.
-6. [Runtime execution](/docs/v0.1.0-alpha/internals/runtime-execution) — step scheduling, harness dispatch, decision routing, outer-loop scheduler.
-7. [Parallel](/docs/v0.1.0-alpha/internals/parallel) — bounded fan-out, fan-in, branch resume.
-8. [Event log](/docs/v0.1.0-alpha/internals/event-log) — the SQLite/WAL durability layer.
-9. [Local World storage](/docs/v0.1.0-alpha/internals/local-world-storage) — artifact manifests, blobs, run locks, outer-loop manifests.
-10. [Replay](/docs/v0.1.0-alpha/internals/replay) — rebuilding state without re-calling external systems.
-11. [AI SDK adapter](/docs/v0.1.0-alpha/internals/ai-sdk-adapter) — how planner and runtime bridge to the AI SDK.
+1. [Architecture](https://little-stack.dev/docs/workflow/v0.1.0-alpha/internals/architecture) — package layout, module dependency graph.
+2. [Compile pipeline](https://little-stack.dev/docs/workflow/v0.1.0-alpha/internals/compile-pipeline) — how `compileWorkflow()` turns a definition into a locked `WorkflowVersion`.
+3. [LWIR internals](https://little-stack.dev/docs/workflow/v0.1.0-alpha/internals/lwir-internals) — the JSON document the runtime executes, plus its validator.
+4. [Planner output](https://little-stack.dev/docs/workflow/v0.1.0-alpha/internals/compile-pipeline) — what the AI planner actually emits, end to end.
+5. [Expressions](https://little-stack.dev/docs/workflow/v0.1.0-alpha/internals/expressions) — the deterministic `{{ ... }}` mini-language.
+6. [Runtime execution](https://little-stack.dev/docs/workflow/v0.1.0-alpha/internals/runtime-execution) — step scheduling, harness dispatch, decision routing, outer-loop scheduler.
+7. [Parallel](https://little-stack.dev/docs/workflow/v0.1.0-alpha/internals/parallel) — bounded fan-out, fan-in, branch resume.
+8. [Event log](https://little-stack.dev/docs/workflow/v0.1.0-alpha/internals/event-log) — the SQLite/WAL durability layer.
+9. [Local World storage](https://little-stack.dev/docs/workflow/v0.1.0-alpha/internals/local-world-storage) — artifact manifests, blobs, run locks, outer-loop manifests.
+10. [Replay](https://little-stack.dev/docs/workflow/v0.1.0-alpha/internals/replay) — rebuilding state without re-calling external systems.
+11. [AI SDK adapter](https://little-stack.dev/docs/workflow/v0.1.0-alpha/internals/ai-sdk-adapter) — how planner and runtime bridge to the AI SDK.
 
 Each page is short on purpose; cross-link rather than chase. If you find a gap between the diagrams and the source, the source wins — file an issue.

@@ -42,14 +42,14 @@ it (code checks, AI judges, people, and what your users said), and improves it
 by testing a proposed change on your own past conversations before it goes
 live. Harness needs nothing from LittleDB to run, and the connection is one
 `onEvent` hook; see [Using LittleDB](/docs/v0.1.0-alpha/reference/using-littledb).
-LittleDB is private source for now.
+LittleDB needs an account; the server is not open source.
 
 An agent's work lives in a **workspace**: each user's own folder, kept between
 visits. Most turns run on the folder tier, which is Harness's own just-bash
 sandbox over the user's files, and a container joins only when a command needs
 a real machine (git, a package manager, a build, tests), as the `nextTier` of
 [`tieredSandbox()`](/docs/v0.1.0-alpha/runtime/execution-tiers). Managed
-workspaces come with LittleDB's hosted service (private for now), and
+workspaces come with LittleDB's hosted service (account required), and
 self-hosted ones with Little Compute; the same agent folder runs on a laptop or
 a Podman box today and on the managed service as it lands, and only the sandbox
 builder differs.
@@ -62,3 +62,11 @@ builder differs.
 - [Foundations](/docs/v0.1.0-alpha/foundations) — the concepts behind sessions, files, tools, persistence, and traces
 - [Runtime Overview](/docs/v0.1.0-alpha/runtime) — the just-bash-backed local runtime
 - [Roadmap](/docs/v0.1.0-alpha/roadmap) — where Little Harness goes after alpha
+
+## Experimental context policy
+
+The private SDK context-policy draft is off by default. It adds bounded model-view trimming
+without rewriting canonical history. Exact-source checkpoints replay without resampling;
+progressive prefix reuse validates unchanged history and durable per-turn admission is
+required for paid summaries. Managed paid summaries and current-turn Workflow compaction remain incomplete. This is not a production-ready compaction v1 release. See the package's
+`docs/context-policy.md` for the host contract and explicit limitations.

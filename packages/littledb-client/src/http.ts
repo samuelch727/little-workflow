@@ -28,7 +28,7 @@ export type RequestOptions = {
 export type Transport = {
   /** The API base, ending in `/v1`. */
   readonly baseUrl: string;
-  request<T>(method: "GET" | "POST" | "PATCH" | "DELETE", path: string, body?: unknown, options?: RequestOptions): Promise<T>;
+  request<T>(method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE", path: string, body?: unknown, options?: RequestOptions): Promise<T>;
 };
 
 /** `http://host:7340`, `http://host:7340/` and `http://host:7340/v1` all mean the same API. */
@@ -53,7 +53,7 @@ export function createTransport(options: {
   return {
     baseUrl,
     async request<T>(
-      method: "GET" | "POST" | "PATCH" | "DELETE",
+      method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE",
       path: string,
       body?: unknown,
       requestOptions: RequestOptions = {},

@@ -44,7 +44,7 @@ npx @little-stack/workflow@alpha setup
 ```
 
 The command synopsis is
-`little setup [directory | --here] [--template node|next|existing-next] [--workflow]`. Run
+`little setup [directory | --here] [--template node|next|existing-next|existing-node] [--workflow] [--littledb]`. Run
 `setup --help` for provider, model, package manager, route, page, installation
 and verification options.
 
@@ -116,3 +116,130 @@ installer. See [Setup Recovery](/docs/workflow/v0.1.0-alpha/reference/setup-reco
 - [Workflow Quickstart](/docs/workflow/v0.1.0-alpha/getting-started/quickstart)
   to define and run your own workflow.
 - [How they fit](/docs/how-they-fit) for what each product owns.
+
+## Existing projects and LittleDB (next alpha)
+
+For an existing project that is not a Next.js App Router app, use the additive
+`existing-node` template. It preserves your scripts and configuration and offers
+the same plan, conflict checks, journal and rollback as `existing-next`.
+
+```bash
+npx @little-stack/workflow@alpha setup --here --template existing-node --plan
+npx @little-stack/workflow@alpha setup --here --template existing-node --yes --install --verify
+```
+
+Every setup template includes `skills/answer-clearly/SKILL.md` beside the agent's
+`instructions.md` and `tools/`. The instructions mention this local starter skill.
+
+Add `--littledb` to any template to leave model selection to your LittleDB project
+when deployed. Local smoke and `little:agent` remain keyless. Without this flag,
+the existing demo/live-provider mode is unchanged. Generated `LITTLE.md` records
+the mode and explains switching; changing a previous setup's options does not
+silently overwrite its generated files.
+
+```bash
+# New project
+npx @little-stack/workflow@alpha setup my-app --template node --littledb --yes --install --verify
+# Existing Next.js App Router app
+npx @little-stack/workflow@alpha setup --here --template existing-next --littledb --yes --install --verify
+# Another existing project
+npx @little-stack/workflow@alpha setup --here --template existing-node --littledb --yes --install --verify
+```
+
+These additions ship in alpha.4. The LittleDB command needs an account; see [release status](/docs/releases).
+
+## Move a Little project to LittleDB's model
+
+These are manual edits for an existing Little project, not another setup run.
+Setup never changes mode by replacing generated files. Keep `.little/setup.json`
+and its hashes: they describe the original generation, not these edits. A later
+setup run can report conflicts, which you should review rather than bypass.
+The examples use `agents/support`; for a Next template use `src/agents/support`
+(or the agent path recorded in `LITTLE.md`). Keep any existing tools/workflows.
+
+### From local demo/provider mode to LittleDB mode
+
+1. In `agent.ts`, remove `import { demoModel } from "./demo-model.ts"`, the
+   `const model = process.env.LITTLE_DEMO ...` declaration, and the `model,`
+   property passed to `createHarness`. Leave the rest of the harness intact.
+   Deployed model selection now belongs to the LittleDB project.
+2. In `scripts/little-smoke.mts`, immediately after `loadHarness`, add this line
+   (use `../src/agents/support/demo-model.ts` for a `src/agents` project):
+
+```ts
+harness.config.model = (await import("../agents/support/demo-model.ts")).demoModel;
+```
+
+3. Create `scripts/little-agent.mts` for local chat. Change both relative import
+   paths and the `join` path below if your agents live under `src/agents`:
+
+```ts
+import { createInterface } from "node:readline/promises";
+import { join } from "node:path";
+import { loadHarness, streamHarness } from "@little-stack/harness";
+
+const harness = await loadHarness(join(process.cwd(), "agents/support"));
+harness.config.model = process.env.LITTLE_DEMO === "0"
+  ? (await import("../agents/support/live-model.ts")).model
+  : (await import("../agents/support/demo-model.ts")).demoModel;
+const lines = createInterface({ input: process.stdin, output: process.stdout });
+try {
+  for await (const line of lines) {
+    if (line.trim() === ":exit") break;
+    if (!line.trim()) continue;
+    const result = streamHarness({
+      harness,
+      session: "local-cli",
+      messages: [{ id: crypto.randomUUID(), role: "user", parts: [{ type: "text", text: line }] }],
+    });
+    for await (const text of result.textStream) process.stdout.write(text);
+    await result.finished;
+    console.log();
+  }
+} finally { lines.close(); }
+```
+
+Set the package script to `"little:agent": "tsx scripts/little-agent.mts"`.
+Add `scripts/little-agent.mts` explicitly to `tsconfig.little.json`'s `include`,
+next to `scripts/little-smoke.mts`; do not include unrelated host scripts.
+
+For the Next sample's local web chat, also update `getAgent()` in
+`src/agents/server.ts` (or `agents/server.ts`): after loading the harness and before
+returning it, insert this `.then` before the existing `.catch`. Keep the model
+in that server-only wrapper, not in `agent.ts`:
+
+```ts
+.then(async (harness) => {
+  harness.config.model = process.env.LITTLE_DEMO === "0"
+    ? (await import("./support/live-model")).model
+    : (await import("./support/demo-model")).demoModel;
+  return harness;
+})
+```
+
+Run your package manager's `little:typecheck` and `little:smoke`, then
+`little:agent` for local keyless chat. In LittleDB mode, **do not use
+`little-harness test support`**: it does not inject the local model and reports
+that a model is required. `LITTLE_DEMO=0` explicitly opts the local runner into
+real provider calls and charges; it does not change the deployed project model.
+This migration neither logs in to nor deploys LittleDB.
+
+### From LittleDB mode back to local demo/provider mode
+
+Restore these lines in `agent.ts`, before the harness definition, and restore
+its `model,` property:
+
+```ts
+import { demoModel } from "./demo-model.ts";
+const model = process.env.LITTLE_DEMO === "0"
+  ? (await import("./live-model.ts")).model
+  : demoModel;
+```
+
+For Next-generated TypeScript, retain its extensionless import style. Remove the
+explicit model injection from smoke and the Next server wrapper. Restore
+`"little:agent": "little-harness test support"`; remove the local-only
+`scripts/little-agent.mts` and its specific `tsconfig.little.json` include if you
+no longer use them. Keep the smoke script's `LITTLE_DEMO=1` assignment so it stays
+keyless. Run typecheck and smoke again. The agent now owns model selection, so
+do not deploy it expecting the LittleDB project's model to override it.

@@ -19,6 +19,11 @@ const contentRef = {
 };
 
 describe("validateTraceEvent", () => {
+  it.each(["/artifacts/trace/legacy.txt", "/.little-harness/trace/output/new.txt"])("accepts stored content reference %s", ref => {
+    const event = { ...baseEvent, type: "harness.model.responded", metadata: { stepNumber: 1, model: { provider: "test", modelId: "test" }, text: { ...contentRef, truncated: true, contentRef: ref } } };
+    expect(validateTraceEvent(event).metadata?.text).toEqual(event.metadata.text);
+  });
+
   it("accepts honest storage-limit omissions and rejects contradictory content evidence", () => {
     const unavailable = { ...contentRef, captured: false, truncated: true, bytes: 20, unavailableReason: "storage_limit", storageLimitBytes: 10 };
     const event = (text: object) => ({ ...baseEvent, type: "harness.model.responded", metadata: { stepNumber: 1, model: { provider: "test", modelId: "test" }, text } });
@@ -630,4 +635,12 @@ it.each(["harness.runtime.tier.escalated", "harness.runtime.tier.unavailable"])(
   expect(() => validateTraceEvent({ ...baseEvent, type, occurrenceId: "attempt", metadata: { ...metadata, executionId: "attempt", toolCallId: "call" } })).not.toThrow();
   expect(() => validateTraceEvent({ ...baseEvent, type, metadata: { ...metadata, executionId: "" } })).toThrow();
   expect(() => validateTraceEvent({ ...baseEvent, type, metadata: { ...metadata, toolCallId: 12 } })).toThrow();
+});
+
+
+it("accepts legacy content refs and validates the additive previewTruncated flag", () => {
+  const event = (text: object) => ({ ...baseEvent, type: "harness.model.responded", metadata: { stepNumber: 1, model: { provider: "test", modelId: "test" }, text } });
+  expect(validateTraceEvent(event(contentRef)).metadata?.text).toEqual(contentRef);
+  expect(validateTraceEvent(event({ ...contentRef, previewTruncated: true })).metadata?.text).toMatchObject({ previewTruncated: true });
+  expect(() => validateTraceEvent(event({ ...contentRef, previewTruncated: "true" }))).toThrow();
 });

@@ -220,6 +220,8 @@ record fails the turn runs no further tool or model step and fails
 Tool results that cross the remote log must be JSON-safe — they round-trip
 through serialization on resume.
 
+> **Not in this release:** Little Compute is not published under `@little-stack`.
+
 `fileSessionLog()` is a single-process reference store. With its default
 `sync: true`, an acknowledgement follows file fsync and parent-directory fsync;
 a filesystem that cannot provide either operation fails the append closed.

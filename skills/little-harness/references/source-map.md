@@ -2,6 +2,8 @@
 
 Use source and tests to verify docs when behavior matters.
 
+The paths below are repository paths. An installed package has no `src/` and no tests: `packages/little-harness/src/<path>.ts` is `node_modules/@little-stack/harness/dist/<path>.js`, with its types in `dist/<path>.d.ts`.
+
 | Task | Source files |
 | --- | --- |
 | Public exports | `packages/little-harness/src/index.ts` (root, pinned by `src/index.test.ts`); `src/sandbox.ts`, `src/host.ts` and `src/internals.ts` for the `/sandbox`, `/host` and `/internals` subpaths |
@@ -34,7 +36,7 @@ Use source and tests to verify docs when behavior matters.
 | Agent-folder loader and workspace discovery (`loadHarness`, tool/skill/workflow discovery, tool-name policy, module loader) | `packages/little-harness/src/workspace/` (`load-harness.ts`, `discover-tools.ts`, `discover-skills.ts`, `discover-workflows.ts`, `tool-name-policy.ts`, `module-loader.ts`, `index.ts`) |
 | Little Workflow adapter | `packages/little-harness/src/workflow-harness/` |
 | Dynamic workflows (config, tools, authored-plans store, `define_workflow` and its store, registry hooks, allowed-caps) | `packages/little-harness/src/dynamic-workflows/` (`types.ts` incl. `AgentWorkflowRegistry`, `config.ts`, `tools.ts`, `authored-plans-store.ts`, `agent-workflow-tools.ts`, `agent-workflows-store.ts`); per-turn offers via `offeredAgentWorkflows` (in `agent-workflow-tools.ts`), allowed-capabilities and parent-snapshot bash in `src/execution/turn-tools.ts`; the plan lowering/factory and the `world` hook live in `@little-stack/workflow` (`src/dynamic-workflow-*.ts`) |
-| LittleDB client (private, unpublished): tracer, registry, tracing World, resolve, eval worker, user feedback | `packages/littledb-client/src/` (`client.ts`, `resolve.ts`, `exporter.ts`, `worker.ts`, `feedback.ts`, `harness/tracer.ts`, `harness/outcome-sink.ts`, `harness/registry.ts`, `workflow/tracing-world.ts`, `contract.ts`) |
+| LittleDB client (alpha.4; LittleDB account required): tracer, registry, tracing World, resolve, eval worker, user feedback | `packages/littledb-client/src/` (`client.ts`, `resolve.ts`, `exporter.ts`, `worker.ts`, `feedback.ts`, `harness/tracer.ts`, `harness/outcome-sink.ts`, `harness/registry.ts`, `workflow/tracing-world.ts`, `contract.ts`) |
 | Agent Groups (neutral launcher contract, injected tools, trusted profiles, revision fencing; the experimental `@little-stack/harness/agents` entry is `src/agents/index.ts`) | `packages/little-harness/src/agents/index.ts`, `packages/little-harness/src/agents/types.ts`, `packages/little-harness/src/agents/tools.ts`, `packages/little-harness/src/tasks/ledger.ts`, `packages/little-harness/src/execution/turn-tools.ts` |
 
 Tests are often the fastest examples. Use:

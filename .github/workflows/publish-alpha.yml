@@ -47,6 +47,7 @@ jobs:
           pnpm build
           pnpm --filter @little-stack/harness test
           pnpm --filter @little-stack/workflow test
+          pnpm --filter @little-stack/littledb test
           pnpm typecheck
           pnpm lint
 
@@ -57,11 +58,13 @@ jobs:
           mkdir -p "${pack_dir}"
           pnpm --filter @little-stack/harness pack --pack-destination "${pack_dir}"
           pnpm --filter @little-stack/workflow pack --pack-destination "${pack_dir}"
+          pnpm --filter @little-stack/littledb pack --pack-destination "${pack_dir}"
           package_version="$(node -p "require('./packages/little-workflow/package.json').version")"
           harness_version="$(node -p "require('./packages/little-harness/package.json').version")"
           node scripts/verify-little-setup.mjs \
             --tarball "${pack_dir}/little-stack-workflow-${package_version}.tgz" \
             --harness-tarball "${pack_dir}/little-stack-harness-${harness_version}.tgz" \
+            --littledb-tarball "${pack_dir}/little-stack-littledb-$(node -p "require('./packages/littledb-client/package.json').version").tgz" \
             --managers npm,pnpm
 
   publish-alpha:
@@ -107,6 +110,7 @@ jobs:
         run: |
           pnpm --filter @little-stack/harness run build
           pnpm --filter @little-stack/workflow run build
+          pnpm --filter @little-stack/littledb run build
 
       - name: Publish missing alpha package versions
         run: |
@@ -155,3 +159,4 @@ jobs:
 
           publish_if_missing @little-stack/harness packages/little-harness
           publish_if_missing @little-stack/workflow packages/little-workflow
+          publish_if_missing @little-stack/littledb packages/littledb-client

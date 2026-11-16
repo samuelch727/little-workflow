@@ -1,4 +1,7 @@
 export const HARNESS_EVENT_TYPES = [
+  "harness.context.attempt",
+  "harness.context.checkpoint",
+  "harness.context.input_usage",
   "harness.snapshot.catalog_presented",
   "harness.snapshot.file_opened",
   "harness.snapshot.tool_effect",

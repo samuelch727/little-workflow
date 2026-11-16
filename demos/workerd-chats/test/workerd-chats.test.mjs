@@ -34,7 +34,7 @@ after(async () => { await stop(server); await stop(dataService); if (dataDir) aw
 test("each chat has its own files and bash", async () => {
   assert.deepEqual(await bash("a", "echo hello > notes.txt && cat notes.txt"), { stdout: "hello\n", stderr: "", exitCode: 0 });
   assert.equal((await bash("b", "cat notes.txt")).exitCode, 1);
-  assert.equal((await bash("b", "ls -A /")).stdout, ".agents\nartifacts\ndev\npersistent\nsession\n");
+  assert.equal((await bash("b", "ls -A /")).stdout, ".agents\nartifacts\ndev\npersistent\nsession\ntmp\n");
 });
 for (const command of [
   "printf hidden > /dev/null; cat /dev/null; printf OK",
@@ -63,7 +63,7 @@ test("null structural operations explicitly preserve sources and device stat/mkd
   await bash("null-structural", "printf keep >/session/source");
   for (const command of ["mv /session/source /dev/null", "cp /session/source /dev/null"]) {
     const result = await bash("null-structural", command);
-    assert.notEqual(result.exitCode, 0); assert.match(result.stderr, /synthetic/); assert.doesNotMatch(result.stderr, /chmod/);
+    assert.notEqual(result.exitCode, 0); assert.match(result.stderr, /cannot safely determine whether/); assert.doesNotMatch(result.stderr, /chmod/);
     assert.equal((await bash("null-structural", "cat /session/source")).stdout, "keep");
   }
   assert.deepEqual(await bash("null-structural", "test ! -f /dev/null && test -c /dev/null && printf OK"), { stdout: "OK", stderr: "", exitCode: 0 });
@@ -96,13 +96,13 @@ test("synthetic /dev directory moves and recursive copies fail without leaving a
       assert.deepEqual((await get("dev-directory-guard", "files")).files, []);
     }
   }
-  assert.deepEqual(await bash("dev-directory-guard", "ls /dev; cat /dev/null"), { stdout: "null\n", stderr: "", exitCode: 0 });
+  assert.deepEqual(await bash("dev-directory-guard", "ls /dev; cat /dev/null"), { stdout: "null\nurandom\nzero\n", stderr: "", exitCode: 0 });
 });
 test("null-source copies leave managed files intact and redirects can explicitly create or truncate them", async () => {
   await bash("null-source-copy", "printf keep > /session/existing");
   for (const destination of ["existing", "absent"]) {
     const result = await bash("null-source-copy", `cp /dev/null /session/${destination}`);
-    assert.notEqual(result.exitCode, 0); assert.match(result.stderr, /synthetic/);
+    assert.notEqual(result.exitCode, 0); assert.match(result.stderr, destination === "existing" ? /cannot safely determine whether/ : /synthetic/);
   }
   assert.equal((await bash("null-source-copy", "cat /session/existing")).stdout, "keep");
   assert.notEqual((await bash("null-source-copy", "test -e /session/absent")).exitCode, 0);
@@ -661,3 +661,20 @@ async function until(check) {
   while (Date.now() < deadline) { if (await check()) return; await delay(30); }
   throw new Error(`Timed out waiting for witness. workerd stderr:\n${server?.stderr()}`);
 }
+
+test("scratch and atomic mktemp are local to one turn, not files or file events", async () => {
+  const first = await post("scratch-turn", 'f=$(mktemp); echo x > "$f"; cat "$f"; echo private > /tmp/secret; d=$(mktemp -d); test -d "$d"');
+  assert.deepEqual(JSON.parse(first.reply), { stdout: "x\n", stderr: "", exitCode: 0 });
+  assert.ok(!first.events.some(e => e.type.startsWith("harness.file.")));
+  assert.deepEqual((await get("scratch-turn", "files")).files, []);
+  assert.equal((await bash("scratch-turn", "test ! -e /tmp/secret")).exitCode, 0);
+  assert.ok(!(await trace("scratch-turn")).some(e => e.type.startsWith("harness.file.")));
+});
+
+test("atomic managed mktemp without a later write is persisted by the file tracker", async () => {
+  const created = await bash("atomic-managed", "mktemp -p /session");
+  assert.equal(created.exitCode, 0);
+  const file = created.stdout.trim();
+  assert.match(file, /^\/session\/tmp\./);
+  assert.equal((await bash("atomic-managed", `test -f ${file}`)).exitCode, 0);
+});

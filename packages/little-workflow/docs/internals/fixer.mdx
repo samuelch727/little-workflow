@@ -3,7 +3,7 @@ title: Fixer
 description: Per-step opt-in code repair — when it triggers, what the fixer harness session sees, and how fixes propagate.
 ---
 
-The Fixer is a `fix_step` harness session spawned when a `code.run` step fails and the step's LWIR declares `onFailure.fixer`. It runs the same [Harness](/docs/v0.1.0-alpha/internals/harness) contract as every other role — agent loop, bash, scratch, memory — with a focused mandate: produce corrected source and a valid output.
+The Fixer is a `fix_step` harness session spawned when a `code.run` step fails and the step's LWIR declares `onFailure.fixer`. It runs the same [Harness](https://little-stack.dev/docs/workflow/v0.1.0-alpha/internals/harness) contract as every other role — agent loop, bash, scratch, memory — with a focused mandate: produce corrected source and a valid output.
 
 ## LWIR Step Declaration
 
@@ -140,7 +140,7 @@ type FixerManifest = WorkerManifest & {
 };
 ```
 
-See [Identity Manifests](/docs/v0.1.0-alpha/internals/identity-manifests) for the full `WorkerManifest` shape and drift detection semantics.
+See [Identity Manifests](https://little-stack.dev/docs/workflow/v0.1.0-alpha/internals/identity-manifests) for the full `WorkerManifest` shape and drift detection semantics.
 
 ## Memory-Write Convention
 
@@ -163,7 +163,7 @@ If the fixer's agent loop fails to produce valid output within `maxAttempts`, it
 
 ## Related Pages
 
-- [Harness](/docs/v0.1.0-alpha/internals/harness) — the full harness contract the fixer runs in
-- [Memory + Scratch](/docs/v0.1.0-alpha/internals/memory-scratch) — how memory and scratch are available to the fixer
-- [Identity Manifests](/docs/v0.1.0-alpha/internals/identity-manifests) — `FixerManifest` shape and drift detection
-- [Runtime Execution](/docs/v0.1.0-alpha/internals/runtime-execution) — where `executeCodeRunStep` lives and how step failures bubble
+- [Harness](https://little-stack.dev/docs/workflow/v0.1.0-alpha/internals/harness) — the full harness contract the fixer runs in
+- [Memory + Scratch](https://little-stack.dev/docs/workflow/v0.1.0-alpha/internals/memory-scratch) — how memory and scratch are available to the fixer
+- [Identity Manifests](https://little-stack.dev/docs/workflow/v0.1.0-alpha/internals/identity-manifests) — `FixerManifest` shape and drift detection
+- [Runtime Execution](https://little-stack.dev/docs/workflow/v0.1.0-alpha/internals/runtime-execution) — where `executeCodeRunStep` lives and how step failures bubble

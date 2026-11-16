@@ -127,7 +127,7 @@ describe("wrapToolsWithHarnessContext", () => {
       expect(result).toMatchObject({
         type: "harness.tool_result_file",
         toolName: "longLookup",
-        path: "/artifacts/tool-results/longLookup/call_1.txt",
+        path: "/session/.tool-results/longLookup/call_1.txt",
         mediaType: "text/plain",
         bytes: new TextEncoder().encode(longResult).byteLength,
         summary: {
@@ -170,7 +170,7 @@ describe("wrapToolsWithHarnessContext", () => {
       const result = await (wrapped.binaryLookup as any).execute({}, { toolCallId: "call_1" });
 
       expect(result).toBe(binary);
-      await expect(session.files.list("/artifacts/tool-results", { recursive: true })).rejects.toMatchObject({
+      await expect(session.files.list("/session/.tool-results", { recursive: true })).rejects.toMatchObject({
         code: "ENOENT",
       });
     });
@@ -223,7 +223,7 @@ describe("wrapToolsWithHarnessContext", () => {
       expect(result).toMatchObject({
         type: "harness.tool_result_file",
         toolName: "queryAccounts",
-        path: "/artifacts/tool-results/queryAccounts/call_rows.json",
+        path: "/session/.tool-results/queryAccounts/call_rows.json",
         mediaType: "application/json",
         summary: {
           format: "json",

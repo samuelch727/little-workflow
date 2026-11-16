@@ -17,10 +17,8 @@ describe("SubtreeFs", () => {
     expect(view.getAllPaths()).not.toContain("/secret.txt");
     expect((await view.readdirWithFileTypes("/")).map((entry) => entry.name).sort()).toEqual(["a.txt", "dir"]);
 
-    await view.symlink("/a.txt", "/link");
-    expect(await view.readlink("/link")).toBe("/a.txt");
-    expect(await outer.readlink("/session/link")).toBe("/session/a.txt");
-    expect(await view.realpath("/link")).toBe("/a.txt");
+    await expect(view.symlink("/a.txt", "/link")).rejects.toMatchObject({ code: "EPERM" });
+    expect(await outer.exists("/session/link")).toBe(false);
 
     await view.mv("/a.txt", "/moved.txt");
     expect(await outer.exists("/session/moved.txt")).toBe(true);
@@ -35,4 +33,19 @@ describe("SubtreeFs", () => {
     expect(new TextDecoder().decode(snapshot["todo.md"])).toBe("- one");
     expect(await snapshotFs(fs, "/persistent/missing")).toEqual({});
   });
+});
+
+it("delegates exclusive creation atomically and rejects unsupported backing stores", async () => {
+  const outer = new InMemoryFs();
+  await outer.mkdir("/session");
+  const view = new SubtreeFs(outer, "/session");
+  const results = await Promise.allSettled([
+    view.createExclusive("/same", { mode: 0o600 }),
+    view.createExclusive("/same", { mode: 0o600 }),
+  ]);
+  expect(results.filter(r => r.status === "fulfilled")).toHaveLength(1);
+  expect(await outer.exists("/session/same")).toBe(true);
+  Object.defineProperty(outer, "createExclusive", { value: undefined });
+  await expect(view.createExclusive("/unsupported", { mode: 0o600 })).rejects.toThrow(/ENOSYS/);
+  expect(await outer.exists("/session/unsupported")).toBe(false);
 });

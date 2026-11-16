@@ -1,6 +1,6 @@
 {
   "name": "@little-stack/harness",
-  "version": "0.2.0-alpha.3",
+  "version": "0.2.0-alpha.4",
   "description": "Local-first agent runtime primitives for AI SDK sessions, tools, files, traces, persistence, and Little Workflow harness integration.",
   "license": "Apache-2.0",
   "repository": {
@@ -27,7 +27,8 @@
   },
   "files": [
     "dist",
-    "docs"
+    "docs",
+    "skills"
   ],
   "engines": {
     "node": ">=22"
@@ -105,10 +106,10 @@
   },
   "scripts": {
     "build": "node ../littledb-client/scripts/prepare-harness-contract.mjs --harness && tsc -p tsconfig.build.json && node ../littledb-client/scripts/prepare-harness-contract.mjs --harness --copy-dist",
-    "prepack": "pnpm run build",
+    "prepack": "pnpm run build && node ../littledb-client/scripts/prepare-package-skill.mjs little-harness",
     "typecheck": "node ../littledb-client/scripts/prepare-harness-contract.mjs --harness && tsc --noEmit",
     "lint": "node ../littledb-client/scripts/prepare-harness-contract.mjs --harness && tsc --noEmit",
-    "test": "node ../littledb-client/scripts/prepare-harness-contract.mjs --harness && vitest run",
+    "test": "node ../littledb-client/scripts/prepare-harness-contract.mjs --harness && node --test scripts/packed-skills.node.mjs && vitest run",
     "test:watch": "vitest"
   },
   "dependencies": {

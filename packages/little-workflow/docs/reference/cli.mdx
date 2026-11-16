@@ -3,7 +3,7 @@ title: CLI
 description: The minimal command surface that ships with v0.1.0-alpha.
 ---
 
-The `little` binary ships with the `@little-stack/workflow` package (`npx @little-stack/workflow@alpha <command>` without installing). Alpha ships the local commands needed for the SDK loop: scaffold workflow projects, validate compiled LWIR, run compiled LWIR in Local World, run folder-authored workflows, dump events, replay state, and report what a run cost. There is no `runs list`, `runs inspect`, timeline, retry-from-step, or fork command yet; a fuller inspection surface is planned (see the [Roadmap](/docs/v0.1.0-alpha/roadmap)).
+The `little` binary ships with the `@little-stack/workflow` package (`npx @little-stack/workflow@alpha <command>` without installing). Alpha ships the local commands needed for the SDK loop: scaffold workflow projects, validate compiled LWIR, run compiled LWIR in Local World, run folder-authored workflows, dump events, replay state, and report what a run cost. There is no `runs list`, `runs inspect`, timeline, retry-from-step, or fork command yet; a fuller inspection surface is planned (see the [Roadmap](https://little-stack.dev/docs/workflow/v0.1.0-alpha/roadmap)).
 
 ```txt
 little setup [directory | --here] [--template node|next|existing-next] [--workflow]
@@ -63,7 +63,7 @@ little add harness [--agent <name>] [--workflow-name <existing-name> | --new-wor
 
 The generated `package.json` pins versions instead of using `latest`. `@little-stack/workflow` is pinned to the CLI's own version, `ai` to `^7.0.0`, and the provider package to its AI SDK 7-era range. It also sets `"pnpm": { "onlyBuiltDependencies": ["better-sqlite3"] }` so pnpm 10 builds the event store's native binding.
 
-`--with-harness` also creates `little-harness.json`, an agent folder (`agents/<agent>/`, default `support`), a `test:agent` script, and an agent workflow shim, `agents/<agent>/workflows/<name>.ts`. The shim default-exports `loadWorkflow(...)` for the manifest folder, so the agent gets the workflow as a tool. See [Compose With Little Harness](/docs/v0.1.0-alpha/authoring/compose-with-harness#folder-workflows-loadworkflow).
+`--with-harness` also creates `little-harness.json`, an agent folder (`agents/<agent>/`, default `support`), a `test:agent` script, and an agent workflow shim, `agents/<agent>/workflows/<name>.ts`. The shim default-exports `loadWorkflow(...)` for the manifest folder, so the agent gets the workflow as a tool. See [Compose With Little Harness](https://little-stack.dev/docs/workflow/v0.1.0-alpha/authoring/compose-with-harness#folder-workflows-loadworkflow).
 
 `add workflow` adds another workflow folder (under `workflows/`, or `--dir`) and records it in `little-workflow.json`. `add harness` creates or reuses a Harness agent and writes an agent workflow shim for either an existing manifest workflow (`--workflow-name`) or a new one (`--new-workflow`).
 
@@ -224,4 +224,4 @@ The JSON form carries the same figures plus `reasoningTokens`, `pricedCalls`, an
 
 `costUsd` is `number | null` everywhere it appears. `null` means unpriced; a genuine `0` is a real zero-dollar total, normally because there were no model calls in scope.
 
-Pre-run cost *estimation* and budget enforcement are separate, still-unimplemented surfaces — `report` is strictly a post-run receipt. See the [Roadmap](/docs/v0.1.0-alpha/roadmap).
+Pre-run cost *estimation* and budget enforcement are separate, still-unimplemented surfaces — `report` is strictly a post-run receipt. See the [Roadmap](https://little-stack.dev/docs/workflow/v0.1.0-alpha/roadmap).

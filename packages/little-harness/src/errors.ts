@@ -52,9 +52,9 @@ export type HarnessTerminalStage =
 export class HarnessTerminalStageError extends LittleHarnessError {
   readonly stage: HarnessTerminalStage;
 
-  constructor(stage: HarnessTerminalStage) {
+  constructor(stage: HarnessTerminalStage, options?: ErrorOptions) {
     super(`Little Harness terminal ${stage} stage failed.`,
-      `harness_terminal_${stage}_failed`);
+      `harness_terminal_${stage}_failed`, undefined, options);
     this.name = "HarnessTerminalStageError";
     this.stage = stage;
   }

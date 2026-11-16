@@ -61,7 +61,7 @@ The Local World data directory is self-contained. Events are stored in one SQLit
     ol_abc123.json
 ```
 
-Events are committed as SQLite rows and exposed through `world.listEvents(runId)` and `little events <runId>`. Artifacts live as files on the local filesystem with a small JSON manifest per artifact. Production databases, distributed queues, and remote blob storage are planned post-alpha (see the [Roadmap](/docs/v0.1.0-alpha/roadmap)) and later.
+Events are committed as SQLite rows and exposed through `world.listEvents(runId)` and `little events <runId>`. Artifacts live as files on the local filesystem with a small JSON manifest per artifact. Production databases, distributed queues, and remote blob storage are planned post-alpha (see the [Roadmap](https://little-stack.dev/docs/workflow/v0.1.0-alpha/roadmap)) and later.
 
 ### `events/`
 
@@ -83,7 +83,7 @@ Memory stores persist across runs. Three scopes:
 
 Memory stores are created lazily on first write. Workflow memory is keyed by `workflowId`; changing the workflow id creates a new store. Devs may pre-populate the org store with policies, runbooks, or style guides before running any workflow.
 
-See [Memory](/docs/v0.1.0-alpha/authoring/memory) for the memory model, mount semantics, and memory poisoning mitigations.
+See [Memory](https://little-stack.dev/docs/workflow/v0.1.0-alpha/authoring/memory) for the memory model, mount semantics, and memory poisoning mitigations.
 
 ### `outer-loops/`
 
@@ -111,7 +111,7 @@ When `maxOuterCycles > 1`, the runtime writes a manifest per outer-loop session:
 }
 ```
 
-The manifest is written via atomic rename (write to `*.tmp`, rename into place) after every `OuterLoopCycleCompleted` event. See [Durability](/docs/v0.1.0-alpha/running/replay-and-durability) for the resume scenarios this enables.
+The manifest is written via atomic rename (write to `*.tmp`, rename into place) after every `OuterLoopCycleCompleted` event. See [Durability](https://little-stack.dev/docs/workflow/v0.1.0-alpha/running/replay-and-durability) for the resume scenarios this enables.
 
 ## API Shape
 
@@ -136,3 +136,8 @@ Local World is not production-grade:
 - memory stores are plain files with no versioning, audit log, or concurrent-write protection (single-process assumption)
 
 The first alpha demo proves kill-and-resume behavior: stop a run mid-flight, restart, replay persisted events, and continue without re-calling completed model or tool steps. The second demo exercises orchestrator + memory: an orchestrator reads accumulated pipeline memory on each run, writing better plans over time.
+
+## Virtual World
+
+For filesystem-backed runs, see [Virtual World](./virtual-world.mdx).
+That page covers options, persistence, ownership and the current native dependency.

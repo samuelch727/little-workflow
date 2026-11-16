@@ -63,7 +63,7 @@ to become a durable artifact.
 Text file changes are traced as `harness.file.created`, `harness.file.updated`,
 and `harness.file.deleted` events with before/after byte counts and hashes, plus
 a bounded unified diff when the diff is small enough to inline. Large diffs use
-`/artifacts/trace/...` content refs; binary files record metadata only. See
+`/.little-harness/trace/...` content refs; binary files record metadata only. See
 [Tracing](/docs/v0.1.0-alpha/foundations/tracing) for the full event shape.
 
 ## `/artifacts/`
@@ -75,7 +75,7 @@ of the whole file, and can inspect the artifact with shell commands or scripts
 when it needs the detail.
 
 If a tool result is too large to return inline, Little Harness automatically
-spools it into `/artifacts/tool-results/<toolName>/<toolCallId>.<ext>` and returns
+spools it into `/session/.tool-results/<toolName>/<toolCallId>.<ext>` and returns
 that pointer to the next model step (the extension follows the result's media type
 — `.json` for JSON). Spooled pointers include a compact summary with
 line/character counts and JSON structure metadata when the stored content can be
@@ -84,7 +84,7 @@ parsed as JSON.
 ```ts
 {
   preview: "42 incidents returned. Top fields: id, severity, summary...",
-  path: "/artifacts/tool-results/search_incidents/toolu_01ab....json",
+  path: "/session/.tool-results/search_incidents/toolu_01ab....json",
   bytes: 910238
 }
 ```
@@ -93,11 +93,12 @@ The model can inspect the artifact with shell commands or scripts:
 
 ```bash
 jq '.incidents[] | select(.severity == "high")' \
-  /artifacts/tool-results/search_incidents/toolu_01ab....json
+  /session/.tool-results/search_incidents/toolu_01ab....json
 ```
 
-Trace artifacts live under `/artifacts/trace/...`. Both are normal artifacts: the
-host can list them, and the model can read them when it receives a harness path.
+Trace spills use logical refs under `/.little-harness/trace/...` and host-owned storage,
+not artifacts or model-readable files. Read them with `session.traceContent.read(contentRef)`.
+Tool spools remain model-readable session files, but do not appear in `result.artifacts`.
 
 ## `.agents/skills/`
 

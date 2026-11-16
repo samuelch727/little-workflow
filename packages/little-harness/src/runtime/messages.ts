@@ -58,7 +58,7 @@ export async function buildModelMessages<TExtraBody>(
       `Available skills:\n${skills
         .map((skill) =>
           bash
-            ? `- ${skill.name}: ${skill.description}. Read details at ${skill.harnessDir}/SKILL.md`
+            ? `- ${skill.name}: ${skill.description}. Read details at /${skill.harnessDir.replace(/^\/+/, "")}/SKILL.md`
             : `- ${skill.name}: ${skill.description}. Open it with ${LOAD_SKILL_TOOL_NAME}.`,
         )
         .join("\n")}`,

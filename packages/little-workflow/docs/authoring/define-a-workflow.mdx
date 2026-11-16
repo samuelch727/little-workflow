@@ -3,9 +3,9 @@ title: Define a Workflow
 description: Author a workflow with defineWorkflow — plain input/output schemas, a model or a fixed plan, and inline tools.
 ---
 
-`defineWorkflow` is how you author a workflow. You describe the job — plain `input`/`output` schemas, a model (or several model slots), the tools the plan may call, and optionally a planner config or a fixed plan — and it normalizes into the shape the runtime runs. Start with one `model` and inline tools; the same function takes the full config (model slots, `PlannerConfig`, `toolSelection`, `workflowVersionReuseStrategy`, worker and memory settings) when you need it. See [Workflow Config](/docs/v0.1.0-alpha/authoring/advanced-createlittleworkflow) for every field.
+`defineWorkflow` is how you author a workflow. You describe the job — plain `input`/`output` schemas, a model (or several model slots), the tools the plan may call, and optionally a planner config or a fixed plan — and it normalizes into the shape the runtime runs. Start with one `model` and inline tools; the same function takes the full config (model slots, `PlannerConfig`, `toolSelection`, `workflowVersionReuseStrategy`, worker and memory settings) when you need it. See [Workflow Config](https://little-stack.dev/docs/workflow/v0.1.0-alpha/authoring/advanced-createlittleworkflow) for every field.
 
-> **Related but distinct.** Little Workflow owns workflow *authoring* (`defineWorkflow`). To hand a defined workflow to a Little Harness agent as a typed tool, adapt it with `asHarnessWorkflow`; see [Compose With Little Harness](/docs/v0.1.0-alpha/authoring/compose-with-harness).
+> **Related but distinct.** Little Workflow owns workflow *authoring* (`defineWorkflow`). To hand a defined workflow to a Little Harness agent as a typed tool, adapt it with `asHarnessWorkflow`; see [Compose With Little Harness](https://little-stack.dev/docs/workflow/v0.1.0-alpha/authoring/compose-with-harness).
 
 ## The minimal shape
 
@@ -56,14 +56,14 @@ export const reviewApplicants = defineWorkflow({
 | `plan` | no | A fixed plan, `{ steps }` or a complete LWIR document. Replaces the planner; see [A fixed plan](#a-fixed-plan). |
 | `tools` | no | AI SDK tools keyed by name, a `ToolRegistry`, or the names of tools the run supplies. |
 | `toolSelection` | no | Which declared tools the plan may reference. Default `"planner_selected"`. |
-| `workflowVersionReuseStrategy` | no | Whether the planner may reuse a prior compiled version: `"planner_reviewed"` (default), `"planner_reviews_each_run"` or `"always_fresh"`. See [Run A Workflow → Options](/docs/v0.1.0-alpha/running/run-a-workflow#options). |
+| `workflowVersionReuseStrategy` | no | Whether the planner may reuse a prior compiled version: `"planner_reviewed"` (default), `"planner_reviews_each_run"` or `"always_fresh"`. See [Run A Workflow → Options](https://little-stack.dev/docs/workflow/v0.1.0-alpha/running/run-a-workflow#options). |
 | `worker` | no | A `WorkerConfig` for the worker harness. |
 | `memory` | no | A `MemoryConfig` for memory-store mounts. |
 | `bash` | no | Bash capabilities for the harness sessions. |
 
 A workflow needs an `id` and a way to get a plan: a `model` (or `models`) for the planner to draft one, or a fixed `plan`. Everything else is optional.
 
-`input` and `output` must stay inside the [LWIR schema subset](/docs/v0.1.0-alpha/reference/lwir-reference#schema-subset). The subset accepts `.describe()`, `.min()`/`.max()`, enums, and string- or enum-keyed `z.record(...)`. It rejects `.positive()`/`.gt()` (`exclusiveMinimum`), `.regex()` (`pattern`), `.email()` (`format`), and `.default()`. The workflow fails to compile before any model is called. Validate finer constraints inside a tool.
+`input` and `output` must stay inside the [LWIR schema subset](https://little-stack.dev/docs/workflow/v0.1.0-alpha/reference/lwir-reference#schema-subset). The subset accepts `.describe()`, `.min()`/`.max()`, enums, and string- or enum-keyed `z.record(...)`. It rejects `.positive()`/`.gt()` (`exclusiveMinimum`), `.regex()` (`pattern`), `.email()` (`format`), and `.default()`. The workflow fails to compile before any model is called. Validate finer constraints inside a tool.
 
 ## Running it
 
@@ -81,7 +81,7 @@ result.usage.costUsd; // number | null — real USD, or null when nothing could 
 result.runId;         // re-runnable / replayable
 ```
 
-`result.usage` also carries `inputTokens`, `cachedInputTokens`, `outputTokens`, `reasoningTokens`, `pricedCalls`, and `unpricedCalls`. `costUsd` is `null` when the run made model calls but none of them matched a registry entry — that is *unpriced*, not free. A real `0` is a genuine zero-dollar total, normally because the run made no model calls. See [Quickstart → What The Run Cost](/docs/v0.1.0-alpha/getting-started/quickstart#what-the-run-cost).
+`result.usage` also carries `inputTokens`, `cachedInputTokens`, `outputTokens`, `reasoningTokens`, `pricedCalls`, and `unpricedCalls`. `costUsd` is `null` when the run made model calls but none of them matched a registry entry — that is *unpriced*, not free. A real `0` is a genuine zero-dollar total, normally because the run made no model calls. See [Quickstart → What The Run Cost](https://little-stack.dev/docs/workflow/v0.1.0-alpha/getting-started/quickstart#what-the-run-cost).
 
 `workflow.run(input, options?)` is the same call, with the same options:
 
@@ -156,7 +156,7 @@ export const echo = defineWorkflow({
 const result = await runWorkflow(echo, { value: "hello" }); // result.output: { echoed: "hello" }
 ```
 
-The plan is validated like a drafted one, but it is never redrafted or replaced: an invalid plan (a misspelled model slot, an unregistered tool) fails the run with the validation findings. Only the steps' own `with.tool` and `with.model` count toward its permissions, so tool arguments are passed as data even when they look like steps. The plan's hash is part of the workflow definition hash, so changing a step changes the hash. See the [LWIR Reference](/docs/v0.1.0-alpha/reference/lwir-reference) for the step types.
+The plan is validated like a drafted one, but it is never redrafted or replaced: an invalid plan (a misspelled model slot, an unregistered tool) fails the run with the validation findings. Only the steps' own `with.tool` and `with.model` count toward its permissions, so tool arguments are passed as data even when they look like steps. The plan's hash is part of the workflow definition hash, so changing a step changes the hash. See the [LWIR Reference](https://little-stack.dev/docs/workflow/v0.1.0-alpha/reference/lwir-reference) for the step types.
 
 ## A policy
 
@@ -182,4 +182,4 @@ The planner sees the policy too, so it can plan the steps the policy needs, and 
 
 ## Composing workflows
 
-To compose distinct workflows, adapt each one with `asHarnessWorkflow` and hand them to a Little Harness agent. See [Compose With Little Harness](/docs/v0.1.0-alpha/authoring/compose-with-harness). `runOrchestration` (the orchestrator agent) is deprecated.
+To compose distinct workflows, adapt each one with `asHarnessWorkflow` and hand them to a Little Harness agent. See [Compose With Little Harness](https://little-stack.dev/docs/workflow/v0.1.0-alpha/authoring/compose-with-harness). `runOrchestration` (the orchestrator agent) is deprecated.

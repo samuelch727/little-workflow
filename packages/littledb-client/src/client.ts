@@ -1,3 +1,4 @@
+import { createPlanUploads } from "./workflow/plans.js";
 import type { IngestBatch, ScoreSource } from "./contract.js";
 import { createExporter, type ExporterStats, type LittleDBErrorHandler } from "./exporter.js";
 import {
@@ -168,7 +169,7 @@ export type LittleDB = {
   /** A harness outcome sink: chat reactions and reported outcomes become user feedback. */
   outcomeSink(options?: OutcomeSinkOptions): LittleDBOutcomeSink;
   /** Call any other `/v1` endpoint (datasets, experiments, proposals). Throws `LittleDBError`. */
-  request<T = unknown>(method: "GET" | "POST" | "PATCH" | "DELETE", path: string, body?: unknown): Promise<T>;
+  request<T = unknown>(method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE", path: string, body?: unknown): Promise<T>;
   /** Send everything queued now. Never throws. */
   flush(): Promise<void>;
   /** Flush and stop sending. Call before the process exits. */
@@ -216,6 +217,7 @@ export function createLittleDB(options: LittleDBOptions): LittleDB {
     ...(options.maxBatch === undefined ? {} : { maxBatch: options.maxBatch }),
     ...(options.maxQueue === undefined ? {} : { maxQueue: options.maxQueue }),
   });
+  const plans = createPlanUploads(transport, onError);
   const feedbackApi = createFeedbackApi({ transport, exporter });
   const resolver = createResolver({
     transport,
@@ -234,7 +236,7 @@ export function createLittleDB(options: LittleDBOptions): LittleDB {
   const memory = createManagedMemory({ transport, onError, links: memoryLinks, ...(options.localMemoryDir === undefined ? {} : { localDir: options.localMemoryDir }) });
   const harnessTracer = (tracerOptions: HarnessTracerOptions) => createHarnessTracer(tracerOptions, { exporter, onError, turnTraceIds, memoryLinks });
   const tracingWorld = <W extends WorldLike>(inner: W, worldOptions: TracingWorldOptions) =>
-    createTracingWorld(inner, worldOptions, { exporter, onError, turnTraceIds });
+    createTracingWorld(inner, worldOptions, { exporter, onError, turnTraceIds, plans });
   const evalWorker = (workerOptions: EvalWorkerOptions) => createEvalWorker(workerOptions, { transport, exporter, onError });
   const agentWorkflowRegistry = (registryOptions: AgentWorkflowRegistryOptions) =>
     createAgentWorkflowRegistry(registryOptions, { transport, onError, tracingWorld });
@@ -295,8 +297,8 @@ export function createLittleDB(options: LittleDBOptions): LittleDB {
     feedbackHandler: (handlerOptions) => createFeedbackHandler(handlerOptions, { ...feedbackApi, onError }),
     outcomeSink: (sinkOptions = {}) => createOutcomeSink(sinkOptions, { ...feedbackApi, onError }),
     request: (method, path, body) => transport.request(method, path.startsWith("/") ? path : `/${path}`, body),
-    flush: () => exporter.flush(),
-    shutdown: () => exporter.shutdown(),
+    flush: async () => { await Promise.all([plans.flush(), exporter.flush()]); },
+    shutdown: async () => { await Promise.all([plans.shutdown(), exporter.shutdown()]); },
     stats: () => exporter.stats(),
   };
 }

@@ -11,14 +11,14 @@ export const TIER0_MATRIX_SCHEMA_VERSION = 1;
  * Bump when the *content* below changes (a new needs-real-exec entry, a re-pinned
  * snapshot after a just-bash upgrade). Date-ordinal so it sorts.
  */
-export const TIER0_MATRIX_VERSION = "2026-11-05.1";
+export const TIER0_MATRIX_VERSION = "2026-11-12.2";
 
 /**
  * The emulator the pinned halves of this matrix were observed against. Informational
  * only — just-bash does not export its `package.json`, so this cannot be read back at
  * runtime. The drift tests, not this string, are what actually catches an upgrade.
  */
-export const TIER0_EMULATOR = "just-bash@3.0.3";
+export const TIER0_EMULATOR = "just-bash@3.6.0";
 
 /**
  * Which runtime toggle has to be on for just-bash to register a command.
@@ -35,15 +35,16 @@ export type Tier0RealExecReason =
   | "network-client"
   | "process-control"
   | "interactive"
-  | "unimplemented-builtin";
+  | "unimplemented-builtin"
+  | "host-filesystem";
 
 export type Tier0CapabilityMatrix = {
   readonly schemaVersion: number;
   readonly matrixVersion: string;
   readonly emulator: string;
   /**
-   * Every command just-bash can register, mapped to the toggle that registers it.
-   * Derived from the library at load time — never hand-maintained.
+   * Registered commands Harness can serve, mapped to their runtime toggle.
+   * Derived from the library, excluding pinned build and filesystem gaps.
    */
   readonly commands: ReadonlyMap<string, Tier0Capability>;
   /**
@@ -65,11 +66,11 @@ export const TIER0_ALWAYS_COMMANDS_SNAPSHOT: readonly string[] = [
   "alias", "awk", "base64", "basename", "bash", "cat", "chmod", "clear", "column", "comm",
   "cp", "cut", "date", "diff", "dirname", "du", "echo", "egrep", "env", "expand", "expr",
   "false", "fgrep", "file", "find", "fold", "grep", "gunzip", "gzip", "head", "help",
-  "history", "hostname", "html-to-markdown", "join", "jq", "ln", "ls", "md5sum", "mkdir",
+  "history", "hostname", "html-to-markdown", "join", "jq", "ln", "ls", "md5sum", "mkdir", "mktemp",
   "mv", "nl", "od", "paste", "printenv", "printf", "pwd", "readlink", "rev", "rg", "rm",
   "rmdir", "sed", "seq", "sh", "sha1sum", "sha256sum", "sleep", "sort", "split", "sqlite3",
   "stat", "strings", "tac", "tail", "tar", "tee", "time", "timeout", "touch", "tr", "tree",
-  "true", "unalias", "unexpand", "uniq", "wc", "which", "whoami", "xan", "xargs", "yq",
+  "true", "unalias", "unexpand", "uniq", "wc", "which", "whoami", "xan", "xargs", "yes", "yq",
   "zcat",
 ];
 
@@ -203,6 +204,11 @@ export const TIER0_NEEDS_REAL_EXEC: readonly (readonly [string, Tier0RealExecRea
   ["man", "interactive"],
 ];
 
+/** Registered commands whose required filesystem primitives Harness cannot serve yet.
+ * Harness wrappers delegate atomic creation; no commands are excluded currently.
+ */
+export const TIER0_FILESYSTEM_UNSERVABLE_COMMANDS: readonly string[] = [];
+
 let cached: Tier0CapabilityMatrix | undefined;
 
 /**
@@ -241,6 +247,10 @@ export function tier0CapabilityMatrix(): Tier0CapabilityMatrix {
       }
     }
     const needsRealExec = new Map<string, Tier0RealExecReason>(TIER0_NEEDS_REAL_EXEC);
+    for (const name of TIER0_FILESYSTEM_UNSERVABLE_COMMANDS) {
+      commands.delete(name);
+      needsRealExec.set(name, "host-filesystem");
+    }
     for (const name of TIER0_UNIMPLEMENTED_BUILTINS) {
       needsRealExec.set(name, "unimplemented-builtin");
     }

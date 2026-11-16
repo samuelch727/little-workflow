@@ -42,7 +42,7 @@ export type FileContent =
   | ReadableStream<Uint8Array>;
 
 export type HarnessWarning = {
-  code: "undefined_input_type" | "provider_warning" | "staging_warning" | "policy_warning";
+  code: "undefined_input_type" | "provider_warning" | "staging_warning" | "artifact_list_warning" | "policy_warning";
   message: string;
   metadata?: JsonObject;
 };
@@ -124,6 +124,8 @@ export type HarnessSession = {
   dataDir?: string;
   files: FileWriter;
   artifacts: HarnessArtifactAccessor;
+  /** Host-owned trace content reader (built-in hosts); custom hosts may opt in. */
+  traceContent?: Pick<import("./trace/storage.js").TraceContentStore, "read">;
   trace: TraceRef;
   status(): Promise<HarnessSessionStatus>;
   setStatus(patch: Partial<HarnessSessionStatus>): Promise<void>;
@@ -272,17 +274,20 @@ export type HarnessRuntimeOptions = {
 };
 
 export type HarnessWorkflowBudgets = {
+  /** Per-turn model-step cap unless turnLimits.maxSteps overrides it; caller stopWhen cannot bypass it. */
   readonly maxModelSteps: number;
+  /** Execution attempts per turn across steps, including nested tools; replay does not spend a call. */
   readonly maxToolCallsPerTurn: number;
+  /** Concurrent execution chains per turn; nested tools share a slot and serialize siblings. */
   readonly maxConcurrentToolCalls: number;
+  /** Workflow-run setting: concurrent child runs. */
   readonly maxConcurrentWorkflowRuns: number;
+  /** Workflow-run setting: queued child runs. */
   readonly maxQueuedWorkflowRuns: number;
-  readonly maxAutonomousTurns: number;
+  /** Queue wait plus result deadline; abort is cooperative and cannot undo tool side effects. */
   readonly toolDeadlineMs?: number;
-  readonly workflowDeadlineMs?: number;
+  /** Workflow-run setting: time a child run may wait for admission. */
   readonly queueDeadlineMs?: number;
-  readonly maxDynamicWorkflowTokens?: number;
-  readonly maxDynamicWorkflowOutputBytes?: number;
 };
 
 export type HarnessRuntimeMount = {
@@ -410,12 +415,15 @@ export type HarnessTrigger = {
 };
 
 export type HarnessAgentOptions = {
+  contextPolicy?: false | import("./context-policy/types.js").ContextPolicy;
   /** Immutable, admitted per-turn content. Requires an owner-installed executionRegistry. */
   executionSnapshot?: import("./execution-snapshot.js").HarnessExecutionSnapshot;
   model?: LanguageModel;
   system?: string | ModelMessage | ModelMessage[];
   runtime?: HarnessRuntimeOptions;
   temperature?: CallSettings["temperature"];
+  /** Maximum completion tokens; also reserved by an enabled context policy. */
+  maxOutputTokens?: CallSettings["maxOutputTokens"];
   stopWhen?: StopCondition<any> | Array<StopCondition<any>>;
   prepareStep?: PrepareStepFunction<any>;
   toolChoice?: ToolChoice<any>;
@@ -552,6 +560,7 @@ export type CreateHarnessOptions<TTools extends ToolSet = ToolSet, TExtraBody = 
    * model fails with "Little Harness model is required".
    */
   model?: LanguageModel;
+  maxOutputTokens?: CallSettings["maxOutputTokens"];
   system?: string | ModelMessage | ModelMessage[];
   tools?: TTools;
   /**
@@ -565,6 +574,10 @@ export type CreateHarnessOptions<TTools extends ToolSet = ToolSet, TExtraBody = 
   /** Workflows exposed to the agent as callable tools (one named tool per workflow). */
   workflows?: readonly import("./workflows.js").HarnessWorkflow[];
   workflowBudgets?: Partial<HarnessWorkflowBudgets>;
+  /** Offer task controls. Defaults to configured workflows, agents or humanInput on a durable host. */
+  taskTools?: boolean;
+  /** Offer workflow inspection tools. Defaults to at least one configured workflow. */
+  workflowTools?: boolean;
   /** Enable model-authored one-shot plans. Inject via little-workflow's `dynamicWorkflows()`. */
   dynamicWorkflows?: import("./dynamic-workflows/types.js").DynamicWorkflowsConfig;
   /** Optional neutral Agent Group launcher; no agent tools are injected when absent. */
@@ -585,6 +598,7 @@ export type CreateHarnessOptions<TTools extends ToolSet = ToolSet, TExtraBody = 
   persistentDirs?: PersistentDir<TExtraBody>[];
   chat?: HarnessChatOptions<TExtraBody>;
   runtime?: HarnessRuntimeOptions;
+  contextPolicy?: false | import("./context-policy/types.js").ContextPolicy;
   toolResultSpooling?: HarnessToolResultSpoolingOptions;
   /**
    * Anthropic prompt caching on the agent's model calls: the tools and system prompt are cached
@@ -663,6 +677,7 @@ export type HarnessOrchestrationServices = {
 export type HarnessHost<TExtraBody = unknown> = {
   /** Adapter identifier ("local", "in-memory", "remote", …) — informational, never branched on. */
   kind: string;
+  contextCompaction?: import("./context-policy/types.js").ContextCompactionHost;
   sessions: HarnessSessionManager<TExtraBody>;
   durable?: HarnessOrchestrationServices;
   /**

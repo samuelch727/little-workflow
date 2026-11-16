@@ -10,6 +10,7 @@ import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { InMemoryFs } from "just-bash";
 import { generateHarness, loadHarness, virtualHost } from "@little-stack/harness";
+import { scriptedModel } from "../src/model.ts";
 const root = fileURLToPath(new URL("..", import.meta.url));
 const workerd = createRequire(import.meta.url)("workerd").default;
 let directory, config, port, running;
@@ -27,7 +28,7 @@ before(async () => {
 after(async () => { await stop(); if (directory) await rm(directory, { recursive: true, force: true }); });
 
 test("discovered tools and instructions match the Node loader on the same folder", async () => {
-  const node = await loadHarness(join(root, "agents/support"), { host: virtualHost({ fs: new InMemoryFs() }) });
+  const node = await loadHarness(join(root, "agents/support"), { host: virtualHost({ fs: new InMemoryFs() }), context: { env: { createModel: scriptedModel, privateToken: "synthetic-context-only" }, chatSessionId: "node-parity", onResult() {}, onEvent() {} } });
   const message = text => [{ id: "test", role: "user", parts: [{ type: "text", text }] }];
   for (const text of ["count:one two three", "system"]) {
     const result = await generateHarness({ harness: node, session: text, messages: message(text) });
@@ -109,3 +110,26 @@ async function stop() {
   await running.exited; clearTimeout(timer);
 }
 function freePort() { return new Promise((resolve, reject) => { const server = createServer(); server.on("error", reject); server.listen(0, "127.0.0.1", () => { const { port } = server.address(); server.close(() => resolve(port)); }); }); }
+
+
+test("trusted construction context and live callbacks stay per chat in real workerd", async () => {
+  const ids = ["context-a", "context-b"];
+  const results = await Promise.all(ids.map(id => post(id, "context")));
+  assert.deepEqual(results.map(output), ids.map(chatSessionId => ({ chatSessionId, count: 1 })));
+  assert.deepEqual(output(await post(ids[0], "context")), { chatSessionId: ids[0], count: 2 });
+  for (const [index, id] of ids.entries()) {
+    const state = await (await fetch(url(id))).json();
+    assert.deepEqual(state.results, Array.from({ length: index === 0 ? 2 : 1 }, (_, n) => ({ chatSessionId: id, count: n + 1 })));
+    assert.ok(state.eventCount > 0, "construction-supplied onEvent was invoked");
+  }
+  const response = await fetch(url(ids[0]), { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text: "context", context: { chatSessionId: ids[1] } }) });
+  assert.equal(response.status, 200);
+  assert.deepEqual(output(await response.json()), { chatSessionId: ids[0], count: 3 });
+});
+test("construction context is absent from system prompts and Bash environment", async () => {
+  const system = (await post("context-private", "system")).reply;
+  assert.doesNotMatch(system, /synthetic-context-only|context-private|privateToken|onResult|onEvent/);
+  const env = await bash("context-private", "env");
+  assert.equal(env.exitCode, 0);
+  assert.doesNotMatch(env.stdout, /synthetic-context-only|context-private|privateToken|chatSessionId|onResult|onEvent/);
+});

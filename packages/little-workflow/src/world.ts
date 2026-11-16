@@ -10,6 +10,7 @@ import type { EventStorage } from "./event-storage.js";
 import { sqliteEventStorage } from "./event-storage-sqlite.js";
 import { filesystemEventStorage } from "./event-storage-filesystem.js";
 import { runFilesFor } from "./run-files.js";
+import { readWorkflowVersion } from "./run-plan.js";
 import { virtualDataDir, virtualStorageKey } from "./storage-identity.js";
 import type { IFileSystem } from "just-bash";
 
@@ -747,6 +748,7 @@ export function virtualWorld(options: VirtualWorldOptions): World {
 function createWorld(base: Pick<World, "kind" | "dataDir" | "files" | "maxConcurrentSteps">): World {
   return {
     ...base,
+    readWorkflowVersion: (workflowVersionId) => readWorkflowVersion(base as World, workflowVersionId),
     appendEvent: (runId, event) => appendEvent(base as LocalWorld, runId, event),
     listEvents: (runId) => listEvents(base as LocalWorld, runId),
     writeArtifact: (input) => writeArtifact(base as LocalWorld, input),

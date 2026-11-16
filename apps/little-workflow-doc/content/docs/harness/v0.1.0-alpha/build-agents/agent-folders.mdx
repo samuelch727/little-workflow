@@ -285,3 +285,12 @@ runtime still process trusted imports; this is not a sandbox. Rebuild after fold
 changes, enable `allowImportingTsExtensions` with `noEmit` for generated-source
 typechecking, and keep Node-only modules out of your worker. Scheduling, connectors,
 chat routing, storage, authentication and network policy remain application-owned.
+
+### Starter folders (next alpha)
+
+`init`, `new`, and every setup template include a local
+`skills/answer-clearly/SKILL.md` beside the agent's tools and prompt-only
+instructions. See the CLI reference's `init` and `new` sections for dependency,
+workspace marker and installation behavior. Additive setup supports existing
+Node and Next projects; `--littledb` leaves deployed model selection to LittleDB
+while the generated local entrypoints remain keyless.

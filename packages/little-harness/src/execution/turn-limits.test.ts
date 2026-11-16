@@ -188,3 +188,36 @@ describe("turnLimits", () => {
     });
   });
 });
+
+describe("soft step stop reason", () => {
+  it.each(["generate", "stream"] as const)("reports only soft tool-loop stops for %s", async mode => {
+    for (const knob of ["budget", "stopWhen", "natural"] as const) {
+      await withTempDir(async dir => {
+        const scripted = pingModel(knob === "natural" ? 0 : Infinity);
+        const harness = createHarness({host: localHost({dataDir: dir}), model: scripted.model, tools: {ping: ping()}, workflowBudgets: {maxModelSteps: 2}});
+        const options = {harness, prompt: "Go", ...(knob === "stopWhen" ? {stopWhen: () => true} : {})};
+        let result;
+        if (mode === "generate") result = await generateHarness(options);
+        else { const stream = await streamHarness(options); result = await stream.finished; }
+        expect(result.status).toBe("completed");
+        if (knob === "natural") expect(result).not.toHaveProperty("stopReason");
+        else expect(result).toHaveProperty("stopReason", knob === "stopWhen" ? "stop-condition" : "step-limit");
+        expect(scripted.calls()).toBe(knob === "budget" ? 2 : 1);
+      });
+    }
+  });
+
+  it.each(["generate", "stream"] as const)("reports step-limit when the budget ends a turn whose caller stopWhen never fires for %s", async mode => {
+    await withTempDir(async dir => {
+      const scripted = pingModel();
+      const harness = createHarness({host: localHost({dataDir: dir}), model: scripted.model, tools: {ping: ping()}, workflowBudgets: {maxModelSteps: 2}});
+      const options = {harness, prompt: "Go", stopWhen: () => false};
+      let result;
+      if (mode === "generate") result = await generateHarness(options);
+      else { const stream = await streamHarness(options); result = await stream.finished; }
+      expect(result.status).toBe("completed");
+      expect(result).toHaveProperty("stopReason", "step-limit");
+      expect(scripted.calls()).toBe(2);
+    });
+  });
+});

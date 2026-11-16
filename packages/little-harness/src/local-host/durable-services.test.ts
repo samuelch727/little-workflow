@@ -1268,7 +1268,7 @@ it("rolls an async launch forward after crashing after task reservation", async 
   await expect(second.tasks.listTasks({ sessionId: base.sessionId })).resolves.toHaveLength(1);
 });
 
-it("does not over-admit workflow or async task queue slots", async () => {
+it("does not over-admit workflow queue slots", async () => {
   const root = await mkdtemp(join(tmpdir(), "lh-durable-services-"));
   dirs.push(root);
   const services = createLocalHarnessDurableServices({ rootDir: root });
@@ -1280,14 +1280,6 @@ it("does not over-admit workflow or async task queue slots", async () => {
     services.workflowQueue.acquireAdmissionSlot({ sessionId: "sess_1", queueId: "queue_2", taskId: "task_2", maxConcurrentWorkflowRuns: 1 }),
   ]);
   expect(workflowResults.filter((result) => result.admitted)).toHaveLength(1);
-
-  await services.asyncTaskQueue.enqueue({ sessionId: "sess_1", queueId: "queue_1", taskId: "task_1", kind: "tool", handle: "a", status: "queued" } as never);
-  await services.asyncTaskQueue.enqueue({ sessionId: "sess_1", queueId: "queue_2", taskId: "task_2", kind: "tool", handle: "b", status: "queued" } as never);
-  const asyncResults = await Promise.all([
-    services.asyncTaskQueue.acquireToolSlot({ sessionId: "sess_1", queueId: "queue_1", taskId: "task_1", maxConcurrentToolCalls: 1, leaseExpiresAt: "2999-01-01T00:00:00.000Z" }),
-    services.asyncTaskQueue.acquireToolSlot({ sessionId: "sess_1", queueId: "queue_2", taskId: "task_2", maxConcurrentToolCalls: 1, leaseExpiresAt: "2999-01-01T00:00:00.000Z" }),
-  ]);
-  expect(asyncResults.filter((result) => result.acquired)).toHaveLength(1);
 });
 
 it("does not let workflow admission overwrite a terminal queue record", async () => {
@@ -1339,53 +1331,6 @@ it("does not let workflow admission overwrite a terminal queue record", async ()
   ]);
 
   await expect(services.workflowQueue.get({ sessionId: "sess_1", queueId: "queue_1" })).resolves.toMatchObject({
-    status: "completed",
-  });
-});
-
-it("does not let async tool-slot acquisition overwrite a terminal queue record", async () => {
-  const root = await mkdtemp(join(tmpdir(), "lh-durable-services-"));
-  dirs.push(root);
-  const services = createLocalHarnessDurableServices({ rootDir: root });
-  await services.asyncTaskQueue.enqueue({
-    sessionId: "sess_1",
-    queueId: "queue_1",
-    taskId: "task_1",
-    kind: "tool",
-    handle: "score",
-    callIdentity: "call_1",
-    inputHash: "sha256:input",
-    inputResultId: "result_1",
-    sessionDataDir: "/tmp/session",
-    originTurnId: "turn_1",
-    parentTurnId: "turn_1",
-    reservationScopeId: "scope_1",
-    reservationOrder: 0,
-    scopeSize: 1,
-    capabilitySnapshot: { implementationHash: "sha256:tool" },
-    status: "queued",
-    createdAt: "2026-06-22T00:00:00.000Z",
-  } as never);
-
-  await Promise.all([
-    services.asyncTaskQueue.acquireToolSlot({
-      sessionId: "sess_1",
-      queueId: "queue_1",
-      taskId: "task_1",
-      maxConcurrentToolCalls: 1,
-      leaseExpiresAt: "2999-01-01T00:00:00.000Z",
-    }),
-    services.asyncTaskQueue.markTerminal({
-      sessionId: "sess_1",
-      queueId: "queue_1",
-      expectedStatuses: ["queued"],
-    }, {
-      status: "completed",
-      terminalAt: "2026-06-22T00:00:01.000Z",
-    }),
-  ]);
-
-  await expect(services.asyncTaskQueue.get({ sessionId: "sess_1", queueId: "queue_1" })).resolves.toMatchObject({
     status: "completed",
   });
 });

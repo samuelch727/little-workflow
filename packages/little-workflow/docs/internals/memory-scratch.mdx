@@ -8,7 +8,7 @@ Two storage surfaces serve distinct concerns. Both are mounted directories in th
 - **Memory Stores** — persistent across runs; filesystem-shaped; curated by agents over time.
 - **Run Scratch** — ephemeral, run-scoped; passes curated context from upper-layer agents down to lower-layer agents within one pipeline run.
 
-See [Harness](/docs/v0.1.0-alpha/internals/harness) for how these mounts are wired into `HarnessContext`.
+See [Harness](https://little-stack.dev/docs/workflow/v0.1.0-alpha/internals/harness) for how these mounts are wired into `HarnessContext`.
 
 ## Memory Stores
 
@@ -215,7 +215,7 @@ A dreaming workflow reads many prior run event logs, reads the target workflow's
 
 ## Related Pages
 
-- [Harness](/docs/v0.1.0-alpha/internals/harness) — how memory and scratch are wired into `HarnessContext`
-- [Fixer](/docs/v0.1.0-alpha/internals/fixer) — how the fixer uses scratch for iteration
-- [Identity Manifests](/docs/v0.1.0-alpha/internals/identity-manifests) — how `memoryStoreIds` appear in manifests
-- [Local World Storage](/docs/v0.1.0-alpha/internals/local-world-storage) — the underlying filesystem store
+- [Harness](https://little-stack.dev/docs/workflow/v0.1.0-alpha/internals/harness) — how memory and scratch are wired into `HarnessContext`
+- [Fixer](https://little-stack.dev/docs/workflow/v0.1.0-alpha/internals/fixer) — how the fixer uses scratch for iteration
+- [Identity Manifests](https://little-stack.dev/docs/workflow/v0.1.0-alpha/internals/identity-manifests) — how `memoryStoreIds` appear in manifests
+- [Local World Storage](https://little-stack.dev/docs/workflow/v0.1.0-alpha/internals/local-world-storage) — the underlying filesystem store

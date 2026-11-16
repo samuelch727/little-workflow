@@ -32,11 +32,13 @@ export {
 export {
   feedbackId,
   type FeedbackAnswer,
+  type FeedbackAnchor,
   type FeedbackHandlerOptions,
   type FeedbackInput,
   type FeedbackReference,
   type FeedbackResult,
   type FeedbackRetracted,
+  type FeedbackSelection,
   type FeedbackTarget,
   type FeedbackUser,
   type RetractFeedbackOptions,

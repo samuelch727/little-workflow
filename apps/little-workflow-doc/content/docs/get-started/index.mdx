@@ -3,8 +3,8 @@ title: Get started
 description: Pick the first step that matches what you are building.
 ---
 
-Most projects start with Little Harness. Little Workflow is optional. LittleDB
-(the product the SDK feeds) and the workspace engines cannot be installed yet.
+Most projects start with Little Harness. Little Workflow is optional. Alpha.4 includes the LittleDB client; it needs a LittleDB account; the server is not open source.
+Workspace engines remain separate.
 
 | You want to | Start with |
 | --- | --- |
@@ -17,12 +17,12 @@ Most projects start with Little Harness. Little Workflow is optional. LittleDB
 All published paths need Node.js 22 or newer and AI SDK 7, which is a peer
 dependency of both packages.
 
-## Not installable yet
+## Service access and workspace engines
 
-- [LittleDB](/docs/littledb) is private source. Harness and Workflow work
-  without it.
+- [LittleDB](/docs/littledb) has a public alpha.4 client. A LittleDB account is required; the server is not open source;
+  Harness and Workflow work without it.
 - [Workspaces](/docs/how-they-fit#workspaces) beyond your own machine: managed
-  workspaces come with LittleDB's hosted service (private for now), and the
+  workspaces come with LittleDB's hosted service (account required), and the
   self-hosted engine ([Little Compute](/docs/compute)) is documented from an
   unpublished source checkout. Neither has an npm package.
 

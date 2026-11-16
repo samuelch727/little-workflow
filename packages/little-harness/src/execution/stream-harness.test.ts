@@ -1468,7 +1468,7 @@ describe("streamHarness", () => {
           };
         },
       });
-      const harness = createHarness({ host, model, system: "Wait for tasks." });
+      const harness = createHarness({ host, model, taskTools: true, system: "Wait for tasks." });
 
       const result = streamHarness({
         harness,

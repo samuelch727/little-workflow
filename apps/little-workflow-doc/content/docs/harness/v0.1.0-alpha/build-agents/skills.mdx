@@ -86,3 +86,5 @@ Use skills for:
 - review checklists
 
 Do not use skills for secrets, user-specific memory, or large raw datasets. Put persistent app data behind tools or Persistent Dirs, and what the agent learns in [memory](/docs/harness/v0.1.0-alpha/build-agents/memory).
+
+Skill advertisements use absolute paths such as `/.agents/skills/review/SKILL.md`. These remain readable after Bash changes its working directory, on both `virtualHost` and in-process `localHost`.
